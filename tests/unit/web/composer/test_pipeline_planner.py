@@ -29,6 +29,7 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError
 from elspeth.web.composer.pipeline_planner import (
     PLANNER_DISCOVERY_TOOL_NAMES,
     PipelinePlannerError,
@@ -262,6 +263,9 @@ async def _plan(
     custody_config: PlannerCustodyConfig | None = None,
     current_state: CompositionState | None = None,
     intent: str = "Build the requested pipeline.",
+    surface: PlannerSurface = PlannerSurface.FREEFORM,
+    eligible_deferred_intent_ids: tuple[str, ...] = (),
+    claim_evaluator: Any = None,
 ) -> Any:
     # Candidate validation needs the real plugin contracts.  ``tool_context``
     # remains in the test signature so the standard composer fixture proves
@@ -277,9 +281,10 @@ async def _plan(
         provider_current_state=(current_state or _empty_state()).to_dict(),
         reviewed_facts={"request": "Build the requested pipeline."},
         reviewed_planner_context={"request": "Build the requested pipeline."},
-        covered_deferred_intent_ids=(),
+        eligible_deferred_intent_ids=eligible_deferred_intent_ids,
+        claim_evaluator=claim_evaluator,
         supersedes_draft_hash=None,
-        surface=PlannerSurface.FREEFORM,
+        surface=surface,
         policy_catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
         originating_message=originating_message or _origin(),
@@ -326,13 +331,106 @@ def test_planner_palette_is_pinned_read_only_and_terminal_schema_is_exact() -> N
     assert terminal["name"] == "emit_pipeline_proposal"
     assert terminal["parameters"] == {
         "type": "object",
-        "properties": {"pipeline": canonical_set_pipeline_schema()},
+        "properties": {
+            "pipeline": canonical_set_pipeline_schema(),
+            "claimed_deferred_intent_ids": {
+                "type": "array",
+                "items": {"type": "string", "format": "uuid"},
+                "uniqueItems": True,
+            },
+        },
         "required": ["pipeline"],
         "additionalProperties": False,
     }
     serialized = canonical_json(terminal)
     assert "rationale" not in serialized
     assert '"base"' not in serialized
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_claims",
+    [
+        [str(uuid4())],
+        ["00000000-0000-4000-8000-000000000311", "00000000-0000-4000-8000-000000000311"],
+    ],
+)
+@pytest.mark.parametrize("surface", (PlannerSurface.FREEFORM, PlannerSurface.GUIDED_FULL))
+async def test_ineligible_and_duplicate_deferred_claims_use_bounded_terminal_repair(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    invalid_claims: list[str],
+    surface: PlannerSurface,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(
+            (
+                "emit_pipeline_proposal",
+                {"pipeline": _pipeline(tmp_path), "claimed_deferred_intent_ids": invalid_claims},
+            )
+        ),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    result = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, surface=surface)
+
+    assert result.proposal.repair_count == 1
+    feedback = completion.requests[1]["messages"][-1]
+    assert feedback["role"] == "tool"
+    assert "deferred_intent_claim" in feedback["content"]
+
+
+@pytest.mark.asyncio
+async def test_guided_claims_are_verified_from_candidate_and_unproven_claims_repair(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    intent_id = "00000000-0000-4000-8000-000000000312"
+    completion = _ScriptedCompletion(
+        _response(
+            (
+                "emit_pipeline_proposal",
+                {"pipeline": _pipeline(tmp_path), "claimed_deferred_intent_ids": [intent_id]},
+            )
+        ),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    evaluations = 0
+
+    def reject_unproven(_candidate: CompositionState, _claims: tuple[str, ...]) -> tuple[str, ...]:
+        nonlocal evaluations
+        evaluations += 1
+        raise DeferredIntentClaimError("unproven")
+
+    result = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        surface=PlannerSurface.GUIDED_STAGED,
+        eligible_deferred_intent_ids=(intent_id,),
+        claim_evaluator=reject_unproven,
+    )
+
+    assert evaluations == 1
+    assert result.proposal.covered_deferred_intent_ids == ()
+    assert result.proposal.repair_count == 1
+    assert "deferred_intent_claim" in completion.requests[1]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_eligible_deferred_claims_require_a_mechanical_evaluator(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    with pytest.raises(ValueError, match="claim_evaluator"):
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=_ScriptedCompletion(),
+            surface=PlannerSurface.GUIDED_STAGED,
+            eligible_deferred_intent_ids=("00000000-0000-4000-8000-000000000313",),
+            claim_evaluator=None,
+        )
 
 
 @pytest.mark.asyncio

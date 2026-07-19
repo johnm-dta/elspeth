@@ -1290,7 +1290,6 @@ class GuidedPipelineProposalAcceptCommand:
     proposal_id: UUID
     draft_hash: str
     reviewed_facts: Mapping[str, Any]
-    proposal_payload: Mapping[str, Any]
     state: CompositionStateData
     candidate_content_hash: str
     executor_content_hash: str
@@ -1310,11 +1309,8 @@ class GuidedPipelineProposalAcceptCommand:
             raise AuditIntegrityError("guided accept expected version must be positive")
         for name in ("draft_hash", "candidate_content_hash", "executor_content_hash"):
             _require_guided_sha256(getattr(self, name), f"guided accept {name}")
-        if type(self.reviewed_facts) not in {dict, MappingProxyType} or type(self.proposal_payload) not in {
-            dict,
-            MappingProxyType,
-        }:
-            raise AuditIntegrityError("guided accept reviewed facts/proposal payload must be mappings")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("guided accept reviewed facts must be a mapping")
         if type(self.state) is not CompositionStateData or type(self.invocation) is not ComposerToolInvocation:
             raise AuditIntegrityError("guided accept state/invocation must be exact")
         if (
@@ -1329,7 +1325,7 @@ class GuidedPipelineProposalAcceptCommand:
             raise AuditIntegrityError("guided accept response must be guided_respond")
         if type(self.payloads) is not tuple or type(self.audit_evidence) is not GuidedAuditEvidence:
             raise AuditIntegrityError("guided accept payload/audit cohort must be exact")
-        freeze_fields(self, "reviewed_facts", "proposal_payload", "payloads")
+        freeze_fields(self, "reviewed_facts", "payloads")
 
 
 @final

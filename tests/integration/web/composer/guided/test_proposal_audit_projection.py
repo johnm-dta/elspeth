@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
+from itertools import permutations, product
+from typing import get_type_hints
 from uuid import UUID
 
 import pytest
 
+import elspeth.web.composer.guided.planning as guided_planning
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.canonical import stable_hash
 from elspeth.web.composer.guided.planning import (
@@ -15,11 +18,12 @@ from elspeth.web.composer.guided.planning import (
     guided_private_reviewed_facts,
     guided_redacted_current_state_context,
     guided_redacted_planner_context,
+    verified_remaining_deferred_intents,
     verify_guided_proposal_projection,
 )
-from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.protocol import GuidedStep, ProposePipelinePayload, proposal_structural_label
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
-from elspeth.web.composer.guided.stage_subjects import OptionValueConstraint, StableSubject
+from elspeth.web.composer.guided.stage_subjects import EdgeRouteConstraint, OptionValueConstraint, PluginSubject, StableSubject
 from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession
 from elspeth.web.composer.pipeline_planner import plan_pipeline, prepare_pipeline_plan
 from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface, PresentBase
@@ -29,6 +33,11 @@ SOURCE_ID = "00000000-0000-4000-8000-000000000101"
 OUTPUT_ID = "00000000-0000-4000-8000-000000000102"
 PROPOSAL_ID = UUID("00000000-0000-4000-8000-000000000103")
 CHECKPOINT_ID = UUID("00000000-0000-4000-8000-000000000104")
+MIXED_INTENT_ID = "00000000-0000-4000-8000-000000000107"
+MIXED_MESSAGE_ID = "00000000-0000-4000-8000-000000000108"
+GATE_ID = "00000000-0000-4000-8000-000000000109"
+PASSTHROUGH_SUBJECT_ID = "00000000-0000-4000-8000-000000000110"
+SECOND_GATE_ID = "00000000-0000-4000-8000-000000000111"
 CANARIES = (
     "RAW-INLINE-CONTENT-CANARY",
     "CREDENTIAL-CANARY",
@@ -112,6 +121,188 @@ def _proposal(guided: GuidedSession) -> PipelineProposal:
         skill_hash=stable_hash("guided planner skill"),
         covered_deferred_intent_ids=(),
         supersedes_draft_hash=None,
+    )
+
+
+def _mixed_gate_guided() -> GuidedSession:
+    return replace(
+        _guided(),
+        deferred_intents=(
+            DeferredStageIntent.create(
+                intent_id=MIXED_INTENT_ID,
+                receiving_stage="output",
+                target_stage="wire_review",
+                catalog_kind=None,
+                catalog_name=None,
+                redacted_summary="Retain direct and fork gate routes.",
+                originating_message_id=MIXED_MESSAGE_ID,
+                message_content_hash=stable_hash("mixed gate instruction"),
+                constraints=(
+                    EdgeRouteConstraint(
+                        kind="edge_route",
+                        from_subject=StableSubject(kind="stable", component_kind="node", stable_id=GATE_ID),
+                        edge_type="route_false",
+                        to_subject=StableSubject(kind="stable", component_kind="output", stable_id=OUTPUT_ID),
+                        present=True,
+                    ),
+                    EdgeRouteConstraint(
+                        kind="edge_route",
+                        from_subject=StableSubject(kind="stable", component_kind="node", stable_id=GATE_ID),
+                        edge_type="fork",
+                        to_subject=PluginSubject(
+                            kind="plugin",
+                            subject_id=PASSTHROUGH_SUBJECT_ID,
+                            plugin_kind="transform",
+                            plugin_name="passthrough",
+                        ),
+                        present=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _mixed_gate_proposal(guided: GuidedSession, routes: dict[str, str]) -> PipelineProposal:
+    return PipelineProposal.create(
+        pipeline={
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "gate-input",
+                    "options": {"schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                }
+            },
+            "nodes": [
+                {
+                    "id": GATE_ID,
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "gate-input",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "row['accepted']",
+                    "routes": routes,
+                    "fork_to": ["accepted"],
+                },
+                {
+                    "id": "copy",
+                    "node_type": "transform",
+                    "plugin": "passthrough",
+                    "input": "accepted",
+                    "on_success": "cleaned",
+                    "on_error": "discard",
+                    "options": {},
+                },
+            ],
+            "edges": [],
+            "outputs": [
+                {
+                    "name": "cleaned",
+                    "plugin": "json",
+                    "options": {"schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        },
+        base=PresentBase(state_id=CHECKPOINT_ID, composition_content_hash="a" * 64),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+        surface=PlannerSurface.GUIDED_STAGED,
+        repair_count=0,
+        skill_hash=stable_hash("guided planner skill"),
+        covered_deferred_intent_ids=(MIXED_INTENT_ID,),
+        supersedes_draft_hash=None,
+    )
+
+
+def _two_gate_proposal(
+    guided: GuidedSession,
+    *,
+    first_routes: dict[str, str],
+    second_routes: dict[str, str],
+) -> PipelineProposal:
+    return PipelineProposal.create(
+        pipeline={
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "first-gate-input",
+                    "options": {"schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                }
+            },
+            "nodes": [
+                {
+                    "id": GATE_ID,
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "first-gate-input",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "row['first']",
+                    "routes": first_routes,
+                    "fork_to": [],
+                },
+                {
+                    "id": SECOND_GATE_ID,
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "second-gate-input",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "row['second']",
+                    "routes": second_routes,
+                    "fork_to": [],
+                },
+                {
+                    "id": "copy",
+                    "node_type": "transform",
+                    "plugin": "passthrough",
+                    "input": "accepted",
+                    "on_success": "cleaned",
+                    "on_error": "discard",
+                    "options": {},
+                },
+            ],
+            "edges": [],
+            "outputs": [
+                {
+                    "name": "cleaned",
+                    "plugin": "json",
+                    "options": {"schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        },
+        base=PresentBase(state_id=CHECKPOINT_ID, composition_content_hash="a" * 64),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+        surface=PlannerSurface.GUIDED_STAGED,
+        repair_count=0,
+        skill_hash=stable_hash("guided planner skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
+    )
+
+
+def _build_with_fixed_projection_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    proposal: PipelineProposal,
+    guided: GuidedSession,
+    catalog: dict[str, frozenset[str]],
+    allocated_id_count: int,
+) -> ProposePipelinePayload:
+    allocated_ids = iter(UUID(f"00000000-0000-4000-8000-{index:012d}") for index in range(200, 200 + allocated_id_count))
+    monkeypatch.setattr(guided_planning, "uuid4", lambda: next(allocated_ids))
+    return build_guided_proposal_projection(
+        proposal_id=PROPOSAL_ID,
+        proposal=proposal,
+        guided=guided,
+        catalog_plugin_ids=catalog,
     )
 
 
@@ -254,6 +445,126 @@ def test_projection_is_closed_redacted_and_reverified_against_private_authority(
         )
 
 
+def test_mixed_gate_projection_is_canonical_and_exact_for_every_route_insertion_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guided = _mixed_gate_guided()
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"passthrough"}),
+        "sink": frozenset({"json"}),
+    }
+    route_entries = (
+        ("alpha", "accepted"),
+        ("false", "cleaned"),
+        ("beta", "fork"),
+        ("true", "fork"),
+    )
+    payloads = []
+    draft_hashes = set()
+    for route_permutation in permutations(route_entries):
+        proposal = _mixed_gate_proposal(guided, dict(route_permutation))
+        payload = _build_with_fixed_projection_ids(
+            monkeypatch,
+            proposal=proposal,
+            guided=guided,
+            catalog=catalog,
+            allocated_id_count=10,
+        )
+        verify_guided_proposal_projection(
+            payload=payload,
+            proposal_id=PROPOSAL_ID,
+            proposal=proposal,
+            guided=guided,
+            catalog_plugin_ids=catalog,
+        )
+        assert verified_remaining_deferred_intents(guided=guided, proposal=proposal) == ()
+        draft_hashes.add(proposal.draft_hash)
+        payloads.append(payload)
+
+    assert len(draft_hashes) == 1
+    assert all(payload == payloads[0] for payload in payloads)
+    payload = payloads[0]
+    route_aliases = [proposal_structural_label("route", index) for index in range(4)]
+    gate = next(node for node in payload["nodes"] if node["stable_id"] and node["node_type"] == "gate")
+    assert gate["behavior"] == {
+        "kind": "gate",
+        "route_aliases": route_aliases,
+        "fork_branches": [
+            {
+                "routes": route_aliases[2:],
+                "branch": proposal_structural_label("branch", 0),
+            }
+        ],
+    }
+    gate_flows = [edge["flow"] for edge in payload["graph"]["edges"] if edge["from_endpoint"].get("stable_id") == gate["stable_id"]]
+    assert gate_flows == [
+        {"kind": "gate_route", "route": route_aliases[0], "branch": None},
+        {"kind": "gate_route", "route": route_aliases[1], "branch": None},
+        {
+            "kind": "gate_fork",
+            "routes": route_aliases[2:],
+            "branch": proposal_structural_label("branch", 0),
+        },
+    ]
+
+
+def test_repeated_route_labels_are_gate_local_and_canonical_for_every_insertion_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guided = _guided()
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"passthrough"}),
+        "sink": frozenset({"json"}),
+    }
+    first_entries = (("true", "second-gate-input"), ("false", "cleaned"))
+    second_entries = (("true", "accepted"), ("false", "cleaned"))
+    payloads = []
+    draft_hashes = set()
+    route_orders = product(permutations(first_entries), permutations(second_entries))
+    for first_routes, second_routes in route_orders:
+        proposal = _two_gate_proposal(
+            guided,
+            first_routes=dict(first_routes),
+            second_routes=dict(second_routes),
+        )
+        payload = _build_with_fixed_projection_ids(
+            monkeypatch,
+            proposal=proposal,
+            guided=guided,
+            catalog=catalog,
+            allocated_id_count=12,
+        )
+        verify_guided_proposal_projection(
+            payload=payload,
+            proposal_id=PROPOSAL_ID,
+            proposal=proposal,
+            guided=guided,
+            catalog_plugin_ids=catalog,
+        )
+        draft_hashes.add(proposal.draft_hash)
+        payloads.append(payload)
+
+    assert len(draft_hashes) == 1
+    assert all(payload == payloads[0] for payload in payloads)
+    gates = [node for node in payloads[0]["nodes"] if node["node_type"] == "gate"]
+    route_aliases = [proposal_structural_label("route", index) for index in range(4)]
+    assert [gate["behavior"]["route_aliases"] for gate in gates] == [route_aliases[:2], route_aliases[2:]]
+    assert len({alias for gate in gates for alias in gate["behavior"]["route_aliases"]}) == 4
+    assert [
+        edge["flow"]
+        for gate in gates
+        for edge in payloads[0]["graph"]["edges"]
+        if edge["from_endpoint"].get("stable_id") == gate["stable_id"]
+    ] == [
+        {"kind": "gate_route", "route": route_aliases[0], "branch": None},
+        {"kind": "gate_route", "route": route_aliases[1], "branch": None},
+        {"kind": "gate_route", "route": route_aliases[2], "branch": None},
+        {"kind": "gate_route", "route": route_aliases[3], "branch": None},
+    ]
+
+
 def test_projection_rejects_plugins_outside_the_same_catalog_snapshot() -> None:
     guided = _guided()
     with pytest.raises(AuditIntegrityError, match="catalog"):
@@ -269,13 +580,22 @@ def test_projection_rejects_plugins_outside_the_same_catalog_snapshot() -> None:
         )
 
 
-@pytest.mark.parametrize("planner", (plan_pipeline, prepare_pipeline_plan))
-def test_planner_requires_private_and_provider_safe_facts_plus_lineage(planner: object) -> None:
-    signature = inspect.signature(planner)
+def test_planner_requires_private_provider_safe_and_model_claim_authority() -> None:
+    model_signature = inspect.signature(plan_pipeline)
     for name in (
         "reviewed_facts",
         "reviewed_planner_context",
-        "covered_deferred_intent_ids",
+        "eligible_deferred_intent_ids",
+        "claim_evaluator",
         "supersedes_draft_hash",
     ):
-        assert signature.parameters[name].default is inspect.Parameter.empty
+        assert model_signature.parameters[name].default is inspect.Parameter.empty
+
+    server_signature = inspect.signature(prepare_pipeline_plan)
+    for name in ("reviewed_facts", "reviewed_planner_context", "supersedes_draft_hash"):
+        assert server_signature.parameters[name].default is inspect.Parameter.empty
+    assert "covered_deferred_intent_ids" not in server_signature.parameters
+
+    verifier_signature = inspect.signature(verified_remaining_deferred_intents)
+    assert tuple(verifier_signature.parameters) == ("guided", "proposal")
+    assert get_type_hints(verified_remaining_deferred_intents)["return"] == tuple[DeferredStageIntent, ...]

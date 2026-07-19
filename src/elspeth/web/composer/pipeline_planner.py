@@ -20,9 +20,11 @@ from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, TypedDict, cast
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
@@ -35,6 +37,7 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
 from elspeth.web.composer.discovery_cache import serialize_tool_result
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     build_llm_call_record,
@@ -212,6 +215,7 @@ class PlannerOriginatingMessage:
 
 
 type PipelineCandidateFinalizer = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+type PipelineClaimEvaluator = Callable[[CompositionState, tuple[str, ...]], tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +294,53 @@ class _AuditedDiscoveryResult:
         }
 
 
+class _PlannerTerminalPayload(BaseModel):
+    """Typed runtime contract for the one planner terminal payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    pipeline: dict[str, Any]
+    claimed_deferred_intent_ids: list[UUID] = Field(default_factory=list, json_schema_extra={"uniqueItems": True})
+
+    @field_validator("claimed_deferred_intent_ids", mode="before")
+    @classmethod
+    def _require_canonical_unique_uuid_strings(cls, value: object) -> object:
+        if type(value) is not list:
+            raise ValueError("claimed_deferred_intent_ids must be an exact JSON array")
+        canonical: list[str] = []
+        for item in value:
+            if type(item) is not str:
+                raise ValueError("deferred intent claims must be canonical UUID strings")
+            try:
+                parsed = UUID(item)
+            except ValueError as exc:
+                raise ValueError("deferred intent claims must be canonical UUID strings") from exc
+            if str(parsed) != item:
+                raise ValueError("deferred intent claims must be canonical UUID strings")
+            canonical.append(item)
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("deferred intent claims must be unique")
+        return [UUID(item) for item in canonical]
+
+
+class _ClaimedDeferredIntentItemsSchema(TypedDict):
+    type: str
+    format: str
+
+
+class _ClaimedDeferredIntentSchema(TypedDict):
+    type: str
+    items: _ClaimedDeferredIntentItemsSchema
+    uniqueItems: bool
+
+
+def _claimed_deferred_intent_schema() -> _ClaimedDeferredIntentSchema:
+    schema = dict(_PlannerTerminalPayload.model_json_schema()["properties"]["claimed_deferred_intent_ids"])
+    schema.pop("default", None)
+    schema.pop("title", None)
+    return cast(_ClaimedDeferredIntentSchema, schema)
+
+
 def planner_terminal_tool_definition() -> dict[str, Any]:
     """Return the sole terminal with the exact registered pipeline schema."""
     return {
@@ -299,7 +350,10 @@ def planner_terminal_tool_definition() -> dict[str, Any]:
             "description": "Return one complete canonical pipeline proposal for server validation.",
             "parameters": {
                 "type": "object",
-                "properties": {"pipeline": canonical_set_pipeline_schema()},
+                "properties": {
+                    "pipeline": canonical_set_pipeline_schema(),
+                    "claimed_deferred_intent_ids": _claimed_deferred_intent_schema(),
+                },
                 "required": ["pipeline"],
                 "additionalProperties": False,
             },
@@ -427,6 +481,40 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
     }
 
 
+class _DeferredIntentClaimFeedbackError(TypedDict):
+    component: str
+    severity: str
+    error_class: str
+    error_code: str
+
+
+class _DeferredIntentClaimFeedbackValidation(TypedDict):
+    is_valid: bool
+    errors: list[_DeferredIntentClaimFeedbackError]
+
+
+class _DeferredIntentClaimFeedback(TypedDict):
+    success: bool
+    validation: _DeferredIntentClaimFeedbackValidation
+
+
+def _deferred_intent_claim_feedback() -> _DeferredIntentClaimFeedback:
+    return {
+        "success": False,
+        "validation": {
+            "is_valid": False,
+            "errors": [
+                {
+                    "component": "claimed_deferred_intent_ids",
+                    "severity": "high",
+                    "error_class": "DeferredIntentClaimError",
+                    "error_code": "deferred_intent_claim",
+                }
+            ],
+        },
+    }
+
+
 def _canonical_schema_feedback() -> dict[str, Any]:
     return {
         "success": False,
@@ -507,7 +595,8 @@ async def _build_valid_pipeline_plan(
     current_state: CompositionState,
     base: ProposalBase,
     reviewed_facts: Mapping[str, Any],
-    covered_deferred_intent_ids: tuple[str, ...],
+    claimed_deferred_intent_ids: tuple[str, ...],
+    claim_evaluator: PipelineClaimEvaluator | None,
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     repair_count: int,
@@ -532,6 +621,19 @@ async def _build_valid_pipeline_plan(
     )
     if not candidate.acceptable:
         raise _PipelineCandidateRejected(candidate.result)
+    covered_deferred_intent_ids = (
+        claim_evaluator(candidate.result.updated_state, claimed_deferred_intent_ids)
+        if claimed_deferred_intent_ids and claim_evaluator is not None
+        else ()
+    )
+    if claimed_deferred_intent_ids and claim_evaluator is None:
+        raise DeferredIntentClaimError("this planner surface has no eligible deferred intent claims")
+    if type(covered_deferred_intent_ids) is not tuple or any(type(intent_id) is not str for intent_id in covered_deferred_intent_ids):
+        raise AuditIntegrityError("deferred intent claim evaluator returned malformed coverage")
+    if len(set(covered_deferred_intent_ids)) != len(covered_deferred_intent_ids) or set(covered_deferred_intent_ids) != set(
+        claimed_deferred_intent_ids
+    ):
+        raise AuditIntegrityError("deferred intent claim evaluator changed the claimed identity set")
 
     safe_pipeline: Mapping[str, Any] = pipeline
     custody_result: PipelineCustodyResult = "not_required"
@@ -561,6 +663,13 @@ async def _build_valid_pipeline_plan(
         )
         if not safe_candidate.acceptable or safe_candidate.prepared_inline_blob is not None:
             raise AuditIntegrityError("custody-safe pipeline failed canonical revalidation")
+        repeated_coverage = (
+            claim_evaluator(safe_candidate.result.updated_state, claimed_deferred_intent_ids)
+            if claimed_deferred_intent_ids and claim_evaluator is not None
+            else ()
+        )
+        if repeated_coverage != covered_deferred_intent_ids:
+            raise AuditIntegrityError("custody-safe pipeline changed deferred intent coverage")
         custody_result = "ready"
 
     return PipelinePlanResult(
@@ -588,7 +697,6 @@ async def prepare_pipeline_plan(
     current_state: CompositionState,
     reviewed_facts: Mapping[str, Any],
     reviewed_planner_context: Mapping[str, Any],
-    covered_deferred_intent_ids: tuple[str, ...],
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
@@ -662,7 +770,8 @@ async def prepare_pipeline_plan(
             current_state=current_state,
             base=base,
             reviewed_facts=reviewed_facts,
-            covered_deferred_intent_ids=covered_deferred_intent_ids,
+            claimed_deferred_intent_ids=(),
+            claim_evaluator=None,
             supersedes_draft_hash=supersedes_draft_hash,
             surface=surface,
             repair_count=repair_count,
@@ -687,7 +796,8 @@ async def plan_pipeline(
     provider_current_state: Mapping[str, Any],
     reviewed_facts: Mapping[str, Any],
     reviewed_planner_context: Mapping[str, Any],
-    covered_deferred_intent_ids: tuple[str, ...],
+    eligible_deferred_intent_ids: tuple[str, ...],
+    claim_evaluator: PipelineClaimEvaluator | None,
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
@@ -715,6 +825,18 @@ async def plan_pipeline(
     canonical_json(provider_current_state)
     if not callable(candidate_finalizer):
         raise TypeError("candidate_finalizer must be callable")
+    if type(eligible_deferred_intent_ids) is not tuple or any(type(intent_id) is not str for intent_id in eligible_deferred_intent_ids):
+        raise TypeError("eligible_deferred_intent_ids must be an exact string tuple")
+    if len(set(eligible_deferred_intent_ids)) != len(eligible_deferred_intent_ids):
+        raise ValueError("eligible_deferred_intent_ids must be unique")
+    if surface in {PlannerSurface.FREEFORM, PlannerSurface.GUIDED_FULL} and eligible_deferred_intent_ids:
+        raise ValueError("freeform and guided-full surfaces cannot provide eligible deferred intent ids")
+    if claim_evaluator is not None and not callable(claim_evaluator):
+        raise TypeError("claim_evaluator must be callable or None")
+    if eligible_deferred_intent_ids and claim_evaluator is None:
+        raise ValueError("eligible deferred intent claims require claim_evaluator")
+    if surface in {PlannerSurface.FREEFORM, PlannerSurface.GUIDED_FULL} and claim_evaluator is not None:
+        raise ValueError("freeform and guided-full surfaces cannot provide claim_evaluator")
 
     outcome: PlannerSettlement = "failed"
     primary_error: BaseException | None = None
@@ -727,7 +849,8 @@ async def plan_pipeline(
                 provider_current_state=provider_current_state,
                 reviewed_facts=reviewed_facts,
                 reviewed_planner_context=reviewed_planner_context,
-                covered_deferred_intent_ids=covered_deferred_intent_ids,
+                eligible_deferred_intent_ids=eligible_deferred_intent_ids,
+                claim_evaluator=claim_evaluator,
                 supersedes_draft_hash=supersedes_draft_hash,
                 surface=surface,
                 policy_catalog=policy_catalog,
@@ -766,7 +889,8 @@ async def _plan_pipeline_inner(
     provider_current_state: Mapping[str, Any],
     reviewed_facts: Mapping[str, Any],
     reviewed_planner_context: Mapping[str, Any],
-    covered_deferred_intent_ids: tuple[str, ...],
+    eligible_deferred_intent_ids: tuple[str, ...],
+    claim_evaluator: PipelineClaimEvaluator | None,
     supersedes_draft_hash: str | None,
     surface: PlannerSurface,
     policy_catalog: PolicyCatalogView,
@@ -1029,17 +1153,27 @@ async def _plan_pipeline_inner(
             if composition_turns > model_config.max_composition_turns:
                 raise PipelinePlannerError("planner composition turn budget exhausted", code="COMPOSITION_EXHAUSTED")
             call = terminal_calls[0]
-            schema_feedback: dict[str, Any] | None = None
-            if set(call.arguments) != {"pipeline"} or type(call.arguments.get("pipeline")) is not dict:
-                schema_feedback = _canonical_schema_feedback()
-                pipeline = None
+            terminal_feedback: Mapping[str, Any] | None = None
+            pipeline: dict[str, Any] | None = None
+            claimed_deferred_intent_ids: tuple[str, ...] = ()
+            allowed_terminal_keys = {"pipeline", "claimed_deferred_intent_ids"}
+            if "pipeline" not in call.arguments or set(call.arguments) - allowed_terminal_keys:
+                terminal_feedback = _canonical_schema_feedback()
             else:
-                pipeline = cast(dict[str, Any], call.arguments["pipeline"])
                 try:
-                    SetPipelineArgumentsModel.model_validate(pipeline)
-                except ValueError:
-                    schema_feedback = _canonical_schema_feedback()
-            if schema_feedback is not None:
+                    payload = _PlannerTerminalPayload.model_validate(call.arguments)
+                    SetPipelineArgumentsModel.model_validate(payload.pipeline)
+                except ValueError as exc:
+                    claim_shape_error = isinstance(exc, PydanticValidationError) and any(
+                        error["loc"] and error["loc"][0] == "claimed_deferred_intent_ids" for error in exc.errors()
+                    )
+                    terminal_feedback = _deferred_intent_claim_feedback() if claim_shape_error else _canonical_schema_feedback()
+                else:
+                    pipeline = payload.pipeline
+                    claimed_deferred_intent_ids = tuple(str(intent_id) for intent_id in payload.claimed_deferred_intent_ids)
+                    if not set(claimed_deferred_intent_ids).issubset(eligible_deferred_intent_ids):
+                        terminal_feedback = _deferred_intent_claim_feedback()
+            if terminal_feedback is not None:
                 repair_count += 1
                 if repair_count > repair_budget:
                     raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
@@ -1048,7 +1182,7 @@ async def _plan_pipeline_inner(
                     {
                         "role": "tool",
                         "tool_call_id": call.call_id,
-                        "content": canonical_json(schema_feedback),
+                        "content": canonical_json(terminal_feedback),
                     }
                 )
                 continue
@@ -1066,7 +1200,8 @@ async def _plan_pipeline_inner(
                     current_state=current_state,
                     base=base,
                     reviewed_facts=reviewed_facts,
-                    covered_deferred_intent_ids=covered_deferred_intent_ids,
+                    claimed_deferred_intent_ids=claimed_deferred_intent_ids,
+                    claim_evaluator=claim_evaluator,
                     supersedes_draft_hash=supersedes_draft_hash,
                     surface=surface,
                     repair_count=repair_count,
@@ -1080,6 +1215,19 @@ async def _plan_pipeline_inner(
                     model_version=audited_call.model_returned or audited_call.model_requested,
                     provider=model_config.provider,
                 )
+            except DeferredIntentClaimError:
+                repair_count += 1
+                if repair_count > repair_budget:
+                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                messages.append(_assistant_tool_calls_message(message, calls))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.call_id,
+                        "content": canonical_json(_deferred_intent_claim_feedback()),
+                    }
+                )
+                continue
             except ToolArgumentError as exc:
                 repair_count += 1
                 if repair_count > repair_budget:

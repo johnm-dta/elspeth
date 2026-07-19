@@ -2675,7 +2675,6 @@ async def post_guided_respond(
                         remaining = verified_remaining_deferred_intents(
                             guided=guided,
                             proposal=authority.proposal,
-                            proposal_payload=current_turn["payload"],
                         )
                         response_payload = {
                             "action": "accept",
@@ -2765,7 +2764,6 @@ async def post_guided_respond(
                                 proposal_id=authority.row.id,
                                 draft_hash=authority.proposal.draft_hash,
                                 reviewed_facts=reviewed_facts,
-                                proposal_payload=current_turn["payload"],
                                 state=state_data,
                                 candidate_content_hash=prepared.candidate_content_hash,
                                 executor_content_hash=prepared.executor_content_hash,

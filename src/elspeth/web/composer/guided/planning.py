@@ -9,13 +9,15 @@ closed ``PROPOSE_PIPELINE`` wire contract.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, NotRequired, TypedDict, cast
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.web.composer.guided.connection_consumers import canonical_connection_consumers
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError, evaluate_deferred_intent_coverage
 from elspeth.web.composer.guided.protocol import (
     PROPOSAL_RATIONALE_TEMPLATE,
     PROPOSAL_SUMMARY_TEMPLATE,
@@ -31,11 +33,9 @@ from elspeth.web.composer.guided.stage_subjects import (
     EdgeRouteConstraint,
     FailureRouteConstraint,
     OptionValueConstraint,
-    PluginSubject,
-    StableSubject,
     SubjectPresenceConstraint,
 )
-from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession
 from elspeth.web.composer.pipeline_proposal import PipelineProposal
 from elspeth.web.composer.state import CompositionState, NodeSpec
 
@@ -66,16 +66,6 @@ class GuidedBoundPipeline(TypedDict):
     edges: list[dict[str, JsonValue]]
     outputs: list[GuidedBoundOutput]
     metadata: NotRequired[dict[str, JsonValue] | None]
-
-
-class _DeferredComponent(TypedDict):
-    """Canonical component facts used to resolve deferred constraints."""
-
-    kind: Literal["source", "node", "output", "edge"]
-    name: str
-    plugin_kind: NotRequired[Literal["source", "transform", "sink"]]
-    plugin: NotRequired[str | None]
-    options: NotRequired[Mapping[str, Any]]
 
 
 def guided_private_reviewed_facts(guided: GuidedSession) -> dict[str, object]:
@@ -319,6 +309,17 @@ def _endpoint(kind: str, stable_id: str | None = None) -> dict[str, str]:
     return result
 
 
+def _ordered_gate_routes(node: NodeSpec) -> tuple[tuple[str, str], ...]:
+    """Return the protocol-canonical direct routes followed by fork routes."""
+
+    assert node.node_type == "gate"
+    routes = sorted((node.routes or {}).items(), key=lambda route: route[0])
+    return (
+        *((name, destination) for name, destination in routes if destination != "fork"),
+        *((name, destination) for name, destination in routes if destination == "fork"),
+    )
+
+
 def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_aliases: Mapping[str, str]) -> dict[str, object]:
     if node.node_type == "transform":
         return {"kind": "transform"}
@@ -343,9 +344,9 @@ def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_a
             "merge": node.merge,
         }
     assert node.node_type == "gate"
-    routes = dict(node.routes or {})
-    route_names = list(routes)
-    fork_routes = [name for name, destination in routes.items() if destination == "fork"]
+    routes = _ordered_gate_routes(node)
+    route_names = [name for name, _destination in routes]
+    fork_routes = [name for name, destination in routes if destination == "fork"]
     fork_to = list(node.fork_to or ())
     return {
         "kind": "gate",
@@ -400,12 +401,12 @@ def _build_projection(
     source_ids = {name: guided.source_order[index] for index, name in enumerate(state.sources)}
     output_ids = {output.name: guided.output_order[index] for index, output in enumerate(state.outputs)}
 
-    route_names: list[str] = []
+    route_keys: list[tuple[str, str]] = []
     branch_names: list[str] = []
     for node in state.nodes:
-        for route in node.routes or {}:
-            if route not in route_names:
-                route_names.append(route)
+        routes = _ordered_gate_routes(node) if node.node_type == "gate" else ()
+        for route, _destination in routes:
+            route_keys.append((node_ids[node.id], route))
         for branch in node.fork_to or ():
             if branch not in branch_names:
                 branch_names.append(branch)
@@ -414,14 +415,21 @@ def _build_projection(
         for branch in values:
             if branch not in branch_names:
                 branch_names.append(branch)
-    route_aliases = {name: proposal_structural_label("route", index) for index, name in enumerate(route_names)}
+    route_aliases = {key: proposal_structural_label("route", index) for index, key in enumerate(route_keys)}
     branch_aliases = {name: proposal_structural_label("branch", index) for index, name in enumerate(branch_names)}
 
-    consumers: dict[str, list[tuple[str, str]]] = {}
-    for node in state.nodes:
-        consumers.setdefault(node.input, []).append(("node", node_ids[node.id]))
-    for output in state.outputs:
-        consumers.setdefault(output.name, []).append(("output", output_ids[output.name]))
+    def gate_route_aliases(node: NodeSpec) -> dict[str, str]:
+        assert node.node_type == "gate"
+        return {route: route_aliases[(node_ids[node.id], route)] for route, _destination in _ordered_gate_routes(node)}
+
+    try:
+        consumers = canonical_connection_consumers(
+            state,
+            node_identities=node_ids,
+            output_identities=output_ids,
+        )
+    except ValueError as exc:  # pragma: no cover - validated state and exact IDs own this invariant
+        raise AuditIntegrityError("guided proposal canonical consumer identities are malformed") from exc
 
     edge_specs: list[tuple[dict[str, str], dict[str, str], dict[str, object]]] = []
 
@@ -445,15 +453,16 @@ def _build_projection(
     for node in state.nodes:
         origin = _endpoint("node", node_ids[node.id])
         if node.node_type == "gate":
-            routes = dict(node.routes or {})
-            fork_routes = [name for name, destination in routes.items() if destination == "fork"]
-            for route, destination in routes.items():
+            routes = _ordered_gate_routes(node)
+            node_route_aliases = gate_route_aliases(node)
+            fork_routes = [name for name, destination in routes if destination == "fork"]
+            for route, destination in routes:
                 if destination == "fork":
                     continue
                 add_targets(
                     origin,
                     destination,
-                    {"kind": "gate_route", "route": route_aliases[route], "branch": None},
+                    {"kind": "gate_route", "route": node_route_aliases[route], "branch": None},
                 )
             for destination in node.fork_to or ():
                 add_targets(
@@ -461,7 +470,7 @@ def _build_projection(
                     destination,
                     {
                         "kind": "gate_fork",
-                        "routes": [route_aliases[route] for route in fork_routes],
+                        "routes": [node_route_aliases[route] for route in fork_routes],
                         "branch": branch_aliases[destination],
                     },
                 )
@@ -498,7 +507,11 @@ def _build_projection(
             "label": proposal_component_label("node", index),
             "node_type": node.node_type,
             "plugin": ({"kind": "transform", "id": node.plugin} if node.plugin is not None else None),
-            "behavior": _node_behavior(node, route_aliases=route_aliases, branch_aliases=branch_aliases),
+            "behavior": _node_behavior(
+                node,
+                route_aliases=gate_route_aliases(node) if node.node_type == "gate" else {},
+                branch_aliases=branch_aliases,
+            ),
         }
         for index, node in enumerate(state.nodes)
     ]
@@ -596,137 +609,19 @@ def verified_remaining_deferred_intents(
     *,
     guided: GuidedSession,
     proposal: PipelineProposal,
-    proposal_payload: Mapping[str, Any],
-) -> tuple[Any, ...]:
+) -> tuple[DeferredStageIntent, ...]:
     """Verify mechanically covered constraints and return the exact remainder."""
 
-    proposal_payload = cast(Mapping[str, Any], deep_thaw(proposal_payload))
     state = _state_from_proposal(proposal)
-    node_ids, edge_ids = _projection_ids_from_payload(proposal_payload)
-    source_stable = {guided.reviewed_sources[stable_id].name: stable_id for stable_id in guided.source_order}
-    output_stable = {guided.reviewed_outputs[stable_id].name: stable_id for stable_id in guided.output_order}
-    components: dict[str, _DeferredComponent] = {}
-    for name, source in state.sources.items():
-        components[source_stable[name]] = {
-            "kind": "source",
-            "name": name,
-            "plugin_kind": "source",
-            "plugin": source.plugin,
-            "options": deep_thaw(source.options),
-        }
-    for index, node in enumerate(state.nodes):
-        components[node_ids[index]] = {
-            "kind": "node",
-            "name": node.id,
-            "plugin_kind": "transform",
-            "plugin": node.plugin,
-            "options": deep_thaw(node.options),
-        }
-    for output in state.outputs:
-        components[output_stable[output.name]] = {
-            "kind": "output",
-            "name": output.name,
-            "plugin_kind": "sink",
-            "plugin": output.plugin,
-            "options": deep_thaw(output.options),
-        }
-    graph_edges = cast(Mapping[str, Any], proposal_payload["graph"])["edges"]
-    for index, _edge in enumerate(graph_edges):
-        components[edge_ids[index]] = {"kind": "edge", "name": edge_ids[index]}
-
-    def resolve(subject: StableSubject | PluginSubject) -> list[_DeferredComponent]:
-        if isinstance(subject, StableSubject):
-            component = components.get(subject.stable_id)
-            return [component] if component is not None and component["kind"] == subject.component_kind else []
-        assert isinstance(subject, PluginSubject)
-        exact = components.get(subject.subject_id)
-        if exact is not None and exact.get("plugin_kind") == subject.plugin_kind and exact.get("plugin") == subject.plugin_name:
-            return [exact]
-        matches = [
-            component
-            for component in components.values()
-            if component.get("plugin_kind") == subject.plugin_kind and component.get("plugin") == subject.plugin_name
-        ]
-        if len(matches) > 1:
-            raise AuditIntegrityError("guided deferred plugin subject is ambiguous")
-        return matches
-
-    def option_value(component: Mapping[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
-        value: Any = component.get("options")
-        for segment in path:
-            if not isinstance(value, Mapping) or segment not in value:
-                return False, None
-            value = value[segment]
-        return True, value
-
-    def target_names(subject: StableSubject | PluginSubject) -> set[str]:
-        return {component["name"] for component in resolve(subject)}
-
-    def route_targets(component: Mapping[str, Any], edge_type: str) -> set[str]:
-        name = component["name"]
-        if component["kind"] == "source":
-            source = state.sources[name]
-            return {source.on_success} if edge_type == "on_success" and source.on_success is not None else set()
-        node = next(item for item in state.nodes if item.id == name)
-        if edge_type == "on_success":
-            return {node.on_success} if node.on_success is not None else set()
-        if edge_type == "on_error":
-            return {node.on_error} if node.on_error is not None else set()
-        if edge_type in {"route_true", "route_false"}:
-            key = "true" if edge_type == "route_true" else "false"
-            value = dict(node.routes or {}).get(key)
-            return {value} if value is not None and value != "fork" else set()
-        return set(node.fork_to or ()) if edge_type == "fork" else set()
-
-    def failure_target(component: Mapping[str, Any], failure_kind: str) -> str | None:
-        name = component["name"]
-        if failure_kind == "source_validation":
-            return state.sources[name].on_validation_failure
-        if failure_kind == "node_error":
-            return next(item for item in state.nodes if item.id == name).on_error
-        return next(item for item in state.outputs if item.name == name).on_write_failure
-
-    covered = set(proposal.covered_deferred_intent_ids)
-    for intent in guided.deferred_intents:
-        if intent.intent_id not in covered:
-            continue
-        for constraint in intent.constraints:
-            satisfied = False
-            if type(constraint) is SubjectPresenceConstraint:
-                satisfied = bool(resolve(constraint.subject)) is constraint.present
-            elif type(constraint) is OptionValueConstraint:
-                resolved = resolve(constraint.subject)
-                if len(resolved) == 1:
-                    present, value = option_value(resolved[0], constraint.option_path)
-                    equals = present and value == constraint.value
-                    satisfied = equals if constraint.operator == "equals" else not equals
-            elif type(constraint) is ComponentCountConstraint:
-                count = sum(
-                    component["kind"] == constraint.component_kind
-                    and (
-                        constraint.plugin_name is None
-                        or (component.get("plugin_kind") == constraint.plugin_kind and component.get("plugin") == constraint.plugin_name)
-                    )
-                    for component in components.values()
-                )
-                satisfied = {
-                    "equals": count == constraint.count,
-                    "at_least": count >= constraint.count,
-                    "at_most": count <= constraint.count,
-                }[constraint.operator]
-            elif type(constraint) is EdgeRouteConstraint:
-                origins = resolve(constraint.from_subject)
-                targets = target_names(constraint.to_subject)
-                present = any(route_targets(origin, constraint.edge_type) & targets for origin in origins)
-                satisfied = present is constraint.present
-            elif type(constraint) is FailureRouteConstraint:
-                subjects = resolve(constraint.subject)
-                expected_targets = {"discard"} if constraint.target == "discard" else target_names(constraint.target)
-                actual = {failure_target(subject, constraint.failure_kind) for subject in subjects}
-                equals = len(subjects) == 1 and actual == expected_targets
-                satisfied = equals if constraint.operator == "equals" else not equals
-            if not satisfied:
-                raise AuditIntegrityError("guided proposal does not mechanically satisfy a covered deferred constraint")
+    try:
+        covered_ordered = evaluate_deferred_intent_coverage(
+            candidate=state,
+            reviewed_guided=guided,
+            claimed_intent_ids=proposal.covered_deferred_intent_ids,
+        )
+    except DeferredIntentClaimError as exc:
+        raise AuditIntegrityError("guided proposal does not mechanically satisfy a covered deferred constraint") from exc
+    covered = set(covered_ordered)
     return tuple(intent for intent in guided.deferred_intents if intent.intent_id not in covered)
 
 

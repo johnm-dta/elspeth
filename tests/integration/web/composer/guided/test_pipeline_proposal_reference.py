@@ -144,7 +144,7 @@ def _pipeline() -> dict[str, object]:
     }
 
 
-def _deferred_guided(*, covered_value: object = "observed") -> GuidedSession:
+def _deferred_guided(*, covered_value: object = "observed", message_content_hash: str | None = None) -> GuidedSession:
     return replace(
         _guided(),
         deferred_intents=(
@@ -156,7 +156,7 @@ def _deferred_guided(*, covered_value: object = "observed") -> GuidedSession:
                 catalog_name="csv",
                 redacted_summary="Apply the deferred source option constraint.",
                 originating_message_id=MESSAGE_ID,
-                message_content_hash=stable_hash("deferred source instruction"),
+                message_content_hash=message_content_hash or stable_hash("deferred source instruction"),
                 constraints=(
                     OptionValueConstraint(
                         kind="option_value",
@@ -181,6 +181,17 @@ async def _command(
 ) -> tuple[GuidedPipelineProposalStageCommand, UUID]:
     session = await service.create_session("alice", "Guided proposal", "local")
     guided = initial_guided or _guided()
+    if guided.deferred_intents:
+        deferred_intents = []
+        for deferred in guided.deferred_intents:
+            message = await service.add_message(
+                session.id,
+                "user",
+                "deferred source instruction",
+                writer_principal="route_user_message",
+            )
+            deferred_intents.append(replace(deferred, originating_message_id=str(message.id)))
+        guided = replace(guided, deferred_intents=tuple(deferred_intents))
     predecessor = await service.save_composition_state(session.id, _state_data(guided), provenance="session_seed")
     predecessor_state = _state_from_record(predecessor)
     checkpoint_id = uuid4()
@@ -592,6 +603,60 @@ def test_stage_recomputes_covered_deferred_constraints_before_sql(
     with pytest.raises(AuditIntegrityError, match="covered deferred constraint"):
         asyncio.run(service.stage_guided_pipeline_proposal(command, payload_store=payload_store))
 
+    _assert_stage_cohort_absent(service, command, session_id)
+
+
+def test_stage_revalidates_deferred_originating_message_hash_inside_settlement(
+    service: SessionServiceImpl,
+    tmp_path: Path,
+) -> None:
+    payload_store = FilesystemPayloadStore(tmp_path / "deferred-message-toctou")
+    command, session_id = asyncio.run(
+        _command(
+            service,
+            payload_store,
+            initial_guided=_deferred_guided(message_content_hash=stable_hash("changed after planner verification")),
+            covered_deferred_intent_ids=(DEFERRED_ID,),
+        )
+    )
+
+    with pytest.raises(AuditIntegrityError, match="deferred intent message content hash mismatch"):
+        asyncio.run(service.stage_guided_pipeline_proposal(command, payload_store=payload_store))
+
+    _assert_stage_cohort_absent(service, command, session_id)
+
+
+def test_stage_repeats_mechanical_coverage_under_settlement_lock_before_write(
+    service: SessionServiceImpl,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elspeth.web.composer.guided import planning
+
+    payload_store = FilesystemPayloadStore(tmp_path / "deferred-mechanical-toctou")
+    command, session_id = asyncio.run(
+        _command(
+            service,
+            payload_store,
+            initial_guided=_deferred_guided(),
+            covered_deferred_intent_ids=(DEFERRED_ID,),
+        )
+    )
+    original = planning.verified_remaining_deferred_intents
+    calls = 0
+
+    def fail_second_verification(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise AuditIntegrityError("simulated pre-stage mechanical authority drift")
+        return original(**kwargs)
+
+    monkeypatch.setattr(planning, "verified_remaining_deferred_intents", fail_second_verification)
+    with pytest.raises(AuditIntegrityError, match="mechanical authority drift"):
+        asyncio.run(service.stage_guided_pipeline_proposal(command, payload_store=payload_store))
+
+    assert calls == 2
     _assert_stage_cohort_absent(service, command, session_id)
 
 

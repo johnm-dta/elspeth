@@ -2125,6 +2125,7 @@ class ComposerServiceImpl:
     ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
         """Run one shared planner call for the current guided checkpoint."""
 
+        from elspeth.web.composer.guided.deferred_intents import evaluate_deferred_intent_coverage
         from elspeth.web.composer.guided.planning import (
             bind_guided_reviewed_components,
             guided_private_reviewed_facts,
@@ -2150,13 +2151,22 @@ class ComposerServiceImpl:
         plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
         reviewed_facts = guided_private_reviewed_facts(guided)
         reviewed_context = guided_redacted_planner_context(guided)
+
+        def evaluate_claims(candidate: CompositionState, claimed_intent_ids: tuple[str, ...]) -> tuple[str, ...]:
+            return evaluate_deferred_intent_coverage(
+                candidate=candidate,
+                reviewed_guided=guided,
+                claimed_intent_ids=claimed_intent_ids,
+            )
+
         plan = await plan_pipeline(
             intent=intent,
             current_state=current_state,
             provider_current_state=guided_redacted_current_state_context(current_state),
             reviewed_facts=reviewed_facts,
             reviewed_planner_context=reviewed_context,
-            covered_deferred_intent_ids=tuple(item.intent_id for item in guided.deferred_intents),
+            eligible_deferred_intent_ids=tuple(item.intent_id for item in guided.deferred_intents),
+            claim_evaluator=evaluate_claims,
             supersedes_draft_hash=supersedes_draft_hash,
             surface=(PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED),
             policy_catalog=policy_catalog,
@@ -2400,7 +2410,6 @@ class ComposerServiceImpl:
                             current_state=state,
                             reviewed_facts={},
                             reviewed_planner_context={},
-                            covered_deferred_intent_ids=(),
                             supersedes_draft_hash=None,
                             surface=PlannerSurface.FREEFORM,
                             policy_catalog=policy_catalog,
@@ -2434,7 +2443,8 @@ class ComposerServiceImpl:
                 provider_current_state=state.to_dict(),
                 reviewed_facts={},
                 reviewed_planner_context={},
-                covered_deferred_intent_ids=(),
+                eligible_deferred_intent_ids=(),
+                claim_evaluator=None,
                 supersedes_draft_hash=None,
                 surface=PlannerSurface.FREEFORM,
                 policy_catalog=policy_catalog,

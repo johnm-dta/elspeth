@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import Any, cast, get_args
 from uuid import uuid4
@@ -17,11 +18,16 @@ from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     CompositionStateData,
     CompositionStateRecord,
+    GuidedPipelineProposalAcceptCommand,
     RunAlreadyActiveError,
     RunRecord,
     SessionRecord,
     SessionRunStatus,
 )
+
+
+def test_guided_pipeline_accept_command_has_no_dead_proposal_projection() -> None:
+    assert "proposal_payload" not in inspect.signature(GuidedPipelineProposalAcceptCommand).parameters
 
 
 def _run_record(**overrides: object) -> RunRecord:

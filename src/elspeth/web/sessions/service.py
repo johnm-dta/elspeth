@@ -753,6 +753,33 @@ def _verify_pipeline_lifecycle_authority(
         raise AuditIntegrityError("pending pipeline proposal row authority binding is malformed")
 
 
+def _verify_guided_deferred_message_authority(
+    conn: Connection,
+    *,
+    session_id: str,
+    guided: Any,
+) -> None:
+    """Re-resolve every deferred intent's private user row under settlement lock."""
+
+    message_ids = tuple(intent.originating_message_id for intent in guided.deferred_intents)
+    if not message_ids:
+        return
+    rows = conn.execute(
+        select(chat_messages_table.c.id, chat_messages_table.c.role, chat_messages_table.c.content)
+        .where(chat_messages_table.c.session_id == session_id)
+        .where(chat_messages_table.c.id.in_(message_ids))
+    ).fetchall()
+    rows_by_id = {row.id: row for row in rows}
+    if set(rows_by_id) != set(message_ids):
+        raise AuditIntegrityError("guided deferred intent message is missing or cross-session")
+    for intent in guided.deferred_intents:
+        row = rows_by_id[intent.originating_message_id]
+        if row.role != "user":
+            raise AuditIntegrityError("guided deferred intent must originate from a user message")
+        if stable_hash(row.content) != intent.message_content_hash:
+            raise AuditIntegrityError("guided deferred intent message content hash mismatch")
+
+
 def _normalize_optional_provenance_text(value: str | None) -> str | None:
     if value is None:
         return None
@@ -8318,7 +8345,6 @@ class SessionServiceImpl:
         verified_remaining_deferred_intents(
             guided=guided,
             proposal=proposal,
-            proposal_payload=proposal_payload_json,
         )
 
         normalized = _normalize_proposal_composer_provenance(
@@ -8375,6 +8401,17 @@ class SessionServiceImpl:
                 current_guided = state_from_record(current_record).guided_session
                 if current_guided is None:
                     raise AuditIntegrityError("guided proposal predecessor lost its guided checkpoint")
+                if current_guided.deferred_intents != guided.deferred_intents:
+                    raise AuditIntegrityError("guided proposal deferred authority changed before staging")
+                _verify_guided_deferred_message_authority(
+                    conn,
+                    session_id=sid,
+                    guided=current_guided,
+                )
+                verified_remaining_deferred_intents(
+                    guided=current_guided,
+                    proposal=proposal,
+                )
 
                 if command.user_message_id is not None:
                     message_row = conn.execute(
@@ -9196,13 +9233,17 @@ class SessionServiceImpl:
                 metadata = deep_thaw(command.state.composer_meta)
                 if current_guided is None or current_guided.active_proposal is None or type(metadata) is not dict:
                     raise AuditIntegrityError("guided proposal acceptance checkpoint metadata is malformed")
+                _verify_guided_deferred_message_authority(
+                    conn,
+                    session_id=sid,
+                    guided=current_guided,
+                )
                 from elspeth.web.composer.guided.planning import verified_remaining_deferred_intents
                 from elspeth.web.composer.guided.state_machine import GuidedSession
 
                 remaining = verified_remaining_deferred_intents(
                     guided=current_guided,
                     proposal=authority.proposal,
-                    proposal_payload=command.proposal_payload,
                 )
                 final_guided = GuidedSession.from_dict(metadata["guided_session"])
                 if (

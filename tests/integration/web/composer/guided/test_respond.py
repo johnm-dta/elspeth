@@ -2030,6 +2030,93 @@ class TestStep2IntraStep:
         proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         assert len(proposals) == 1 and proposals[0].status == "pending"
 
+    @pytest.mark.parametrize("revalidation", ("message", "mechanical"))
+    def test_accept_revalidates_deferred_authority_before_any_write(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        revalidation: str,
+    ) -> None:
+        from elspeth.web.composer.guided import planning
+        from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction
+        from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
+        from elspeth.web.sessions import service as service_module
+        from elspeth.web.sessions.routes.composer import guided as guided_route
+        from tests.integration.web.composer.guided.test_wrong_stage_intent import _provider
+
+        session_id = _create_session(composer_test_client)
+        current = _get_guided(composer_test_client, session_id)
+        action = DeferredIntentAction(
+            target_stage="topology",
+            catalog_kind="transform",
+            catalog_name="passthrough",
+            redacted_summary="Retain a mechanically testable topology constraint.",
+            constraints=(
+                ComponentCountConstraint(
+                    kind="component_count",
+                    component_kind="node",
+                    plugin_kind="transform",
+                    plugin_name="passthrough",
+                    operator="at_most",
+                    count=0,
+                ),
+            ),
+        )
+        monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(action))
+        retained = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/chat",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": current["next_turn"]["turn_token"],
+                "message": "Do not include passthrough later.",
+            },
+        )
+        assert retained.status_code == 200, retained.json()
+        staged = self._stage_proposal(composer_test_client, session_id, filename="accept-deferred-revalidation.jsonl")
+        turn = staged["next_turn"]
+        state_before = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+        events_before = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
+        messages_before = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+
+        if revalidation == "message":
+
+            def reject_corrupt_authority(*_args, **_kwargs):
+                raise AuditIntegrityError("guided deferred intent message content hash mismatch")
+
+            monkeypatch.setattr(service_module, "_verify_guided_deferred_message_authority", reject_corrupt_authority)
+        else:
+            original_verifier = planning.verified_remaining_deferred_intents
+            verification_calls = 0
+
+            def reject_second_verification(**kwargs):
+                nonlocal verification_calls
+                verification_calls += 1
+                if verification_calls == 2:
+                    raise AuditIntegrityError("guided deferred mechanical coverage drifted before acceptance")
+                return original_verifier(**kwargs)
+
+            monkeypatch.setattr(planning, "verified_remaining_deferred_intents", reject_second_verification)
+        failed = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": turn["payload"]["proposal_id"],
+                "draft_hash": turn["payload"]["draft_hash"],
+                "chosen": ["accept"],
+            },
+        )
+
+        assert failed.status_code == 500, failed.json()
+        state_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+        assert state_before is not None and state_after is not None and state_after.id == state_before.id
+        assert asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id))) == events_before
+        assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before
+        proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "pending"
+        if revalidation == "mechanical":
+            assert verification_calls == 2
+
     def test_accept_cancellation_before_service_settlement_persists_no_dispatch_audit(
         self,
         composer_test_client: TestClient,

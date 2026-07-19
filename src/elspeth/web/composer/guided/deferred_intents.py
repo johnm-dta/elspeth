@@ -9,8 +9,9 @@ it is reduced to a content hash; it is never stored in deferred metadata.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -18,9 +19,11 @@ from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginKind
+from elspeth.web.composer.guided.connection_consumers import ConsumerIdentity, canonical_connection_consumers
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError, InvariantError
 from elspeth.web.composer.guided.stage_subjects import (
     CatalogSubjectClarification,
@@ -45,6 +48,7 @@ from elspeth.web.composer.guided.state_machine import (
     DeferredStageIntent,
     GuidedSession,
 )
+from elspeth.web.composer.state import CompositionState
 from elspeth.web.plugin_policy.models import PluginId, PluginUnavailableReason
 
 _STAGE_ORDINAL: dict[StageName, int] = {"source": 0, "output": 1, "topology": 2, "wire_review": 3}
@@ -67,6 +71,10 @@ _ALLOWED_CONSTRAINT_TYPES = {
 
 class DeferredIntentActionShapeError(GuidedSolverResponseShapeError):
     """The model emitted a malformed future-stage action."""
+
+
+class DeferredIntentClaimError(ValueError):
+    """A planner terminal claimed deferred coverage it did not prove."""
 
 
 def _require_nonempty_exact_str(value: object, field_name: str) -> str:
@@ -650,6 +658,239 @@ def validate_deferred_intent_action(
             if invalid_option is not None:
                 return invalid_option
     return DeferredIntentAccepted(action=action)
+
+
+type _ComponentKind = Literal["source", "node", "edge", "output"]
+
+
+@dataclass(frozen=True, slots=True)
+class _CandidateComponent:
+    kind: _ComponentKind
+    stable_id: str
+    name: str
+    plugin_kind: PluginKind | None = None
+    plugin: str | None = None
+    options: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SubjectResolution:
+    components: tuple[_CandidateComponent, ...]
+    ambiguous: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _DeferredCoverageContext:
+    candidate: CompositionState
+    components: tuple[_CandidateComponent, ...]
+    exact_components: Mapping[tuple[_ComponentKind, str], _CandidateComponent]
+    consumers: Mapping[str, tuple[ConsumerIdentity, ...]]
+
+    def resolve(self, subject: StableSubject | PluginSubject) -> _SubjectResolution:
+        if type(subject) is StableSubject:
+            exact = self.exact_components.get((subject.component_kind, subject.stable_id))
+            components = (exact,) if exact is not None else ()
+            return _SubjectResolution(components=components)
+        plugin_subject = cast(PluginSubject, subject)
+        component_kind = cast(
+            Literal["source", "node", "output"],
+            {"source": "source", "transform": "node", "sink": "output"}[plugin_subject.plugin_kind],
+        )
+        exact = self.exact_components.get((component_kind, plugin_subject.subject_id))
+        matches = tuple(
+            component
+            for component in self.components
+            if component.plugin_kind == plugin_subject.plugin_kind and component.plugin == plugin_subject.plugin_name
+        )
+        if exact is not None and exact.plugin_kind == plugin_subject.plugin_kind and exact.plugin == plugin_subject.plugin_name:
+            return _SubjectResolution(components=(exact,))
+        if len(matches) > 1:
+            return _SubjectResolution(components=(), ambiguous=True)
+        return _SubjectResolution(components=matches)
+
+    @staticmethod
+    def option_value(component: _CandidateComponent, path: tuple[str, ...]) -> tuple[bool, Any]:
+        value: Any = component.options
+        for segment in path:
+            if not isinstance(value, Mapping) or segment not in value:
+                return False, None
+            value = value[segment]
+        return True, value
+
+    def route_targets(self, component: _CandidateComponent, edge_type: str) -> set[ConsumerIdentity]:
+        connections: set[str]
+        if component.kind == "source":
+            source = self.candidate.sources[component.name]
+            connections = {source.on_success} if edge_type == "on_success" and source.on_success is not None else set()
+        elif component.kind != "node":
+            connections = set()
+        else:
+            node = next(item for item in self.candidate.nodes if item.id == component.name)
+            if edge_type == "on_success":
+                connections = {node.on_success} if node.on_success is not None else set()
+            elif edge_type == "on_error":
+                connections = {node.on_error} if node.on_error is not None else set()
+            elif edge_type in {"route_true", "route_false"}:
+                key = "true" if edge_type == "route_true" else "false"
+                value = dict(node.routes or {}).get(key)
+                connections = {value} if value is not None and value != "fork" else set()
+            else:
+                connections = set(node.fork_to or ()) if edge_type == "fork" else set()
+        return {destination for connection in connections for destination in self.consumers.get(connection, ())}
+
+    def failure_target(self, component: _CandidateComponent, failure_kind: str) -> str | None:
+        if failure_kind == "source_validation":
+            return self.candidate.sources[component.name].on_validation_failure
+        if failure_kind == "node_error":
+            return next(item for item in self.candidate.nodes if item.id == component.name).on_error
+        return next(item for item in self.candidate.outputs if item.name == component.name).on_write_failure
+
+    def constraint_holds(self, constraint: DeferredConstraint) -> bool:
+        if type(constraint) is SubjectPresenceConstraint:
+            resolved = self.resolve(constraint.subject)
+            return not resolved.ambiguous and bool(resolved.components) is constraint.present
+        if type(constraint) is OptionValueConstraint:
+            resolved = self.resolve(constraint.subject)
+            if resolved.ambiguous or len(resolved.components) != 1:
+                return False
+            present, value = self.option_value(resolved.components[0], constraint.option_path)
+            if not present:
+                return False
+            equals = _exact_json_scalar(value, constraint.value)
+            return equals if constraint.operator == "equals" else not equals
+        if type(constraint) is ComponentCountConstraint:
+            count = sum(
+                component.kind == constraint.component_kind
+                and (
+                    constraint.plugin_name is None
+                    or (component.plugin_kind == constraint.plugin_kind and component.plugin == constraint.plugin_name)
+                )
+                for component in self.components
+            )
+            return {
+                "equals": count == constraint.count,
+                "at_least": count >= constraint.count,
+                "at_most": count <= constraint.count,
+            }[constraint.operator]
+        if type(constraint) is EdgeRouteConstraint:
+            origins = self.resolve(constraint.from_subject)
+            destinations = self.resolve(constraint.to_subject)
+            if origins.ambiguous or destinations.ambiguous or not origins.components or not destinations.components:
+                return False
+            targets = {(component.kind, component.stable_id) for component in destinations.components}
+            present = any(self.route_targets(origin, constraint.edge_type) & targets for origin in origins.components)
+            return present is constraint.present
+        if type(constraint) is FailureRouteConstraint:
+            subjects = self.resolve(constraint.subject)
+            if subjects.ambiguous or len(subjects.components) != 1:
+                return False
+            if constraint.target == "discard":
+                expected_targets = {"discard"}
+            else:
+                target_resolution = self.resolve(constraint.target)
+                if target_resolution.ambiguous or len(target_resolution.components) != 1:
+                    return False
+                expected_targets = {component.name for component in target_resolution.components}
+            actual = {self.failure_target(subject, constraint.failure_kind) for subject in subjects.components}
+            equals = actual == expected_targets
+            return equals if constraint.operator == "equals" else not equals
+        raise InvariantError("deferred intent contains an unsupported constraint")
+
+
+def _coverage_context(candidate: CompositionState, reviewed_guided: GuidedSession) -> _DeferredCoverageContext:
+    source_ids = {source.name: stable_id for stable_id, source in reviewed_guided.reviewed_sources.items()}
+    output_ids = {output.name: stable_id for stable_id, output in reviewed_guided.reviewed_outputs.items()}
+    components: list[_CandidateComponent] = []
+    for name, source in candidate.sources.items():
+        components.append(
+            _CandidateComponent(
+                kind="source",
+                stable_id=source_ids.get(name, name),
+                name=name,
+                plugin_kind="source",
+                plugin=source.plugin,
+                options=cast(Mapping[str, Any], deep_thaw(source.options)),
+            )
+        )
+    for node in candidate.nodes:
+        components.append(
+            _CandidateComponent(
+                kind="node",
+                stable_id=node.id,
+                name=node.id,
+                plugin_kind="transform" if node.plugin is not None else None,
+                plugin=node.plugin,
+                options=cast(Mapping[str, Any], deep_thaw(node.options)),
+            )
+        )
+    for edge in candidate.edges:
+        components.append(_CandidateComponent(kind="edge", stable_id=edge.id, name=edge.id))
+    for output in candidate.outputs:
+        components.append(
+            _CandidateComponent(
+                kind="output",
+                stable_id=output_ids.get(output.name, output.name),
+                name=output.name,
+                plugin_kind="sink",
+                plugin=output.plugin,
+                options=cast(Mapping[str, Any], deep_thaw(output.options)),
+            )
+        )
+    component_tuple = tuple(components)
+    exact_components = {(component.kind, component.stable_id): component for component in component_tuple}
+    if len(exact_components) != len(component_tuple):
+        raise InvariantError("guided candidate contains duplicate same-kind stable component identities")
+    try:
+        consumers = canonical_connection_consumers(
+            candidate,
+            node_identities={node.id: node.id for node in candidate.nodes},
+            output_identities={output.name: output_ids.get(output.name, output.name) for output in candidate.outputs},
+        )
+    except ValueError as exc:
+        raise InvariantError("guided candidate canonical consumer identities are malformed") from exc
+    return _DeferredCoverageContext(
+        candidate=candidate,
+        components=component_tuple,
+        exact_components=exact_components,
+        consumers=consumers,
+    )
+
+
+def constraint_holds(candidate: CompositionState, reviewed_guided: GuidedSession, constraint: DeferredConstraint) -> bool:
+    """Return whether one persisted structural predicate is true of a candidate."""
+
+    if type(candidate) is not CompositionState or type(reviewed_guided) is not GuidedSession:
+        raise TypeError("constraint_holds requires exact candidate and reviewed guided authority")
+    return _coverage_context(candidate, reviewed_guided).constraint_holds(constraint)
+
+
+def evaluate_deferred_intent_coverage(
+    *,
+    candidate: CompositionState,
+    reviewed_guided: GuidedSession,
+    claimed_intent_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Prove model claims and return only the verified reviewed-order subset."""
+
+    if type(candidate) is not CompositionState or type(reviewed_guided) is not GuidedSession:
+        raise TypeError("deferred coverage requires exact candidate and reviewed guided authority")
+    if type(claimed_intent_ids) is not tuple or any(type(intent_id) is not str for intent_id in claimed_intent_ids):
+        raise DeferredIntentClaimError("guided proposal claims must be an exact string tuple")
+    if len(set(claimed_intent_ids)) != len(claimed_intent_ids):
+        raise DeferredIntentClaimError("guided proposal contained a duplicate deferred intent claim")
+
+    claimed = set(claimed_intent_ids)
+    context = _coverage_context(candidate, reviewed_guided)
+    verified: list[str] = []
+    for intent in reviewed_guided.deferred_intents:
+        if intent.intent_id not in claimed:
+            continue
+        if not intent.constraints or not all(context.constraint_holds(constraint) for constraint in intent.constraints):
+            raise DeferredIntentClaimError("guided proposal claimed an unproven deferred intent")
+        verified.append(intent.intent_id)
+    if claimed != set(verified):
+        raise DeferredIntentClaimError("guided proposal claimed an unknown deferred intent")
+    return tuple(verified)
 
 
 def create_deferred_stage_intent(

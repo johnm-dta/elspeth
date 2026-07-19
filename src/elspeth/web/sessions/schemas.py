@@ -15,13 +15,14 @@ boundary instead of being silently reinterpreted by the route layer.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import pydantic
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationKind, InterpretationSource
+from elspeth.web.composer.guided.protocol import GUIDED_MAX_COMPONENTS_PER_KIND
 from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
 from elspeth.web.sessions.protocol import (
     ComposerDensityDefault,
@@ -525,6 +526,84 @@ class GuidedEditTargetRequest(BaseModel):
     stable_id: pydantic.StrictStr
 
 
+def _parse_canonical_uuid(value: object, *, field_name: str) -> UUID:
+    if type(value) is UUID:
+        return value
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a canonical UUID") from exc
+    if str(parsed) != value:
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return parsed
+
+
+class _ComponentActionModel(BaseModel):
+    """Strict closed request boundary for one plural component controller action."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+
+class GuidedComponentTargetRequest(_ComponentActionModel):
+    """Stable source/output identity; topology targets are not component actions."""
+
+    kind: Literal["source", "output"]
+    stable_id: UUID
+
+    @field_validator("stable_id", mode="before")
+    @classmethod
+    def _validate_stable_id(cls, value: object) -> UUID:
+        return _parse_canonical_uuid(value, field_name="stable_id")
+
+
+class AddComponentAction(_ComponentActionModel):
+    action: Literal["add"]
+    component_kind: Literal["source", "output"]
+
+
+class EditComponentAction(_ComponentActionModel):
+    action: Literal["edit"]
+    target: GuidedComponentTargetRequest
+
+
+class RemoveComponentAction(_ComponentActionModel):
+    action: Literal["remove"]
+    target: GuidedComponentTargetRequest
+
+
+class ReorderComponentsAction(_ComponentActionModel):
+    action: Literal["reorder"]
+    component_kind: Literal["source", "output"]
+    stable_ids: list[UUID] = Field(min_length=1, max_length=GUIDED_MAX_COMPONENTS_PER_KIND)
+
+    @field_validator("stable_ids", mode="before")
+    @classmethod
+    def _validate_stable_ids(cls, value: object) -> list[UUID]:
+        if type(value) is not list:
+            raise ValueError("stable_ids must be a list of canonical UUIDs")
+        return [_parse_canonical_uuid(item, field_name="stable_ids item") for item in value]
+
+    @field_validator("stable_ids")
+    @classmethod
+    def _validate_unique_stable_ids(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("stable_ids must not contain duplicates")
+        return value
+
+
+class FinishComponentsAction(_ComponentActionModel):
+    action: Literal["finish"]
+    component_kind: Literal["source", "output"]
+
+
+type GuidedComponentAction = Annotated[
+    AddComponentAction | EditComponentAction | RemoveComponentAction | ReorderComponentsAction | FinishComponentsAction,
+    Field(discriminator="action"),
+]
+
+
 class GuidedRespondRequest(_GuidedOperationRequest):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
@@ -544,6 +623,7 @@ class GuidedRespondRequest(_GuidedOperationRequest):
     proposal_id: pydantic.StrictStr | None = None
     draft_hash: pydantic.StrictStr | None = None
     edit_target: GuidedEditTargetRequest | None = None
+    component_action: GuidedComponentAction | None = None
 
     @model_validator(mode="after")
     def _validate_token_action_shape(self) -> GuidedRespondRequest:
@@ -557,10 +637,15 @@ class GuidedRespondRequest(_GuidedOperationRequest):
             self.draft_hash,
             self.edit_target,
         )
-        response_fields = (*turn_response_fields, *proposal_fields)
+        response_fields = (*turn_response_fields, *proposal_fields, self.component_action)
         if self.turn_token is None:
             if self.control_signal != "exit_to_freeform" or any(value is not None for value in response_fields):
                 raise ValueError("turn_token is required for live-turn actions")
+            return self
+        if self.component_action is not None:
+            competing_fields = (*turn_response_fields, *proposal_fields, self.control_signal)
+            if any(value is not None for value in competing_fields):
+                raise ValueError("component_action cannot be combined with any other guided response")
             return self
         if (self.proposal_id is None) != (self.draft_hash is None):
             raise ValueError("proposal_id and draft_hash must be supplied together")

@@ -22,6 +22,11 @@ from elspeth.web.composer.guided.stage_transitions import (
     PluginSelectionResponse,
     SchemaFormAuthority,
     SchemaFormResponse,
+    add_component_intent,
+    begin_component_edit,
+    finish_component_review,
+    remove_reviewed_component,
+    reorder_reviewed_components,
     transition_sink_field_review,
     transition_sink_plugin_selection,
     transition_sink_schema_form,
@@ -29,7 +34,7 @@ from elspeth.web.composer.guided.stage_transitions import (
     transition_source_plugin_selection,
     transition_source_schema_form,
 )
-from elspeth.web.composer.guided.state_machine import GuidedSession, SinkIntent, SourceIntent, TurnRecord
+from elspeth.web.composer.guided.state_machine import ComponentTarget, GuidedSession, SinkIntent, SourceIntent, TurnRecord
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_to_dict
 
 SOURCE_A = "11111111-1111-4111-8111-111111111111"
@@ -76,6 +81,28 @@ def _output(name: str) -> SinkOutputResolved:
         required_fields=("id",),
         schema_mode="observed",
         on_write_failure="discard",
+    )
+
+
+def _review_session(*, step: GuidedStep, two_components: bool = True) -> GuidedSession:
+    sources = {
+        SOURCE_A: _source("source", ("id", "name")),
+        **({SOURCE_B: _source("source_2", ("email",))} if two_components else {}),
+    }
+    source_order = (SOURCE_A, SOURCE_B) if two_components else (SOURCE_A,)
+    if step is GuidedStep.STEP_1_SOURCE:
+        return GuidedSession(step=step, source_order=source_order, reviewed_sources=sources)
+    outputs = {
+        OUTPUT_A: _output("output"),
+        **({OUTPUT_B: _output("output_2")} if two_components else {}),
+    }
+    output_order = (OUTPUT_A, OUTPUT_B) if two_components else (OUTPUT_A,)
+    return GuidedSession(
+        step=step,
+        source_order=source_order,
+        reviewed_sources=sources,
+        output_order=output_order,
+        reviewed_outputs=outputs,
     )
 
 
@@ -898,3 +925,240 @@ def test_transition_rejects_ambiguous_sibling_target_for_one_turn_occurrence() -
             response=SchemaFormResponse(plugin="csv", options={"mode": "csv"}),
             authority=SchemaFormAuthority(knobs=SOURCE_KNOBS, model_validated_options={}),
         )
+
+
+@pytest.mark.parametrize(
+    ("step", "component_kind", "new_id", "expected_order", "expected_name"),
+    [
+        (
+            GuidedStep.STEP_1_SOURCE,
+            "source",
+            UUID("55555555-5555-4555-8555-555555555555"),
+            (SOURCE_A, SOURCE_B, "55555555-5555-4555-8555-555555555555"),
+            "source_3",
+        ),
+        (
+            GuidedStep.STEP_2_SINK,
+            "output",
+            UUID("66666666-6666-4666-8666-666666666666"),
+            (OUTPUT_A, OUTPUT_B, "66666666-6666-4666-8666-666666666666"),
+            "output_3",
+        ),
+    ],
+)
+def test_add_component_intent_reuses_preallocated_id_and_appends_order(
+    step: GuidedStep,
+    component_kind: str,
+    new_id: UUID,
+    expected_order: tuple[str, ...],
+    expected_name: str,
+) -> None:
+    session = _review_session(step=step)
+
+    result = add_component_intent(session, component_kind, new_id)
+
+    if component_kind == "source":
+        assert result.source_order == expected_order
+        intent = result.pending_source_intents[str(new_id)]
+        assert result.reviewed_sources[SOURCE_A] is session.reviewed_sources[SOURCE_A]
+    else:
+        assert result.output_order == expected_order
+        intent = result.pending_output_intents[str(new_id)]
+        assert result.reviewed_sources[SOURCE_A] is session.reviewed_sources[SOURCE_A]
+    assert intent.name == expected_name
+    assert intent.phase == "plugin_selection"
+    assert session.to_dict() == _review_session(step=step).to_dict()
+
+
+def test_add_component_intent_rejects_cross_stage_duplicate_and_non_uuid() -> None:
+    source_session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+
+    with pytest.raises(ValueError, match="step"):
+        add_component_intent(source_session, "output", UUID(OUTPUT_A))
+    with pytest.raises(InvariantError, match="already"):
+        add_component_intent(source_session, "source", UUID(SOURCE_A))
+    with pytest.raises(InvariantError, match="UUID"):
+        add_component_intent(source_session, "source", SOURCE_B)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("step", "target"),
+    [
+        (GuidedStep.STEP_1_SOURCE, ComponentTarget(kind="source", stable_id=SOURCE_B)),
+        (GuidedStep.STEP_2_SINK, ComponentTarget(kind="output", stable_id=OUTPUT_B)),
+    ],
+)
+def test_begin_component_edit_preserves_reviewed_record_as_prefill_authority(
+    step: GuidedStep,
+    target: ComponentTarget,
+) -> None:
+    session = _review_session(step=step)
+    original_dict = session.to_dict()
+
+    result = begin_component_edit(session, target)
+
+    if target.kind == "source":
+        reviewed = result.reviewed_sources[target.stable_id]
+        assert reviewed is session.reviewed_sources[target.stable_id]
+        assert reviewed.name == "source_2"
+        assert reviewed.plugin == "csv"
+        assert dict(reviewed.options) == {"path": "/data/source_2.csv"}
+        assert reviewed.on_validation_failure == "discard"
+        assert not result.pending_source_intents
+        assert result.reviewed_sources[SOURCE_A] is session.reviewed_sources[SOURCE_A]
+    else:
+        reviewed = result.reviewed_outputs[target.stable_id]
+        assert reviewed is session.reviewed_outputs[target.stable_id]
+        assert reviewed.name == "output_2"
+        assert reviewed.plugin == "json"
+        assert dict(reviewed.options) == {"path": "/data/output_2.jsonl"}
+        assert reviewed.on_write_failure == "discard"
+        assert not result.pending_output_intents
+        assert result.reviewed_outputs[OUTPUT_A] is session.reviewed_outputs[OUTPUT_A]
+    assert result.active_edit_target == target
+    assert session.to_dict() == original_dict
+
+
+def test_begin_component_edit_rejects_node_edge_cross_kind_missing_and_pending() -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    missing = ComponentTarget(kind="source", stable_id="77777777-7777-4777-8777-777777777777")
+
+    for target in (
+        ComponentTarget(kind="node", stable_id=SOURCE_A),
+        ComponentTarget(kind="edge", stable_id=SOURCE_A),
+        ComponentTarget(kind="output", stable_id=OUTPUT_A),
+        missing,
+    ):
+        with pytest.raises(ValueError):
+            begin_component_edit(session, target)
+
+    pending = add_component_intent(session, "source", UUID("55555555-5555-4555-8555-555555555555"))
+    with pytest.raises(InvariantError, match="pending"):
+        begin_component_edit(pending, ComponentTarget(kind="source", stable_id=SOURCE_A))
+
+
+@pytest.mark.parametrize(
+    ("step", "target", "remaining_order"),
+    [
+        (GuidedStep.STEP_1_SOURCE, ComponentTarget(kind="source", stable_id=SOURCE_A), (SOURCE_B,)),
+        (GuidedStep.STEP_2_SINK, ComponentTarget(kind="output", stable_id=OUTPUT_A), (OUTPUT_B,)),
+    ],
+)
+def test_remove_reviewed_component_changes_mapping_and_order_atomically(
+    step: GuidedStep,
+    target: ComponentTarget,
+    remaining_order: tuple[str, ...],
+) -> None:
+    session = _review_session(step=step)
+    original_dict = session.to_dict()
+
+    result = remove_reviewed_component(session, target)
+
+    if target.kind == "source":
+        assert result.source_order == remaining_order
+        assert tuple(result.reviewed_sources) == remaining_order
+        assert result.reviewed_sources[SOURCE_B] is session.reviewed_sources[SOURCE_B]
+    else:
+        assert result.output_order == remaining_order
+        assert tuple(result.reviewed_outputs) == remaining_order
+        assert result.reviewed_outputs[OUTPUT_B] is session.reviewed_outputs[OUTPUT_B]
+    assert session.to_dict() == original_dict
+
+
+@pytest.mark.parametrize(
+    ("step", "target"),
+    [
+        (GuidedStep.STEP_1_SOURCE, ComponentTarget(kind="source", stable_id=SOURCE_A)),
+        (GuidedStep.STEP_2_SINK, ComponentTarget(kind="output", stable_id=OUTPUT_A)),
+    ],
+)
+def test_remove_reviewed_component_rejects_last_required_item(step: GuidedStep, target: ComponentTarget) -> None:
+    session = _review_session(step=step, two_components=False)
+
+    with pytest.raises(ValueError, match="last"):
+        remove_reviewed_component(session, target)
+
+    assert target.stable_id in (session.reviewed_sources if target.kind == "source" else session.reviewed_outputs)
+
+
+def test_remove_reviewed_component_rejects_cross_kind_and_unresolved_target() -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    with pytest.raises(ValueError, match="step"):
+        remove_reviewed_component(session, ComponentTarget(kind="output", stable_id=OUTPUT_A))
+    with pytest.raises(ValueError, match="reviewed"):
+        remove_reviewed_component(
+            session,
+            ComponentTarget(kind="source", stable_id="77777777-7777-4777-8777-777777777777"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("step", "component_kind", "stable_ids", "expected"),
+    [
+        (GuidedStep.STEP_1_SOURCE, "source", (UUID(SOURCE_B), UUID(SOURCE_A)), (SOURCE_B, SOURCE_A)),
+        (GuidedStep.STEP_2_SINK, "output", (UUID(OUTPUT_B), UUID(OUTPUT_A)), (OUTPUT_B, OUTPUT_A)),
+    ],
+)
+def test_reorder_reviewed_components_requires_stable_id_exact_permutation(
+    step: GuidedStep,
+    component_kind: str,
+    stable_ids: tuple[UUID, ...],
+    expected: tuple[str, ...],
+) -> None:
+    session = _review_session(step=step)
+
+    result = reorder_reviewed_components(session, component_kind, stable_ids)
+
+    assert (result.source_order if component_kind == "source" else result.output_order) == expected
+    assert result.reviewed_sources[SOURCE_A] is session.reviewed_sources[SOURCE_A]
+    if step is GuidedStep.STEP_2_SINK:
+        assert result.reviewed_outputs[OUTPUT_A] is session.reviewed_outputs[OUTPUT_A]
+
+
+@pytest.mark.parametrize(
+    "stable_ids",
+    [
+        (UUID(SOURCE_A),),
+        (UUID(SOURCE_A), UUID(SOURCE_A)),
+        (UUID(SOURCE_A), UUID("77777777-7777-4777-8777-777777777777")),
+    ],
+    ids=["missing", "duplicate", "foreign"],
+)
+def test_reorder_reviewed_components_rejects_non_permutations(stable_ids: tuple[UUID, ...]) -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+
+    with pytest.raises(ValueError, match="permutation"):
+        reorder_reviewed_components(session, "source", stable_ids)
+
+
+def test_reorder_reviewed_components_rejects_cross_kind_and_pending_collection() -> None:
+    session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    with pytest.raises(ValueError, match="step"):
+        reorder_reviewed_components(session, "output", (UUID(OUTPUT_A), UUID(OUTPUT_B)))
+    pending = add_component_intent(session, "source", UUID("55555555-5555-4555-8555-555555555555"))
+    with pytest.raises(InvariantError, match="pending"):
+        reorder_reviewed_components(pending, "source", (UUID(SOURCE_B), UUID(SOURCE_A)))
+
+
+def test_finish_component_review_advances_only_valid_source_then_output_collections() -> None:
+    source_session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    output_session = _review_session(step=GuidedStep.STEP_2_SINK)
+
+    source_result = finish_component_review(source_session, "source")
+    output_result = finish_component_review(output_session, "output")
+
+    assert source_result.step is GuidedStep.STEP_2_SINK
+    assert output_result.step is GuidedStep.STEP_3_TRANSFORMS
+    assert source_result.reviewed_sources[SOURCE_A] is source_session.reviewed_sources[SOURCE_A]
+    assert output_result.reviewed_outputs[OUTPUT_A] is output_session.reviewed_outputs[OUTPUT_A]
+
+
+def test_finish_component_review_rejects_cross_kind_empty_and_pending_collections() -> None:
+    source_session = _review_session(step=GuidedStep.STEP_1_SOURCE)
+    with pytest.raises(ValueError, match="step"):
+        finish_component_review(source_session, "output")
+    with pytest.raises(InvariantError, match="at least one"):
+        finish_component_review(GuidedSession.initial(), "source")
+    pending = add_component_intent(source_session, "source", UUID("55555555-5555-4555-8555-555555555555"))
+    with pytest.raises(InvariantError, match="pending"):
+        finish_component_review(pending, "source")

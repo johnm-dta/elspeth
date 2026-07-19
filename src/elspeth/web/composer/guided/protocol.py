@@ -22,6 +22,7 @@ from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPaylo
 # by-id blob lookup. A filesystem path never starts with this prefix, so the
 # sentinel is unambiguous.
 BLOB_REF_PATH_PREFIX = "blob:"
+GUIDED_MAX_COMPONENTS_PER_KIND = 256
 
 
 class TurnType(StrEnum):
@@ -31,6 +32,7 @@ class TurnType(StrEnum):
     SINGLE_SELECT = "single_select"
     MULTI_SELECT_WITH_CUSTOM = "multi_select_with_custom"
     SCHEMA_FORM = "schema_form"
+    REVIEW_COMPONENTS = "review_components"
     PROPOSE_PIPELINE = "propose_pipeline"
     CONFIRM_WIRING = "confirm_wiring"
 
@@ -62,6 +64,26 @@ class MultiSelectWithCustomPayload(TypedDict):
     options: Sequence[_Option]
     default_chosen: Sequence[str]
     escape_label: str | None
+
+
+ComponentReviewAction = Literal["add", "edit", "remove", "reorder", "finish"]
+
+
+class _ComponentReviewItem(TypedDict):
+    """Public reviewed-component summary; private plugin options stay server-side."""
+
+    stable_id: str
+    name: str
+    plugin: str
+    status: Literal["reviewed"]
+
+
+class ComponentReviewPayload(TypedDict):
+    """Stable-id-authoritative source/output collection review."""
+
+    component_kind: Literal["source", "output"]
+    items: Sequence[_ComponentReviewItem]
+    allowed_actions: Sequence[ComponentReviewAction]
 
 
 class ComponentTargetPayload(TypedDict):
@@ -461,6 +483,7 @@ _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
             TurnType.INSPECT_AND_CONFIRM,
             TurnType.SINGLE_SELECT,
             TurnType.SCHEMA_FORM,
+            TurnType.REVIEW_COMPONENTS,
         }
     ),
     GuidedStep.STEP_2_SINK: frozenset(
@@ -468,6 +491,7 @@ _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
             TurnType.SINGLE_SELECT,
             TurnType.MULTI_SELECT_WITH_CUSTOM,
             TurnType.SCHEMA_FORM,
+            TurnType.REVIEW_COMPONENTS,
         }
     ),
     GuidedStep.STEP_3_TRANSFORMS: frozenset(
@@ -538,6 +562,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
         }
     ),
     TurnType.SCHEMA_FORM: frozenset({"mode", "knobs", "prefilled"}),
+    TurnType.REVIEW_COMPONENTS: frozenset({"component_kind", "items", "allowed_actions"}),
     TurnType.PROPOSE_PIPELINE: frozenset(
         {
             "proposal_id",
@@ -560,6 +585,7 @@ _ALLOWED_KEYS: Mapping[TurnType, frozenset[str]] = {
     TurnType.SINGLE_SELECT: frozenset({"question", "options", "allow_custom"}),
     TurnType.MULTI_SELECT_WITH_CUSTOM: frozenset({"question", "options", "default_chosen", "escape_label"}),
     TurnType.SCHEMA_FORM: frozenset({"mode", "knobs", "prefilled", "plugin"}),
+    TurnType.REVIEW_COMPONENTS: _REQUIRED_KEYS[TurnType.REVIEW_COMPONENTS],
     TurnType.PROPOSE_PIPELINE: _REQUIRED_KEYS[TurnType.PROPOSE_PIPELINE],
     TurnType.CONFIRM_WIRING: frozenset(
         {
@@ -834,6 +860,52 @@ def _validate_multi_select_payload(payload: Mapping[str, Any]) -> str | None:
     if not set(defaults).issubset(option_ids):
         return "payload.default_chosen must reference declared option ids"
     return _current_text_error(payload["escape_label"], "payload.escape_label", nullable=True)
+
+
+def _validate_component_review_payload(payload: Mapping[str, Any]) -> str | None:
+    component_kind = payload["component_kind"]
+    if type(component_kind) is not str or component_kind not in {"source", "output"}:
+        return "payload.component_kind is outside the closed component review vocabulary"
+    items, error = _current_sequence(payload["items"], "payload.items")
+    if error is not None:
+        return error
+    assert items is not None
+    if not items:
+        return "payload.items must contain at least one reviewed component"
+    if len(items) > GUIDED_MAX_COMPONENTS_PER_KIND:
+        return f"payload.items exceeds the {GUIDED_MAX_COMPONENTS_PER_KIND}-component limit"
+    stable_ids: list[str] = []
+    names: list[str] = []
+    expected_item_keys = frozenset({"stable_id", "name", "plugin", "status"})
+    for index, item in enumerate(items):
+        path = f"payload.items[{index}]"
+        if (error := _exact_nested_keys(item, expected_item_keys, path)) is not None:
+            return error
+        assert isinstance(item, Mapping)
+        if (error := _canonical_uuid_error(item["stable_id"], f"{path}.stable_id")) is not None:
+            return error
+        for key in ("name", "plugin"):
+            if (error := _current_text_error(item[key], f"{path}.{key}", nonempty=True)) is not None:
+                return error
+        if type(item["status"]) is not str or item["status"] != "reviewed":
+            return f"{path}.status must be 'reviewed'"
+        stable_ids.append(cast(str, item["stable_id"]))
+        names.append(cast(str, item["name"]))
+    if len(stable_ids) != len(set(stable_ids)):
+        return "payload.items must not contain duplicate stable ids"
+    if len(names) != len(set(names)):
+        return "payload.items must not contain duplicate names"
+
+    actions, error = _current_string_sequence(payload["allowed_actions"], "payload.allowed_actions", unique=True)
+    if error is not None:
+        return error
+    assert actions is not None
+    expected_actions = {"add", "edit", "reorder", "finish"}
+    if len(items) > 1:
+        expected_actions.add("remove")
+    if set(actions) != expected_actions:
+        return "payload.allowed_actions does not match the closed actions for this reviewed collection"
+    return None
 
 
 def _validate_knob_schema(value: object, path: str) -> str | None:
@@ -1673,6 +1745,7 @@ _PAYLOAD_VALIDATORS: Mapping[TurnType, Callable[[Mapping[str, Any]], str | None]
     TurnType.SINGLE_SELECT: _validate_single_select_payload,
     TurnType.MULTI_SELECT_WITH_CUSTOM: _validate_multi_select_payload,
     TurnType.SCHEMA_FORM: _validate_schema_form_payload,
+    TurnType.REVIEW_COMPONENTS: _validate_component_review_payload,
     TurnType.PROPOSE_PIPELINE: _validate_propose_pipeline_payload,
     TurnType.CONFIRM_WIRING: _validate_wire_payload,
 }

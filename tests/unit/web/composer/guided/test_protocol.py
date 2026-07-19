@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import pytest
 
 from elspeth.web.composer.guided.protocol import (
+    ComponentReviewPayload,
     ControlSignal,
     GuidedStep,
     InspectAndConfirmPayload,
@@ -23,12 +25,13 @@ from elspeth.web.composer.guided.protocol import (
 
 
 class TestTurnType:
-    def test_six_turn_types_defined(self) -> None:
+    def test_seven_turn_types_defined(self) -> None:
         expected = {
             "inspect_and_confirm",
             "single_select",
             "multi_select_with_custom",
             "schema_form",
+            "review_components",
             "propose_pipeline",
             "confirm_wiring",
         }
@@ -78,6 +81,23 @@ class TestPayloadShapes:
         }
         assert payload["mode"] == "plugin_options"
         assert payload["plugin"] == "csv"
+
+    def test_component_review_payload_is_public_and_stable_id_authoritative(self) -> None:
+        payload: ComponentReviewPayload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": "11111111-1111-4111-8111-111111111111",
+                    "name": "orders",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                }
+            ],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert payload["items"][0]["stable_id"].endswith("1111")
+        assert "options" not in payload["items"][0]
 
     def test_propose_pipeline_payload_is_exported(self) -> None:
         payload: ProposePipelinePayload = {
@@ -160,6 +180,7 @@ class TestLegalTurnMatrix:
         assert TurnType.INSPECT_AND_CONFIRM in legal
         assert TurnType.SINGLE_SELECT in legal
         assert TurnType.SCHEMA_FORM in legal
+        assert TurnType.REVIEW_COMPONENTS in legal
         assert TurnType.PROPOSE_PIPELINE not in legal
 
     def test_step_2_legal_types(self) -> None:
@@ -169,6 +190,7 @@ class TestLegalTurnMatrix:
         assert TurnType.SINGLE_SELECT in legal
         assert TurnType.MULTI_SELECT_WITH_CUSTOM in legal
         assert TurnType.SCHEMA_FORM in legal
+        assert TurnType.REVIEW_COMPONENTS in legal
 
     def test_step_3_legal_types(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
@@ -184,6 +206,158 @@ class TestLegalTurnMatrix:
 
 
 class TestPayloadValidation:
+    def test_review_components_golden_payload_validates(self) -> None:
+        payload = {
+            "component_kind": "output",
+            "items": [
+                {
+                    "stable_id": "33333333-3333-4333-8333-333333333333",
+                    "name": "primary",
+                    "plugin": "json",
+                    "status": "reviewed",
+                },
+                {
+                    "stable_id": "44444444-4444-4444-8444-444444444444",
+                    "name": "archive",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                },
+            ],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is None
+        assert (
+            validate_current_turn(
+                GuidedStep.STEP_2_SINK,
+                {"type": "review_components", "step_index": 1, "payload": payload},
+            )
+            is TurnType.REVIEW_COMPONENTS
+        )
+
+    def test_review_components_rejects_status_str_subclass(self) -> None:
+        class ReviewedStatus(str):
+            pass
+
+        payload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": "11111111-1111-4111-8111-111111111111",
+                    "name": "orders",
+                    "plugin": "csv",
+                    "status": ReviewedStatus("reviewed"),
+                }
+            ],
+            "allowed_actions": ["add", "edit", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    def test_review_components_rejects_more_than_256_items(self) -> None:
+        payload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": str(UUID(int=index + 1)),
+                    "name": f"source_{index + 1}",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                }
+                for index in range(257)
+            ],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            {"component_kind": "node"},
+            {"component_kind": []},
+            {"items": []},
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-33333333333A",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "reviewed",
+                    }
+                ]
+            },
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-333333333333",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "pending",
+                    }
+                ]
+            },
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-333333333333",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "reviewed",
+                        "options": {"path": "/private/output.jsonl"},
+                    }
+                ]
+            },
+            {"allowed_actions": ["add", "edit", "edit", "finish"]},
+            {"allowed_actions": ["add", "replace", "finish"]},
+            {"selected_index": 0},
+        ],
+        ids=[
+            "closed-kind",
+            "unhashable-kind",
+            "nonempty-items",
+            "canonical-id",
+            "closed-status",
+            "no-private-options",
+            "duplicate-action",
+            "closed-action",
+            "no-index-authority",
+        ],
+    )
+    def test_review_components_rejects_malformed_payload(self, mutation: dict[str, Any]) -> None:
+        payload: dict[str, Any] = {
+            "component_kind": "output",
+            "items": [
+                {
+                    "stable_id": "33333333-3333-4333-8333-333333333333",
+                    "name": "primary",
+                    "plugin": "json",
+                    "status": "reviewed",
+                }
+            ],
+            "allowed_actions": ["add", "edit", "reorder", "finish"],
+        }
+        payload.update(mutation)
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    def test_review_components_rejects_duplicate_ids_and_names(self) -> None:
+        first = {
+            "stable_id": "33333333-3333-4333-8333-333333333333",
+            "name": "primary",
+            "plugin": "json",
+            "status": "reviewed",
+        }
+        base = {
+            "component_kind": "output",
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+        for second in (
+            {**first, "name": "archive"},
+            {**first, "stable_id": "44444444-4444-4444-8444-444444444444"},
+        ):
+            assert validate_payload(TurnType.REVIEW_COMPONENTS, {**base, "items": [first, second]}) is not None
+
     @pytest.mark.parametrize(
         ("step", "turn"),
         [

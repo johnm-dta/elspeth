@@ -27,7 +27,7 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
-from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
+from elspeth.web.composer.guided.protocol import GUIDED_MAX_COMPONENTS_PER_KIND, ChatRole, ChatTurn, GuidedStep, TurnType
 from elspeth.web.composer.guided.resolved import (
     GUIDED_JSON_MAX_ITEMS,
     GuidedJsonBudget,
@@ -50,7 +50,6 @@ from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_
 # converter: session epoch 30 owns the current store recreation boundary
 # (epoch 29 introduced schema 8; epoch 30 closes the quota failure-code CHECK).
 GUIDED_SESSION_SCHEMA_VERSION = 8
-GUIDED_MAX_COMPONENTS_PER_KIND = 256
 GUIDED_MAX_DEFERRED_INTENTS = 256
 GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64
 GUIDED_MAX_TOTAL_CONSTRAINTS = 4_096

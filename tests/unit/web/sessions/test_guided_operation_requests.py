@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from elspeth.web.sessions.guided_operations import guided_operation_request_hash
 from elspeth.web.sessions.schemas import (
+    AddComponentAction,
     ConvertGuidedRequest,
     ForkSessionRequest,
     GuidedChatRequest,
@@ -114,6 +115,127 @@ def test_guided_respond_rejects_empty_actions_and_mixed_control_shapes() -> None
                 "turn_token": "a" * 64,
                 "control_signal": "passthrough",
                 "custom_inputs": ["field"],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "component_action",
+    [
+        {"action": "add", "component_kind": "source"},
+        {
+            "action": "edit",
+            "target": {"kind": "source", "stable_id": "11111111-1111-4111-8111-111111111111"},
+        },
+        {
+            "action": "remove",
+            "target": {"kind": "output", "stable_id": "33333333-3333-4333-8333-333333333333"},
+        },
+        {
+            "action": "reorder",
+            "component_kind": "output",
+            "stable_ids": [
+                "33333333-3333-4333-8333-333333333333",
+                "44444444-4444-4444-8444-444444444444",
+            ],
+        },
+        {"action": "finish", "component_kind": "source"},
+    ],
+    ids=["add", "edit", "remove", "reorder", "finish"],
+)
+def test_guided_respond_accepts_one_closed_component_action(component_action: dict[str, object]) -> None:
+    request = GuidedRespondRequest.model_validate(
+        {
+            "operation_id": _OPERATION_ID,
+            "turn_token": "a" * 64,
+            "component_action": component_action,
+        }
+    )
+
+    assert request.component_action is not None
+    assert request.component_action.action == component_action["action"]
+    assert type(request).model_config.get("strict") is True
+    assert isinstance(
+        AddComponentAction.model_validate({"action": "add", "component_kind": "source"}),
+        AddComponentAction,
+    )
+
+
+@pytest.mark.parametrize(
+    "component_action",
+    [
+        {"action": "add", "component_kind": "node"},
+        {"action": "add", "component_kind": "source", "stable_id": "11111111-1111-4111-8111-111111111111"},
+        {"action": "edit", "target": {"kind": "node", "stable_id": "11111111-1111-4111-8111-111111111111"}},
+        {"action": "remove", "target": {"kind": "edge", "stable_id": "11111111-1111-4111-8111-111111111111"}},
+        {"action": "edit", "target": {"kind": "source", "stable_id": "11111111-1111-4111-8111-11111111111A"}},
+        {"action": "reorder", "component_kind": "source"},
+        {"action": "reorder", "component_kind": "source", "stable_ids": []},
+        {
+            "action": "reorder",
+            "component_kind": "source",
+            "stable_ids": [
+                "11111111-1111-4111-8111-111111111111",
+                "11111111-1111-4111-8111-111111111111",
+            ],
+        },
+        {
+            "action": "reorder",
+            "component_kind": "source",
+            "stable_ids": [str(UUID(int=index + 1)) for index in range(257)],
+        },
+        {"action": "finish"},
+        {"action": "replace", "component_kind": "source"},
+    ],
+    ids=[
+        "closed-kind",
+        "extra-field",
+        "node-target",
+        "edge-target",
+        "noncanonical-target",
+        "missing-ids",
+        "empty-ids",
+        "duplicate-ids",
+        "too-many-ids",
+        "missing-kind",
+        "closed-action",
+    ],
+)
+def test_guided_respond_rejects_malformed_component_action(component_action: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "component_action": component_action,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "other_fields",
+    [
+        {"chosen": ["csv"]},
+        {"edited_values": {"path": "/data/input.csv"}},
+        {"custom_inputs": ["field"]},
+        {"control_signal": "back"},
+        {"proposal_id": "00000000-0000-4000-8000-000000000002", "draft_hash": "b" * 64},
+        {
+            "proposal_id": "00000000-0000-4000-8000-000000000002",
+            "draft_hash": "b" * 64,
+            "edit_target": {"kind": "source", "stable_id": "00000000-0000-4000-8000-000000000003"},
+        },
+    ],
+    ids=["chosen", "edited", "custom", "control", "proposal", "proposal-edit"],
+)
+def test_guided_respond_rejects_component_action_combined_with_other_response(other_fields: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="component_action"):
+        GuidedRespondRequest.model_validate(
+            {
+                "operation_id": _OPERATION_ID,
+                "turn_token": "a" * 64,
+                "component_action": {"action": "finish", "component_kind": "source"},
+                **other_fields,
             }
         )
 

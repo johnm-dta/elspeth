@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 from uuid import UUID
 
 from elspeth.contracts.freeze import deep_thaw
@@ -25,7 +25,7 @@ from elspeth.web.composer.guided.resolved import (
     freeze_guided_json_mapping,
     freeze_guided_str_sequence,
 )
-from elspeth.web.composer.guided.state_machine import GuidedSession, SinkIntent, SourceIntent
+from elspeth.web.composer.guided.state_machine import ComponentTarget, GuidedSession, SinkIntent, SourceIntent
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
 _PATH_OPTION_NAMES: Final = frozenset({"path", "file"})
@@ -608,6 +608,145 @@ def _require_no_other_pending(mapping: Mapping[str, object], target_id: str, com
         raise InvariantError(f"cannot advance {component_kind} stage while other pending intents remain")
 
 
+def _require_component_review_stage(
+    session: GuidedSession,
+    component_kind: Literal["source", "output"],
+) -> None:
+    expected_step = GuidedStep.STEP_1_SOURCE if component_kind == "source" else GuidedStep.STEP_2_SINK
+    if session.step is not expected_step:
+        raise ValueError(f"{component_kind} component review requires session step {expected_step.value}")
+    if session.terminal is not None:
+        raise InvariantError("component review cannot mutate a terminal guided session")
+    if session.transition_consumed:
+        raise InvariantError("component review cannot mutate a consumed guided transition")
+    if session.active_proposal is not None or session.active_edit_target is not None:
+        raise InvariantError("component review requires proposal and edit references to be cleared")
+
+
+def _validated_component_kind(component_kind: object) -> Literal["source", "output"]:
+    if type(component_kind) is not str or component_kind not in {"source", "output"}:
+        raise ValueError("component_kind must be 'source' or 'output'")
+    return cast(Literal["source", "output"], component_kind)
+
+
+def _require_reviewed_collection(
+    session: GuidedSession,
+    component_kind: Literal["source", "output"],
+) -> tuple[tuple[str, ...], Mapping[str, SourceResolved] | Mapping[str, SinkOutputResolved]]:
+    _require_component_review_stage(session, component_kind)
+    if component_kind == "source":
+        if session.pending_source_intents:
+            raise InvariantError("source component review requires no pending source intents")
+        return session.source_order, session.reviewed_sources
+    if session.pending_output_intents:
+        raise InvariantError("output component review requires no pending output intents")
+    if not session.reviewed_sources or set(session.source_order) != set(session.reviewed_sources):
+        raise InvariantError("output component review requires a complete reviewed source collection")
+    return session.output_order, session.reviewed_outputs
+
+
+def add_component_intent(
+    session: GuidedSession,
+    component_kind: Literal["source", "output"],
+    new_stable_id: UUID,
+) -> GuidedSession:
+    """Append one caller-preallocated stable id as a pending component intent."""
+
+    kind = _validated_component_kind(component_kind)
+    order, reviewed = _require_reviewed_collection(session, kind)
+    stable_id = _admit_new_stable_id(session, new_stable_id)
+    if kind == "source":
+        name = _next_component_name("source", tuple(source.name for source in reviewed.values()))
+        source_pending = dict(session.pending_source_intents)
+        source_pending[stable_id] = SourceIntent(
+            name=name,
+            phase="plugin_selection",
+            plugin=None,
+            options=None,
+            inspection_facts=None,
+            observed_columns=(),
+            sample_rows=(),
+        )
+        return replace(session, source_order=(*order, stable_id), pending_source_intents=source_pending)
+    name = _next_component_name("output", tuple(output.name for output in reviewed.values()))
+    output_pending = dict(session.pending_output_intents)
+    output_pending[stable_id] = SinkIntent(name=name, phase="plugin_selection", plugin=None, options=None)
+    return replace(session, output_order=(*order, stable_id), pending_output_intents=output_pending)
+
+
+def begin_component_edit(session: GuidedSession, target: ComponentTarget) -> GuidedSession:
+    """Select one reviewed source/output as the authoritative edit prefill."""
+
+    if type(target) is not ComponentTarget:
+        raise TypeError("target must be ComponentTarget")
+    if target.kind not in {"source", "output"}:
+        raise ValueError("component edit target must be a source or output")
+    kind = cast(Literal["source", "output"], target.kind)
+    _, reviewed = _require_reviewed_collection(session, kind)
+    if target.stable_id not in reviewed:
+        raise ValueError("component edit target does not name a reviewed component")
+    return replace(session, active_edit_target=target)
+
+
+def remove_reviewed_component(session: GuidedSession, target: ComponentTarget) -> GuidedSession:
+    """Remove one reviewed component and its order entry as one immutable change."""
+
+    if type(target) is not ComponentTarget:
+        raise TypeError("target must be ComponentTarget")
+    if target.kind not in {"source", "output"}:
+        raise ValueError("component remove target must be a source or output")
+    kind = cast(Literal["source", "output"], target.kind)
+    order, reviewed = _require_reviewed_collection(session, kind)
+    if target.stable_id not in reviewed:
+        raise ValueError("component remove target does not name a reviewed component")
+    if len(reviewed) == 1:
+        raise ValueError(f"cannot remove the last required reviewed {kind}")
+    next_order = tuple(stable_id for stable_id in order if stable_id != target.stable_id)
+    if kind == "source":
+        next_reviewed_sources = dict(session.reviewed_sources)
+        del next_reviewed_sources[target.stable_id]
+        return replace(session, source_order=next_order, reviewed_sources=next_reviewed_sources)
+    next_reviewed_outputs = dict(session.reviewed_outputs)
+    del next_reviewed_outputs[target.stable_id]
+    return replace(session, output_order=next_order, reviewed_outputs=next_reviewed_outputs)
+
+
+def reorder_reviewed_components(
+    session: GuidedSession,
+    component_kind: Literal["source", "output"],
+    stable_ids: object,
+) -> GuidedSession:
+    """Apply a UUID-authoritative exact permutation to one reviewed collection."""
+
+    kind = _validated_component_kind(component_kind)
+    _, reviewed = _require_reviewed_collection(session, kind)
+    if not isinstance(stable_ids, Sequence) or isinstance(stable_ids, (str, bytes, bytearray)):
+        raise TypeError("stable_ids must be a sequence of UUID values")
+    stable_id_values = cast(Sequence[object], stable_ids)
+    if any(type(stable_id) is not UUID for stable_id in stable_id_values):
+        raise TypeError("stable_ids must contain exact UUID values")
+    reordered = tuple(str(stable_id) for stable_id in stable_id_values)
+    if len(reordered) != len(set(reordered)) or set(reordered) != set(reviewed):
+        raise ValueError("stable_ids must be an exact permutation of the reviewed component ids")
+    if kind == "source":
+        return replace(session, source_order=reordered)
+    return replace(session, output_order=reordered)
+
+
+def finish_component_review(
+    session: GuidedSession,
+    component_kind: Literal["source", "output"],
+) -> GuidedSession:
+    """Advance only after one complete, non-empty reviewed collection."""
+
+    kind = _validated_component_kind(component_kind)
+    _, reviewed = _require_reviewed_collection(session, kind)
+    if not reviewed:
+        raise InvariantError(f"{kind} component review requires at least one reviewed component")
+    next_step = GuidedStep.STEP_2_SINK if kind == "source" else GuidedStep.STEP_3_TRANSFORMS
+    return replace(session, step=next_step)
+
+
 def transition_source_plugin_selection(
     session: GuidedSession,
     *,
@@ -915,6 +1054,11 @@ __all__ = [
     "PluginSelectionResponse",
     "SchemaFormAuthority",
     "SchemaFormResponse",
+    "add_component_intent",
+    "begin_component_edit",
+    "finish_component_review",
+    "remove_reviewed_component",
+    "reorder_reviewed_components",
     "transition_sink_field_review",
     "transition_sink_plugin_selection",
     "transition_sink_schema_form",

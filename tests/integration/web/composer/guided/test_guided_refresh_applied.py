@@ -10,11 +10,12 @@ from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.routes.composer import guided as guided_route
+from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from tests.integration.web.composer.guided.test_step_chat import _create_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
-async def _source_selection_provider(**_kwargs: object) -> tuple[StepChatResult, Step1SourceChatResolution, None]:
+async def _source_selection_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
     resolution = Step1SourceChatResolution(
         assistant_message="I prepared the CSV source form.",
         plugin="csv",
@@ -26,15 +27,16 @@ async def _source_selection_provider(**_kwargs: object) -> tuple[StepChatResult,
         sample_rows=({"name": "alice", "email": "a@example.test"},),
         on_validation_failure="discard",
     )
-    return (
-        StepChatResult(
+    return GuidedChatProviderOutcome(
+        chat=StepChatResult(
             assistant_message=resolution.assistant_message,
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        resolution,
-        None,
+        source_resolution=resolution,
+        sink_resolution=None,
+        deferred_action=None,
     )
 
 

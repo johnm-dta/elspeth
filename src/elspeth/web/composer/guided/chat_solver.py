@@ -33,11 +33,17 @@ from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
+from elspeth.web.composer.guided.deferred_intents import (
+    DeferredIntentAction,
+    DeferredIntentActionShapeError,
+    deferred_intent_action_from_dict,
+)
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError, InvariantError
 from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import (
     GUIDED_JSON_MAX_ITEMS,
+    GUIDED_JSON_MAX_TOTAL_UTF8_BYTES,
     GuidedJsonBudget,
     SinkOutputResolved,
     SinkResolved,
@@ -320,6 +326,7 @@ class Step1SourceChatOutcome:
 
     resolution: Step1SourceChatResolution | None
     prose_reply: str | None
+    deferred_action: DeferredIntentAction | None = None
 
 
 _STEP_1_SOURCE_TOOL: dict[str, Any] = {
@@ -382,6 +389,142 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+_DEFERRED_SUBJECT_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "component_kind", "stable_id"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["stable"]},
+                "component_kind": {"type": "string", "enum": ["source", "node", "edge", "output"]},
+                "stable_id": {"type": "string", "format": "uuid"},
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "subject_id", "plugin_kind", "plugin_name"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["plugin"]},
+                "subject_id": {"type": "string", "format": "uuid"},
+                "plugin_kind": {"type": "string", "enum": ["source", "transform", "sink"]},
+                "plugin_name": {"type": "string", "minLength": 1},
+            },
+        },
+    ]
+}
+
+_DEFERRED_CONSTRAINT_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "subject", "present"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["subject_presence"]},
+                "subject": _DEFERRED_SUBJECT_SCHEMA,
+                "present": {"type": "boolean"},
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "subject", "option_path", "operator", "value"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["option_value"]},
+                "subject": _DEFERRED_SUBJECT_SCHEMA,
+                "option_path": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1}},
+                "operator": {"type": "string", "enum": ["equals", "not_equals"]},
+                "value": {"type": ["string", "integer", "number", "boolean", "null"]},
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "component_kind", "plugin_kind", "plugin_name", "operator", "count"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["component_count"]},
+                "component_kind": {"type": "string", "enum": ["source", "node", "edge", "output"]},
+                "plugin_kind": {"type": ["string", "null"], "enum": ["source", "transform", "sink", None]},
+                "plugin_name": {"type": ["string", "null"], "minLength": 1},
+                "operator": {"type": "string", "enum": ["equals", "at_least", "at_most"]},
+                "count": {"type": "integer", "minimum": 0},
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "from_subject", "edge_type", "to_subject", "present"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["edge_route"]},
+                "from_subject": _DEFERRED_SUBJECT_SCHEMA,
+                "edge_type": {"type": "string", "enum": ["on_success", "on_error", "route_true", "route_false", "fork"]},
+                "to_subject": _DEFERRED_SUBJECT_SCHEMA,
+                "present": {"type": "boolean"},
+            },
+        },
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "subject", "failure_kind", "operator", "target"],
+            "properties": {
+                "kind": {"type": "string", "enum": ["failure_route"]},
+                "subject": _DEFERRED_SUBJECT_SCHEMA,
+                "failure_kind": {"type": "string", "enum": ["source_validation", "node_error", "output_write"]},
+                "operator": {"type": "string", "enum": ["equals", "not_equals"]},
+                "target": {"oneOf": [{"type": "string", "enum": ["discard"]}, _DEFERRED_SUBJECT_SCHEMA]},
+            },
+        },
+    ]
+}
+
+_DEFERRED_INTENT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "retain_deferred_intent",
+        "description": (
+            "Use only when the user gives a concrete instruction whose responsible guided stage is later than the current stage. "
+            "Emit structural facts only; never copy raw user prose into redacted_summary."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["target_stage", "catalog_kind", "catalog_name", "redacted_summary", "constraints"],
+            "properties": {
+                "target_stage": {"type": "string", "enum": ["source", "output", "topology", "wire_review"]},
+                "catalog_kind": {"type": ["string", "null"], "enum": ["source", "transform", "sink", None]},
+                "catalog_name": {"type": ["string", "null"], "minLength": 1},
+                "redacted_summary": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "constraints": {"type": "array", "minItems": 1, "maxItems": 64, "items": _DEFERRED_CONSTRAINT_SCHEMA},
+            },
+        },
+    },
+}
+
+
+def _parse_deferred_intent_tool_arguments(arguments: object) -> DeferredIntentAction:
+    if type(arguments) is not str:
+        raise DeferredIntentActionShapeError(
+            f"retain_deferred_intent function.arguments must be an exact JSON string; got {type(arguments).__name__}"
+        )
+    try:
+        argument_bytes = len(arguments.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise DeferredIntentActionShapeError("retain_deferred_intent function.arguments must be valid UTF-8 text") from exc
+    if argument_bytes > GUIDED_JSON_MAX_TOTAL_UTF8_BYTES:
+        raise DeferredIntentActionShapeError(
+            f"retain_deferred_intent function.arguments exceeds the {GUIDED_JSON_MAX_TOTAL_UTF8_BYTES}-byte guided JSON limit"
+        )
+    try:
+        value = json.loads(arguments)
+    except (RecursionError, ValueError) as exc:
+        raise DeferredIntentActionShapeError(
+            "retain_deferred_intent function.arguments could not be parsed within bounded JSON limits"
+        ) from exc
+    return deferred_intent_action_from_dict(value)
 
 
 def _record_llm_call(
@@ -485,7 +628,11 @@ def _build_step_1_source_dynamic_block(
         "when you resolve a source: use `discard` for a demo source that is valid by "
         "construction, or the name of a quarantine sink for production data whose invalid "
         "rows must be kept for inspection. If the message is only a "
-        "question or lacks enough source detail, reply in prose and do not call a tool.\n"
+        "question or lacks enough source detail, reply in prose and do not call a tool. "
+        "If the user instead gives a concrete instruction for a LATER guided stage, call "
+        "`retain_deferred_intent` with only structural constraints and a redacted summary; "
+        "do not copy the user's raw wording into the summary. Never call it for the current "
+        "source stage.\n"
     )
 
 
@@ -800,7 +947,7 @@ async def maybe_resolve_step_1_source_chat(
         if retry_addendum is not None:
             messages.append({"role": "system", "content": retry_addendum})
         messages.append({"role": "user", "content": user_message})
-        tools = [_STEP_1_SOURCE_TOOL]
+        tools = [_STEP_1_SOURCE_TOOL, _DEFERRED_INTENT_TOOL]
         # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
         # the audit record (messages / tools below, read in the finally block).
         # Gated on THIS call's model.
@@ -828,15 +975,31 @@ async def maybe_resolve_step_1_source_chat(
 
             message = response.choices[0].message
             tool_calls = message.tool_calls or ()
-            for tool_call in tool_calls:
-                function = tool_call.function
-                if function is None:
-                    continue
-                if function.name != "resolve_source":
-                    continue
+            terminal_calls = [
+                tool_call
+                for tool_call in tool_calls
+                if tool_call.function is not None and tool_call.function.name in {"resolve_source", "retain_deferred_intent"}
+            ]
+            if terminal_calls:
+                if len(terminal_calls) != 1 or len(tool_calls) != 1:
+                    error_type = (
+                        DeferredIntentActionShapeError
+                        if any(call.function is not None and call.function.name == "retain_deferred_intent" for call in terminal_calls)
+                        else GuidedSolverResponseShapeError
+                    )
+                    raise error_type("step-1 chat must return exactly one terminal guided action")
+                function = terminal_calls[0].function
+                if function is None:  # pragma: no cover - filtered immediately above
+                    raise GuidedSolverResponseShapeError("step-1 terminal action has no function")
                 arguments = function.arguments
+                if function.name == "retain_deferred_intent":
+                    deferred = _parse_deferred_intent_tool_arguments(arguments)
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return Step1SourceChatOutcome(resolution=None, prose_reply=None, deferred_action=deferred)
                 if not isinstance(arguments, str):
-                    raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
+                    raise GuidedSolverResponseShapeError(
+                        f"{function.name} function.arguments must be a JSON string; got {type(arguments).__name__}"
+                    )
                 result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
                 status = ComposerLLMCallStatus.SUCCESS
                 return Step1SourceChatOutcome(resolution=result, prose_reply=None)
@@ -908,7 +1071,7 @@ async def maybe_resolve_step_1_source_chat(
             error_class = type(exc).__name__
             error_message = type(exc).__name__
             raise
-        except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+        except (IndexError, AttributeError, json.JSONDecodeError, ValueError, GuidedSolverResponseShapeError) as exc:
             status = ComposerLLMCallStatus.MALFORMED_RESPONSE
             error_class = type(exc).__name__
             error_message = "malformed_response"
@@ -992,7 +1155,10 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
         "(name, plugin, options, required_fields, schema_mode, "
         "on_write_failure) and a brief "
         "assistant_message. If the message is only a question or lacks enough "
-        "detail, reply in prose and do not call a tool.\n"
+        "detail, reply in prose and do not call a tool. If it gives a concrete "
+        "instruction for topology or wire review instead, call `retain_deferred_intent` "
+        "with only structural constraints and a redacted summary; do not copy the user's "
+        "raw wording into the summary. Never call it for the current output stage.\n"
     )
 
 
@@ -1102,6 +1268,7 @@ class Step2SinkChatOutcome:
 
     sink: SinkResolved | None
     assistant_message: str | None
+    deferred_action: DeferredIntentAction | None = None
 
 
 async def maybe_resolve_step_2_sink_chat(
@@ -1170,7 +1337,7 @@ async def maybe_resolve_step_2_sink_chat(
     discovery_enabled = catalog is not None and plugin_snapshot is not None and state is not None
     discovery_defs = get_discovery_tool_definitions(_STEP_2_SINK_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
     allowed_discovery = _STEP_2_SINK_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
-    tools = [_STEP_2_SINK_TOOL, *discovery_defs]
+    tools = [_STEP_2_SINK_TOOL, _DEFERRED_INTENT_TOOL, *discovery_defs]
     actor = user_id or "guided-composer"
     iteration_cap = max_discovery_iters if max_discovery_iters is not None else _DEFAULT_MAX_DISCOVERY_ITERS
 
@@ -1208,14 +1375,31 @@ async def maybe_resolve_step_2_sink_chat(
             message = response.choices[0].message
             tool_calls = message.tool_calls or ()
 
-            # resolve_sink is terminal — take it regardless of sibling calls.
-            for tool_call in tool_calls:
-                function = tool_call.function
-                if function is None or function.name != "resolve_sink":
-                    continue
+            terminal_calls = [
+                tool_call
+                for tool_call in tool_calls
+                if tool_call.function is not None and tool_call.function.name in {"resolve_sink", "retain_deferred_intent"}
+            ]
+            if terminal_calls:
+                if len(terminal_calls) != 1 or len(tool_calls) != 1:
+                    error_type = (
+                        DeferredIntentActionShapeError
+                        if any(call.function is not None and call.function.name == "retain_deferred_intent" for call in terminal_calls)
+                        else GuidedSolverResponseShapeError
+                    )
+                    raise error_type("step-2 chat must return exactly one terminal guided action")
+                function = terminal_calls[0].function
+                if function is None:  # pragma: no cover - filtered immediately above
+                    raise GuidedSolverResponseShapeError("step-2 terminal action has no function")
                 arguments = function.arguments
+                if function.name == "retain_deferred_intent":
+                    deferred = _parse_deferred_intent_tool_arguments(arguments)
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return Step2SinkChatOutcome(sink=None, assistant_message=None, deferred_action=deferred)
                 if not isinstance(arguments, str):
-                    raise ValueError(f"resolve_sink function.arguments must be a JSON string; got {type(arguments).__name__}")
+                    raise GuidedSolverResponseShapeError(
+                        f"{function.name} function.arguments must be a JSON string; got {type(arguments).__name__}"
+                    )
                 sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
                 status = ComposerLLMCallStatus.SUCCESS
                 return Step2SinkChatOutcome(sink=sink, assistant_message=assistant)

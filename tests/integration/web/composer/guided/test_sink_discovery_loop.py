@@ -409,6 +409,6 @@ async def test_sink_loop_single_shot_when_no_catalog() -> None:
         )
 
     assert result.sink is not None
-    # Only the resolve_sink tool is offered — no discovery tools.
+    # Terminal guided actions remain available, but no discovery tools are offered.
     offered_names = {t["function"]["name"] for t in captured[0]}
-    assert offered_names == {"resolve_sink"}
+    assert offered_names == {"resolve_sink", "retain_deferred_intent"}

@@ -27,6 +27,7 @@ from elspeth.web.composer.guided.chat_solver import (
     maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction, DeferredIntentActionShapeError
 from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
@@ -79,6 +80,7 @@ class Step1SourceChatResult:
     source_resolution: Step1SourceChatResolution | None
     fallback_chat: StepChatResult | None
     prose_chat: StepChatResult | None = None
+    deferred_action: DeferredIntentAction | None = None
 
 
 # Synthetic message returned to the user when the LLM is transiently
@@ -109,6 +111,11 @@ _SCAFFOLD_LEAK_MESSAGE = (
     "That reply didn't pass a quality check, so it wasn't shown — nothing is "
     "wrong with the service. Try sending your message again, or keep going "
     "with the wizard controls."
+)
+
+_DEFERRED_ACTION_REPAIR_MESSAGE = (
+    "I couldn't verify that future-stage instruction, so I didn't retain it. "
+    "Please restate the target stage and the structural requirement."
 )
 
 
@@ -203,6 +210,28 @@ async def resolve_step_1_source_chat_with_auto_drop(
             source_resolution=outcome.resolution,
             fallback_chat=None,
             prose_chat=prose_chat,
+            deferred_action=outcome.deferred_action,
+        )
+    except DeferredIntentActionShapeError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_1_deferred_intent_shape_rejected",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_1_SOURCE.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return Step1SourceChatResult(
+            source_resolution=None,
+            fallback_chat=StepChatResult(
+                assistant_message=_DEFERRED_ACTION_REPAIR_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
         )
     except AssistantScaffoldLeakError as exc:
         # Distinct branch from the transient set below: the model can leak
@@ -246,6 +275,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
         AttributeError,
         json.JSONDecodeError,
         ValueError,
+        GuidedSolverResponseShapeError,
     ) as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
@@ -296,6 +326,7 @@ class Step2SinkChatResult:
     assistant_message: str | None
     fallback_chat: StepChatResult | None
     prose_chat: StepChatResult | None = None
+    deferred_action: DeferredIntentAction | None = None
 
 
 async def resolve_step_2_sink_chat_with_auto_drop(
@@ -364,6 +395,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
                 sink_resolution=outcome.sink,
                 assistant_message=outcome.assistant_message,
                 fallback_chat=None,
+                deferred_action=outcome.deferred_action,
             )
         prose_chat: StepChatResult | None = None
         if outcome.assistant_message is not None:
@@ -382,6 +414,29 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             assistant_message=None,
             fallback_chat=None,
             prose_chat=prose_chat,
+            deferred_action=outcome.deferred_action,
+        )
+    except DeferredIntentActionShapeError as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_2_deferred_intent_shape_rejected",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_2_SINK.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return Step2SinkChatResult(
+            sink_resolution=None,
+            assistant_message=None,
+            fallback_chat=StepChatResult(
+                assistant_message=_DEFERRED_ACTION_REPAIR_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
         )
     except AssistantScaffoldLeakError as exc:
         # Distinct branch from the transient set below: the model can leak

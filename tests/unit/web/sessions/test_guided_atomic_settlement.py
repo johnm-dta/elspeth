@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog
@@ -30,7 +30,8 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
+from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession, TurnRecord
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT, PROMPT_SHIELD_WARNING_DRAFT
@@ -40,6 +41,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_states_table,
+    guided_operation_events_table,
     guided_operations_table,
     interpretation_events_table,
     sessions_table,
@@ -51,6 +53,7 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationClaimed,
     GuidedOperationFence,
     GuidedOperationFenceLostError,
+    GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
     GuidedOriginatingUserMessageDraft,
     GuidedReplayPolicyFinding,
@@ -59,7 +62,6 @@ from elspeth.web.sessions.protocol import (
     GuidedStateOperationCommand,
     PreparedGuidedInterpretationDraft,
     PreparedGuidedJsonPayload,
-    StaleComposeStateError,
     guided_json_payload_id,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -1388,6 +1390,51 @@ async def _seed_present_guided_predecessor(service: SessionServiceImpl, session_
     )
 
 
+async def _seed_guided_predecessor_with_intents(
+    service: SessionServiceImpl,
+    session_id,
+    intents: tuple[DeferredStageIntent, ...],
+) -> CompositionStateRecord:
+    return await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            metadata_={"name": "Guided predecessor", "description": ""},
+            is_valid=False,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=intents).to_dict()},
+        ),
+        provenance="convergence_persist",
+    )
+
+
+def _deferred_intent(
+    *,
+    intent_id=None,
+    originating_message_id=None,
+    message_content: str = "private deferred instruction",
+    summary: str = "Future topology transform requirement.",
+) -> DeferredStageIntent:
+    return DeferredStageIntent.create(
+        intent_id=str(intent_id or uuid4()),
+        receiving_stage="source",
+        target_stage="topology",
+        catalog_kind="transform",
+        catalog_name="passthrough",
+        redacted_summary=summary,
+        originating_message_id=str(originating_message_id or uuid4()),
+        message_content_hash=stable_hash(message_content),
+        constraints=(
+            ComponentCountConstraint(
+                kind="component_count",
+                component_kind="node",
+                plugin_kind="transform",
+                plugin_name="passthrough",
+                operator="at_least",
+                count=1,
+            ),
+        ),
+    )
+
+
 def _present_respond_command(
     fence: GuidedOperationFence,
     predecessor: CompositionStateRecord,
@@ -1414,6 +1461,166 @@ def _present_respond_command(
         ),
         originating_message=GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="continue"),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["omitted_addition", "replacement_same_id", "reorder", "removal", "extra_append", "mismatched_sideband"],
+)
+async def test_deferred_intent_delta_rejects_every_untyped_or_non_append_mutation_before_cohort_write(
+    service_and_engine,
+    mutation: str,
+) -> None:
+    service, engine = service_and_engine
+    session_id = (await service.create_session("alice", f"guided deferred delta {mutation}", "local")).id
+    first = _deferred_intent()
+    second = _deferred_intent()
+    prior = () if mutation == "omitted_addition" else (first, second) if mutation in {"reorder", "removal"} else (first,)
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, prior)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=f"respond-deferred-delta-{mutation}",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+    originating = command.originating_message
+    assert originating is not None
+    appended = _deferred_intent(
+        originating_message_id=originating.message_id,
+        message_content=originating.content,
+    )
+    if mutation == "omitted_addition":
+        candidate = (appended,)
+        sideband = None
+    elif mutation == "replacement_same_id":
+        candidate = (
+            _deferred_intent(
+                intent_id=first.intent_id,
+                originating_message_id=originating.message_id,
+                message_content=originating.content,
+                summary="Changed existing intent under the same id.",
+            ),
+        )
+        sideband = UUID(first.intent_id)
+    elif mutation == "reorder":
+        candidate = (second, first)
+        sideband = None
+    elif mutation == "removal":
+        candidate = (first,)
+        sideband = None
+    elif mutation == "extra_append":
+        candidate = (first, appended, _deferred_intent())
+        sideband = UUID(appended.intent_id)
+    else:
+        candidate = (first, appended)
+        sideband = uuid4()
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=candidate).to_dict()},
+        ),
+        retained_deferred_intent_id=sideband,
+    )
+    with engine.connect() as connection:
+        events_before = connection.execute(
+            select(guided_operation_events_table).where(guided_operation_events_table.c.session_id == str(session_id))
+        ).all()
+
+    with pytest.raises(AuditIntegrityError, match="deferred intent"):
+        await service.settle_guided_state_operation(command)
+
+    with engine.connect() as connection:
+        states = connection.execute(
+            select(composition_states_table)
+            .where(composition_states_table.c.session_id == str(session_id))
+            .order_by(composition_states_table.c.version)
+        ).all()
+        messages = connection.execute(select(chat_messages_table).where(chat_messages_table.c.session_id == str(session_id))).all()
+        operation = connection.execute(select(guided_operations_table).where(guided_operations_table.c.session_id == str(session_id))).one()
+        events_after = connection.execute(
+            select(guided_operation_events_table).where(guided_operation_events_table.c.session_id == str(session_id))
+        ).all()
+    assert [row.id for row in states] == [str(predecessor.id)]
+    assert messages == []
+    assert operation.status == "in_progress"
+    assert operation.originating_message_id is None
+    assert operation.result_state_id is None
+    assert operation.response_hash is None
+    assert events_after == events_before
+
+
+@pytest.mark.asyncio
+async def test_deferred_intent_delta_allows_exact_unchanged_candidate(service_and_engine) -> None:
+    service, _engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided deferred unchanged", "local")).id
+    prior = (_deferred_intent(),)
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, prior)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="respond-deferred-unchanged",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=prior).to_dict()},
+        ),
+    )
+
+    settlement = await service.settle_guided_state_operation(command)
+
+    assert state_from_record(settlement.result_state).guided_session.deferred_intents == prior  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_deferred_intent_delta_allows_one_typed_terminal_append(service_and_engine) -> None:
+    service, _engine = service_and_engine
+    session_id = (await service.create_session("alice", "guided deferred append", "local")).id
+    prior = (_deferred_intent(),)
+    predecessor = await _seed_guided_predecessor_with_intents(service, session_id, prior)
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id="respond-deferred-append",
+        kind="guided_respond",
+        request_hash="a" * 64,
+        actor="worker",
+        lease_seconds=60,
+    )
+    assert isinstance(claimed, GuidedOperationClaimed)
+    command = _present_respond_command(claimed.fence, predecessor)
+    originating = command.originating_message
+    assert originating is not None
+    appended = _deferred_intent(
+        originating_message_id=originating.message_id,
+        message_content=originating.content,
+    )
+    candidate = (*prior, appended)
+    command = replace(
+        command,
+        state=replace(
+            command.state,
+            composer_meta={"guided_session": replace(GuidedSession.initial(), deferred_intents=candidate).to_dict()},
+        ),
+        retained_deferred_intent_id=UUID(appended.intent_id),
+    )
+
+    settlement = await service.settle_guided_state_operation(command)
+
+    result_guided = state_from_record(settlement.result_state).guided_session
+    assert result_guided is not None
+    assert result_guided.deferred_intents == candidate
 
 
 @pytest.mark.asyncio
@@ -1469,7 +1676,8 @@ async def test_present_expected_head_mismatch_rolls_back_and_same_fence_retries(
     }[mismatch]
     bad = replace(exact, **replacements)
 
-    with pytest.raises((StaleComposeStateError, AuditIntegrityError)):
+    expected_error = AuditIntegrityError if mismatch == "content_hash" else GuidedOperationSettlementConflictError
+    with pytest.raises(expected_error):
         await service.settle_guided_state_operation(bad)
 
     with engine.connect() as conn:

@@ -82,6 +82,7 @@ from elspeth.web.sessions.protocol import (
     SessionRecord,
 )
 from elspeth.web.sessions.routes import create_session_router
+from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -4280,15 +4281,16 @@ class TestMessageRoutes:
         with patch(
             "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
             new=_async_return(
-                (
-                    StepChatResult(
+                GuidedChatProviderOutcome(
+                    chat=StepChatResult(
                         assistant_message="Use the source form first.",
                         status=ComposerChatTurnStatus.SUCCESS,
                         latency_ms=7,
                         error_class=None,
                     ),
-                    None,
-                    None,
+                    source_resolution=None,
+                    sink_resolution=None,
+                    deferred_action=None,
                 )
             ),
         ):
@@ -4432,15 +4434,16 @@ class TestMessageRoutes:
 
         retry_body = {**chat_body, "operation_id": str(uuid.uuid4())}
         retry_provider = AsyncMock(
-            return_value=(
-                StepChatResult(
+            return_value=GuidedChatProviderOutcome(
+                chat=StepChatResult(
                     assistant_message="Use the current source form.",
                     status=ComposerChatTurnStatus.SUCCESS,
                     latency_ms=1,
                     error_class=None,
                 ),
-                None,
-                None,
+                source_resolution=None,
+                sink_resolution=None,
+                deferred_action=None,
             )
         )
         with patch(
@@ -4492,14 +4495,14 @@ class TestMessageRoutes:
             patch(
                 "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
                 new=_async_return(
-                    (
-                        StepChatResult(
+                    GuidedChatProviderOutcome(
+                        chat=StepChatResult(
                             assistant_message="I created the source.",
                             status=ComposerChatTurnStatus.SUCCESS,
                             latency_ms=5,
                             error_class=None,
                         ),
-                        Step1SourceChatResolution(
+                        source_resolution=Step1SourceChatResolution(
                             assistant_message="I created the source.",
                             plugin="csv",
                             filename="source.csv",
@@ -4510,7 +4513,8 @@ class TestMessageRoutes:
                             sample_rows=({"name": raw_row_secret, "value": "1"},),
                             on_validation_failure="discard",
                         ),
-                        None,
+                        sink_resolution=None,
+                        deferred_action=None,
                     )
                 ),
             ),

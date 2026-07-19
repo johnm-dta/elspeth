@@ -30,6 +30,7 @@ from elspeth.web.sessions.models import guided_operations_table
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.routes._helpers import _initial_composition_state_with_guided_session
 from elspeth.web.sessions.routes.composer import guided as guided_route
+from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.schemas import GuidedChatRequest
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -145,17 +146,18 @@ def _source_resolution() -> Step1SourceChatResolution:
     )
 
 
-async def _resolved_source_provider(**_kwargs: object) -> tuple[StepChatResult, Step1SourceChatResolution, None]:
+async def _resolved_source_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
     resolution = _source_resolution()
-    return (
-        StepChatResult(
+    return GuidedChatProviderOutcome(
+        chat=StepChatResult(
             assistant_message=resolution.assistant_message,
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        resolution,
-        None,
+        source_resolution=resolution,
+        sink_resolution=None,
+        deferred_action=None,
     )
 
 
@@ -179,16 +181,17 @@ def _persist_guided(client: TestClient, session_id: str, guided: GuidedSession) 
     )
 
 
-async def _advisory_provider(**_kwargs: object) -> tuple[StepChatResult, None, None]:
-    return (
-        StepChatResult(
+async def _advisory_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
+    return GuidedChatProviderOutcome(
+        chat=StepChatResult(
             assistant_message="Review the current source choices.",
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        None,
-        None,
+        source_resolution=None,
+        sink_resolution=None,
+        deferred_action=None,
     )
 
 
@@ -428,7 +431,7 @@ def test_same_operation_concurrent_callers_join_one_provider_result_outside_comp
         provider_started = asyncio.Event()
         release_provider = asyncio.Event()
 
-        async def controlled_provider(**kwargs: object) -> tuple[StepChatResult, None, None]:
+        async def controlled_provider(**kwargs: object) -> GuidedChatProviderOutcome:
             nonlocal provider_calls
             provider_calls += 1
             compose_lock = await client.app.state.session_compose_lock_registry.get_lock(str(kwargs["session_id"]))
@@ -511,7 +514,7 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
     body = _chat_body(turn)
     service = composer_test_client.app.state.session_service
 
-    async def drifting_provider(**kwargs: object) -> tuple[StepChatResult, None, None]:
+    async def drifting_provider(**kwargs: object) -> GuidedChatProviderOutcome:
         state = kwargs["state"]
         state_dict = state.to_dict()  # type: ignore[union-attr]
         await service.save_composition_state(
@@ -585,7 +588,7 @@ def test_expired_operation_takeover_fences_stale_worker_and_both_join_winner(
         release_stale_provider = asyncio.Event()
         takeover_provider_started = asyncio.Event()
 
-        async def controlled_provider(**_kwargs: object) -> tuple[StepChatResult, None, None]:
+        async def controlled_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
             nonlocal provider_calls
             provider_calls += 1
             if provider_calls == 1:

@@ -8043,16 +8043,58 @@ class SessionServiceImpl:
                     expected_state_id=command.expected_current_state_id,
                     expected_state_version=command.expected_current_state_version,
                 )
+                current_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).one_or_none()
                 if command.expected_current_content_hash is not None:
-                    current_row = conn.execute(
-                        select(composition_states_table)
-                        .where(composition_states_table.c.session_id == sid)
-                        .order_by(desc(composition_states_table.c.version))
-                        .limit(1)
-                    ).one()
+                    if current_row is None:  # pragma: no cover - expected-current guard owns absence
+                        raise AuditIntegrityError("Guided operation expected content hash without a current state")
                     current_record = self._row_to_state_record(current_row)
                     if composition_content_hash(state_from_record(current_record)) != command.expected_current_content_hash:
                         raise AuditIntegrityError("Guided operation current state content changed before settlement")
+
+                from elspeth.web.composer.guided.errors import InvariantError
+                from elspeth.web.composer.guided.state_machine import GuidedSession
+
+                def _guided_checkpoint(composer_meta: object, *, role: str) -> GuidedSession:
+                    metadata = deep_thaw(composer_meta)
+                    if type(metadata) is not dict or type(metadata.get("guided_session")) is not dict:
+                        raise AuditIntegrityError(f"{role} deferred intent state has no exact guided checkpoint")
+                    try:
+                        return GuidedSession.from_dict(metadata["guided_session"])
+                    except (InvariantError, KeyError, TypeError, ValueError) as exc:
+                        raise AuditIntegrityError(f"{role} deferred intent guided checkpoint is malformed") from exc
+
+                candidate_guided = _guided_checkpoint(command.state.composer_meta, role="candidate")
+                prior_guided = (
+                    GuidedSession.initial()
+                    if current_row is None
+                    else _guided_checkpoint(self._row_to_state_record(current_row).composer_meta, role="prior")
+                )
+                prior_intents = tuple(canonical_json(intent.to_dict()) for intent in prior_guided.deferred_intents)
+                candidate_intents = tuple(canonical_json(intent.to_dict()) for intent in candidate_guided.deferred_intents)
+                retained_deferred_intent = None
+                if command.retained_deferred_intent_id is None:
+                    if candidate_intents != prior_intents:
+                        raise AuditIntegrityError("deferred intent mutation requires an explicit typed append sideband")
+                else:
+                    if (
+                        len(candidate_intents) != len(prior_intents) + 1
+                        or candidate_intents[:-1] != prior_intents
+                        or candidate_guided.deferred_intents[-1].intent_id != str(command.retained_deferred_intent_id)
+                    ):
+                        raise AuditIntegrityError("retained deferred intent must be one exact terminal append")
+                    retained_deferred_intent = candidate_guided.deferred_intents[-1]
+                    originating = command.originating_message
+                    if originating is None:  # pragma: no cover - command type owns this guard
+                        raise AuditIntegrityError("retained deferred intent lost its originating message")
+                    if retained_deferred_intent.originating_message_id != str(originating.message_id):
+                        raise AuditIntegrityError("retained deferred intent names the wrong originating message")
+                    if retained_deferred_intent.message_content_hash != stable_hash(originating.content):
+                        raise AuditIntegrityError("retained deferred intent message content hash mismatch")
 
                 inserted_state_id = self._insert_composition_state(
                     conn,
@@ -8077,6 +8119,15 @@ class SessionServiceImpl:
                     if sequence_no is None:
                         raise AuditIntegrityError("Guided originating message has no reserved sequence")
                     originating = command.originating_message
+                    existing_origin = conn.execute(
+                        select(
+                            chat_messages_table.c.session_id,
+                            chat_messages_table.c.role,
+                            chat_messages_table.c.content,
+                        ).where(chat_messages_table.c.id == str(originating.message_id))
+                    ).one_or_none()
+                    if existing_origin is not None:
+                        raise AuditIntegrityError("Guided originating message id already belongs to a persisted row")
                     self._insert_chat_message(
                         conn,
                         session_id=sid,
@@ -8092,6 +8143,21 @@ class SessionServiceImpl:
                         created_at=now,
                         message_id=str(originating.message_id),
                     )
+                    if retained_deferred_intent is not None:
+                        persisted_origin = conn.execute(
+                            select(
+                                chat_messages_table.c.session_id,
+                                chat_messages_table.c.role,
+                                chat_messages_table.c.content,
+                            ).where(chat_messages_table.c.id == str(originating.message_id))
+                        ).one_or_none()
+                        if (
+                            persisted_origin is None
+                            or persisted_origin.session_id != sid
+                            or persisted_origin.role != "user"
+                            or stable_hash(persisted_origin.content) != retained_deferred_intent.message_content_hash
+                        ):
+                            raise AuditIntegrityError("retained deferred intent originating message failed session/role/content custody")
                     originating_record = ChatMessageRecord(
                         id=originating.message_id,
                         session_id=command.fence.session_id,

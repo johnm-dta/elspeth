@@ -12,6 +12,7 @@ from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.sessions._guided_step_chat import StepChatResult
 from elspeth.web.sessions.routes.composer import guided as guided_route
+from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from tests.integration.web.composer.guided.test_step_chat import TestStepChatCrossStep, _create_session, _outputs_path
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -38,17 +39,18 @@ def _source_resolution() -> Step1SourceChatResolution:
     )
 
 
-async def _resolved_source_provider(**_kwargs: object) -> tuple[StepChatResult, Step1SourceChatResolution, None]:
+async def _resolved_source_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
     resolution = _source_resolution()
-    return (
-        StepChatResult(
+    return GuidedChatProviderOutcome(
+        chat=StepChatResult(
             assistant_message=resolution.assistant_message,
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=1,
             error_class=None,
         ),
-        resolution,
-        None,
+        source_resolution=resolution,
+        sink_resolution=None,
+        deferred_action=None,
     )
 
 
@@ -77,7 +79,7 @@ def test_uploaded_blob_does_not_create_a_chat_fast_path_and_inline_bytes_remain_
     initial_turn = client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
     provider_calls = 0
 
-    async def counted_provider(**kwargs: object) -> tuple[StepChatResult, Step1SourceChatResolution, None]:
+    async def counted_provider(**kwargs: object) -> GuidedChatProviderOutcome:
         nonlocal provider_calls
         provider_calls += 1
         return await _resolved_source_provider(**kwargs)
@@ -147,16 +149,17 @@ def test_step_2_chat_projects_sink_selection_without_committing_an_output(
         )
     )
 
-    async def sink_provider(**_kwargs: object) -> tuple[StepChatResult, None, SinkResolved]:
-        return (
-            StepChatResult(
+    async def sink_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
+        return GuidedChatProviderOutcome(
+            chat=StepChatResult(
                 assistant_message="I prepared the JSON output form.",
                 status=ComposerChatTurnStatus.SUCCESS,
                 latency_ms=1,
                 error_class=None,
             ),
-            None,
-            sink,
+            source_resolution=None,
+            sink_resolution=sink,
+            deferred_action=None,
         )
 
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", sink_provider)

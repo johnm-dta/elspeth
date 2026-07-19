@@ -1106,6 +1106,7 @@ class GuidedStateOperationCommand:
     payloads: tuple[PreparedGuidedJsonPayload, ...] = ()
     audit_evidence: GuidedAuditEvidence = GuidedAuditEvidence()
     originating_message: GuidedOriginatingUserMessageDraft | None = None
+    retained_deferred_intent_id: UUID | None = None
     interpretations: tuple[PreparedGuidedInterpretationDraft, ...] = ()
 
     def __post_init__(self) -> None:
@@ -1146,6 +1147,10 @@ class GuidedStateOperationCommand:
             raise AuditIntegrityError("GuidedStateOperationCommand.audit_evidence must be exact typed evidence")
         if self.originating_message is not None and type(self.originating_message) is not GuidedOriginatingUserMessageDraft:
             raise AuditIntegrityError("GuidedStateOperationCommand.originating_message must be an exact draft or None")
+        if self.retained_deferred_intent_id is not None and type(self.retained_deferred_intent_id) is not UUID:
+            raise AuditIntegrityError("GuidedStateOperationCommand.retained_deferred_intent_id must be a UUID or None")
+        if self.retained_deferred_intent_id is not None and self.originating_message is None:
+            raise AuditIntegrityError("A retained deferred intent requires an originating user-message draft")
         if type(self.interpretations) is not tuple or any(
             type(draft) is not PreparedGuidedInterpretationDraft for draft in self.interpretations
         ):

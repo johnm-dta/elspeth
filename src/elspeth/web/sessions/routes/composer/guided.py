@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio  # noqa: F401  # Preserve signed module statement positions.
 import json  # noqa: F401  # Preserve signed module statement positions.
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -100,7 +100,6 @@ from .._helpers import (
     Request,
     SessionServiceProtocol,
     SourceResolved,
-    StepChatResult,
     TerminalKind,
     TerminalReason,
     TerminalState,
@@ -144,6 +143,9 @@ from .._helpers import (
     slog,
     sys,
 )
+
+if TYPE_CHECKING:
+    from .guided_chat_atomic import GuidedChatProviderOutcome
 
 _COMPLETED_TERMINAL_BEFORE_EXIT_META_KEY = "guided_completed_terminal_before_user_exit"
 _MISSING_COMPLETED_TERMINAL_MARKER = object()
@@ -3150,7 +3152,7 @@ async def post_guided_respond(
         raise AuditIntegrityError("Guided RESPOND settlement loop exited without a result")
 
 
-async def _run_guided_chat_provider_attempt(**kwargs: Any) -> tuple[StepChatResult, Any | None, SinkResolved | None]:
+async def _run_guided_chat_provider_attempt(**kwargs: Any) -> GuidedChatProviderOutcome:
     """Delegate provider work without importing the atomic route at module load."""
 
     from .guided_chat_atomic import run_guided_chat_provider_attempt

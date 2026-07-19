@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,11 +26,19 @@ from elspeth.web.composer.guided.chat_solver import (
     _parse_step_1_source_tool_arguments,
     _parse_step_2_sink_tool_arguments,
     build_step_chat_context_block,
+    maybe_resolve_step_1_source_chat,
+    maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
+from elspeth.web.composer.guided.deferred_intents import DeferredIntentAction
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
+from elspeth.web.composer.guided.stage_subjects import ComponentCountConstraint
+from elspeth.web.sessions._guided_step_chat import (
+    resolve_step_1_source_chat_with_auto_drop,
+    resolve_step_2_sink_chat_with_auto_drop,
+)
 
 
 @dataclass
@@ -50,6 +59,321 @@ class _FakeLLMResponse:
 
 def _ok_response(text: str) -> _FakeLLMResponse:
     return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=text))])
+
+
+@pytest.mark.asyncio
+async def test_step_1_solver_returns_only_the_closed_deferred_intent_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    arguments = {
+        "target_stage": "topology",
+        "catalog_kind": "transform",
+        "catalog_name": "llm",
+        "redacted_summary": "Use the named transform during topology authoring.",
+        "constraints": [
+            {
+                "kind": "component_count",
+                "component_kind": "node",
+                "plugin_kind": "transform",
+                "plugin_name": "llm",
+                "operator": "at_least",
+                "count": 1,
+            }
+        ],
+    }
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        call = SimpleNamespace(
+            function=SimpleNamespace(name="retain_deferred_intent", arguments=json.dumps(arguments)),
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    outcome = await maybe_resolve_step_1_source_chat(
+        model="test/model",
+        user_message="Later, use the llm transform.",
+        plugin_hint=None,
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+    )
+
+    assert outcome.resolution is None
+    assert outcome.prose_reply is None
+    assert outcome.deferred_action == DeferredIntentAction(
+        target_stage="topology",
+        catalog_kind="transform",
+        catalog_name="llm",
+        redacted_summary="Use the named transform during topology authoring.",
+        constraints=(
+            ComponentCountConstraint(
+                kind="component_count",
+                component_kind="node",
+                plugin_kind="transform",
+                plugin_name="llm",
+                operator="at_least",
+                count=1,
+            ),
+        ),
+    )
+    tool_names = [tool["function"]["name"] for tool in captured["tools"]]
+    assert tool_names == ["resolve_source", "retain_deferred_intent"]
+    deferred_schema = captured["tools"][1]["function"]["parameters"]
+    assert deferred_schema["additionalProperties"] is False
+    assert set(deferred_schema["required"]) == {
+        "target_stage",
+        "catalog_kind",
+        "catalog_name",
+        "redacted_summary",
+        "constraints",
+    }
+
+
+@pytest.mark.asyncio
+async def test_malformed_deferred_action_returns_repair_copy_without_an_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="retain_deferred_intent",
+                arguments=json.dumps(
+                    {
+                        "target_stage": "topology",
+                        "catalog_kind": "transform",
+                        "catalog_name": "llm",
+                        "redacted_summary": "Retain a transform requirement.",
+                        "constraints": [],
+                        "raw_user_message": "must never be accepted",
+                    }
+                ),
+            ),
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    result = await resolve_step_1_source_chat_with_auto_drop(
+        site="test",
+        session_id="session",
+        user_id="user",
+        model="test/model",
+        user_message="Later use a transform.",
+        plugin_hint=None,
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+    )
+
+    assert result.source_resolution is None
+    assert result.deferred_action is None
+    assert result.prose_chat is None
+    assert result.fallback_chat is not None
+    assert "couldn't verify that future-stage instruction" in result.fallback_chat.assistant_message
+    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+
+
+_MALFORMED_DEFERRED_ARGUMENTS: tuple[object, ...] = (
+    17,
+    "{",
+    pytest.param("9" * 5_000, id="integer-conversion-limit"),
+    pytest.param("[" * 10_000 + "]" * 10_000, id="json-recursion-limit"),
+    pytest.param(" " * 1_048_577, id="guided-json-byte-limit"),
+    "[]",
+    json.dumps({"target_stage": "topology"}),
+    json.dumps(
+        {
+            "target_stage": "later_maybe",
+            "catalog_kind": "transform",
+            "catalog_name": "llm",
+            "redacted_summary": "Retain a transform requirement.",
+            "constraints": [],
+        }
+    ),
+    json.dumps(
+        {
+            "target_stage": "topology",
+            "catalog_kind": ["transform"],
+            "catalog_name": "llm",
+            "redacted_summary": "Retain a transform requirement.",
+            "constraints": [],
+        }
+    ),
+    json.dumps(
+        {
+            "target_stage": "topology",
+            "catalog_kind": "transform",
+            "catalog_name": "llm",
+            "redacted_summary": "Retain a transform requirement.",
+            "constraints": [
+                {
+                    "kind": "component_count",
+                    "component_kind": ["node"],
+                    "plugin_kind": "transform",
+                    "plugin_name": "llm",
+                    "operator": "at_least",
+                    "count": 1,
+                }
+            ],
+        }
+    ),
+    json.dumps(
+        {
+            "target_stage": "topology",
+            "catalog_kind": "transform",
+            "catalog_name": "llm",
+            "redacted_summary": "Retain a transform requirement.",
+            "constraints": {},
+        }
+    ),
+    json.dumps(
+        {
+            "target_stage": "topology",
+            "catalog_kind": "transform",
+            "catalog_name": "llm",
+            "redacted_summary": "Retain a transform requirement.",
+            "constraints": [{"kind": "wishful_constraint"}],
+        }
+    ),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["source", "sink"])
+@pytest.mark.parametrize("arguments", _MALFORMED_DEFERRED_ARGUMENTS)
+async def test_every_malformed_deferred_terminal_payload_gets_the_bounded_deferred_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    arguments: object,
+) -> None:
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        call = SimpleNamespace(function=SimpleNamespace(name="retain_deferred_intent", arguments=arguments))
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    if stage == "source":
+        result = await resolve_step_1_source_chat_with_auto_drop(
+            site="test",
+            session_id="session",
+            user_id="user",
+            model="test/model",
+            user_message="Later use a transform.",
+            plugin_hint=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+    else:
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="session",
+            user_id="user",
+            model="test/model",
+            user_message="Later use a transform.",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+
+    assert result.deferred_action is None
+    assert result.fallback_chat is not None
+    assert result.fallback_chat.assistant_message == (
+        "I couldn't verify that future-stage instruction, so I didn't retain it. "
+        "Please restate the target stage and the structural requirement."
+    )
+    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["source", "sink"])
+async def test_mixed_deferred_and_other_terminal_calls_get_the_bounded_deferred_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    terminal_name = "resolve_source" if stage == "source" else "resolve_sink"
+
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        calls = [
+            SimpleNamespace(function=SimpleNamespace(name="retain_deferred_intent", arguments="{}")),
+            SimpleNamespace(function=SimpleNamespace(name=terminal_name, arguments="{}")),
+        ]
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=calls))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    if stage == "source":
+        result = await resolve_step_1_source_chat_with_auto_drop(
+            site="test",
+            session_id="session",
+            user_id="user",
+            model="test/model",
+            user_message="Later use a transform.",
+            plugin_hint=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+    else:
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="session",
+            user_id="user",
+            model="test/model",
+            user_message="Later use a transform.",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+
+    assert result.deferred_action is None
+    assert result.fallback_chat is not None
+    assert result.fallback_chat.error_class == "DeferredIntentActionShapeError"
+
+
+@pytest.mark.asyncio
+async def test_step_2_solver_returns_the_same_closed_deferred_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="retain_deferred_intent",
+                arguments=json.dumps(
+                    {
+                        "target_stage": "topology",
+                        "catalog_kind": "transform",
+                        "catalog_name": "passthrough",
+                        "redacted_summary": "Include the named transform during topology authoring.",
+                        "constraints": [
+                            {
+                                "kind": "component_count",
+                                "component_kind": "node",
+                                "plugin_kind": "transform",
+                                "plugin_name": "passthrough",
+                                "operator": "at_least",
+                                "count": 1,
+                            }
+                        ],
+                    }
+                ),
+            ),
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    result = await maybe_resolve_step_2_sink_chat(
+        model="test/model",
+        user_message="Later add passthrough.",
+        current_sink=None,
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+    )
+
+    assert result.sink is None
+    assert result.assistant_message is None
+    assert result.deferred_action is not None
+    assert result.deferred_action.target_stage == "topology"
+    assert [tool["function"]["name"] for tool in captured["tools"]] == ["resolve_sink", "retain_deferred_intent"]
 
 
 def test_step_1_source_chat_resolution_deep_freezes_container_fields() -> None:

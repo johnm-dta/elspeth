@@ -1,0 +1,78 @@
+{
+  "class": "structured_llm",
+  "intent": "Read colour rows from CSV and send each through one LLM that returns typed structured output fields — a blue amount (integer 0-100), a blue confidence (number 0-1), and a blue reason (one sentence). A downstream step must consume those typed fields to route each row, so the typed contract is genuinely used downstream and not just emitted.",
+  "canonical_arguments": {
+    "source": {
+      "plugin": "csv",
+      "on_success": "rows",
+      "options": {"path": "colours.csv", "schema": {"mode": "observed"}},
+      "on_validation_failure": "discard"
+    },
+    "nodes": [
+      {
+        "id": "assess_blue",
+        "node_type": "transform",
+        "plugin": "llm",
+        "input": "rows",
+        "on_success": "assessed",
+        "on_error": "discard",
+        "options": {
+          "provider": "openrouter",
+          "model": "openrouter/openai/gpt-5.4-mini",
+          "temperature": 0.0,
+          "prompt_template": "Assess the perceptible amount of blue in the colour {{ color_name }} ({{ hex }}).",
+          "queries": {
+            "blue": {
+              "input_fields": {"color_name": "color_name", "hex": "hex"},
+              "response_format": "structured",
+              "output_fields": [
+                {"suffix": "amount", "type": "integer"},
+                {"suffix": "confidence", "type": "number"},
+                {"suffix": "reason", "type": "string"}
+              ]
+            }
+          },
+          "schema": {"mode": "observed"}
+        }
+      },
+      {
+        "id": "route_by_blue",
+        "node_type": "gate",
+        "input": "assessed",
+        "condition": "row['blue_amount'] >= 50",
+        "routes": {"true": "strong_blue", "false": "weak_blue"}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "strong_blue",
+        "plugin": "json",
+        "options": {"path": "outputs/strong_blue.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      },
+      {
+        "sink_name": "weak_blue",
+        "plugin": "json",
+        "options": {"path": "outputs/weak_blue.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "structured-llm", "description": "Typed multi-query LLM output consumed by a downstream gate."}
+  },
+  "semantic_expectations": {
+    "source": {"plugin": "csv", "on_success": "rows"},
+    "nodes": [
+      {"id": "assess_blue", "node_type": "transform", "plugin": "llm", "input": "rows", "on_success": "assessed", "typed_output_fields": ["blue_amount", "blue_confidence", "blue_reason"]},
+      {"id": "route_by_blue", "node_type": "gate", "input": "assessed", "condition": "row['blue_amount'] >= 50", "routes": {"true": "strong_blue", "false": "weak_blue"}}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "strong_blue", "plugin": "json"}, {"sink_name": "weak_blue", "plugin": "json"}],
+    "topology": "source -> assess_blue(llm typed queries) -> route_by_blue(gate on blue_amount) -> {strong_blue, weak_blue}(sinks)"
+  },
+  "runtime_assertions": [
+    "The LLM node declares typed structured output fields (blue_amount integer, blue_confidence number, blue_reason string) via the typed multi-query authoring form.",
+    "The query name 'blue' prefixes each output suffix so the downstream row exposes blue_amount, blue_confidence, and blue_reason.",
+    "The downstream gate consumes the typed integer field blue_amount to route rows, proving the typed contract is used downstream and not merely emitted."
+  ]
+}

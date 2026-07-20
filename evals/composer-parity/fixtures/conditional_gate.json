@@ -1,0 +1,61 @@
+{
+  "class": "conditional_gate",
+  "intent": "Read orders from CSV, coerce the price to a number, then route each row by a numeric threshold: orders priced at 100 or more go to a high-value output and everything else goes to a low-value output. Do not fake the split with a transform.",
+  "canonical_arguments": {
+    "source": {
+      "plugin": "csv",
+      "on_success": "rows",
+      "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+      "on_validation_failure": "discard"
+    },
+    "nodes": [
+      {
+        "id": "coerce_numeric",
+        "node_type": "transform",
+        "plugin": "type_coerce",
+        "input": "rows",
+        "on_success": "numeric_rows",
+        "on_error": "discard",
+        "options": {"schema": {"mode": "observed"}, "conversions": [{"field": "price", "to": "float"}]}
+      },
+      {
+        "id": "threshold_gate",
+        "node_type": "gate",
+        "input": "numeric_rows",
+        "condition": "row['price'] >= 100.0",
+        "routes": {"true": "high", "false": "low"}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "high",
+        "plugin": "json",
+        "options": {"path": "outputs/high.jsonl", "format": "jsonl", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      },
+      {
+        "sink_name": "low",
+        "plugin": "json",
+        "options": {"path": "outputs/low.jsonl", "format": "jsonl", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "conditional-gate", "description": "Numeric threshold gate with true/false routing."}
+  },
+  "semantic_expectations": {
+    "source": {"plugin": "csv", "on_success": "rows"},
+    "nodes": [
+      {"id": "coerce_numeric", "node_type": "transform", "plugin": "type_coerce", "input": "rows", "on_success": "numeric_rows"},
+      {"id": "threshold_gate", "node_type": "gate", "input": "numeric_rows", "condition": "row['price'] >= 100.0", "routes": {"true": "high", "false": "low"}}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "high", "plugin": "json"}, {"sink_name": "low", "plugin": "json"}],
+    "topology": "source -> coerce_numeric(transform) -> threshold_gate(gate) -> {high, low}(sinks)"
+  },
+  "runtime_assertions": [
+    "The gate is a real gate node (node_type gate), not a transform emulating routing.",
+    "Rows with price >= 100.0 reach the 'high' sink; all other rows reach the 'low' sink.",
+    "Each row lands in exactly one of the two outputs (true/false routing is total and exclusive)."
+  ]
+}

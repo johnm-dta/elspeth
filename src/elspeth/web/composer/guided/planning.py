@@ -687,6 +687,17 @@ def _build_projection(
 
     edge_specs: list[tuple[dict[str, str], dict[str, str], dict[str, object]]] = []
 
+    # A queue's connection name is its own id (``queue_node_contract_error``
+    # enforces ``input == id``), so ``canonical_connection_consumers`` lists both
+    # the queue itself (input side) and its one ordinary downstream node
+    # (republish side) as consumers of that connection. Those two sides must be
+    # separated in the wire projection: an external producer publishing into the
+    # connection reaches only the fan-in point, while the queue's own
+    # ``queue_continue`` republishes to the downstream node — never back to
+    # itself. Collapsing them would either self-loop the queue or fan a producer
+    # straight past it (elspeth-a5b86149d4).
+    queue_stable_by_connection = {node.id: node_ids[node.id] for node in state.nodes if node.node_type == "queue"}
+
     def add_targets(origin: dict[str, str], connection: str | None, flow: dict[str, object]) -> None:
         if connection is None:
             return
@@ -694,6 +705,12 @@ def _build_projection(
             edge_specs.append((origin, _endpoint("discard"), flow))
             return
         destinations = consumers.get(connection, ())
+        queue_stable = queue_stable_by_connection.get(connection)
+        if queue_stable is not None:
+            if origin.get("stable_id") == queue_stable:
+                destinations = tuple(dest for dest in destinations if dest != ("node", queue_stable))
+            else:
+                destinations = (("node", queue_stable),)
         if not destinations:
             raise AuditIntegrityError("guided proposal connection has no canonical consumer")
         for kind, stable_id in destinations:

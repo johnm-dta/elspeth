@@ -9,15 +9,18 @@ custody → candidate validation → durable proposal → acceptance / confirm-w
 graph is semantically isomorphic to the ground-truth reference.
 
 Freeform and guided-full drive all nine fixtures (18 cases). Guided-staged
-drives six (24 cases total): three fixtures — ``multi_source_queue``,
-``multi_output``, ``fork_coalesce`` — hit invariants in the guided
-wire-projection / structured review that are stricter than the shared
-``set_pipeline`` commit path and therefore cannot be authored through the stage
-protocol at HEAD. Those are code-proven guided-staged capability GAPS (the
-identical committed graph commits fine on the other two surfaces); they are
-excluded here and reported as blockers, documented case-by-case in
-``_GUIDED_STAGED_CAPABILITY_GAPS`` below. They are gaps to report, not tests to
-skip: there is no ``skip``/``xfail`` and no gutted fixture.
+drives seven (25 cases total): two fixtures — ``multi_output`` and
+``fork_coalesce`` — hit invariants in the guided wire-projection / structured
+review that are stricter than the shared ``set_pipeline`` commit path and
+therefore cannot be authored through the stage protocol at HEAD. Those are
+code-proven guided-staged capability GAPS (the identical committed graph commits
+fine on the other two surfaces); they are excluded here and reported as
+blockers, documented case-by-case in ``_GUIDED_STAGED_CAPABILITY_GAPS`` below.
+They are gaps to report, not tests to skip: there is no ``skip``/``xfail`` and
+no gutted fixture. (``multi_source_queue`` was a third such gap — a queue's
+fan-in self-looped the wire projection — until the guided projection learned to
+separate a queue connection's input side from its republish side; it now drives
+guided-staged like any other fixture.)
 
 No provider network, no skips, no xfail. Cross-surface parity is transitive:
 every surface is anchored to the same per-fixture reference committed graph.
@@ -52,7 +55,7 @@ SURFACES = ["freeform", "guided_full", "guided_staged"]
 # so byte-exact public-YAML equality and exact-name semantic expectations hold.
 _NAME_PRESERVING_SURFACES = frozenset({"freeform", "guided_full"})
 
-# Three capability fixtures cannot be authored through the guided-staged stage
+# Two capability fixtures cannot be authored through the guided-staged stage
 # protocol at HEAD: they hit invariants in the guided wire-projection /
 # structured review that are STRICTER than the shared audited ``set_pipeline``
 # commit path, so freeform + guided_full derive them but guided_staged cannot.
@@ -60,23 +63,14 @@ _NAME_PRESERVING_SURFACES = frozenset({"freeform", "guided_full"})
 # defects — the identical committed graph commits fine on the other two
 # surfaces). They are excluded from the guided_staged parity parametrization and
 # reported as blockers; each is traceable here to the exact mechanism + code
-# location so a reader sees *why* the guided_staged column is 6 fixtures, not 9,
+# location so a reader sees *why* the guided_staged column is 7 fixtures, not 9,
 # and so the follow-up owner can find the seam. Do NOT paper over these by
 # gutting the fixture or asserting the failure — either would hide the gap the
 # corpus exists to surface. When a gap is closed in ``src/``, move the fixture
-# back into the guided_staged parity set (its drive will then succeed).
+# back into the guided_staged parity set (its drive will then succeed) — as
+# ``multi_source_queue`` was once the queue self-loop / fan-out was fixed in the
+# guided projection.
 _GUIDED_STAGED_CAPABILITY_GAPS: dict[str, str] = {
-    "multi_source_queue": (
-        "Queue fan-in. ``queue_node_contract_error`` (state.py) MANDATES a queue's "
-        "``input == id``; but ``canonical_connection_consumers`` (guided/connection_consumers.py) "
-        "registers every node — including the queue — as a consumer of its own ``input``, and "
-        "``_build_projection`` (guided/planning.py) emits ``queue_continue -> node.id``. With "
-        "``input == id`` the queue is a consumer of its own continue-connection, so the wire "
-        "projection self-loops (``payload.graph.edges[..] is a self-loop``). The two invariants are "
-        "mutually unsatisfiable — no candidate can drive a queue through guided-staged. LIKELY A "
-        "PRODUCT BUG: the consumer builder should exclude a queue's own identity from its "
-        "``queue_continue`` targets. (Follow-up, not fixed here.)"
-    ),
     "multi_output": (
         "Cross-sink write-failure fallback. The structured sink review "
         "(``transition_sink_schema_form`` -> ``_validated_merged_options``, guided/stage_transitions.py) "
@@ -102,8 +96,8 @@ _GUIDED_STAGED_CAPABILITY_GAPS: dict[str, str] = {
 _GUIDED_STAGED_PARITY_FIXTURES = [fixture for fixture in PARITY_FIXTURES if fixture["class"] not in _GUIDED_STAGED_CAPABILITY_GAPS]
 
 # Explicit (surface, fixture) grid: all 9 fixtures on the two name-preserving
-# surfaces, and the 6 guided-staged-drivable fixtures on guided_staged = 24
-# real-path parity cases (the 3 gaps above are excluded and reported).
+# surfaces, and the 7 guided-staged-drivable fixtures on guided_staged = 25
+# real-path parity cases (the 2 gaps above are excluded and reported).
 _SURFACE_FIXTURE_PARAMS = [
     (surface, fixture)
     for surface in SURFACES

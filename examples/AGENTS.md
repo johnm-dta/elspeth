@@ -36,7 +36,7 @@ These run immediately with no setup:
 | `multi_source_queue` | 3 | Multiple named sources fan into a queue |
 | `large_scale_test` | 10,000 | Performance test — committed `input.csv` is 10k rows (~1.5 min); regenerate larger via `generate_data.py` (default 50k) |
 | `retention_purge` | 5 | Payload retention policy demo |
-| `blob_transforms` | 158 offline expansion rows | Blob refs, payload-store CSV expansion; optional hosted tutorial HTML fetch |
+| `blob_transforms` | 200 offline expansion rows | Blob refs, payload-store CSV expansion; optional hosted tutorial HTML fetch |
 | `schema_contracts_demo` | 5 | Schema validation contracts |
 | `threshold_gate` | 8 | Numeric threshold routing |
 

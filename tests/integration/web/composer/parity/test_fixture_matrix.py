@@ -84,9 +84,11 @@ _GUIDED_STAGED_CAPABILITY_GAPS: dict[str, str] = {
         "it is a visible knob field (it is not for the json sink); submitting the cross-sink target "
         "raises ``client altered server-held structural policy 'on_write_failure'`` (HTTP 400). Since "
         "``bind_guided_reviewed_components`` sources the committed ``on_write_failure`` from the reviewed "
-        "output, a guided-staged output can only ever discard write failures — the priority->standard "
-        "fallback this fixture proves is unauthorable. (Source ``on_validation_failure`` IS editable, "
-        "which is why the ``error_routing`` fixture — a source failure routed to a sink — passes.)"
+        "output, this fixture's json ``priority_out`` sink can only ever discard write failures — the "
+        "priority->standard fallback it proves is unauthorable. (Proven for the json sink here; whether "
+        "any sink exposes ``on_write_failure`` as an editable knob is unverified. Source "
+        "``on_validation_failure`` IS editable, which is why the ``error_routing`` fixture — a source "
+        "failure routed to a sink — passes.)"
     ),
     "fork_coalesce": (
         "Require-all coalesce. ``canonical_connection_consumers`` keys consumers only on ``node.input`` "

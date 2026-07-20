@@ -164,6 +164,44 @@ def test_source_and_output_paths_reduce_to_basename() -> None:
     assert_isomorphic(left, right)
 
 
+def test_effective_options_drops_explicit_plugin_defaults() -> None:
+    """A plugin default made explicit on one side is effective-equal to its absence.
+
+    The guided stage protocol persists the full ``model_dump`` (every default
+    explicit); ``set_pipeline`` persists authored-minimal options. Locking this
+    direction protects the comparator contract Task 4 inherits: csv
+    ``delimiter``/``encoding`` and json ``encoding`` at their model defaults must
+    not break isomorphism against a side that omits them.
+    """
+    left = _error_routing_state()
+    right = copy.deepcopy(left)
+    right["sources"]["source"]["options"]["delimiter"] = ","  # csv default
+    right["sources"]["source"]["options"]["encoding"] = "utf-8"  # csv default
+    right["outputs"][0]["options"]["encoding"] = "utf-8"  # json default
+    assert_isomorphic(left, right)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda s: s["sources"]["source"]["options"].__setitem__("delimiter", ";"), id="source-non-default"),
+        pytest.param(lambda s: s["outputs"][0]["options"].__setitem__("encoding", "latin-1"), id="sink-non-default"),
+    ],
+)
+def test_effective_options_keeps_non_default_plugin_option(mutate: Any) -> None:
+    """A genuine non-default source/sink option is preserved and detected.
+
+    The default-dropping normalization must never hide a real config change: a
+    non-default value has no matching default to collapse, so it stays in the
+    compared form and a divergence raises.
+    """
+    left = _error_routing_state()
+    right = copy.deepcopy(left)
+    mutate(right)
+    with pytest.raises(IsomorphismError):
+        assert_isomorphic(left, right)
+
+
 def test_consistent_wire_renaming_is_isomorphic() -> None:
     left = _fork_state()
     right = _rename_connections(

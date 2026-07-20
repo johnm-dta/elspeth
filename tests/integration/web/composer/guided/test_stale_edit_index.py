@@ -29,7 +29,10 @@ def test_step_3_chat_is_rejected_before_provider_reservation_or_blob_work(
         "_run_guided_chat_provider_attempt",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("Step 3 called the provider")),
     )
-    reserve = AsyncMock(side_effect=AssertionError("Step 3 attempted blob custody"))
+    reserve = AsyncMock(
+        spec=client.app.state.blob_service.reserve_inline_custody,
+        side_effect=AssertionError("Step 3 attempted blob custody"),
+    )
     monkeypatch.setattr(client.app.state.blob_service, "reserve_inline_custody", reserve)
 
     response = client.post(

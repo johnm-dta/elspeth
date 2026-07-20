@@ -796,7 +796,8 @@ def test_sink_field_review_resolves_same_id_and_stays_in_output_stage() -> None:
     output = result.reviewed_outputs[OUTPUT_A]
     assert output.required_fields == ("id", "email", "derived")
     assert output.schema_mode == "observed"
-    assert not hasattr(result, "topology")
+    with pytest.raises(AttributeError):
+        _ = result.topology
 
 
 def test_sink_field_review_explicit_passthrough_is_the_only_empty_selection() -> None:

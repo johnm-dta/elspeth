@@ -27,7 +27,7 @@ from elspeth.web.sessions.models import (
     guided_operations_table,
     proposal_events_table,
 )
-from elspeth.web.sessions.protocol import CompositionStateData
+from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted
 from elspeth.web.sessions.routes._helpers import (
     _composition_proposal_response,
     _state_from_record,
@@ -435,7 +435,7 @@ def test_guided_full_replay_fails_closed_on_persisted_authority_tamper(
 
         async def tampered_reserve(*args, **kwargs):
             outcome = await reserve(*args, **kwargs)
-            if hasattr(outcome, "response_hash"):
+            if isinstance(outcome, GuidedOperationCompleted):
                 return replace(outcome, response_hash="0" * 64)
             return outcome
 

@@ -4405,7 +4405,7 @@ class TestRecordTransformErrorWithRouting:
         transform = _make_transform(on_error="error_sink")
         token = _make_token()
         ctx = make_context()
-        ctx.record_transform_error = MagicMock()  # type: ignore[method-assign]
+        ctx.record_transform_error = MagicMock(spec=ctx.record_transform_error)  # type: ignore[method-assign]
 
         with pytest.raises(OrchestrationInvariantError, match="state_id is required"):
             record_transform_error_with_routing(

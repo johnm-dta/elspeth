@@ -4,6 +4,8 @@ import ast
 import importlib
 from pathlib import Path
 
+import pytest
+
 
 def test_session_routes_are_split_by_resource_module() -> None:
     modules = {
@@ -28,8 +30,10 @@ def test_session_routes_package_exports_router_factory() -> None:
 def test_session_routes_package_does_not_export_removed_guided_adapters() -> None:
     routes = importlib.import_module("elspeth.web.sessions.routes")
 
-    assert not hasattr(routes, "_dispatch_guided_respond")
-    assert not hasattr(routes, "step_advance")
+    with pytest.raises(AttributeError):
+        _ = routes._dispatch_guided_respond
+    with pytest.raises(AttributeError):
+        _ = routes.step_advance
 
 
 def test_removed_guided_architecture_has_no_compatibility_stubs() -> None:

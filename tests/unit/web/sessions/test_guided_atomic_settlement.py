@@ -542,11 +542,11 @@ def _turn_emitted_evidence(payload_id: str) -> ComposerToolInvocation:
 def test_protocol_exposes_closed_guided_state_settlement_contract() -> None:
     protocol = importlib.import_module("elspeth.web.sessions.protocol")
 
-    assert hasattr(protocol, "PreparedGuidedJsonPayload")
-    assert hasattr(protocol, "PreparedGuidedAuditRow")
-    assert hasattr(protocol, "GuidedResponseDescriptor")
-    assert hasattr(protocol, "GuidedStateOperationCommand")
-    assert hasattr(protocol, "GuidedStateOperationSettlement")
+    assert protocol.PreparedGuidedJsonPayload is not None
+    assert protocol.PreparedGuidedAuditRow is not None
+    assert protocol.GuidedResponseDescriptor is not None
+    assert protocol.GuidedStateOperationCommand is not None
+    assert protocol.GuidedStateOperationSettlement is not None
 
 
 def test_replay_turn_accepts_zero_based_step_one_index() -> None:

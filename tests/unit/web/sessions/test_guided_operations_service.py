@@ -172,7 +172,8 @@ def test_fence_lost_error_never_retains_or_logs_lease_token(caplog: pytest.LogCa
     assert error.session_id == fence.session_id
     assert error.operation_id == fence.operation_id
     assert error.attempt == fence.attempt
-    assert not hasattr(error, "fence")
+    with pytest.raises(AttributeError):
+        _ = error.fence
     assert secret not in str(error)
     assert secret not in repr(error)
     assert secret not in repr(vars(error))

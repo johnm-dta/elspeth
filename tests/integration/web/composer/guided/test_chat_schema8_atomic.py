@@ -385,8 +385,14 @@ def test_schema_form_source_resolution_is_advisory_without_blob_mutation_and_rep
     body = _chat_body(schema_turn)
     state_before = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["composition_state"]
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
-    reserve = AsyncMock(side_effect=AssertionError("advisory Chat attempted blob custody"))
-    delete = AsyncMock(side_effect=AssertionError("advisory Chat attempted blob deletion"))
+    reserve = AsyncMock(
+        spec=composer_test_client.app.state.blob_service.reserve_inline_custody,
+        side_effect=AssertionError("advisory Chat attempted blob custody"),
+    )
+    delete = AsyncMock(
+        spec=composer_test_client.app.state.blob_service.delete_blob,
+        side_effect=AssertionError("advisory Chat attempted blob deletion"),
+    )
     monkeypatch.setattr(composer_test_client.app.state.blob_service, "reserve_inline_custody", reserve)
     monkeypatch.setattr(composer_test_client.app.state.blob_service, "delete_blob", delete)
 

@@ -1561,7 +1561,12 @@ def test_generic_accept_rejects_guided_pipeline_surfaces_before_dispatch(tmp_pat
             composer_provider="provider",
         )
     )
-    prepare = AsyncMock(side_effect=AssertionError("generic route dispatched guided proposal"))
+    from elspeth.web.sessions.routes.composer import pipeline_settlement
+
+    prepare = AsyncMock(
+        spec=pipeline_settlement.prepare_pipeline_proposal_commit,
+        side_effect=AssertionError("generic route dispatched guided proposal"),
+    )
     monkeypatch.setattr(
         "elspeth.web.sessions.routes.composer.pipeline_settlement.prepare_pipeline_proposal_commit",
         prepare,
@@ -1645,7 +1650,12 @@ def test_malformed_canonical_creation_event_fails_closed_without_legacy_fallback
         event = conn.execute(select(proposal_events_table).where(proposal_events_table.c.proposal_id == str(row.id))).one()
         malformed = ["schema", "pipeline_proposal_created.v1"]
         conn.execute(update(proposal_events_table).where(proposal_events_table.c.id == event.id).values(payload=malformed))
-    legacy_execute = MagicMock(side_effect=AssertionError("malformed canonical proposal used legacy replay"))
+    from elspeth.web.sessions.routes.composer import proposals
+
+    legacy_execute = MagicMock(
+        spec=proposals.execute_tool,
+        side_effect=AssertionError("malformed canonical proposal used legacy replay"),
+    )
     monkeypatch.setattr("elspeth.web.sessions.routes.composer.proposals.execute_tool", legacy_execute)
 
     with pytest.raises(AuditIntegrityError):
@@ -2243,7 +2253,7 @@ class TestSessionCRUDRoutes:
         app, service = _make_app(tmp_path)
         registry = _SessionComposeLockRegistry()
         app.state.session_compose_lock_registry = registry
-        clear_progress = AsyncMock()
+        clear_progress = AsyncMock(spec=app.state.composer_progress_registry.clear)
         app.state.composer_progress_registry.clear = clear_progress
 
         async with AsyncClient(
@@ -2255,7 +2265,7 @@ class TestSessionCRUDRoutes:
             admission_key = f"{session_id}:guided-respond-admission"
             admission = await registry.get_lock(admission_key)
 
-            service.archive_session = AsyncMock(side_effect=RuntimeError("archive unavailable"))  # type: ignore[method-assign]
+            service.archive_session = AsyncMock(spec=service.archive_session, side_effect=RuntimeError("archive unavailable"))  # type: ignore[method-assign]
             delete_resp = await client.delete(f"/api/sessions/{session_id}")
 
             assert delete_resp.status_code == 500
@@ -4429,7 +4439,12 @@ class TestMessageRoutes:
         assert asyncio.run(service.get_state_versions(uuid.UUID(session_id))) == state_versions_before
         assert asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None)) == messages_before
 
-        old_provider = AsyncMock(side_effect=AssertionError("terminal replay called provider"))
+        from elspeth.web.sessions.routes.composer import guided
+
+        old_provider = AsyncMock(
+            spec=guided._run_guided_chat_provider_attempt,
+            side_effect=AssertionError("terminal replay called provider"),
+        )
         with patch(
             "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
             new=old_provider,
@@ -4444,6 +4459,7 @@ class TestMessageRoutes:
 
         retry_body = {**chat_body, "operation_id": str(uuid.uuid4())}
         retry_provider = AsyncMock(
+            spec=guided._run_guided_chat_provider_attempt,
             return_value=GuidedStepChatOnlyResult(
                 chat=StepChatResult(
                     assistant_message="Use the current source form.",
@@ -4451,7 +4467,7 @@ class TestMessageRoutes:
                     latency_ms=1,
                     error_class=None,
                 ),
-            )
+            ),
         )
         with patch(
             "elspeth.web.sessions.routes.composer.guided._run_guided_chat_provider_attempt",
@@ -6933,12 +6949,13 @@ sinks:
         session = await service.create_session("alice", "Pipeline", "local")
         app.state.blob_service = SimpleNamespace(
             get_blob=AsyncMock(
+                spec=BlobServiceProtocol.get_blob,
                 return_value=SimpleNamespace(
                     id=uuid.UUID(blob_id),
                     session_id=session.id,
                     storage_path="/data/blobs/session/contact_form_submissions.csv",
                     status="ready",
-                )
+                ),
             )
         )
         await service.save_composition_state(
@@ -7007,12 +7024,13 @@ sinks:
         foreign_session_id = uuid.uuid4()
         storage_path = "/data/blobs/foreign/private.csv"
         get_blob = AsyncMock(
+            spec=BlobServiceProtocol.get_blob,
             return_value=SimpleNamespace(
                 id=uuid.uuid4() if custody_failure == "wrong_id" else blob_id,
                 session_id=foreign_session_id if custody_failure == "foreign_session" else session.id,
                 storage_path="/data/blobs/same-session/wrong.csv" if custody_failure == "wrong_path" else storage_path,
                 status="pending" if custody_failure == "non_ready" else "ready",
-            )
+            ),
         )
         if custody_failure == "missing":
             get_blob.side_effect = BlobNotFoundError(str(blob_id))
@@ -7072,7 +7090,7 @@ sinks:
         stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
         storage_path = "/data/blobs/foreign/private.csv"
         session = await service.create_session("alice", "Pipeline", "local")
-        get_blob = AsyncMock()
+        get_blob = AsyncMock(spec=BlobServiceProtocol.get_blob)
         app.state.blob_service = SimpleNamespace(get_blob=get_blob)
         guided = replace(
             GuidedSession.initial(),
@@ -7153,7 +7171,7 @@ sinks:
         stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
         storage_path = "/data/blobs/foreign/private.csv"
         session = await service.create_session("alice", "Pipeline", "local")
-        get_blob = AsyncMock()
+        get_blob = AsyncMock(spec=BlobServiceProtocol.get_blob)
         app.state.blob_service = SimpleNamespace(get_blob=get_blob)
         guided = replace(
             GuidedSession.initial(),
@@ -7238,12 +7256,13 @@ sinks:
         stable_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
         session = await service.create_session("alice", "Pipeline", "local")
         get_blob = AsyncMock(
+            spec=BlobServiceProtocol.get_blob,
             return_value=SimpleNamespace(
                 id=uuid.UUID(stable_id),
                 session_id=session.id,
                 storage_path="/data/blobs/foreign/live.csv",
                 status="ready",
-            )
+            ),
         )
         app.state.blob_service = SimpleNamespace(get_blob=get_blob)
         guided = replace(
@@ -7310,7 +7329,7 @@ sinks:
         blob_id = uuid.UUID("98b1357d-5aab-4fb3-85b4-5ad643912e84")
         storage_path = "/data/blobs/foreign/private.csv"
         session = await service.create_session("alice", "Pipeline", "local")
-        get_blob = AsyncMock()
+        get_blob = AsyncMock(spec=BlobServiceProtocol.get_blob)
         app.state.blob_service = SimpleNamespace(get_blob=get_blob)
         guided = replace(
             GuidedSession.initial(),

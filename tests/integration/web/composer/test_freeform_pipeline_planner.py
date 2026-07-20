@@ -525,7 +525,7 @@ async def test_requests_outside_empty_mutation_gate_use_ordinary_compose_loop(
         session_engine=engine,
     )
     expected = ComposerResult(message="ordinary loop", state=state)
-    ordinary_loop = AsyncMock(return_value=expected)
+    ordinary_loop = AsyncMock(spec=composer._compose_loop, return_value=expected)
     monkeypatch.setattr(composer, "_compose_loop", ordinary_loop)
 
     result = await composer.compose(
@@ -587,7 +587,11 @@ async def test_planner_audit_failure_publishes_no_proposal_authority_or_state(
         return _terminal_response(tmp_path)
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
-    monkeypatch.setattr(sessions, "add_message", AsyncMock(side_effect=SQLAlchemyError("audit write failed")))
+    monkeypatch.setattr(
+        sessions,
+        "add_message",
+        AsyncMock(spec=sessions.add_message, side_effect=SQLAlchemyError("audit write failed")),
+    )
 
     with pytest.raises(AuditIntegrityError, match="audit persistence failed before proposal creation"):
         await composer.compose(
@@ -850,10 +854,18 @@ async def test_invalid_server_recipe_falls_back_before_custody_without_side_effe
         inline_blob=InlineRecipeBlob(filename="rows.csv", mime_type="text/csv", content="name,description\na,hello"),
         slots={"output_path": "outputs/result.jsonl"},
     )
+    from elspeth.web.composer import service as composer_service
+
     monkeypatch.setattr("elspeth.web.composer.service.match_freeform_recipe_intent", lambda _message: invalid_match)
-    prepare = AsyncMock(side_effect=AssertionError("invalid recipe must not reach custody preparation"))
+    prepare = AsyncMock(
+        spec=composer_service.prepare_pipeline_plan,
+        side_effect=AssertionError("invalid recipe must not reach custody preparation"),
+    )
     monkeypatch.setattr("elspeth.web.composer.service.prepare_pipeline_plan", prepare)
-    fallback = AsyncMock(side_effect=PipelinePlannerError("fallback stopped", code="TEST_STOP"))
+    fallback = AsyncMock(
+        spec=composer_service.plan_pipeline,
+        side_effect=PipelinePlannerError("fallback stopped", code="TEST_STOP"),
+    )
     monkeypatch.setattr("elspeth.web.composer.service.plan_pipeline", fallback)
 
     with pytest.raises(PipelinePlannerError, match="fallback stopped"):
@@ -894,10 +906,15 @@ async def test_recipe_custody_failure_cannot_publish_reviewable_authority(
             "key_b": "path_b",
         },
     )
+    from elspeth.web.composer import pipeline_planner as pipeline_planner_module
+
     monkeypatch.setattr("elspeth.web.composer.service.match_freeform_recipe_intent", lambda _message: valid_match)
     monkeypatch.setattr(
         "elspeth.web.composer.pipeline_planner.finalize_pipeline_custody",
-        AsyncMock(side_effect=AuditIntegrityError("custody failed")),
+        AsyncMock(
+            spec=pipeline_planner_module.finalize_pipeline_custody,
+            side_effect=AuditIntegrityError("custody failed"),
+        ),
     )
 
     with pytest.raises(AuditIntegrityError, match="custody failed"):

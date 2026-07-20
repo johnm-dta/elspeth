@@ -10,8 +10,8 @@ from elspeth.web.sessions.routes._helpers import _state_from_record
 
 
 def test_guided_full_staging_has_dedicated_exact_command_and_settlement() -> None:
-    assert hasattr(protocol, "GuidedFullPipelineProposalStageCommand")
-    assert hasattr(protocol, "GuidedFullPipelineProposalStageSettlement")
+    assert protocol.GuidedFullPipelineProposalStageCommand is not None
+    assert protocol.GuidedFullPipelineProposalStageSettlement is not None
     assert "originating_message" in protocol.GuidedFullPipelineProposalStageCommand.__dataclass_fields__
     assert "checkpoint_state" in protocol.GuidedFullPipelineProposalStageSettlement.__dataclass_fields__
 

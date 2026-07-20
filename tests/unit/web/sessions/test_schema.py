@@ -268,7 +268,7 @@ def test_initialize_session_schema_rejects_epoch_32_database() -> None:
 
 
 def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with_recreate_guidance(tmp_path) -> None:
-    """The epoch-30 operation CHECKs cannot be opened by epoch-32 code."""
+    """The epoch-30 operation CHECKs cannot be opened by epoch-33 code."""
     db_path = tmp_path / "epoch-30-without-guided-plan.db"
     engine = create_session_engine(f"sqlite:///{db_path}")
     initialize_session_schema(engine)

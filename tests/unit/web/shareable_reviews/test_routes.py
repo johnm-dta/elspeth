@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,6 +24,7 @@ class _SessionRecord:
     id: UUID
     user_id: str
     auth_provider_type: str
+    archived_at: datetime | None = None
 
 
 @dataclass(slots=True)

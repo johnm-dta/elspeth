@@ -706,7 +706,11 @@ async def test_settlement_fault_rolls_back_every_surface_and_child_remains_takeo
             chat_updates += 1
         should_fail = (
             (fault_point == "state_replace" and normalized.startswith("delete from composition_states"))
-            or (fault_point == "message_repoint" and normalized.startswith("update chat_messages") and chat_updates == 2)
+            # Settlement now repoints the edited message with a single UPDATE
+            # (insert replacement state -> repoint -> delete staged state); the
+            # prior detach-to-NULL + repoint pair is gone, so the repoint is the
+            # first (and only) ``update chat_messages`` statement.
+            or (fault_point == "message_repoint" and normalized.startswith("update chat_messages") and chat_updates == 1)
             or (fault_point == "activation" and normalized.startswith("update sessions") and "archived_at" in normalized)
             or (fault_point == "operation_complete" and normalized.startswith("update guided_operations") and "status" in normalized)
         )

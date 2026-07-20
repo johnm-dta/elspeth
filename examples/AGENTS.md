@@ -24,7 +24,7 @@ These run immediately with no setup:
 | `statistical_batch_plugins` | 8 each | Statistical batch plugin examples; run one `settings_*.yaml` file at a time |
 | `boolean_routing` | 10 | True/false gate routing |
 | `checkpoint_resume` | 20 | Checkpoint/resume on interruption |
-| `database_sink` | 8 | SQLite database output |
+| `database_sink` | 8 (4 to DB) | SQLite database output — durable exactly-once sink; run via `./examples/database_sink/run.sh` (seeds the operator-owned target + `_elspeth_*` effect ledger first; a bare `elspeth run` fails preflight by design) |
 | `deaggregation` | 6 | Expanding aggregated rows (6→11 output) |
 | `deep_routing` | 20 | Multi-level cascading gates |
 | `error_routing` | 17 | Error-triggered routing paths |

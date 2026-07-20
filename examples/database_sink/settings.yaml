@@ -5,8 +5,10 @@
 #   source ─(validated)─> [value_gate] ─┬─ database (high-value deals)
 #                                        └─ standard.csv (everything else)
 #
-# The database sink creates the table automatically on first write.
-# Uses SQLite so no external database server is needed.
+# The database sink is a durable, exactly-once publisher: it appends to a target
+# table you own and fences each committed batch in a target-side `_elspeth_*`
+# effect ledger. Provision both up front with ./run.sh (which runs seed.py first)
+# — the runtime never issues DDL. Uses SQLite so no external server is needed.
 
 sources:
   primary:
@@ -47,7 +49,14 @@ sinks:
         - 'amount: int'
         - 'category: str'
         - 'region: str'
-      if_exists: replace
+      # Recoverable exactly-once publication: append to the operator-owned target
+      # table and record each committed batch in the target-side effect ledger.
+      # Both tables are provisioned up front by seed.py (run via ./run.sh).
+      if_exists: append
+      effect_ledger:
+        table: _elspeth_sink_effects
+        schema_version: 1
+        permissions: [select, insert]
   standard:
     plugin: csv
     on_write_failure: discard

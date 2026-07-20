@@ -93,15 +93,6 @@
               "item_schema": {
                 "fields": [
                   {
-                    "default": null,
-                    "description": "Schema configuration for data validation.",
-                    "kind": "json-value",
-                    "label": "Schema",
-                    "name": "schema",
-                    "nullable": true,
-                    "required": false
-                  },
-                  {
                     "description": "Column suffix in output row",
                     "kind": "text",
                     "label": "Suffix",
@@ -507,15 +498,6 @@
               "item_schema": {
                 "fields": [
                   {
-                    "default": null,
-                    "description": "Schema configuration for data validation.",
-                    "kind": "json-value",
-                    "label": "Schema",
-                    "name": "schema",
-                    "nullable": true,
-                    "required": false
-                  },
-                  {
                     "description": "Column suffix in output row",
                     "kind": "text",
                     "label": "Suffix",
@@ -909,15 +891,6 @@
               "description": "Typed structured-output field definitions (None = unstructured response).",
               "item_schema": {
                 "fields": [
-                  {
-                    "default": null,
-                    "description": "Schema configuration for data validation.",
-                    "kind": "json-value",
-                    "label": "Schema",
-                    "name": "schema",
-                    "nullable": true,
-                    "required": false
-                  },
                   {
                     "description": "Column suffix in output row",
                     "kind": "text",

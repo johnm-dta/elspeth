@@ -44,6 +44,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer import yaml_generator as real_yaml_generator
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
+from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
@@ -148,7 +149,7 @@ async def test_committed_profiled_multi_query_llm_passes_readiness_preflight(par
     loop = asyncio.get_running_loop()
     service = ExecutionServiceImpl(
         loop=loop,
-        broadcaster=MagicMock(),
+        broadcaster=MagicMock(spec=ProgressBroadcaster),
         settings=app_state.settings,
         session_service=session_service,
         yaml_generator=real_yaml_generator,

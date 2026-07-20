@@ -82,6 +82,7 @@
                 "type": "null"
               }
             ],
+            "composer_hidden": true,
             "default": null,
             "description": "Schema configuration for data validation.",
             "title": "Schema"

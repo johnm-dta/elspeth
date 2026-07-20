@@ -71,6 +71,12 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
+# Re-register the guided suite's restart-capable HTTP fixture for this package so
+# the deferred-intent negatives in ``test_repair_and_deferral.py`` can request it
+# (guided/'s conftest is a sibling scope and not inherited here). Importing it in
+# the test module instead would shadow the fixture parameter and trip ruff F811.
+from tests.integration.web.composer.guided.conftest import composer_test_client  # noqa: F401
+
 # --------------------------------------------------------------------------- #
 # Deterministic completion double (lifted from test_pipeline_planner.py)       #
 # --------------------------------------------------------------------------- #
@@ -533,8 +539,16 @@ class ParityEnv:
         options["on_write_failure"] = output_map.get(failure, failure)
         return options
 
-    async def drive_guided_staged(self, fixture: Mapping[str, Any]) -> CompositionState:
+    async def drive_guided_staged(self, fixture: Mapping[str, Any], *, start_profile: str | None = None) -> CompositionState:
         """Guided-staged: drive the persisted stage protocol to the sole commit.
+
+        ``start_profile`` (when given) explicitly opens the guided session with
+        that workflow profile via ``POST /guided/start`` before the first turn is
+        fetched — the tutorial-identity negative passes ``"tutorial"`` so the sole
+        planner call runs on the ``TUTORIAL_PROFILE`` surface with its frozen
+        lesson, while the reviewed components and the committed graph stay
+        identical to the ``live`` staged run. When ``None`` the first GET
+        implicitly opens a ``live`` session (the positive-matrix behaviour).
 
         ``/guided/start`` (implicit on first GET) → per-source review (single
         select → schema form → review) → finish sources → per-output review
@@ -567,6 +581,14 @@ class ParityEnv:
             if created.status_code != 201:
                 raise AssertionError(f"session create failed ({created.status_code}): {created.text}")
             session_id = created.json()["id"]
+
+            if start_profile is not None:
+                started = await client.post(
+                    f"/api/sessions/{session_id}/guided/start",
+                    json={"profile": start_profile, "operation_id": str(uuid4())},
+                )
+                if started.status_code != 200:
+                    raise AssertionError(f"guided-staged {start_profile} start failed ({started.status_code}): {started.text}")
 
             # Step 1 — review every source in canonical order.
             for index, (_name, spec) in enumerate(source_items):

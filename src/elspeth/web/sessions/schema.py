@@ -61,6 +61,12 @@ _SESSION_METADATA_CREATE_LOCK = Lock()
 # * ``trg_guided_operation_events_no_update`` / ``no_delete`` — lease,
 #   takeover, and settlement evidence is append-only; only the owning-session
 #   lifecycle cascade may remove it.
+# * ``trg_guided_operation_admission_blocks_no_update`` / ``no_delete`` — a
+#   negative admission decision is append-only; only the owning-session
+#   lifecycle cascade may remove it.
+# * the admission coexistence triggers reject either insertion order, plus an
+#   operation identity update, so a block and operation can never share one
+#   session-scoped operation id.
 #
 # The validator catches the case where schema bootstrap succeeded but the
 # trigger DDL failed silently (e.g., if the DDL event listener was removed
@@ -78,6 +84,11 @@ _REQUIRED_AUDIT_TRIGGERS: frozenset[str] = frozenset(
         "trg_guided_operations_terminal_immutable",
         "trg_guided_operation_events_no_update",
         "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
     }
 )
 
@@ -372,8 +383,15 @@ def _validate_required_triggers(bind: Engine | Connection) -> None:
                   'trg_guided_operation_events_no_update',
                   'trg_guided_operation_events_no_delete'
                 ))
+                OR (relation.relname = 'guided_operation_admission_blocks' AND trigger.tgname IN (
+                  'trg_guided_operation_admission_blocks_no_update',
+                  'trg_guided_operation_admission_blocks_no_delete',
+                  'trg_guided_operation_admission_blocks_reject_existing_operation'
+                ))
                 OR (relation.relname = 'guided_operations' AND trigger.tgname IN (
-                  'trg_guided_operations_terminal_immutable'
+                  'trg_guided_operations_terminal_immutable',
+                  'trg_guided_operations_reject_admission_block_insert',
+                  'trg_guided_operations_reject_admission_block_update'
                 ))
               )
             """

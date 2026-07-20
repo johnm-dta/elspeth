@@ -975,7 +975,6 @@ describe("api/client guided functions", () => {
 
   describe("reconcileGuidedStartOperation", () => {
     it.each([
-      [{ status: "absent" }],
       [{ status: "in_progress" }],
       [{ status: "failed", failure_code: "request_cancelled" }],
       [{ status: "completed", composition_state_id: "00000000-0000-4000-8000-000000000321" }],
@@ -999,6 +998,7 @@ describe("api/client guided functions", () => {
     });
 
     it.each([
+      { status: "absent" },
       { status: "unknown" },
       { status: "in_progress", lease_token: "must-not-cross" },
       { status: "failed", failure_code: "raw_provider_exception" },

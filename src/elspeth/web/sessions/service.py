@@ -107,6 +107,7 @@ from elspeth.web.sessions.models import (
     composer_completion_events_table,
     composition_proposals_table,
     composition_states_table,
+    guided_operation_admission_blocks_table,
     guided_operation_events_table,
     guided_operations_table,
     interpretation_events_table,
@@ -3320,6 +3321,65 @@ class SessionServiceImpl:
             SessionServiceImpl._validate_guided_terminal_bundle(row)
 
     @staticmethod
+    def _validate_guided_operation_admission_block_row(
+        row: RowMapping,
+        *,
+        expected_session_id: str,
+        expected_operation_id: str,
+    ) -> None:
+        """Validate one complete Tier-1 negative admission authority."""
+
+        if row["session_id"] != expected_session_id or row["operation_id"] != expected_operation_id:
+            raise AuditIntegrityError("Tier 1: guided operation admission block identity does not match its lookup key")
+        operation_id = row["operation_id"]
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise AuditIntegrityError("Tier 1: guided operation admission block operation_id is invalid")
+        if row["kind"] != "guided_start":
+            raise AuditIntegrityError("Tier 1: guided operation admission block kind is invalid")
+        if row["failure_code"] != "request_cancelled":
+            raise AuditIntegrityError("Tier 1: guided operation admission block failure code is invalid")
+        try:
+            SessionServiceImpl._validate_guided_actor(row["actor"])
+        except ValueError as exc:
+            raise AuditIntegrityError("Tier 1: guided operation admission block actor is invalid") from exc
+        if not isinstance(row["created_at"], datetime):
+            raise AuditIntegrityError("Tier 1: guided operation admission block timestamp is invalid")
+        SessionServiceImpl._ensure_utc(row["created_at"])
+
+    @staticmethod
+    def _read_guided_operation_authority(
+        conn: Connection,
+        *,
+        session_id: str,
+        operation_id: str,
+    ) -> tuple[RowMapping | None, RowMapping | None]:
+        """Read the mutually exclusive positive and negative authorities."""
+
+        operation = (
+            conn.execute(
+                select(guided_operations_table).where(
+                    guided_operations_table.c.session_id == session_id,
+                    guided_operations_table.c.operation_id == operation_id,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        block = (
+            conn.execute(
+                select(guided_operation_admission_blocks_table).where(
+                    guided_operation_admission_blocks_table.c.session_id == session_id,
+                    guided_operation_admission_blocks_table.c.operation_id == operation_id,
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if operation is not None and block is not None:
+            raise AuditIntegrityError("Tier 1: guided operation and admission block coexist")
+        return operation, block
+
+    @staticmethod
     def _guided_in_progress_expiry(row: RowMapping) -> datetime:
         lease_token = row["lease_token"]
         lease_expires_at = row["lease_expires_at"]
@@ -3446,16 +3506,20 @@ class SessionServiceImpl:
         def _sync() -> GuidedOperationOutcome:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 now = self._guided_database_now(conn)
-                row = (
-                    conn.execute(
-                        select(guided_operations_table).where(
-                            guided_operations_table.c.session_id == sid,
-                            guided_operations_table.c.operation_id == operation_id,
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
+                row, block = self._read_guided_operation_authority(
+                    conn,
+                    session_id=sid,
+                    operation_id=operation_id,
                 )
+                if block is not None:
+                    self._validate_guided_operation_admission_block_row(
+                        block,
+                        expected_session_id=sid,
+                        expected_operation_id=operation_id,
+                    )
+                    if kind != "guided_start":
+                        raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
+                    return GuidedOperationFailed(failure_code="request_cancelled")
                 lease_expires_at = now + timedelta(seconds=lease_seconds)
                 if row is None:
                     parent = conn.execute(
@@ -3576,16 +3640,20 @@ class SessionServiceImpl:
         def _sync() -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
             with self._engine.connect() as conn:
                 now = self._guided_database_now(conn)
-                row = (
-                    conn.execute(
-                        select(guided_operations_table).where(
-                            guided_operations_table.c.session_id == sid,
-                            guided_operations_table.c.operation_id == operation_id,
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
+                row, block = self._read_guided_operation_authority(
+                    conn,
+                    session_id=sid,
+                    operation_id=operation_id,
                 )
+            if block is not None:
+                self._validate_guided_operation_admission_block_row(
+                    block,
+                    expected_session_id=sid,
+                    expected_operation_id=operation_id,
+                )
+                if kind != "guided_start":
+                    raise self._guided_conflict(session_id=session_id, operation_id=operation_id)
+                return GuidedOperationFailed(failure_code="request_cancelled")
             if row is None:
                 return None
             self._validate_guided_operation_row(
@@ -3616,28 +3684,45 @@ class SessionServiceImpl:
         session_id: UUID,
         operation_id: str,
         actor: str,
-    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed:
         """Read one guided-start outcome, abandoning an expired exact attempt."""
         if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
             raise ValueError("guided operation id must be a non-empty string of at most 128 characters")
         self._validate_guided_actor(actor)
         sid = str(session_id)
 
-        def _sync() -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None:
+        def _sync() -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 now = self._guided_database_now(conn)
-                row = (
-                    conn.execute(
-                        select(guided_operations_table).where(
-                            guided_operations_table.c.session_id == sid,
-                            guided_operations_table.c.operation_id == operation_id,
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
+                row, block = self._read_guided_operation_authority(
+                    conn,
+                    session_id=sid,
+                    operation_id=operation_id,
                 )
                 if row is None:
-                    return None
+                    if block is not None:
+                        self._validate_guided_operation_admission_block_row(
+                            block,
+                            expected_session_id=sid,
+                            expected_operation_id=operation_id,
+                        )
+                        return GuidedOperationFailed(failure_code="request_cancelled")
+                    parent = conn.execute(
+                        select(sessions_table.c.id, sessions_table.c.archived_at).where(sessions_table.c.id == sid)
+                    ).one_or_none()
+                    if parent is None or parent.archived_at is not None:
+                        raise SessionNotFoundError(session_id)
+                    conn.execute(
+                        insert(guided_operation_admission_blocks_table).values(
+                            session_id=sid,
+                            operation_id=operation_id,
+                            kind="guided_start",
+                            failure_code="request_cancelled",
+                            actor=actor,
+                            created_at=now,
+                        )
+                    )
+                    return GuidedOperationFailed(failure_code="request_cancelled")
                 self._validate_guided_operation_row(
                     row,
                     expected_session_id=sid,
@@ -3700,7 +3785,7 @@ class SessionServiceImpl:
                 return GuidedOperationFailed(failure_code="request_cancelled")
 
         return cast(
-            "GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None",
+            "GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed",
             await self._run_sync(_sync),
         )
 

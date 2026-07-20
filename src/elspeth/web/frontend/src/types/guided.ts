@@ -171,7 +171,6 @@ export type GuidedOperationFailureCode =
   | "request_cancelled";
 
 export type GuidedStartOperationReconciliation =
-  | { status: "absent" }
   | { status: "in_progress" }
   | { status: "failed"; failure_code: GuidedOperationFailureCode }
   | { status: "completed"; composition_state_id: string };

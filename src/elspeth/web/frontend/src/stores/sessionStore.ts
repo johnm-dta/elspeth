@@ -92,7 +92,7 @@ async function reconcileGuidedStartRetry(
     return "unknown";
   }
 
-  if (reconciliation.status === "absent" || reconciliation.status === "failed") {
+  if (reconciliation.status === "failed") {
     clearGuidedRetry(retry);
     return "cleared";
   }

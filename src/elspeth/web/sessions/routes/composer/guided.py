@@ -72,7 +72,6 @@ from elspeth.web.sessions.schemas import (
     ConvertGuidedRequest,
     EditComponentAction,
     FinishComponentsAction,
-    GuidedStartOperationAbsentResponse,
     GuidedStartOperationCompletedResponse,
     GuidedStartOperationFailedResponse,
     GuidedStartOperationInProgressResponse,
@@ -1294,8 +1293,6 @@ async def reconcile_guided_start_operation(
             detail="Operation id is already bound to a different guided action.",
         ) from exc
 
-    if outcome is None:
-        return GuidedStartOperationAbsentResponse(status="absent")
     if type(outcome) is GuidedOperationActive:
         return GuidedStartOperationInProgressResponse(status="in_progress")
     if type(outcome) is GuidedOperationFailed:

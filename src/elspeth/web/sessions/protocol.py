@@ -2062,7 +2062,7 @@ class SessionServiceProtocol(Protocol):
         session_id: UUID,
         operation_id: str,
         actor: str,
-    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed | None: ...
+    ) -> GuidedOperationActive | GuidedOperationCompleted | GuidedOperationFailed: ...
 
     async def renew_guided_operation(
         self,

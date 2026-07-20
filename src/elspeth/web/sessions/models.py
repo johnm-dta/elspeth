@@ -156,7 +156,10 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #   32 -> every failed guided-operation event commits the exact ordered audit
 #        evidence cohort. Epoch 31 is rejected outright; no decoder, backfill,
 #        or migration exists.
-SESSION_SCHEMA_EPOCH = 32
+#   33 -> guided-start reconciliation gains a durable append-only negative
+#        admission barrier. Epoch 32 cannot represent a cancelled operation id
+#        before reservation and is rejected outright; no migration exists.
+SESSION_SCHEMA_EPOCH = 33
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -626,6 +629,42 @@ def _lower_sha256_check(column_name: str, *, dialect: Literal["sqlite", "postgre
     if dialect == "sqlite":
         return f"{base} AND {column_name} NOT GLOB '*[^a-f0-9]*'"
     return f"{base} AND {column_name} ~ '^[a-f0-9]+$'"
+
+
+# Durable negative admission authority for a guided start whose client lost
+# its request body before the server ever reserved an operation row. The row
+# deliberately carries no request hash or raw intent: an exact operation id is
+# permanently closed as request_cancelled, independent of any later payload.
+guided_operation_admission_blocks_table = Table(
+    "guided_operation_admission_blocks",
+    metadata,
+    Column("session_id", String(128), nullable=False),
+    Column("operation_id", String(128), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("failure_code", String(128), nullable=False),
+    Column("actor", String(128), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("session_id", "operation_id", name="pk_guided_operation_admission_blocks"),
+    ForeignKeyConstraint(
+        ["session_id"],
+        ["sessions.id"],
+        name="fk_guided_operation_admission_blocks_session",
+        ondelete="CASCADE",
+    ),
+    CheckConstraint(
+        "length(operation_id) >= 1 AND length(operation_id) <= 128",
+        name="ck_guided_operation_admission_blocks_operation_id_bounded",
+    ),
+    CheckConstraint("kind = 'guided_start'", name="ck_guided_operation_admission_blocks_kind"),
+    CheckConstraint(
+        "failure_code = 'request_cancelled'",
+        name="ck_guided_operation_admission_blocks_failure_code",
+    ),
+    CheckConstraint(
+        "length(actor) >= 1 AND length(actor) <= 128",
+        name="ck_guided_operation_admission_blocks_actor_bounded",
+    ),
+)
 
 
 # One bounded reservation row per client-authored mutating action. Raw request
@@ -1408,6 +1447,132 @@ POSTGRESQL_AUDIT_DDL_COHORT: tuple[PostgresqlAuditDDL, ...] = (
         ),
     ),
     PostgresqlAuditDDL(
+        table=guided_operation_admission_blocks_table,
+        trigger_name="trg_guided_operation_admission_blocks_no_update",
+        function_name="elspeth_guided_operation_admission_blocks_no_update",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operation_admission_blocks_no_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          RAISE EXCEPTION 'guided_operation_admission_blocks is append-only; UPDATE is forbidden'
+            USING ERRCODE = '23000';
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operation_admission_blocks_no_update "
+            "BEFORE UPDATE ON guided_operation_admission_blocks "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operation_admission_blocks_no_update()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=guided_operation_admission_blocks_table,
+        trigger_name="trg_guided_operation_admission_blocks_no_delete",
+        function_name="elspeth_guided_operation_admission_blocks_no_delete",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operation_admission_blocks_no_delete()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) THEN
+            RAISE EXCEPTION 'guided_operation_admission_blocks is append-only; DELETE is forbidden'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN OLD;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operation_admission_blocks_no_delete "
+            "BEFORE DELETE ON guided_operation_admission_blocks "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operation_admission_blocks_no_delete()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=guided_operations_table,
+        trigger_name="trg_guided_operation_admission_blocks_reject_existing_operation",
+        function_name="elspeth_guided_operation_admission_blocks_reject_existing_operation",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operation_admission_blocks_reject_existing_operation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM guided_operations
+            WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id
+          ) THEN
+            RAISE EXCEPTION 'guided operation admission block cannot shadow an existing operation'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operation_admission_blocks_reject_existing_operation "
+            "BEFORE INSERT ON guided_operation_admission_blocks "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operation_admission_blocks_reject_existing_operation()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=guided_operations_table,
+        trigger_name="trg_guided_operations_reject_admission_block_insert",
+        function_name="elspeth_guided_operations_reject_admission_block",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operations_reject_admission_block()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM guided_operation_admission_blocks
+            WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id
+          ) THEN
+            RAISE EXCEPTION 'guided operation is closed by an admission block'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operations_reject_admission_block_insert "
+            "BEFORE INSERT ON guided_operations "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operations_reject_admission_block()"
+        ),
+    ),
+    PostgresqlAuditDDL(
+        table=guided_operations_table,
+        trigger_name="trg_guided_operations_reject_admission_block_update",
+        function_name="elspeth_guided_operations_reject_admission_block_update",
+        function_sql="""
+        CREATE FUNCTION elspeth_guided_operations_reject_admission_block_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM guided_operation_admission_blocks
+            WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id
+          ) THEN
+            RAISE EXCEPTION 'guided operation is closed by an admission block'
+              USING ERRCODE = '23000';
+          END IF;
+          RETURN NEW;
+        END;
+        $$
+        """,
+        trigger_sql=(
+            "CREATE TRIGGER trg_guided_operations_reject_admission_block_update "
+            "BEFORE UPDATE ON guided_operations "
+            "FOR EACH ROW EXECUTE FUNCTION elspeth_guided_operations_reject_admission_block_update()"
+        ),
+    ),
+    PostgresqlAuditDDL(
         table=guided_operation_events_table,
         trigger_name="trg_guided_operation_events_no_update",
         function_name="elspeth_guided_operation_events_no_update",
@@ -1594,6 +1759,83 @@ event.listen(
         "WHEN OLD.status IN ('completed', 'failed') "
         "BEGIN "
         "  SELECT RAISE(ABORT, 'guided_operations terminal rows are immutable'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operation_admission_blocks_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operation_admission_blocks_no_update "
+        "BEFORE UPDATE ON guided_operation_admission_blocks "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided_operation_admission_blocks is append-only; UPDATE is forbidden'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operation_admission_blocks_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operation_admission_blocks_no_delete "
+        "BEFORE DELETE ON guided_operation_admission_blocks "
+        "FOR EACH ROW "
+        "WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id) "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided_operation_admission_blocks is append-only; DELETE is forbidden'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operations_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operation_admission_blocks_reject_existing_operation "
+        "BEFORE INSERT ON guided_operation_admission_blocks "
+        "FOR EACH ROW "
+        "WHEN EXISTS ("
+        "  SELECT 1 FROM guided_operations "
+        "  WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id"
+        ") "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided operation admission block cannot shadow an existing operation'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operations_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operations_reject_admission_block_insert "
+        "BEFORE INSERT ON guided_operations "
+        "FOR EACH ROW "
+        "WHEN EXISTS ("
+        "  SELECT 1 FROM guided_operation_admission_blocks "
+        "  WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id"
+        ") "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided operation is closed by an admission block'); "
+        "END;"
+    ).execute_if(dialect="sqlite"),
+)
+
+event.listen(
+    guided_operations_table,
+    "after_create",
+    DDL(  # type: ignore[no-untyped-call]
+        "CREATE TRIGGER IF NOT EXISTS trg_guided_operations_reject_admission_block_update "
+        "BEFORE UPDATE ON guided_operations "
+        "FOR EACH ROW "
+        "WHEN EXISTS ("
+        "  SELECT 1 FROM guided_operation_admission_blocks "
+        "  WHERE session_id = NEW.session_id AND operation_id = NEW.operation_id"
+        ") "
+        "BEGIN "
+        "  SELECT RAISE(ABORT, 'guided operation is closed by an admission block'); "
         "END;"
     ).execute_if(dialect="sqlite"),
 )

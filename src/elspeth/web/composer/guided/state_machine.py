@@ -48,7 +48,7 @@ from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase, Prop
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
 # Schema 9 is a pre-release hard cut. There is no older-schema decoder or
-# converter: session epoch 32 owns the current store recreation boundary.
+# converter: session epoch 33 owns the current store recreation boundary.
 GUIDED_SESSION_SCHEMA_VERSION = 9
 GUIDED_MAX_DEFERRED_INTENTS = 256
 GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64

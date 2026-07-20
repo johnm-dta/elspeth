@@ -1616,9 +1616,6 @@ export function decodeGuidedStartOperationReconciliation(
   const base = record(value, "response");
   const status = stringValue(base.status, "response.status");
   switch (status) {
-    case "absent":
-      exactRecord(value, "response", ["status"]);
-      return { status };
     case "in_progress":
       exactRecord(value, "response", ["status"]);
       return { status };

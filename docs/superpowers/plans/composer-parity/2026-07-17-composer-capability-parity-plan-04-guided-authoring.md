@@ -514,7 +514,7 @@ whitelists, release signatures, or artifact manifests.
 
 ## Task 5: Add the production guided-full endpoint and make staged start authoritative
 
-Task 5 advances the session store to epoch 32 so failed guided operations can
+Task 5 advances the session store to epoch 33 so failed guided operations can
 commit to their exact ordered audit-evidence cohort. Epoch 31 is rejected at
 startup; there is no migration or fallback. The guided checkpoint schema stays
 at 9. Cold-start cancellation recovery uses an authenticated operation
@@ -751,5 +751,5 @@ reconciliation command and never persists raw intent in browser retry storage.
   final acceptance consumes them.
 - A guided proposal remains pending through arbitrary-DAG wire review;
   corrections supersede it immutably; Confirm Wiring is the sole commit point.
-- Guided schema 9 / session epoch 32 is a hard cut with no schema-8,
+- Guided schema 9 / session epoch 33 is a hard cut with no schema-8,
   epoch-31, migration, or compatibility path.

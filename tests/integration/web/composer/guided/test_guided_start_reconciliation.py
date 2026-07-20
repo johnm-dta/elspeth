@@ -6,8 +6,16 @@ import asyncio
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
+from sqlalchemy import func, select
 
 from elspeth.web.auth.middleware import get_current_user
+from elspeth.web.sessions.models import (
+    chat_messages_table,
+    composition_states_table,
+    guided_operation_admission_blocks_table,
+    guided_operation_events_table,
+    guided_operations_table,
+)
 from elspeth.web.sessions.protocol import GuidedOperationClaimed
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -22,13 +30,31 @@ def _reconcile(client: TestClient, session_id: str, operation_id: str):
     return client.post(f"/api/sessions/{session_id}/guided/start/{operation_id}/reconcile")
 
 
-def test_reconciliation_reports_absent_with_exact_non_sensitive_shape(composer_test_client: TestClient) -> None:
+def test_reconciliation_seals_absent_operation_with_exact_non_sensitive_shape(composer_test_client: TestClient) -> None:
     session_id = _create_session(composer_test_client)
+    operation_id = str(uuid4())
 
-    response = _reconcile(composer_test_client, session_id, str(uuid4()))
+    response = _reconcile(composer_test_client, session_id, operation_id)
+    repeated = _reconcile(composer_test_client, session_id, operation_id)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "absent"}
+    assert response.json() == repeated.json() == {"status": "failed", "failure_code": "request_cancelled"}
+    assert set(response.json()) == {"status", "failure_code"}
+
+    late_original = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={"profile": "live", "intent": "Original private intent", "operation_id": operation_id},
+    )
+    assert late_original.status_code == 499
+    assert late_original.json()["detail"]["failure_code"] == "request_cancelled"
+
+    engine = composer_test_client.app.state.session_engine
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(guided_operation_admission_blocks_table)) == 1
+        assert connection.scalar(select(func.count()).select_from(guided_operations_table)) == 0
+        assert connection.scalar(select(func.count()).select_from(guided_operation_events_table)) == 0
+        assert connection.scalar(select(func.count()).select_from(chat_messages_table)) == 0
+        assert connection.scalar(select(func.count()).select_from(composition_states_table)) == 0
 
 
 def test_reconciliation_reports_unexpired_without_exposing_operation_custody(composer_test_client: TestClient) -> None:

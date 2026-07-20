@@ -518,10 +518,6 @@ class GetGuidedResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
-class GuidedStartOperationAbsentResponse(_StrictResponse):
-    status: Literal["absent"]
-
-
 class GuidedStartOperationInProgressResponse(_StrictResponse):
     status: Literal["in_progress"]
 
@@ -537,10 +533,7 @@ class GuidedStartOperationCompletedResponse(_StrictResponse):
 
 
 GuidedStartOperationReconciliationResponse = Annotated[
-    GuidedStartOperationAbsentResponse
-    | GuidedStartOperationInProgressResponse
-    | GuidedStartOperationFailedResponse
-    | GuidedStartOperationCompletedResponse,
+    GuidedStartOperationInProgressResponse | GuidedStartOperationFailedResponse | GuidedStartOperationCompletedResponse,
     Field(discriminator="status"),
 ]
 

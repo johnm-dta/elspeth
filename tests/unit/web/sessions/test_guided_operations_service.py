@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 import pytest
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
@@ -28,6 +28,7 @@ from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_proposals_table,
     composition_states_table,
+    guided_operation_admission_blocks_table,
     guided_operation_events_table,
     guided_operations_table,
     sessions_table,
@@ -1065,20 +1066,116 @@ async def test_live_renewal_uses_same_fence_and_appends_evidence(file_engine) ->
 
 
 @pytest.mark.asyncio
-async def test_reconcile_guided_start_reports_absent_without_creating_operation(file_engine) -> None:
+async def test_reconcile_guided_start_seals_absent_operation_as_request_cancelled(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
+    operation_id = "missing-guided-start"
 
-    outcome = await service.reconcile_guided_start_operation(
+    first = await service.reconcile_guided_start_operation(
         session_id=session_id,
-        operation_id="missing-guided-start",
+        operation_id=operation_id,
         actor="reconciler",
     )
+    second = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        actor="different-reconciler",
+    )
 
-    assert outcome is None
+    assert first == second == GuidedOperationFailed(failure_code="request_cancelled")
     with file_engine.connect() as conn:
         assert conn.execute(select(guided_operations_table)).all() == []
         assert conn.execute(select(guided_operation_events_table)).all() == []
+        block = conn.execute(select(guided_operation_admission_blocks_table)).one()
+    assert block.session_id == str(session_id)
+    assert block.operation_id == operation_id
+    assert block.kind == "guided_start"
+    assert block.failure_code == "request_cancelled"
+    assert block.actor == "reconciler"
+    assert isinstance(block.created_at, datetime)
+
+
+@pytest.mark.asyncio
+async def test_blocked_guided_start_reservation_replays_cancellation_without_request_binding(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    operation_id = "blocked-guided-start"
+    blocked = await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        actor="reconciler",
+    )
+
+    original = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="1" * 64,
+        actor="original-worker",
+        lease_seconds=30,
+    )
+    changed_payload = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="2" * 64,
+        actor="late-worker",
+        lease_seconds=30,
+    )
+
+    assert blocked == original == changed_payload == GuidedOperationFailed(failure_code="request_cancelled")
+    with file_engine.connect() as conn:
+        assert conn.execute(select(guided_operations_table)).all() == []
+        assert conn.execute(select(guided_operation_events_table)).all() == []
+
+
+@pytest.mark.asyncio
+async def test_blocked_guided_start_lookup_replays_cancellation_without_request_binding(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    operation_id = "blocked-guided-start-lookup"
+    await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        actor="reconciler",
+    )
+
+    first = await service.get_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="1" * 64,
+    )
+    changed_payload = await service.get_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash="2" * 64,
+    )
+
+    assert first == changed_payload == GuidedOperationFailed(failure_code="request_cancelled")
+
+
+@pytest.mark.asyncio
+async def test_admission_block_rejects_reservation_as_another_guided_kind(file_engine) -> None:
+    service = _service(file_engine)
+    session_id = await _create_session(service)
+    operation_id = "blocked-wrong-kind"
+    await service.reconcile_guided_start_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        actor="reconciler",
+    )
+
+    with pytest.raises(GuidedOperationConflictError):
+        await service.reserve_guided_operation(
+            session_id=session_id,
+            operation_id=operation_id,
+            kind="guided_chat",
+            request_hash="3" * 64,
+            actor="chat-worker",
+            lease_seconds=30,
+        )
 
 
 @pytest.mark.asyncio
@@ -1437,6 +1534,155 @@ async def test_expired_guided_start_reconciliation_race_rejects_stale_completion
             .order_by(guided_operation_events_table.c.sequence)
         ).all()
     assert [event.event_kind for event in events] == ["claimed", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_absent_reconciliation_race_with_original_reservation_has_one_admission_authority(
+    durable_engine,
+) -> None:
+    reconcile_service = _service(durable_engine)
+    original_service = _service(durable_engine)
+    session_id = await _create_session(reconcile_service)
+    operation_id = f"absent-original-race-{uuid4()}"
+    barrier = threading.Barrier(2)
+
+    def reconcile():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            reconcile_service.reconcile_guided_start_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                actor="reconciler",
+            )
+        )
+
+    def reserve_original():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            original_service.reserve_guided_operation(
+                session_id=session_id,
+                operation_id=operation_id,
+                kind="guided_start",
+                request_hash="a" * 64,
+                actor="original-worker",
+                lease_seconds=30,
+            )
+        )
+
+    reconciled, reserved = await asyncio.gather(
+        asyncio.to_thread(reconcile),
+        asyncio.to_thread(reserve_original),
+    )
+
+    with durable_engine.connect() as conn:
+        block_count = conn.scalar(
+            select(func.count())
+            .select_from(guided_operation_admission_blocks_table)
+            .where(
+                guided_operation_admission_blocks_table.c.session_id == str(session_id),
+                guided_operation_admission_blocks_table.c.operation_id == operation_id,
+            )
+        )
+        operation_count = conn.scalar(
+            select(func.count())
+            .select_from(guided_operations_table)
+            .where(
+                guided_operations_table.c.session_id == str(session_id),
+                guided_operations_table.c.operation_id == operation_id,
+            )
+        )
+        events = conn.execute(
+            select(guided_operation_events_table).where(
+                guided_operation_events_table.c.session_id == str(session_id),
+                guided_operation_events_table.c.operation_id == operation_id,
+            )
+        ).all()
+
+    assert block_count + operation_count == 1
+    if isinstance(reserved, GuidedOperationClaimed):
+        assert isinstance(reconciled, GuidedOperationActive)
+        assert (block_count, operation_count) == (0, 1)
+        assert [event.event_kind for event in events] == ["claimed"]
+    else:
+        assert reconciled == reserved == GuidedOperationFailed(failure_code="request_cancelled")
+        assert (block_count, operation_count) == (1, 0)
+        assert events == []
+
+
+@pytest.mark.asyncio
+async def test_absent_reconciliation_race_with_revised_start_leaves_only_revised_operation_admitted(
+    durable_engine,
+) -> None:
+    reconcile_service = _service(durable_engine)
+    revised_service = _service(durable_engine)
+    session_id = await _create_session(reconcile_service)
+    old_operation_id = f"old-start-{uuid4()}"
+    revised_operation_id = f"revised-start-{uuid4()}"
+    barrier = threading.Barrier(2)
+
+    def block_old():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            reconcile_service.reconcile_guided_start_operation(
+                session_id=session_id,
+                operation_id=old_operation_id,
+                actor="reconciler",
+            )
+        )
+
+    def reserve_revised():
+        barrier.wait(timeout=5)
+        return asyncio.run(
+            revised_service.reserve_guided_operation(
+                session_id=session_id,
+                operation_id=revised_operation_id,
+                kind="guided_start",
+                request_hash="b" * 64,
+                actor="revised-worker",
+                lease_seconds=30,
+            )
+        )
+
+    blocked, revised = await asyncio.gather(
+        asyncio.to_thread(block_old),
+        asyncio.to_thread(reserve_revised),
+    )
+    late_original = await revised_service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=old_operation_id,
+        kind="guided_start",
+        request_hash="c" * 64,
+        actor="late-original-worker",
+        lease_seconds=30,
+    )
+
+    assert blocked == late_original == GuidedOperationFailed(failure_code="request_cancelled")
+    assert isinstance(revised, GuidedOperationClaimed)
+    with durable_engine.connect() as conn:
+        blocks = (
+            conn.execute(
+                select(guided_operation_admission_blocks_table.c.operation_id).where(
+                    guided_operation_admission_blocks_table.c.session_id == str(session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        operations = (
+            conn.execute(select(guided_operations_table.c.operation_id).where(guided_operations_table.c.session_id == str(session_id)))
+            .scalars()
+            .all()
+        )
+        events = (
+            conn.execute(
+                select(guided_operation_events_table.c.operation_id).where(guided_operation_events_table.c.session_id == str(session_id))
+            )
+            .scalars()
+            .all()
+        )
+    assert blocks == [old_operation_id]
+    assert operations == [revised_operation_id]
+    assert events == [revised_operation_id]
 
 
 @pytest.mark.asyncio

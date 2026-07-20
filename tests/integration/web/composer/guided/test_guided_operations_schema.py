@@ -11,6 +11,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_proposals_table,
     composition_states_table,
+    guided_operation_admission_blocks_table,
     guided_operation_events_table,
     guided_operations_table,
     metadata,
@@ -140,8 +141,25 @@ def _event(**overrides: object) -> dict[str, object]:
     return values
 
 
+def _admission_block(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "session_id": SESSION_ID,
+        "operation_id": OPERATION_ID,
+        "kind": "guided_start",
+        "failure_code": "request_cancelled",
+        "actor": "reconciler",
+        "created_at": NOW,
+    }
+    values.update(overrides)
+    return values
+
+
 def test_tables_and_composite_keys_are_current(engine) -> None:
-    assert {"guided_operations", "guided_operation_events"} <= set(metadata.tables)
+    assert {
+        "guided_operations",
+        "guided_operation_events",
+        "guided_operation_admission_blocks",
+    } <= set(metadata.tables)
     inspector = inspect(engine)
     assert inspector.get_pk_constraint("guided_operations")["constrained_columns"] == ["session_id", "operation_id"]
     assert inspector.get_pk_constraint("guided_operation_events")["constrained_columns"] == [
@@ -149,6 +167,18 @@ def test_tables_and_composite_keys_are_current(engine) -> None:
         "operation_id",
         "sequence",
     ]
+    assert inspector.get_pk_constraint("guided_operation_admission_blocks")["constrained_columns"] == [
+        "session_id",
+        "operation_id",
+    ]
+    assert {column["name"] for column in inspector.get_columns("guided_operation_admission_blocks")} == {
+        "session_id",
+        "operation_id",
+        "kind",
+        "failure_code",
+        "actor",
+        "created_at",
+    }
     assert "failure_audit_cohort" in {column["name"] for column in inspector.get_columns("guided_operation_events")}
 
 
@@ -165,6 +195,61 @@ def test_failure_event_commitment_presence_is_exact(engine, event: dict[str, obj
         connection.execute(insert(guided_operations_table).values(**_operation()))
     with pytest.raises(IntegrityError, match="ck_guided_operation_events_failure_audit_cohort"), engine.begin() as connection:
         connection.execute(insert(guided_operation_events_table).values(**event))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"operation_id": ""},
+        {"kind": "guided_chat"},
+        {"failure_code": "operation_failed"},
+        {"actor": ""},
+    ],
+    ids=["empty-operation-id", "wrong-kind", "wrong-failure-code", "empty-actor"],
+)
+def test_admission_block_has_a_closed_non_sensitive_shape(engine, overrides: dict[str, object]) -> None:
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(insert(guided_operation_admission_blocks_table).values(**_admission_block(**overrides)))
+
+
+def test_admission_block_and_operation_cannot_coexist_in_either_insert_order(engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operation_admission_blocks_table).values(**_admission_block()))
+    with pytest.raises(IntegrityError, match="admission"), engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation()))
+
+    other_operation_id = "00000000-0000-4000-8000-000000000012"
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operations_table).values(**_operation(operation_id=other_operation_id)))
+    with pytest.raises(IntegrityError, match="admission"), engine.begin() as connection:
+        connection.execute(insert(guided_operation_admission_blocks_table).values(**_admission_block(operation_id=other_operation_id)))
+
+
+def test_operation_cannot_be_rekeyed_onto_an_admission_block(engine) -> None:
+    other_operation_id = "00000000-0000-4000-8000-000000000012"
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operation_admission_blocks_table).values(**_admission_block()))
+        connection.execute(insert(guided_operations_table).values(**_operation(operation_id=other_operation_id)))
+    with pytest.raises(IntegrityError, match="admission"), engine.begin() as connection:
+        connection.execute(
+            update(guided_operations_table)
+            .where(guided_operations_table.c.operation_id == other_operation_id)
+            .values(operation_id=OPERATION_ID)
+        )
+
+
+def test_admission_blocks_are_append_only_but_whole_session_cascade_is_allowed(engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(insert(guided_operation_admission_blocks_table).values(**_admission_block()))
+
+    with pytest.raises(IntegrityError, match="append-only"), engine.begin() as connection:
+        connection.execute(update(guided_operation_admission_blocks_table).values(actor="tampered"))
+    with pytest.raises(IntegrityError, match="append-only"), engine.begin() as connection:
+        connection.execute(delete(guided_operation_admission_blocks_table))
+
+    with engine.begin() as connection:
+        connection.execute(delete(sessions_table).where(sessions_table.c.id == SESSION_ID))
+        assert connection.execute(text("SELECT count(*) FROM guided_operation_admission_blocks")).scalar_one() == 0
 
 
 def test_failed_event_accepts_exact_empty_commitment_storage_shape(engine) -> None:
@@ -567,6 +652,11 @@ def test_event_constraints_and_same_operation_fk(engine, invalid: dict[str, obje
         "trg_guided_operations_terminal_immutable",
         "trg_guided_operation_events_no_update",
         "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
     ],
 )
 def test_startup_probe_rejects_missing_required_trigger(engine, trigger: str) -> None:
@@ -579,7 +669,9 @@ def test_startup_probe_rejects_missing_required_trigger(engine, trigger: str) ->
 def test_schema_has_no_raw_request_or_lease_token_event_columns(engine) -> None:
     operation_columns = {column["name"] for column in inspect(engine).get_columns("guided_operations")}
     event_columns = {column["name"] for column in inspect(engine).get_columns("guided_operation_events")}
+    block_columns = {column["name"] for column in inspect(engine).get_columns("guided_operation_admission_blocks")}
     assert "result_locator_json" not in operation_columns
     assert "result_kind" in operation_columns
     assert {"raw_body", "raw_intent", "provider_error"}.isdisjoint(operation_columns)
     assert {"lease_token", "raw_body", "raw_intent", "provider_error"}.isdisjoint(event_columns)
+    assert {"request_hash", "lease_token", "raw_body", "raw_intent", "provider_error", "secret"}.isdisjoint(block_columns)

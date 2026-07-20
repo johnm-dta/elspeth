@@ -12,10 +12,22 @@ from typing import Any
 import pytest
 
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.plugins.transforms.llm.multi_query import QueryDefinition
 from elspeth.plugins.transforms.llm.transform import LLMTransform
 
 # Re-export chaosllm_server fixture for field collision tests
 from tests.fixtures.chaosllm import chaosllm_server  # noqa: F401
+
+
+def _mapping_defs(defs: dict[str, dict[str, Any]]) -> dict[str, QueryDefinition]:
+    """Build the typed mapping form of ``queries`` (value carries no ``name``)."""
+    return {name: QueryDefinition(**spec) for name, spec in defs.items()}
+
+
+def _list_defs(items: list[dict[str, Any]]) -> list[QueryDefinition]:
+    """Build the typed list form of ``queries`` (each entry carries ``name``)."""
+    return [QueryDefinition(**item) for item in items]
+
 
 # ---------------------------------------------------------------------------
 # Config helpers (inline, using the new unified format)
@@ -216,16 +228,18 @@ class TestResolveQueriesDuplicateNames:
 
         with pytest.raises(ValueError, match="Duplicate query name"):
             resolve_queries(
-                [
-                    {
-                        "name": "diagnosis",
-                        "input_fields": {"text": "col_a"},
-                    },
-                    {
-                        "name": "diagnosis",
-                        "input_fields": {"text": "col_b"},
-                    },
-                ]
+                _list_defs(
+                    [
+                        {
+                            "name": "diagnosis",
+                            "input_fields": {"text": "col_a"},
+                        },
+                        {
+                            "name": "diagnosis",
+                            "input_fields": {"text": "col_b"},
+                        },
+                    ]
+                )
             )
 
     def test_duplicate_names_in_query_spec_list_rejected(self) -> None:
@@ -245,16 +259,18 @@ class TestResolveQueriesDuplicateNames:
         from elspeth.plugins.transforms.llm.multi_query import resolve_queries
 
         specs = resolve_queries(
-            [
-                {
-                    "name": "diagnosis_1",
-                    "input_fields": {"text": "col_a"},
-                },
-                {
-                    "name": "diagnosis_2",
-                    "input_fields": {"text": "col_b"},
-                },
-            ]
+            _list_defs(
+                [
+                    {
+                        "name": "diagnosis_1",
+                        "input_fields": {"text": "col_a"},
+                    },
+                    {
+                        "name": "diagnosis_2",
+                        "input_fields": {"text": "col_b"},
+                    },
+                ]
+            )
         )
         assert len(specs) == 2
         assert specs[0].name == "diagnosis_1"
@@ -266,10 +282,12 @@ class TestResolveQueriesDuplicateNames:
 
         # Python dicts can't have duplicate keys, so this is always safe
         specs = resolve_queries(
-            {
-                "query_a": {"input_fields": {"text": "col_a"}},
-                "query_b": {"input_fields": {"text": "col_b"}},
-            }
+            _mapping_defs(
+                {
+                    "query_a": {"input_fields": {"text": "col_a"}},
+                    "query_b": {"input_fields": {"text": "col_b"}},
+                }
+            )
         )
         assert len(specs) == 2
 
@@ -289,14 +307,16 @@ class TestResolveQueriesReservedSuffixes:
 
         with pytest.raises(ValueError, match="reserved LLM suffix"):
             resolve_queries(
-                {
-                    "query_a": {
-                        "input_fields": {"text": "col_a"},
-                        "output_fields": [
-                            {"suffix": "usage", "type": "string"},
-                        ],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "query_a": {
+                            "input_fields": {"text": "col_a"},
+                            "output_fields": [
+                                {"suffix": "usage", "type": "string"},
+                            ],
+                        },
+                    }
+                )
             )
 
     def test_reserved_suffix_model_raises_error(self) -> None:
@@ -305,14 +325,16 @@ class TestResolveQueriesReservedSuffixes:
 
         with pytest.raises(ValueError, match="reserved LLM suffix"):
             resolve_queries(
-                {
-                    "query_a": {
-                        "input_fields": {"text": "col_a"},
-                        "output_fields": [
-                            {"suffix": "model", "type": "string"},
-                        ],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "query_a": {
+                            "input_fields": {"text": "col_a"},
+                            "output_fields": [
+                                {"suffix": "model", "type": "string"},
+                            ],
+                        },
+                    }
+                )
             )
 
     def test_reserved_suffix_error_raises_error(self) -> None:
@@ -321,14 +343,16 @@ class TestResolveQueriesReservedSuffixes:
 
         with pytest.raises(ValueError, match="reserved LLM suffix"):
             resolve_queries(
-                {
-                    "query_a": {
-                        "input_fields": {"text": "col_a"},
-                        "output_fields": [
-                            {"suffix": "error", "type": "string"},
-                        ],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "query_a": {
+                            "input_fields": {"text": "col_a"},
+                            "output_fields": [
+                                {"suffix": "error", "type": "string"},
+                            ],
+                        },
+                    }
+                )
             )
 
     def test_audit_only_suffixes_are_accepted(self) -> None:
@@ -338,14 +362,16 @@ class TestResolveQueriesReservedSuffixes:
 
         for suffix in (s.lstrip("_") for s in LLM_AUDIT_SUFFIXES):
             specs = resolve_queries(
-                {
-                    f"query_{suffix}": {
-                        "input_fields": {"text": "col_a"},
-                        "output_fields": [
-                            {"suffix": suffix, "type": "string"},
-                        ],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        f"query_{suffix}": {
+                            "input_fields": {"text": "col_a"},
+                            "output_fields": [
+                                {"suffix": suffix, "type": "string"},
+                            ],
+                        },
+                    }
+                )
             )
 
             assert specs[0].output_fields is not None
@@ -356,14 +382,90 @@ class TestResolveQueriesReservedSuffixes:
         from elspeth.plugins.transforms.llm.multi_query import resolve_queries
 
         specs = resolve_queries(
-            {
-                "query_a": {
-                    "input_fields": {"text": "col_a"},
-                    "output_fields": [
-                        {"suffix": "score", "type": "integer"},
-                        {"suffix": "rationale", "type": "string"},
-                    ],
-                },
-            }
+            _mapping_defs(
+                {
+                    "query_a": {
+                        "input_fields": {"text": "col_a"},
+                        "output_fields": [
+                            {"suffix": "score", "type": "integer"},
+                            {"suffix": "rationale", "type": "string"},
+                        ],
+                    },
+                }
+            )
         )
         assert len(specs) == 1
+
+
+class TestQueryDefinitionDualForm:
+    """Both accepted authoring forms normalize to identical QuerySpec lists.
+
+    Mapping form keys each query by name (value omits ``name``); list form
+    carries ``name`` on each entry. Under ``extra=forbid`` the asymmetry is real
+    — a mapping value must not require ``name`` while a list entry must — but
+    ``resolve_queries`` erases it, producing byte-identical runtime specs.
+    """
+
+    def test_mapping_and_list_forms_produce_identical_query_specs(self) -> None:
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        shared_spec = {
+            "input_fields": {"text": "content"},
+            "response_format": "structured",
+            "output_fields": [
+                {"suffix": "score", "type": "integer"},
+                {"suffix": "band", "type": "enum", "values": ["low", "high"]},
+            ],
+            "template": "Rate {{ text }}",
+            "max_tokens": 128,
+        }
+
+        mapping_form = _mapping_defs({"clarity": dict(shared_spec)})
+        list_form = _list_defs([{"name": "clarity", **shared_spec}])
+
+        mapping_specs = resolve_queries(mapping_form)
+        list_specs = resolve_queries(list_form)
+
+        # Byte-identical runtime specs: same order, names, input_fields,
+        # response_format, output_fields, template, and max_tokens.
+        assert mapping_specs == list_specs
+        assert [spec.name for spec in mapping_specs] == ["clarity"]
+        assert mapping_specs[0].output_fields == list_specs[0].output_fields
+
+    def test_multi_query_dual_form_order_and_equality_preserved(self) -> None:
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        mapping_form = _mapping_defs(
+            {
+                "clarity": {"input_fields": {"text": "a"}},
+                "depth": {"input_fields": {"text": "b"}},
+            }
+        )
+        list_form = _list_defs(
+            [
+                {"name": "clarity", "input_fields": {"text": "a"}},
+                {"name": "depth", "input_fields": {"text": "b"}},
+            ]
+        )
+
+        assert resolve_queries(mapping_form) == resolve_queries(list_form)
+
+    def test_list_entry_without_name_is_rejected_safely(self) -> None:
+        """A list-form entry that omits ``name`` fails closed with a ValueError."""
+        from elspeth.plugins.transforms.llm.multi_query import resolve_queries
+
+        with pytest.raises(ValueError, match="must include a 'name'"):
+            resolve_queries([QueryDefinition(input_fields={"text": "a"})])
+
+    def test_mapping_value_forbids_name_via_extra_forbid(self) -> None:
+        """A raw mapping value that carries its own ``name`` key would be extra.
+
+        The mapping form injects the key as ``name`` at the ``LLMConfig`` layer;
+        constructing ``QueryDefinition`` from a mapping value that itself declares
+        ``name`` is legal (name is a real field), but a genuinely unexpected key
+        is rejected under ``extra=forbid`` — proving the model is closed.
+        """
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            QueryDefinition.model_validate({"input_fields": {"text": "a"}, "unexpected_key": 1})

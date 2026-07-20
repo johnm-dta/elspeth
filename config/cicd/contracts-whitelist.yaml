@@ -365,7 +365,6 @@ allowed_dict_patterns:
   # LLM multi-query
   - "src/elspeth/plugins/transforms/llm/multi_query.py:QuerySpec.build_template_context:row"
   - "src/elspeth/plugins/transforms/llm/multi_query.py:QuerySpec.build_template_context:return"
-  - "src/elspeth/plugins/transforms/llm/multi_query.py:resolve_queries:queries"
 
   # LLM provider protocol — response_format follows the OpenAI API spec
   # (varies between {"type": "json_object"} and {"type": "json_schema", ...})

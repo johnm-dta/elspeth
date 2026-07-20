@@ -69,6 +69,157 @@
         "title": "FieldDefinition",
         "type": "object"
       },
+      "OutputFieldConfig": {
+        "additionalProperties": false,
+        "description": "Configuration for a single output field in the LLM response.\n\nAttributes:\n    suffix: Column suffix in output row (e.g., \"score\" -> \"{prefix}_score\")\n    type: Data type for schema enforcement\n    values: Required for enum type - list of allowed values",
+        "properties": {
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SchemaConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Schema configuration for data validation.",
+            "title": "Schema"
+          },
+          "suffix": {
+            "description": "Column suffix in output row",
+            "title": "Suffix",
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/$defs/OutputFieldType",
+            "description": "Data type for schema enforcement",
+            "title": "Type"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Allowed values (required for enum type)",
+            "title": "Values"
+          }
+        },
+        "required": [
+          "suffix",
+          "type"
+        ],
+        "title": "OutputFieldConfig",
+        "type": "object"
+      },
+      "OutputFieldType": {
+        "description": "Supported types for structured output fields.",
+        "enum": [
+          "string",
+          "integer",
+          "number",
+          "boolean",
+          "enum"
+        ],
+        "title": "OutputFieldType",
+        "type": "string"
+      },
+      "QueryDefinition": {
+        "additionalProperties": false,
+        "description": "Typed authoring model for a single multi-query LLM query.\n\nThis is the *public discovery* shape for one entry of ``LLMConfig.queries``.\nIt replaces the previous untyped ``dict[str, Any]`` so the catalog can\nadvertise the structured-output contract (``name``, ``input_fields``,\n``template``, ``response_format``, ``output_fields``) and so malformed\ndrafts fail closed with a safe ``PluginConfigError`` rather than a bare\n``ValueError`` escaping as a 500.\n\nBoth accepted authoring forms normalize to this model:\n\n* **Mapping form** \u2014 ``queries: {query_name: {...}}``. The value carries no\n  ``name``; ``LLMConfig`` injects the mapping key as ``name`` before\n  validation (see ``LLMConfig._inject_mapping_query_names``).\n* **List form** \u2014 ``queries: [{name: query_name, ...}]``. Each entry must\n  carry its own ``name``; ``resolve_queries`` rejects a list entry with a\n  missing name as a safe configuration error.\n\n``name`` is therefore ``str | None`` at the model level (the mapping value\nlegitimately omits it under ``extra=forbid``); the list-form requirement is\nenforced downstream in ``resolve_queries``. The frozen runtime spec remains\n:class:`QuerySpec`.",
+        "properties": {
+          "input_fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Mapping of template variable name to row column name.",
+            "title": "Input Fields",
+            "type": "object"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Per-query max_tokens override (None = use the config-level max_tokens).",
+            "title": "Max Tokens"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Unique query identifier (used in output field prefixes). Omitted in mapping form, where the mapping key supplies it.",
+            "title": "Name"
+          },
+          "output_fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/OutputFieldConfig"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Typed structured-output field definitions (None = unstructured response).",
+            "title": "Output Fields"
+          },
+          "response_format": {
+            "$ref": "#/$defs/ResponseFormat",
+            "default": "standard",
+            "description": "LLM response format mode (standard JSON object vs. enforced json_schema)."
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Per-query Jinja2 template override (None = use the config-level prompt_template).",
+            "title": "Template"
+          }
+        },
+        "required": [
+          "input_fields"
+        ],
+        "title": "QueryDefinition",
+        "type": "object"
+      },
+      "ResponseFormat": {
+        "description": "LLM response format modes.\n\n- STANDARD: Uses {\"type\": \"json_object\"} - model outputs JSON but no schema enforcement\n- STRUCTURED: Uses {\"type\": \"json_schema\", ...} - API enforces exact schema compliance",
+        "enum": [
+          "standard",
+          "structured"
+        ],
+        "title": "ResponseFormat",
+        "type": "string"
+      },
       "SchemaConfig": {
         "description": "Configuration for a plugin's data schema.\n\nA schema can be either observed (accept anything, infer types from data)\nor explicit (validate against specified fields).\n\nSchema Contracts (for DAG validation):\n    - guaranteed_fields: Fields the producer GUARANTEES will exist AND are\n      part of the stable API contract. Downstream can safely depend on these.\n    - required_fields: Fields the consumer REQUIRES in input.\n    - audit_fields: Fields that exist in output but are NOT part of the\n      stability contract. These are for audit trail reconstruction and may\n      change between versions. DAG validation does NOT enforce these.\n\nFor explicit schemas (mode='fixed' or 'flexible'), the declared fields are\nimplicitly guaranteed. Use guaranteed_fields/required_fields to express\ncontracts for observed schemas that still have known field requirements.\n\nExample YAML for an observed schema with explicit contracts:\n    schema:\n      mode: observed\n      guaranteed_fields: [customer_id, timestamp]  # Producer guarantees these\n\n    schema:\n      mode: observed\n      required_fields: [customer_id, amount]  # Consumer requires these\n\n    schema:\n      mode: observed\n      guaranteed_fields: [response, response_usage]  # Stable API\n      audit_fields: [response_template_hash]  # May change between versions\n\nAttributes:\n    mode: \"fixed\" (exact fields), \"flexible\" (at least these), or \"observed\" (infer from data)\n    fields: List of FieldDefinitions, or None if observed\n    is_observed: True if schema types are inferred from data\n    guaranteed_fields: Field names the producer guarantees (for observed schemas)\n    required_fields: Field names the consumer requires (for observed schemas)\n    audit_fields: Field names that exist but are not part of stability contract",
         "properties": {
@@ -181,15 +332,13 @@
         "anyOf": [
           {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/$defs/QueryDefinition"
             },
             "type": "array"
           },
           {
             "additionalProperties": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/$defs/QueryDefinition"
             },
             "type": "object"
           },

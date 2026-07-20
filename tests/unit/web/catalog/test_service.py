@@ -300,6 +300,62 @@ class TestGetSchema:
         assert "region_name" in defs["BedrockConfig"]["properties"]
         assert "api_key" not in defs["BedrockConfig"]["properties"]
 
+    def test_llm_transform_schema_defs_expose_typed_query_structure(self, catalog: CatalogServiceImpl) -> None:
+        """Ruling B(1): json_schema $defs advertise the typed structured-query contract.
+
+        Once ``LLMConfig.queries`` is a typed ``QueryDefinition`` union, the
+        discriminated-union schema emits ``$defs`` for the query and output-field
+        models automatically. Discovery must expose query ``name``,
+        ``input_fields``, ``template``, ``response_format``, and ``output_fields``,
+        plus the output field ``suffix`` and ``type`` — not an opaque object.
+        """
+        pytest.importorskip(
+            "litellm",
+            reason="LLM transform requires the [llm] extra; catalog discovery skips it otherwise.",
+        )
+        info = catalog.get_schema("transform", "llm")
+        defs = info.json_schema["$defs"]
+        assert "QueryDefinition" in defs
+        assert "OutputFieldConfig" in defs
+        query_props = defs["QueryDefinition"]["properties"]
+        assert {"name", "input_fields", "template", "response_format", "output_fields"} <= set(query_props)
+        output_field_props = defs["OutputFieldConfig"]["properties"]
+        assert {"suffix", "type"} <= set(output_field_props)
+        # response_format is a real enum, not an opaque json value.
+        assert defs["ResponseFormat"]["enum"] == ["standard", "structured"]
+
+    def test_llm_transform_knob_schema_exposes_typed_query_structure(self, catalog: CatalogServiceImpl) -> None:
+        """Ruling B(2): the lowered knob_schema exposes the nested query structure.
+
+        A generic ``json-value`` (or ``additionalProperties: true`` object) does
+        NOT satisfy the gate: the ``queries`` knob must carry a nested
+        ``item_schema`` whose fields advertise ``name``, ``input_fields``,
+        ``template``, ``response_format``, and ``output_fields`` — and the
+        ``output_fields`` knob must itself nest an ``item_schema`` exposing
+        ``suffix`` and ``type``.
+        """
+        pytest.importorskip(
+            "litellm",
+            reason="LLM transform requires the [llm] extra; catalog discovery skips it otherwise.",
+        )
+        info = catalog.get_schema("transform", "llm")
+        queries_knobs = [f for f in info.knob_schema["fields"] if f["name"] == "queries"]
+        assert queries_knobs, "queries knob missing from lowered LLM schema"
+        for queries in queries_knobs:
+            assert queries["kind"] != "json-value", "queries must not fall through to a generic json-value"
+            assert "item_schema" in queries, "queries knob must expose the nested query structure"
+            nested = {field["name"]: field for field in queries["item_schema"]["fields"]}
+            assert {"name", "input_fields", "template", "response_format", "output_fields"} <= set(nested)
+            # response_format exposes its real enum choice set.
+            assert nested["response_format"]["kind"] == "enum"
+            assert set(nested["response_format"]["enum"]) == {"standard", "structured"}
+            # output_fields recurses to expose the typed field suffix/type.
+            output_fields = nested["output_fields"]
+            assert "item_schema" in output_fields
+            output_nested = {field["name"]: field for field in output_fields["item_schema"]["fields"]}
+            assert {"suffix", "type"} <= set(output_nested)
+            assert output_nested["type"]["kind"] == "enum"
+
     def test_llm_transform_summary_includes_provider_fields(self, catalog: CatalogServiceImpl) -> None:
         """Regression: bug elspeth-dcf12c061b.
 

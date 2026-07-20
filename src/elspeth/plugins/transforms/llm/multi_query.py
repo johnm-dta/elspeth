@@ -13,7 +13,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.config_base import PluginConfig
@@ -75,6 +75,59 @@ class OutputFieldConfig(PluginConfig):
         else:
             # Direct type mapping
             return {"type": self.type.value}
+
+
+class QueryDefinition(BaseModel):
+    """Typed authoring model for a single multi-query LLM query.
+
+    This is the *public discovery* shape for one entry of ``LLMConfig.queries``.
+    It replaces the previous untyped ``dict[str, Any]`` so the catalog can
+    advertise the structured-output contract (``name``, ``input_fields``,
+    ``template``, ``response_format``, ``output_fields``) and so malformed
+    drafts fail closed with a safe ``PluginConfigError`` rather than a bare
+    ``ValueError`` escaping as a 500.
+
+    Both accepted authoring forms normalize to this model:
+
+    * **Mapping form** — ``queries: {query_name: {...}}``. The value carries no
+      ``name``; ``LLMConfig`` injects the mapping key as ``name`` before
+      validation (see ``LLMConfig._inject_mapping_query_names``).
+    * **List form** — ``queries: [{name: query_name, ...}]``. Each entry must
+      carry its own ``name``; ``resolve_queries`` rejects a list entry with a
+      missing name as a safe configuration error.
+
+    ``name`` is therefore ``str | None`` at the model level (the mapping value
+    legitimately omits it under ``extra=forbid``); the list-form requirement is
+    enforced downstream in ``resolve_queries``. The frozen runtime spec remains
+    :class:`QuerySpec`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str | None = Field(
+        default=None,
+        description="Unique query identifier (used in output field prefixes). Omitted in mapping form, where the mapping key supplies it.",
+    )
+    input_fields: dict[str, str] = Field(
+        ...,
+        description="Mapping of template variable name to row column name.",
+    )
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.STANDARD,
+        description="LLM response format mode (standard JSON object vs. enforced json_schema).",
+    )
+    output_fields: list[OutputFieldConfig] | None = Field(
+        default=None,
+        description="Typed structured-output field definitions (None = unstructured response).",
+    )
+    template: str | None = Field(
+        default=None,
+        description="Per-query Jinja2 template override (None = use the config-level prompt_template).",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        description="Per-query max_tokens override (None = use the config-level max_tokens).",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,30 +192,51 @@ class QuerySpec:
 _POSITIONAL_VAR_PATTERN = re.compile(r"\{\{\s*input_\d+\s*\}\}")
 
 
+def _query_spec_from_definition(name: str, definition: QueryDefinition) -> QuerySpec:
+    """Build the frozen runtime :class:`QuerySpec` from a typed authoring model."""
+    output_fields = tuple(definition.output_fields) if definition.output_fields is not None else None
+    return QuerySpec(
+        name=name,
+        input_fields=MappingProxyType(dict(definition.input_fields)),
+        response_format=definition.response_format,
+        output_fields=output_fields,
+        template=definition.template,
+        max_tokens=definition.max_tokens,
+    )
+
+
 def resolve_queries(
-    queries: list[QuerySpec] | dict[str, Any] | list[dict[str, Any]],
+    queries: list[QuerySpec] | list[QueryDefinition] | dict[str, QueryDefinition],
 ) -> list[QuerySpec]:
-    """Normalize query definitions into a list of QuerySpec.
+    """Normalize typed query definitions into a list of QuerySpec.
 
     Accepts:
-    - list[QuerySpec]: Pass through as-is
-    - dict[str, dict]: Key becomes query name, value has spec fields
-    - list[dict]: Each dict must include 'name' key
+    - ``dict[str, QueryDefinition]``: mapping key becomes the query name
+      (the value carries no ``name``).
+    - ``list[QueryDefinition]``: each entry must carry its own ``name``.
+    - ``list[QuerySpec]``: already-resolved specs, passed through as-is.
 
-    Validates:
+    Validates (cross-query rules that a per-field Pydantic model cannot express):
     - Non-empty input
-    - No output field suffix collisions across queries
-    - Warns on reserved suffixes (e.g., "error", "usage", "model")
-    - Rejects legacy positional template variables ({{ input_N }})
+    - List-form entries carry a ``name``
+    - No duplicate query names
+    - No legacy positional template variables (``{{ input_N }}``)
+    - No output field suffix collisions across queries, and no collision with a
+      reserved LLM suffix (``usage``/``model``/``error``)
+
+    Per-field shape (missing ``input_fields``, invalid ``output_fields``, enum
+    without ``values``, ...) is already enforced by ``QueryDefinition`` /
+    ``OutputFieldConfig`` at model-validation time, so those never reach here.
 
     Args:
-        queries: Query definitions in any supported format
+        queries: Typed query definitions in any supported form.
 
     Returns:
-        List of validated QuerySpec instances
+        List of validated QuerySpec instances.
 
     Raises:
-        ValueError: If queries is empty, has collisions, or uses positional vars
+        ValueError: If queries is empty, a list entry omits ``name``, names
+            collide, positional variables are used, or output keys collide.
     """
     specs: list[QuerySpec] = []
 
@@ -170,23 +244,7 @@ def resolve_queries(
         if not queries:
             raise ValueError("no queries configured")
         for name, definition in queries.items():
-            # Parse output_fields from dicts if present
-            output_fields = None
-            raw_output_fields = definition.get("output_fields")
-            if raw_output_fields is not None:
-                output_fields = tuple(OutputFieldConfig(**of) if isinstance(of, dict) else of for of in raw_output_fields)
-            specs.append(
-                QuerySpec(
-                    name=name,
-                    input_fields=MappingProxyType(definition["input_fields"]),
-                    response_format=ResponseFormat(definition["response_format"])
-                    if "response_format" in definition
-                    else ResponseFormat.STANDARD,
-                    output_fields=output_fields,
-                    template=definition.get("template"),
-                    max_tokens=definition.get("max_tokens"),
-                )
-            )
+            specs.append(_query_spec_from_definition(name, definition))
     elif isinstance(queries, list):
         if not queries:
             raise ValueError("no queries configured")
@@ -194,21 +252,12 @@ def resolve_queries(
             if isinstance(item, QuerySpec):
                 specs.append(item)
             else:
-                # dict form with 'name' key
-                output_fields = None
-                raw_output_fields = item.get("output_fields")
-                if raw_output_fields is not None:
-                    output_fields = tuple(OutputFieldConfig(**of) if isinstance(of, dict) else of for of in raw_output_fields)
-                specs.append(
-                    QuerySpec(
-                        name=item["name"],
-                        input_fields=MappingProxyType(item["input_fields"]),
-                        response_format=ResponseFormat(item.get("response_format", "standard")),
-                        output_fields=output_fields,
-                        template=item.get("template"),
-                        max_tokens=item.get("max_tokens"),
+                if item.name is None:
+                    raise ValueError(
+                        "List-form query entries must include a 'name'. Add 'name' to each "
+                        "query, or author the queries as a mapping keyed by query name."
                     )
-                )
+                specs.append(_query_spec_from_definition(item.name, item))
     else:
         raise TypeError(f"queries must be list or dict, got {type(queries).__name__}")
 

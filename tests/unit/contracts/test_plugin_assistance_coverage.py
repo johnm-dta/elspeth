@@ -11,6 +11,8 @@ are contract: every discovered plugin gets non-empty short hints and a summary.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pytest
 
 from elspeth.plugins.infrastructure.discovery import discover_all_plugins
@@ -44,3 +46,35 @@ def test_builtin_plugin_publishes_summary(plugin_type: str, plugin_cls: type) ->
     assert assistance is not None
     assert assistance.summary, f"{label}.summary is empty"
     assert isinstance(assistance.summary, str)
+
+
+def test_llm_assistance_includes_structured_multi_query_example() -> None:
+    """The shared LLM assistance carries one concrete structured multi-query example.
+
+    Catalog, freeform, guided-full, guided-staged, and tutorial all consume this
+    same discovery-time assistance, so the structured-output authoring shape
+    (``queries`` mapping with typed ``output_fields``) must live here — not be
+    copied into any guided prompt.
+    """
+    pytest.importorskip(
+        "litellm",
+        reason="LLM transform requires the [llm] extra; discovery skips it otherwise.",
+    )
+    from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+    assistance = LLMTransform.get_agent_assistance(issue_code=None)
+    assert assistance is not None
+
+    structured_examples = [example for example in assistance.examples if isinstance(example.after, Mapping) and "queries" in example.after]
+    assert structured_examples, "LLM assistance has no structured multi-query (queries) example"
+
+    after = structured_examples[0].after
+    assert after is not None
+    queries = after["queries"]
+    assert isinstance(queries, Mapping) and queries, "structured example queries must be a non-empty mapping"
+    # The example must demonstrate typed output_fields (suffix + type), the
+    # discovery contract Task 1 makes public.
+    first_query = next(iter(queries.values()))
+    output_fields = first_query["output_fields"]
+    assert output_fields, "structured example query must declare output_fields"
+    assert {"suffix", "type"} <= set(output_fields[0])

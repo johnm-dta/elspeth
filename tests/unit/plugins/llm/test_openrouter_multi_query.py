@@ -202,10 +202,18 @@ class TestOpenRouterMultiQueryInit:
         assert len(transform._strategy.query_specs) == 4
 
     def test_transform_requires_queries(self) -> None:
-        """Transform with multi-query requires queries in config."""
+        """Transform with an empty queries map fails closed with a safe config error.
+
+        Cross-query validation now runs in the ``LLMConfig`` model_validator, so an
+        empty queries map surfaces as ``PluginConfigError`` (the §5.3 redacted-safe
+        category) via ``from_dict`` rather than a bare ``ValueError`` escaping as a
+        500 (Ruling A). The underlying "no queries configured" cause is preserved.
+        """
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+
         config = make_config()
         config["queries"] = {}
-        with pytest.raises(ValueError, match="no queries configured"):
+        with pytest.raises(PluginConfigError, match="no queries configured"):
             LLMTransform(config)
 
     def test_process_raises_not_implemented(self) -> None:

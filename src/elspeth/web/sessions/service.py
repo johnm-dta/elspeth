@@ -11689,6 +11689,42 @@ class SessionServiceImpl:
                 )
 
                 if command.rewritten_state is not None and command.rewritten_state_id is not None:
+                    # Detach the edited message from the staged state and delete
+                    # that staged state BEFORE inserting the rewritten replacement.
+                    # ``_insert_composition_state`` allocates ``MAX(version)+1``
+                    # per session, so the replacement's version depends on whether
+                    # the staged row (version 1) is still present when it runs.
+                    # Removing the staged row first lets the replacement reclaim
+                    # version 1 — a fresh forked-and-edited child settles at its
+                    # first version rather than leaking a version-2 gap whose only
+                    # meaning is "settlement happened to rewrite blob custody"
+                    # (a non-rewriting settlement already lands the child at
+                    # version 1). The composite FK on
+                    # ``chat_messages(composition_state_id, session_id)`` is
+                    # RESTRICT, so the message must be detached to NULL before the
+                    # staged state can be removed; the insert then repoints it.
+                    # All four writes share this transaction under the
+                    # parent+child pair lock, so the transient NULL provenance is
+                    # never externally observable.
+                    detached = conn.execute(
+                        update(chat_messages_table)
+                        .where(
+                            chat_messages_table.c.id == str(command.edited_message_id),
+                            chat_messages_table.c.session_id == child_session_id_str,
+                            chat_messages_table.c.composition_state_id == str(command.expected_current_state_id),
+                        )
+                        .values(composition_state_id=None)
+                    )
+                    if detached.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement lost edited-message compare-and-swap")
+                    removed_staged_state = conn.execute(
+                        delete(composition_states_table).where(
+                            composition_states_table.c.id == str(command.expected_current_state_id),
+                            composition_states_table.c.session_id == child_session_id_str,
+                        )
+                    )
+                    if removed_staged_state.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement could not remove superseded staged state")
                     self._insert_composition_state(
                         conn,
                         session_id=child_session_id_str,
@@ -11705,20 +11741,12 @@ class SessionServiceImpl:
                         .where(
                             chat_messages_table.c.id == str(command.edited_message_id),
                             chat_messages_table.c.session_id == child_session_id_str,
-                            chat_messages_table.c.composition_state_id == str(command.expected_current_state_id),
+                            chat_messages_table.c.composition_state_id.is_(None),
                         )
                         .values(composition_state_id=str(command.rewritten_state_id))
                     )
                     if repointed.rowcount != 1:
                         raise AuditIntegrityError("Guided fork settlement could not bind replacement state")
-                    removed_staged_state = conn.execute(
-                        delete(composition_states_table).where(
-                            composition_states_table.c.id == str(command.expected_current_state_id),
-                            composition_states_table.c.session_id == child_session_id_str,
-                        )
-                    )
-                    if removed_staged_state.rowcount != 1:
-                        raise AuditIntegrityError("Guided fork settlement could not remove superseded staged state")
 
                 final_state_id = command.rewritten_state_id or command.expected_current_state_id
                 if child_guided_root is not None:

@@ -1,6 +1,6 @@
 {
   "class": "fork_coalesce",
-  "intent": "Read rows from CSV, fan every row into two independent parallel branches, then wait for both branches to complete before merging them back into one row. The merge must require all branches, not select one.",
+  "intent": "Build a pipeline that reads rows from CSV, fans every row into two independent parallel branches, then waits for both branches to complete before merging them back into one row. The merge must require all branches, not select one.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",

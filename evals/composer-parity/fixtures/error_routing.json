@@ -1,6 +1,6 @@
 {
   "class": "error_routing",
-  "intent": "Read records from CSV. Rows that fail source validation must go to a rejected output. Rows that pass through the coercion transform but fail coercion must go to a separate errors output, while successfully coerced rows go to the clean output. Every failure path must terminate at a real sink.",
+  "intent": "Build a pipeline that reads records from CSV. Rows that fail source validation must go to a rejected output. Rows that pass through the coercion transform but fail coercion must go to a separate errors output, while successfully coerced rows go to the clean output. Every failure path must terminate at a real sink.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",

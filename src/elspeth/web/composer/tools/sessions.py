@@ -609,9 +609,32 @@ def build_set_pipeline_candidate(
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
-            provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=node_plugin)
-            if provider_policy_error is not None:
-                return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+            # Operator-profiled transforms (an ``llm`` node authored with a
+            # ``profile`` alias) carry their private provider config — the
+            # sequential multi-query retry budget (``max_capacity_retry_seconds``
+            # / ``pool_size``) and any nested provider_config — in the operator
+            # profile, not the raw authored options. The profile injects a
+            # web-safe bounded retry budget at lowering
+            # (``_LLMProfileResolver.lower_options``), and the resulting
+            # EXECUTABLE is validated above via ``_prevalidate_transform_for_context``
+            # (which lowers the profile first). Running the raw provider-config
+            # policy on the authored options would false-positive on the missing
+            # private budget and make every web-authored multi-query LLM node
+            # uncommittable, so it is skipped for profiled nodes.
+            #
+            # Skipping the whole policy (which also covers the RAG
+            # ``web_rag_provider_config_policy_error`` base_url/managed-identity
+            # egress checks) is safe here: the public operator-profile schema is
+            # ``additionalProperties: false`` (see ``_LLMProfileResolver.public_schema``),
+            # so a profiled node's authored options CANNOT carry ``base_url`` /
+            # ``provider`` / ``endpoint`` at all, and ``_prevalidate_transform_for_context``
+            # rejects any option outside that public schema before this line. The
+            # executable — where the profile injects the real provider binding —
+            # is the authority for profiled nodes.
+            if "profile" not in node_options:
+                provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=node_plugin)
+                if provider_policy_error is not None:
+                    return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
             # S2: confine nested provider_config persist_directory (RAG
             # retrieval). Parity with the per-output sink-path check below so

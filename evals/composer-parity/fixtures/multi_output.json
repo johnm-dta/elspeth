@@ -1,6 +1,6 @@
 {
   "class": "multi_output",
-  "intent": "Read records from CSV, pass them through one transform, then write to two distinctly-named outputs with different write-failure policies: a priority JSON output whose write failures fall back to the standard output, and a standard CSV output whose write failures are discarded.",
+  "intent": "Build a pipeline that reads records from CSV, passes them through one transform, then writes to two distinctly-named outputs with different write-failure policies: a priority JSON output whose write failures fall back to the standard output, and a standard CSV output whose write failures are discarded.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",

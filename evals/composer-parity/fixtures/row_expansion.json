@@ -1,6 +1,6 @@
 {
   "class": "row_expansion",
-  "intent": "Read records from CSV, batch and aggregate them, then expand each aggregated batch back into multiple rows with a replicate step, and hand the expanded rows to a downstream transform before writing to one JSON output. Upstream guaranteed fields and the cardinality contract must survive the expansion.",
+  "intent": "Build a pipeline that reads records from CSV, batches and aggregates them, then expands each aggregated batch back into multiple rows with a replicate step, and hands the expanded rows to a downstream transform before writing to one JSON output. Upstream guaranteed fields and the cardinality contract must survive the expansion.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",
@@ -16,17 +16,19 @@
         "input": "rows",
         "on_success": "aggregated",
         "on_error": "discard",
-        "options": {"schema": {"mode": "observed"}, "fields": ["value"]},
+        "options": {"schema": {"mode": "observed"}, "value_field": "value"},
         "trigger": {"count": 10}
       },
       {
         "id": "expand_rows",
-        "node_type": "transform",
+        "node_type": "aggregation",
         "plugin": "batch_replicate",
         "input": "aggregated",
         "on_success": "expanded",
         "on_error": "discard",
-        "options": {"schema": {"mode": "observed"}}
+        "options": {"schema": {"mode": "observed"}, "copies_field": "copies", "default_copies": 2},
+        "trigger": {"count": 1},
+        "output_mode": "transform"
       },
       {
         "id": "consume_expanded",
@@ -53,15 +55,15 @@
     "source": {"plugin": "csv", "on_success": "rows"},
     "nodes": [
       {"id": "batch_summary", "node_type": "aggregation", "plugin": "batch_stats", "input": "rows", "on_success": "aggregated", "trigger": {"count": 10}},
-      {"id": "expand_rows", "node_type": "transform", "plugin": "batch_replicate", "input": "aggregated", "on_success": "expanded"},
+      {"id": "expand_rows", "node_type": "aggregation", "plugin": "batch_replicate", "input": "aggregated", "on_success": "expanded", "output_mode": "transform", "trigger": {"count": 1}},
       {"id": "consume_expanded", "node_type": "transform", "plugin": "passthrough", "input": "expanded", "on_success": "final"}
     ],
     "edges": [],
     "outputs": [{"sink_name": "final", "plugin": "json"}],
-    "topology": "source -> batch_summary(aggregation) -> expand_rows(batch_replicate) -> consume_expanded(transform) -> final(sink)"
+    "topology": "source -> batch_summary(batch_stats aggregation) -> expand_rows(batch_replicate aggregation, output_mode transform) -> consume_expanded(transform) -> final(sink)"
   },
   "runtime_assertions": [
-    "The aggregation feeds a real batch_replicate transform that expands one aggregated batch into multiple downstream rows.",
+    "The batch_stats aggregation feeds a real batch_replicate aggregation node (output_mode transform) that expands one aggregated batch into multiple downstream rows.",
     "The downstream consumer receives more rows than the aggregation emitted (genuine cardinality expansion).",
     "Upstream guaranteed fields are preserved across the expansion into the downstream consumer and the sink."
   ]

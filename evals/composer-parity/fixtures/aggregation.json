@@ -1,6 +1,6 @@
 {
   "class": "aggregation",
-  "intent": "Read numeric records from CSV, collect them into batches, compute batch statistics over each batch with a real aggregation node, then hand the aggregated result to a downstream transform and write it to one JSON output.",
+  "intent": "Build a pipeline that reads numeric records from CSV, collects them into batches, computes batch statistics over each batch with a real aggregation node, then hands the aggregated result to a downstream transform and writes it to one JSON output.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",
@@ -16,7 +16,7 @@
         "input": "rows",
         "on_success": "stats",
         "on_error": "discard",
-        "options": {"schema": {"mode": "observed"}, "fields": ["value"]},
+        "options": {"schema": {"mode": "observed"}, "value_field": "value"},
         "trigger": {"count": 10}
       },
       {

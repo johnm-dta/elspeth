@@ -1,6 +1,6 @@
 {
   "class": "linear_transform",
-  "intent": "Read a CSV of records, pass every row through a single ordered transform, and write the transformed rows to one JSON output, preserving the upstream fields end to end.",
+  "intent": "Build a pipeline that reads a CSV of records, passes every row through a single ordered transform, and writes the transformed rows to one JSON output, preserving the upstream fields end to end.",
   "canonical_arguments": {
     "source": {
       "plugin": "csv",

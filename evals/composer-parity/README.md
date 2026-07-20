@@ -36,6 +36,26 @@ alternative and is deferred to Task 3's real-path matrix, where the
 args -> `CompositionState` conversion inside the session-bound
 `_execute_set_pipeline` handler is exercised end to end.
 
+## Real-path assumptions (Task 3)
+
+The Task 3 matrix (`tests/integration/web/composer/parity/`) drives these
+fixtures through the real freeform + guided-full production paths (web plugin
+policy, operator-profile lowering, audited `set_pipeline`), which imposes two
+authoring-form requirements beyond the Task 2 argument shape:
+
+- **Imperative intents.** Every `intent` is phrased as a build request so the
+  freeform empty-pipeline gate (`_user_request_expects_pipeline_mutation`)
+  routes it through `plan_pipeline` rather than the ordinary compose loop.
+- **`structured_llm` uses the web operator-profile form.** Its `llm` node is
+  authored with `profile: "task-role"` plus public safe options (`queries`,
+  `prompt_template`, `schema`, `required_input_fields`, `temperature`) — the
+  private `provider` / `model` / `api_key` / retry knobs are supplied by the
+  operator profile at lowering. The real-path harness (and any live run, Task 5/6)
+  must configure an LLM profile aliased `task-role`; the multi-query retry budget
+  is injected by profile lowering (`_LLMProfileResolver.lower_options`). The
+  source declares a fixed schema so the field contract to the LLM's declared
+  `required_input_fields` is satisfiable at config time.
+
 ## Byte canonicalization (Ruling C)
 
 Both colour files are pinned to **LF newlines, UTF-8 with no BOM, and exactly

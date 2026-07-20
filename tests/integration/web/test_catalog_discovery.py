@@ -122,5 +122,13 @@ def test_live_catalog_advertises_typed_structured_query_contract(catalog: Catalo
     assert queries_knobs
     for queries in queries_knobs:
         assert queries["kind"] != "json-value"
-        nested = {field["name"] for field in queries["item_schema"]["fields"]}
-        assert {"name", "input_fields", "response_format", "output_fields"} <= nested
+        nested = {field["name"]: field for field in queries["item_schema"]["fields"]}
+        assert {"name", "input_fields", "response_format", "output_fields"} <= set(nested)
+        # The nested ``output_fields`` knob recurses to the typed
+        # ``OutputFieldConfig`` field set (suffix/type/values). Its inherited
+        # ``PluginConfig.schema_config`` (JSON-Schema alias "schema") is
+        # composer_hidden, so the lowered output-field knob set must NOT carry a
+        # spurious editable "schema" knob.
+        output_nested = {field["name"] for field in nested["output_fields"]["item_schema"]["fields"]}
+        assert {"suffix", "type"} <= output_nested
+        assert "schema" not in output_nested

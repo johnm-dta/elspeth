@@ -58,6 +58,7 @@ const AUDITED_COMPONENTS = [
   "ModeSwitchButton",
   "PipelineGloss",
   "PipelineValidationSummary",
+  "ProposePipelineTurn",
   // 2026-07-02 UX-review regression net (elspeth-adf5e679e7): the tutorial
   // surface, the acknowledgement cards it leans on, the auth surface, and
   // the chrome/run components the review epic touched. Added centrally by
@@ -119,6 +120,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "PipelineValidationSummary",
   "PluginCard",
   "ProgressView",
+  "ProposePipelineTurn",
   "ReadinessRowDetail",
   "RecoveryPanel",
   "RunsHistoryDrawer",
@@ -243,6 +245,12 @@ vi.mock("@dagrejs/dagre", () => ({
         node() {
           return { x: 0, y: 0 };
         }
+        // ReadOnlyPipelineGraph (ProposePipelineTurn's DAG canvas) reads
+        // graph.graph().width/height to size the viewBox — the GraphView stub
+        // above never calls it, so the shared mock must still answer it.
+        graph() {
+          return { width: 480, height: 200 };
+        }
       },
     },
     layout() {},
@@ -283,6 +291,7 @@ import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
 import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
 import { PipelineGloss } from "@/components/chat/guided/PipelineGloss";
 import { PipelineValidationSummary } from "@/components/chat/guided/PipelineValidationSummary";
+import { ProposePipelineTurn } from "@/components/chat/guided/ProposePipelineTurn";
 import { AcknowledgementCard } from "@/components/chat/AcknowledgementCard";
 import { AcknowledgementStack } from "@/components/chat/AcknowledgementStack";
 import { ChatInput } from "@/components/chat/ChatInput";
@@ -322,7 +331,9 @@ import type {
 } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
 import type {
+  GuidedProposalReviewState,
   GuidedSession,
+  ProposePipelinePayload,
   SchemaFormPayload,
   TurnPayload,
   WireStageData,
@@ -853,6 +864,199 @@ describe("PipelineValidationSummary", () => {
       },
     } as never);
     const { container } = render(<PipelineValidationSummary />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// --- Guided proposal review surface ------------------------------------------
+//
+// ProposePipelineTurn is the whole-DAG review turn the guided/freeform parity
+// work lands on: a read-only graph, the components/routes summary, blockers,
+// and the accept/reject/revise controls (Plan 05 Task 5). It carries a
+// live-region status/alert whose focus moves on stale/error transitions and a
+// tutorial read-only variant. Audit every branch of that surface — the plain
+// active controls, the blocker-gated revise-required state, the stale and
+// error live regions (asserting the focus placement the useEffect performs),
+// and the passive tutorial render.
+
+describe("ProposePipelineTurn", () => {
+  const PROPOSAL_ID = "00000000-0000-4000-8000-0000000004a1";
+  const DRAFT_HASH = "d".repeat(64);
+  const SOURCE_ID = "00000000-0000-4000-8000-0000000004a2";
+  const NODE_ID = "00000000-0000-4000-8000-0000000004a3";
+  const OUTPUT_ID = "00000000-0000-4000-8000-0000000004a4";
+  const edge = (n: number): string => `00000000-0000-4000-8000-${String(4000 + n).padStart(12, "0")}`;
+
+  function proposalPayload(
+    overrides: Partial<ProposePipelinePayload> = {},
+  ): ProposePipelinePayload {
+    return {
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+      summary: "guided.proposal.summary.a11y.v1",
+      rationale: "guided.proposal.rationale.a11y.v1",
+      component_counts: { sources: 1, nodes: 1, edges: 5, outputs: 1 },
+      blockers: [],
+      graph: {
+        sources: [
+          { stable_id: SOURCE_ID, label: "pages", plugin: { kind: "source", id: "csv" } },
+        ],
+        edges: [
+          {
+            stable_id: edge(1),
+            from_endpoint: { kind: "source", stable_id: SOURCE_ID },
+            to_endpoint: { kind: "node", stable_id: NODE_ID },
+            flow: { kind: "source_success", branch: null },
+          },
+          {
+            stable_id: edge(2),
+            from_endpoint: { kind: "source", stable_id: SOURCE_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "source_validation_failure" },
+          },
+          {
+            stable_id: edge(3),
+            from_endpoint: { kind: "node", stable_id: NODE_ID },
+            to_endpoint: { kind: "output", stable_id: OUTPUT_ID },
+            flow: { kind: "node_success", branch: null },
+          },
+          {
+            stable_id: edge(4),
+            from_endpoint: { kind: "node", stable_id: NODE_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "node_error" },
+          },
+          {
+            stable_id: edge(5),
+            from_endpoint: { kind: "output", stable_id: OUTPUT_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "output_write_failure" },
+          },
+        ],
+      },
+      nodes: [
+        {
+          stable_id: NODE_ID,
+          label: "summarise",
+          node_type: "transform",
+          plugin: { kind: "transform", id: "llm" },
+          behavior: { kind: "transform" },
+        },
+      ],
+      outputs: [
+        { stable_id: OUTPUT_ID, label: "results", plugin: { kind: "sink", id: "json" } },
+      ],
+      edit_targets: [
+        { kind: "node", stable_id: NODE_ID },
+        { kind: "source", stable_id: SOURCE_ID },
+        { kind: "output", stable_id: OUTPUT_ID },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("has no axe violations in the default active review state", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Non-vacuous: the labelled graph, the accessible heading, and the enabled
+    // primary control must all be real.
+    screen.getByRole("img", { name: /pipeline proposal graph/i });
+    screen.getByRole("heading", { name: "Review pipeline proposal" });
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the blocker-gated revise-required state", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn
+        payload={proposalPayload({
+          blockers: [
+            {
+              code: "policy_review_required",
+              category: "policy",
+              summary: "guided.proposal.blocker.policy_review_required.v1",
+              edit_target: { kind: "node", stable_id: NODE_ID },
+            },
+          ],
+        })}
+        reviewState={reviewState}
+        onSubmit={() => {}}
+      />,
+    );
+    // Non-vacuous: the blocker list gates wiring review while the revise
+    // affordance stays reachable.
+    screen.getByText("A policy review is required before this pipeline can advance.");
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Revise summarise/ })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the stale live-region state (focus moves to status)", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "stale",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Live-region behavior + focus placement: the stale transition surfaces a
+    // role=status announcement that receives focus, and locks the controls.
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/stale/i);
+    expect(status).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the retryable error state (focus moves to alert)", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "error",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+      message: "The response was not received. Retry the same action.",
+      retryable: true,
+      retry_action: { kind: "revise", edit_target: { kind: "node", stable_id: NODE_ID } },
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Live-region behavior + focus placement: the error transition surfaces a
+    // role=alert that receives focus; only the retained revise action stays
+    // enabled.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/response was not received/i);
+    expect(alert).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Revise summarise/ })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the passive tutorial render", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} isTutorial />,
+    );
+    // Non-vacuous: the worked-example note renders and the decision controls
+    // are withheld.
+    screen.getByText(/This worked example is read-only/i);
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });
 });

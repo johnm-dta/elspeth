@@ -355,6 +355,11 @@ class TestGetSchema:
             output_nested = {field["name"]: field for field in output_fields["item_schema"]["fields"]}
             assert {"suffix", "type"} <= set(output_nested)
             assert output_nested["type"]["kind"] == "enum"
+            # OutputFieldConfig inherits PluginConfig.schema_config (JSON-Schema
+            # alias "schema"). It is meaningless for a single output-field
+            # descriptor and is marked composer_hidden so the lowered nested
+            # knob set must NOT expose a spurious editable "schema" knob.
+            assert "schema" not in output_nested
 
     def test_llm_transform_summary_includes_provider_fields(self, catalog: CatalogServiceImpl) -> None:
         """Regression: bug elspeth-dcf12c061b.

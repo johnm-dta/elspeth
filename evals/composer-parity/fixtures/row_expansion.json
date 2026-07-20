@@ -17,7 +17,8 @@
         "on_success": "aggregated",
         "on_error": "discard",
         "options": {"schema": {"mode": "observed"}, "value_field": "value"},
-        "trigger": {"count": 10}
+        "trigger": {"count": 10},
+        "output_mode": "transform"
       },
       {
         "id": "expand_rows",

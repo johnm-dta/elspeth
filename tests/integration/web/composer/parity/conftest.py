@@ -202,6 +202,131 @@ def _empty_state() -> CompositionState:
 
 
 # --------------------------------------------------------------------------- #
+# Guided-staged naming + candidate derivation                                 #
+# --------------------------------------------------------------------------- #
+#
+# The structured guided stage protocol reviews sources and outputs one at a
+# time and auto-assigns their names positionally: sources become
+# ``source`` / ``source_2`` / … and outputs become ``output`` / ``output_2`` /
+# … in review (add) order — the operator cannot name them. ``set_pipeline`` on
+# the reviewed candidate (``bind_guided_reviewed_components``) then OVERWRITES
+# the scripted planner candidate's source/output plugin+options with the
+# reviewed authority, keeping only the candidate's *topology* (node ids, edges,
+# and each source's ``on_success`` wiring). So for guided-staged to derive the
+# same canonical graph the scripted candidate must (a) name its sources/outputs
+# with the guided defaults and (b) rewrite every routing target that points at
+# a source/output to the guided default — while free node-to-node connection
+# names (``rows``, ``stats``, ``gate_in``, …) stay verbatim (the comparator
+# canonicalizes them). The committed graph is then isomorphic to the reference;
+# only the component *names* differ, which §8.1 canonicalizes away.
+
+
+def _guided_naming(args: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """Map canonical source/output names to their guided positional defaults."""
+    if isinstance(args.get("sources"), dict):
+        source_names = list(args["sources"].keys())
+    else:
+        source_names = ["source"]
+    output_names = [output["sink_name"] for output in args["outputs"]]
+    source_map = {name: ("source" if index == 0 else f"source_{index + 1}") for index, name in enumerate(source_names)}
+    output_map = {name: ("output" if index == 0 else f"output_{index + 1}") for index, name in enumerate(output_names)}
+    return source_map, output_map
+
+
+def _derive_guided_candidate(
+    args: Mapping[str, Any],
+    source_map: Mapping[str, str],
+    output_map: Mapping[str, str],
+    data_dir: Path,
+) -> dict[str, Any]:
+    """Rename the canonical pipeline into the guided candidate the planner emits.
+
+    Role-based substitution (never a blind string replace): source dict keys and
+    output ``sink_name`` are renamed to guided defaults; every *routing target*
+    that names an output (``on_success`` / ``on_error`` / gate routes / fork
+    targets / branch targets / ``on_write_failure``) is rewritten only when it
+    equals an output name; explicit edge endpoints are rewritten when they name a
+    source or output. Node ids, node options, and free connection names are
+    emitted verbatim so the committed graph stays isomorphic to the reference.
+    """
+
+    def route(value: Any) -> Any:
+        # Routing targets never name a source; only outputs (or free connection
+        # names, which are left untouched).
+        return output_map.get(value, value) if isinstance(value, str) else value
+
+    endpoint = {**source_map, **output_map}
+
+    if isinstance(args.get("sources"), dict):
+        source_items = list(args["sources"].items())
+        plural = True
+    else:
+        source_items = [("source", args["source"])]
+        plural = False
+
+    candidate_sources: dict[str, Any] = {}
+    for name, spec in source_items:
+        entry = copy.deepcopy(dict(spec))
+        options = entry.get("options")
+        if isinstance(options, dict) and isinstance(options.get("path"), str):
+            entry["options"] = {**options, "path": str(data_dir / "blobs" / Path(options["path"]).name)}
+        if "on_success" in entry:
+            entry["on_success"] = route(entry["on_success"])
+        if "on_validation_failure" in entry:
+            entry["on_validation_failure"] = route(entry["on_validation_failure"])
+        candidate_sources[source_map[name]] = entry
+
+    candidate_nodes: list[dict[str, Any]] = []
+    for node in args.get("nodes", []):
+        entry = copy.deepcopy(dict(node))
+        # The guided proposal wire projection reconstructs the committed candidate
+        # via the strict ``CompositionState.from_dict`` (unlike the lenient
+        # ``set_pipeline`` tool the freeform/guided-full accept path uses), which
+        # requires every node to carry ``plugin`` / ``on_success`` / ``on_error``
+        # / ``options``. The fixtures omit them on gate/queue/coalesce nodes; the
+        # emit schema accepts explicit nulls (``["string","null"]``), so fill them.
+        entry.setdefault("plugin", None)
+        entry.setdefault("on_success", None)
+        entry.setdefault("on_error", None)
+        entry.setdefault("options", {})
+        if entry.get("on_success") is not None:
+            entry["on_success"] = route(entry["on_success"])
+        if entry.get("on_error") is not None:
+            entry["on_error"] = route(entry["on_error"])
+        if isinstance(entry.get("routes"), dict):
+            entry["routes"] = {key: route(value) for key, value in entry["routes"].items()}
+        if entry.get("fork_to"):
+            entry["fork_to"] = [route(value) for value in entry["fork_to"]]
+        if isinstance(entry.get("branches"), dict):
+            entry["branches"] = {key: route(value) for key, value in entry["branches"].items()}
+        candidate_nodes.append(entry)
+
+    candidate_edges: list[dict[str, Any]] = []
+    for edge in args.get("edges", []):
+        entry = copy.deepcopy(dict(edge))
+        entry["from_node"] = endpoint.get(entry["from_node"], entry["from_node"])
+        entry["to_node"] = endpoint.get(entry["to_node"], entry["to_node"])
+        candidate_edges.append(entry)
+
+    candidate_outputs: list[dict[str, Any]] = []
+    for output in args["outputs"]:
+        entry = copy.deepcopy(dict(output))
+        entry["sink_name"] = output_map[entry["sink_name"]]
+        if entry.get("on_write_failure") is not None:
+            entry["on_write_failure"] = route(entry["on_write_failure"])
+        candidate_outputs.append(entry)
+
+    candidate: dict[str, Any] = {"nodes": candidate_nodes, "edges": candidate_edges, "outputs": candidate_outputs}
+    if plural:
+        candidate["sources"] = candidate_sources
+    else:
+        candidate["source"] = candidate_sources["source"]
+    if "metadata" in args:
+        candidate["metadata"] = copy.deepcopy(dict(args["metadata"]))
+    return candidate
+
+
+# --------------------------------------------------------------------------- #
 # Shared production stack + per-surface adapters                               #
 # --------------------------------------------------------------------------- #
 
@@ -285,6 +410,8 @@ class ParityEnv:
             return await self.drive_freeform(fixture)
         if surface == "guided_full":
             return await self.drive_guided_full(fixture)
+        if surface == "guided_staged":
+            return await self.drive_guided_staged(fixture)
         raise AssertionError(f"unknown parity surface {surface!r}")  # pragma: no cover
 
     async def drive_freeform(self, fixture: Mapping[str, Any]) -> CompositionState:
@@ -361,6 +488,148 @@ class ParityEnv:
             )
             if accept.status_code != 200:
                 raise AssertionError(f"guided-full accept failed ({accept.status_code}): {accept.text}")
+        return await self._committed_state(UUID(session_id))
+
+    # --- guided-staged (the persisted multi-request stage protocol) --------- #
+
+    async def _staged_respond(self, client: AsyncClient, session_id: str, **fields: Any) -> dict[str, Any]:
+        """GET the current turn's token then POST one fenced ``/guided/respond``."""
+        current = await client.get(f"/api/sessions/{session_id}/guided")
+        if current.status_code != 200:
+            raise AssertionError(f"guided-staged GET failed ({current.status_code}): {current.text}")
+        turn = current.json()["next_turn"]
+        body: dict[str, Any] = {
+            "operation_id": str(uuid4()),
+            "turn_token": turn["turn_token"] if turn is not None else None,
+            **fields,
+        }
+        resp = await client.post(f"/api/sessions/{session_id}/guided/respond", json=body)
+        if resp.status_code != 200:
+            raise AssertionError(f"guided-staged respond {sorted(fields)} failed ({resp.status_code}): {resp.text}")
+        return resp.json()
+
+    def _source_review_options(self, spec: Mapping[str, Any], output_map: Mapping[str, str]) -> dict[str, Any]:
+        """Build the Step-1 SCHEMA_FORM options that review one source verbatim.
+
+        ``on_validation_failure`` rides inside the submitted options (the
+        transition splits it out into the reviewed source's structural field);
+        the source ``path`` is rebound under ``{data_dir}/blobs/`` (the S2 commit
+        allowlist), and a validation failure routed to a sink is remapped to that
+        sink's guided default name.
+        """
+        options = copy.deepcopy(dict(spec["options"]))
+        if isinstance(options.get("path"), str):
+            options["path"] = str(self.data_dir / "blobs" / Path(options["path"]).name)
+        failure = spec.get("on_validation_failure", "discard")
+        options["on_validation_failure"] = output_map.get(failure, failure)
+        return options
+
+    def _output_review_options(self, output: Mapping[str, Any], output_map: Mapping[str, str]) -> dict[str, Any]:
+        """Build the Step-2 SCHEMA_FORM options that review one output verbatim."""
+        options = copy.deepcopy(dict(output["options"]))
+        if isinstance(options.get("path"), str):
+            options["path"] = str(self.data_dir / "outputs" / Path(options["path"]).name)
+        failure = output.get("on_write_failure", "discard")
+        options["on_write_failure"] = output_map.get(failure, failure)
+        return options
+
+    async def drive_guided_staged(self, fixture: Mapping[str, Any]) -> CompositionState:
+        """Guided-staged: drive the persisted stage protocol to the sole commit.
+
+        ``/guided/start`` (implicit on first GET) → per-source review (single
+        select → schema form → review) → finish sources → per-output review
+        (single select → schema form → passthrough field review → review) →
+        finish outputs (the ONLY planner call: real ``plan_guided_pipeline`` →
+        scripted completion emits the guided-named candidate → real
+        ``bind_guided_reviewed_components`` + candidate validation → durable
+        proposal) → review wiring → confirm wiring (the sole commit).
+
+        Only ``service._litellm_acompletion`` is scripted; the structured
+        ``/guided/respond`` transitions never touch
+        ``chat_solver._litellm_acompletion``. The single response is queued from
+        the start so any unexpected pre-finish provider call surfaces as a
+        scripted-completion-exhausted error at finish.
+        """
+        args = fixture["canonical_arguments"]
+        source_map, output_map = _guided_naming(args)
+        candidate = _derive_guided_candidate(args, source_map, output_map, self.data_dir)
+        (self.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
+
+        completion = _ScriptedCompletion(emit_proposal_response(candidate))
+        self.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
+
+        source_items = list(args["sources"].items()) if isinstance(args.get("sources"), dict) else [("source", args["source"])]
+        outputs = args["outputs"]
+
+        async with self._client() as client:
+            created = await client.post("/api/sessions", json={"title": "parity guided-staged"})
+            if created.status_code != 201:
+                raise AssertionError(f"session create failed ({created.status_code}): {created.text}")
+            session_id = created.json()["id"]
+
+            # Step 1 — review every source in canonical order.
+            for index, (_name, spec) in enumerate(source_items):
+                if index > 0:
+                    await self._staged_respond(client, session_id, component_action={"action": "add", "component_kind": "source"})
+                await self._staged_respond(client, session_id, chosen=[spec["plugin"]])
+                reviewed = await self._staged_respond(
+                    client,
+                    session_id,
+                    edited_values={"plugin": spec["plugin"], "options": self._source_review_options(spec, output_map)},
+                )
+                if reviewed["next_turn"]["type"] == "inspect_and_confirm":
+                    columns = list(
+                        reviewed["next_turn"]["payload"].get("columns") or reviewed["next_turn"]["payload"].get("observed_columns") or ()
+                    )
+                    reviewed = await self._staged_respond(client, session_id, edited_values={"columns": columns})
+                if reviewed["next_turn"]["type"] != "review_components":
+                    raise AssertionError(
+                        f"guided-staged source {index} landed on {reviewed['next_turn']['type']!r}, not review_components "
+                        f"for {fixture['class']}"
+                    )
+            await self._staged_respond(client, session_id, component_action={"action": "finish", "component_kind": "source"})
+
+            # Step 2 — review every output in canonical order. The finish-output
+            # transition is the sole planner call.
+            for index, output in enumerate(outputs):
+                if index > 0:
+                    await self._staged_respond(client, session_id, component_action={"action": "add", "component_kind": "output"})
+                await self._staged_respond(client, session_id, chosen=[output["plugin"]])
+                await self._staged_respond(
+                    client,
+                    session_id,
+                    edited_values={"plugin": output["plugin"], "options": self._output_review_options(output, output_map)},
+                )
+                await self._staged_respond(client, session_id, control_signal="passthrough")
+            staged = await self._staged_respond(client, session_id, component_action={"action": "finish", "component_kind": "output"})
+            if staged["next_turn"]["type"] != "propose_pipeline":
+                raise AssertionError(
+                    f"guided-staged finish did not stage a proposal for {fixture['class']} (got {staged['next_turn']['type']!r})"
+                )
+            proposal = staged["next_turn"]["payload"]
+            surface_value = staged["composition_state"]["composer_meta"]["guided_session"]["active_proposal"]
+            if surface_value is None:
+                raise AssertionError(f"guided-staged staged no active proposal for {fixture['class']}")
+
+            # Step 3 → Step 4 — review wiring, then confirm (the sole commit).
+            reviewed = await self._staged_respond(
+                client,
+                session_id,
+                proposal_id=proposal["proposal_id"],
+                draft_hash=proposal["draft_hash"],
+                chosen=["review_wiring"],
+            )
+            wire = reviewed["next_turn"]["payload"]
+            confirmed = await self._staged_respond(
+                client,
+                session_id,
+                proposal_id=wire["proposal_id"],
+                draft_hash=wire["draft_hash"],
+                chosen=["confirm_wiring"],
+            )
+            if confirmed["terminal"]["kind"] != "completed":
+                raise AssertionError(f"guided-staged did not complete for {fixture['class']} (terminal={confirmed['terminal']['kind']!r})")
         return await self._committed_state(UUID(session_id))
 
 

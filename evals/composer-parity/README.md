@@ -55,6 +55,28 @@ authoring-form requirements beyond the Task 2 argument shape:
   is injected by profile lowering (`_LLMProfileResolver.lower_options`). The
   source declares a fixed schema so the field contract to the LLM's declared
   `required_input_fields` is satisfiable at config time.
+- **`batch_stats` aggregations declare `output_mode: "transform"`.** The
+  `aggregation` and `row_expansion` fixtures set `output_mode: "transform"` on
+  their `batch_stats` node. This is faithful, not a workaround: the runtime
+  `OutputMode` default is `TRANSFORM` ("emit transformed output from the
+  aggregation plugin"), so an unspecified `output_mode` already runs as
+  transform — the fixture just makes it explicit. It is also required for the
+  guided-staged wire projection, whose closed `output_mode` vocabulary
+  (`default` / `passthrough` / `transform`) rejects the `None` a bare
+  `set_pipeline` commit would persist.
+
+### Guided-staged capability gaps (Task 3)
+
+The guided-staged column drives six fixtures; three cannot be authored through
+the guided stage protocol at HEAD and are reported as blockers (they commit
+identically on the freeform + guided-full surfaces, so the fixtures are not at
+fault). Each is documented with its exact mechanism and code location in
+`_GUIDED_STAGED_CAPABILITY_GAPS` in `test_fixture_matrix.py`: `multi_source_queue`
+(queue `input == id` self-loops the wire projection — likely a product bug in
+`canonical_connection_consumers`), `multi_output` (the structured sink review
+locks `on_write_failure` to `discard`, so a cross-sink fallback is unauthorable),
+and `fork_coalesce` (the consumer model keys on a single `node.input`, so a
+require-all coalesce's extra branch connection is orphaned).
 
 ## Byte canonicalization (Ruling C)
 

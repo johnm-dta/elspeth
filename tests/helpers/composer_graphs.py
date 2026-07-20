@@ -115,8 +115,58 @@ def _canon_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
-def _canon_options(options: Any) -> dict[str, Any]:
-    canon = _canon_value(options if options is not None else {})
+def _effective_options(options: Any, plugin_kind: str | None, plugin_name: str | None) -> Any:
+    """Drop a source/sink plugin's default-valued option keys so options compare by value.
+
+    Different commit paths persist the *same* plugin config at different levels
+    of explicitness: ``set_pipeline`` keeps the authored option keys, while the
+    guided stage protocol persists the full pydantic ``model_dump`` (every
+    default made explicit — e.g. csv ``delimiter`` / ``encoding`` / ``skip_rows``,
+    json ``indent`` / ``headers``). Those are the identical effective
+    configuration, so "normalized options" (a §8.1 PRESERVE attribute) must mean
+    the *effective* options, not the authored surface form. Dropping every option
+    key whose value equals its plugin config-model field default collapses that
+    explicit-vs-default noise on both sides while keeping every non-default value
+    (a real regression) fully visible. This reads field defaults only — it never
+    validates — so structural (``on_validation_failure``) and aliased/nested
+    (``schema``) keys, which have no matching plain field name, are left
+    untouched, and options that carry a genuine non-default stay in the compared
+    form. Falls back to the raw options when no model resolves.
+    """
+    from elspeth.contracts.freeze import deep_thaw
+
+    raw = dict(deep_thaw(options)) if options is not None else {}
+    if plugin_kind is None or plugin_name is None:
+        return raw
+    try:
+        from pydantic_core import PydanticUndefined
+
+        from elspeth.plugins.infrastructure.validation import get_sink_config_model, get_source_config_model
+
+        if plugin_kind == "source":
+            model = get_source_config_model(plugin_name)
+        elif plugin_kind == "sink":
+            model = get_sink_config_model(plugin_name)
+        else:
+            return raw
+        if model is None:
+            return raw
+        fields = model.model_fields
+        reduced: dict[str, Any] = {}
+        for key, value in raw.items():
+            field = fields.get(key)
+            if field is not None:
+                default = field.get_default(call_default_factory=True)
+                if default is not PydanticUndefined and value == default:
+                    continue  # explicit default == absent default: pure surface noise
+            reduced[key] = value
+        return reduced
+    except Exception:
+        return raw
+
+
+def _canon_options(options: Any, *, plugin_kind: str | None = None, plugin_name: str | None = None) -> dict[str, Any]:
+    canon = _canon_value(_effective_options(options, plugin_kind, plugin_name))
     if not isinstance(canon, dict):  # pragma: no cover - options are always mappings
         raise TypeError(f"options must canonicalize to a mapping, got {type(options)!r}")
     return canon
@@ -162,7 +212,11 @@ def _build_model(state: Mapping[str, Any]) -> _Model:
     # Sources -------------------------------------------------------------- #
     for key, source in state["sources"].items():
         atom = f"S:{key}"
-        base[atom] = ("source", source["plugin"], _freeze(_canon_options(source.get("options"))))
+        base[atom] = (
+            "source",
+            source["plugin"],
+            _freeze(_canon_options(source.get("options"), plugin_kind="source", plugin_name=source["plugin"])),
+        )
         links.append((atom, "source.on_success", conn_atom(str(source["on_success"]))))
         links.append((atom, "source.on_validation_failure", failure_target(source.get("on_validation_failure"))))
 
@@ -202,7 +256,11 @@ def _build_model(state: Mapping[str, Any]) -> _Model:
     for output in state["outputs"]:
         name = output["name"]
         atom = f"O:{name}"
-        base[atom] = ("output", output["plugin"], _freeze(_canon_options(output.get("options"))))
+        base[atom] = (
+            "output",
+            output["plugin"],
+            _freeze(_canon_options(output.get("options"), plugin_kind="sink", plugin_name=output["plugin"])),
+        )
         links.append((atom, "output.sink", conn_atom(str(name))))
         links.append((atom, "output.on_write_failure", failure_target(output.get("on_write_failure"))))
 
@@ -321,7 +379,7 @@ def canonical_graph(state: CompositionState | Mapping[str, Any]) -> CanonicalGra
         sources.append(
             {
                 "plugin": source["plugin"],
-                "options": _canon_options(source.get("options")),
+                "options": _canon_options(source.get("options"), plugin_kind="source", plugin_name=source["plugin"]),
                 "on_success": tok(str(source["on_success"])),
                 "on_validation_failure": failure_tok(source.get("on_validation_failure")),
             }
@@ -361,7 +419,7 @@ def canonical_graph(state: CompositionState | Mapping[str, Any]) -> CanonicalGra
         outputs.append(
             {
                 "plugin": output["plugin"],
-                "options": _canon_options(output.get("options")),
+                "options": _canon_options(output.get("options"), plugin_kind="sink", plugin_name=output["plugin"]),
                 "sink": tok(str(output["name"])),
                 "on_write_failure": failure_tok(output.get("on_write_failure")),
             }

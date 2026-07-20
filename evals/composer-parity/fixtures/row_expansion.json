@@ -66,6 +66,6 @@
   "runtime_assertions": [
     "The batch_stats aggregation feeds a real batch_replicate aggregation node (output_mode transform) that expands one aggregated batch into multiple downstream rows.",
     "The downstream consumer receives more rows than the aggregation emitted (genuine cardinality expansion).",
-    "Upstream guaranteed fields are preserved across the expansion into the downstream consumer and the sink."
+    "batch_stats emits derived summary rows (count, sum, mean, batch_size) and drops the original CSV row fields; those derived summary fields are what batch_replicate passes through (passes_through_input=True) into the downstream consumer and the sink, with copy_index added per replica."
   ]
 }

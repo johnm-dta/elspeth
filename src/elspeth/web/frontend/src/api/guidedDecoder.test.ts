@@ -26,10 +26,14 @@ function wireResponse(payloadOverrides: Record<string, unknown> = {}): Record<st
       payload: {
         proposal_id: "00000000-0000-4000-8000-000000000001",
         draft_hash: "d".repeat(64),
-        topology: { sources: {}, nodes: [], outputs: [] },
-        edge_contracts: [],
+        sources: [],
+        nodes: [],
+        outputs: [],
+        connections: [],
         semantic_contracts: [],
         warnings: [],
+        blockers: [],
+        can_confirm: true,
         ...payloadOverrides,
       },
     },
@@ -38,7 +42,37 @@ function wireResponse(payloadOverrides: Record<string, unknown> = {}): Record<st
   };
 }
 
-describe("guided schema-9 decoder", () => {
+function aggregationNode(
+  behaviorOverrides: Record<string, unknown> = {},
+  cardinalityOverrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    stable_id: "00000000-0000-4000-8000-000000000002",
+    label: "batch",
+    node_type: "aggregation",
+    plugin: "batch_stats",
+    behavior: {
+      kind: "aggregation",
+      trigger_kinds: ["count", "timeout"],
+      count: "25",
+      timeout_seconds: 12.5,
+      output_mode: "transform",
+      expected_output_count: "1",
+      ...behaviorOverrides,
+    },
+    required_fields: [],
+    guaranteed_fields: [],
+    row_cardinality: {
+      input: "batch",
+      output: "expected_count",
+      expected_output_count: "1",
+      ...cardinalityOverrides,
+    },
+    structured_output_fields: [],
+  };
+}
+
+describe("guided schema-10 wire decoder", () => {
   it("decodes a wire turn bound to its pending proposal", () => {
     const decoded = decodeGetGuidedResponse(wireResponse());
 
@@ -55,5 +89,48 @@ describe("guided schema-9 decoder", () => {
     delete nextTurn.payload[missing];
 
     expect(() => decodeGetGuidedResponse(response)).toThrow(missing);
+  });
+
+  it.each(["advisor_findings", "signoff_outcome", "passes_remaining"])(
+    "rejects removed wire sign-off field %s",
+    (field) => {
+      expect(() => decodeGetGuidedResponse(wireResponse({ [field]: field === "passes_remaining" ? 1 : "legacy" })))
+        .toThrow(`unexpected ${field}`);
+    },
+  );
+
+  it.each([
+    [["count", "unknown"], "unknown trigger"],
+    [["count", "count"], "duplicate trigger"],
+  ])("rejects %s aggregation trigger kinds", (triggerKinds) => {
+    expect(() => decodeGetGuidedResponse(wireResponse({
+      nodes: [aggregationNode({ trigger_kinds: triggerKinds })],
+    }))).toThrow("trigger_kinds");
+  });
+
+  it.each([
+    ["count trigger without count", { trigger_kinds: ["count", "timeout"], count: null }, "count"],
+    ["count without count trigger", { trigger_kinds: ["timeout"], count: "25" }, "count"],
+    ["timeout trigger without timeout", { trigger_kinds: ["count", "timeout"], timeout_seconds: null }, "timeout_seconds"],
+    ["timeout without timeout trigger", { trigger_kinds: ["count"], timeout_seconds: 12.5 }, "timeout_seconds"],
+  ])("rejects aggregation %s", (_case, behaviorOverrides, field) => {
+    expect(() => decodeGetGuidedResponse(wireResponse({
+      nodes: [aggregationNode(behaviorOverrides)],
+    }))).toThrow(field);
+  });
+
+  it.each(["01", "+1", "1.0"])("rejects noncanonical cardinality count %s", (count) => {
+    expect(() => decodeGetGuidedResponse(wireResponse({
+      nodes: [aggregationNode({}, { expected_output_count: count })],
+    }))).toThrow("expected_output_count");
+  });
+
+  it("rejects cardinality output/count coupling violations", () => {
+    expect(() => decodeGetGuidedResponse(wireResponse({
+      nodes: [aggregationNode({}, { output: "expected_count", expected_output_count: null })],
+    }))).toThrow("expected_output_count");
+    expect(() => decodeGetGuidedResponse(wireResponse({
+      nodes: [aggregationNode({}, { output: "one", expected_output_count: "1" })],
+    }))).toThrow("expected_output_count");
   });
 });

@@ -20,8 +20,9 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+import structlog
 from litellm.exceptions import APIError as LiteLLMAPIError
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
@@ -53,8 +54,10 @@ from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_sc
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, chat_messages_table, composition_proposals_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, composition_proposals_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @dataclass
@@ -978,7 +981,7 @@ async def test_safe_candidate_argument_error_gets_closed_feedback_then_repairs_w
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     raw_canary = "RAW_INVALID_FILENAME_CONTENT_CANARY"
     invalid = _inline_pipeline(tmp_path)
     invalid["source"]["inline_blob"]["filename"] = ""
@@ -1028,7 +1031,7 @@ async def test_safe_candidate_argument_error_exhaustion_fails_without_custody(
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     invalid = _inline_pipeline(tmp_path)
     invalid["source"]["inline_blob"]["filename"] = ""
     completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": invalid})))
@@ -1401,48 +1404,28 @@ async def test_repeated_discovery_call_hits_explicit_cycle_guard_before_redispat
     assert len(recorder.invocations) == 1
 
 
-def _session_context(*, content: str = "Use this CSV: name,score\nada,42\n") -> tuple[Any, PlannerOriginatingMessage]:
+async def _session_context(*, content: str = "Use this CSV: name,score\nada,42\n") -> tuple[Any, PlannerOriginatingMessage]:
     engine = create_session_engine(
         "sqlite:///:memory:",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
-    session_id = str(uuid4())
-    message_id = str(uuid4())
-    from datetime import UTC, datetime
-
-    now = datetime.now(UTC)
-    with engine.begin() as conn:
-        conn.execute(
-            insert(sessions_table).values(
-                id=session_id,
-                user_id="planner-user",
-                auth_provider_type="local",
-                title="planner custody",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        conn.execute(
-            insert(chat_messages_table).values(
-                id=message_id,
-                session_id=session_id,
-                role="user",
-                content=content,
-                raw_content=None,
-                tool_calls=None,
-                tool_call_id=None,
-                sequence_no=1,
-                writer_principal="route_user_message",
-                created_at=now,
-                composition_state_id=None,
-                parent_assistant_id=None,
-            )
-        )
+    service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.pipeline-planner-custody"),
+    )
+    session = await service.create_session("planner-user", "planner custody", "local")
+    message = await service.add_message(
+        session.id,
+        "user",
+        content,
+        writer_principal="route_user_message",
+    )
     return engine, PlannerOriginatingMessage(
-        session_id=session_id,
-        message_id=message_id,
+        session_id=str(session.id),
+        message_id=str(message.id),
         content=content,
         user_id="planner-user",
     )
@@ -1453,7 +1436,7 @@ async def test_invalid_inline_draft_exhaustion_leaves_zero_pre_custody_residue(
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     completion = _ScriptedCompletion(
         _response(("emit_pipeline_proposal", {"pipeline": _inline_pipeline(tmp_path, output_name="not_rows")}))
     )
@@ -1490,7 +1473,7 @@ async def test_cancellation_during_custody_settles_then_reraises_without_proposa
     tool_context: ToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     entered = asyncio.Event()
     release = asyncio.Event()
     settled = asyncio.Event()
@@ -1537,7 +1520,7 @@ async def test_real_inline_custody_returns_only_blob_id_and_ready_row(
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     raw_content = "name,score\nada,42\n"
     completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _inline_pipeline(tmp_path)})))
     recorder = BufferingRecorder()
@@ -1585,7 +1568,7 @@ async def test_inline_custody_provenance_uses_terminal_audited_model_returned_or
     model_returned: str | None,
     expected_model_version: str,
 ) -> None:
-    engine, origin = _session_context(content="Generate a fresh CSV for this pipeline.")
+    engine, origin = await _session_context(content="Generate a fresh CSV for this pipeline.")
     response = _response(("emit_pipeline_proposal", {"pipeline": _inline_pipeline(tmp_path)}))
     response.model = model_returned
     recorder = BufferingRecorder()
@@ -1929,7 +1912,7 @@ async def test_blob_content_discovery_audit_projection_never_retains_content(
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    engine, origin = _session_context()
+    engine, origin = await _session_context()
     custody = PlannerCustodyConfig(
         data_dir=str(tmp_path),
         session_engine=engine,

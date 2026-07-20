@@ -38,6 +38,7 @@ from elspeth.web.sessions.protocol import (
     GuidedForkSettlementCommand,
     GuidedOperationClaimed,
     GuidedOperationTakenOver,
+    GuidedOriginatingUserMessageDraft,
     InvalidForkTargetError,
 )
 from elspeth.web.sessions.routes import create_session_router
@@ -63,7 +64,7 @@ def _guided_fork_checkpoint(
     deferred_message_content: str,
     current_turn: str,
 ) -> Any:
-    """Build a schema-9 checkpoint containing the fork-sensitive fields."""
+    """Build a schema-10 checkpoint containing the fork-sensitive fields."""
     from elspeth.core.canonical import stable_hash
     from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
     from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
@@ -302,6 +303,55 @@ async def _fork_session(
         )
     )
     return active, list(staged.messages), staged.state
+
+
+async def _complete_guided_start_authority(
+    service: SessionServiceImpl,
+    *,
+    session_id: uuid.UUID,
+    root_message,
+    state,
+    state_data: CompositionStateData,
+) -> None:
+    """Bind a fixture root and existing guided head through the production start APIs."""
+    from elspeth.contracts.hashing import stable_hash
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.schemas import StartGuidedRequest
+
+    operation_id = str(uuid.uuid4())
+    request = StartGuidedRequest.model_validate(
+        {
+            "operation_id": operation_id,
+            "profile": "live",
+            "intent": root_message.content,
+        },
+        strict=True,
+    )
+    claimed = await service.reserve_guided_operation(
+        session_id=session_id,
+        operation_id=operation_id,
+        kind="guided_start",
+        request_hash=guided_operation_request_hash(
+            session_id=session_id,
+            kind="guided_start",
+            request=request,
+        ),
+        actor="composer_route",
+        lease_seconds=300,
+    )
+    assert type(claimed) in {GuidedOperationClaimed, GuidedOperationTakenOver}
+    outcome = await service.seed_or_complete_guided_start_operation(
+        claimed.fence,
+        state=state_data,
+        provenance="session_seed",
+        actor="composer_route",
+        response_hash_factory=lambda record: stable_hash({"state_id": str(record.id)}),
+        originating_message=GuidedOriginatingUserMessageDraft(
+            message_id=root_message.id,
+            content=root_message.content,
+        ),
+    )
+    assert outcome.state.id == state.id
 
 
 async def _assert_fork_integrity_failure_is_atomic(
@@ -1010,18 +1060,26 @@ class TestForkSession:
             deferred_message_content=deferred_origin.content,
             current_turn=TurnType.PROPOSE_PIPELINE.value,
         )
+        state_data = CompositionStateData(
+            sources={},
+            nodes=[],
+            edges=[],
+            outputs=[],
+            metadata_={"name": "Guided", "description": ""},
+            is_valid=True,
+            composer_meta={"guided_session": source_guided.to_dict()},
+        )
         state = await service.save_composition_state(
             session.id,
-            CompositionStateData(
-                sources={},
-                nodes=[],
-                edges=[],
-                outputs=[],
-                metadata_={"name": "Guided", "description": ""},
-                is_valid=True,
-                composer_meta={"guided_session": source_guided.to_dict()},
-            ),
+            state_data,
             provenance="session_seed",
+        )
+        await _complete_guided_start_authority(
+            service,
+            session_id=session.id,
+            root_message=root,
+            state=state,
+            state_data=state_data,
         )
         _proposal, state, source_guided = await _attach_pending_fork_proposal(
             service,
@@ -1053,7 +1111,7 @@ class TestForkSession:
         copied_deferred_origin = next(message for message in child_messages if message.content == "deferred detail")
 
         assert copied_guided.profile == EMPTY_PROFILE
-        assert copied_guided.step is GuidedStep.STEP_3_TRANSFORMS
+        assert copied_guided.step is GuidedStep.STEP_2_SINK
         assert copied_guided.reviewed_sources == source_guided.reviewed_sources
         assert copied_guided.reviewed_outputs == source_guided.reviewed_outputs
         assert copied_guided.deferred_intents[0].redacted_summary == source_guided.deferred_intents[0].redacted_summary
@@ -1098,14 +1156,22 @@ class TestForkSession:
             deferred_message_content=root.content,
             current_turn=turn_type,
         )
+        state_data = CompositionStateData(
+            is_valid=True,
+            metadata_={"name": "Guided", "description": ""},
+            composer_meta={"guided_session": guided.to_dict()},
+        )
         state = await service.save_composition_state(
             session.id,
-            CompositionStateData(
-                is_valid=True,
-                metadata_={"name": "Guided", "description": ""},
-                composer_meta={"guided_session": guided.to_dict()},
-            ),
+            state_data,
             provenance="session_seed",
+        )
+        await _complete_guided_start_authority(
+            service,
+            session_id=session.id,
+            root_message=root,
+            state=state,
+            state_data=state_data,
         )
         _proposal, state, guided = await _attach_pending_fork_proposal(
             service,
@@ -1133,7 +1199,7 @@ class TestForkSession:
         assert copied_state is not None
         copied_meta = dict(deep_thaw(copied_state.composer_meta))
         copied_guided = GuidedSession.from_dict(copied_meta["guided_session"])
-        assert copied_guided.step is GuidedStep.STEP_3_TRANSFORMS
+        assert copied_guided.step is GuidedStep.STEP_2_SINK
         assert copied_guided.active_proposal is None
         assert copied_guided.active_edit_target is None
         assert copied_guided.transition_consumed is False
@@ -1322,7 +1388,14 @@ class TestForkSession:
         other = await service.save_composition_state(
             session.id,
             CompositionStateData(
-                sources={},
+                sources={
+                    "other": {
+                        "plugin": "csv",
+                        "on_success": "discard",
+                        "options": {},
+                        "on_validation_failure": "discard",
+                    }
+                },
                 nodes=[],
                 edges=[],
                 outputs=[],
@@ -1339,6 +1412,10 @@ class TestForkSession:
             guided=guided,
             proposal_base_state=other,
         )
+        from elspeth.web.composer.pipeline_proposal import composition_content_hash
+        from elspeth.web.sessions.converters import state_from_record
+
+        assert composition_content_hash(state_from_record(target)) != composition_content_hash(state_from_record(other))
         fork_message = await service.add_message(
             session.id,
             "user",
@@ -1368,11 +1445,11 @@ class TestForkSession:
             service,
             source_session_id=session.id,
             fork_message_id=fork_message.id,
-            match="checkpoint content binding",
+            match="base content binding",
         )
 
     @pytest.mark.asyncio
-    async def test_fork_topology_rewind_clears_terminal_and_advisor_state(self, service) -> None:
+    async def test_fork_topology_rewind_clears_terminal_state(self, service) -> None:
         from dataclasses import replace
 
         from elspeth.contracts.freeze import deep_thaw
@@ -1391,8 +1468,6 @@ class TestForkSession:
         guided = replace(
             completed,
             history=(*completed.history[:-1], replace(completed.history[-1], response_hash="c" * 64)),
-            advisor_checkpoint_passes_used=3,
-            advisor_signoff_escape_offered=True,
             terminal=TerminalState(
                 kind=TerminalKind.COMPLETED,
                 reason=None,
@@ -1401,10 +1476,26 @@ class TestForkSession:
             active_proposal=None,
             active_edit_target=None,
         )
+        state_data = CompositionStateData(
+            sources={},
+            nodes=[],
+            edges=[],
+            outputs=[],
+            metadata_={"name": "Guided", "description": ""},
+            is_valid=True,
+            composer_meta={"guided_session": guided.to_dict()},
+        )
         state = await service.save_composition_state(
             session.id,
-            CompositionStateData(is_valid=True, composer_meta={"guided_session": guided.to_dict()}),
+            state_data,
             provenance="session_seed",
+        )
+        await _complete_guided_start_authority(
+            service,
+            session_id=session.id,
+            root_message=root,
+            state=state,
+            state_data=state_data,
         )
         fork_msg = await service.add_message(
             session.id,
@@ -1427,8 +1518,6 @@ class TestForkSession:
         copied_meta = dict(deep_thaw(copied_state.composer_meta))
         copied_guided = GuidedSession.from_dict(copied_meta["guided_session"])
         assert copied_guided.terminal is None
-        assert copied_guided.advisor_checkpoint_passes_used == 0
-        assert copied_guided.advisor_signoff_escape_offered is False
 
     @pytest.mark.asyncio
     async def test_fork_topology_rewind_removes_trailing_step3_edit_turn(self, service) -> None:
@@ -1445,10 +1534,26 @@ class TestForkSession:
             deferred_message_content=root.content,
             current_turn=TurnType.SCHEMA_FORM.value,
         )
+        state_data = CompositionStateData(
+            sources={},
+            nodes=[],
+            edges=[],
+            outputs=[],
+            metadata_={"name": "Guided", "description": ""},
+            is_valid=True,
+            composer_meta={"guided_session": guided.to_dict()},
+        )
         state = await service.save_composition_state(
             session.id,
-            CompositionStateData(is_valid=True, composer_meta={"guided_session": guided.to_dict()}),
+            state_data,
             provenance="session_seed",
+        )
+        await _complete_guided_start_authority(
+            service,
+            session_id=session.id,
+            root_message=root,
+            state=state,
+            state_data=state_data,
         )
         fork_msg = await service.add_message(
             session.id,
@@ -1516,7 +1621,7 @@ class TestForkSession:
             writer_principal="route_user_message",
         )
 
-        with pytest.raises(AuditIntegrityError, match="schema-9 authority is malformed"):
+        with pytest.raises(AuditIntegrityError, match="schema-10 authority is malformed"):
             await _fork_session(
                 service,
                 source_session_id=session.id,
@@ -2287,10 +2392,26 @@ class TestForkEndpoint:
             },
             root_intent_message_id=str(root.id),
         )
+        state_data = CompositionStateData(
+            sources={},
+            nodes=[],
+            edges=[],
+            outputs=[],
+            metadata_={"name": "Guided", "description": ""},
+            is_valid=True,
+            composer_meta={"guided_session": guided.to_dict()},
+        )
         state = await service.save_composition_state(
             parent.id,
-            CompositionStateData(is_valid=True, composer_meta={"guided_session": guided.to_dict()}),
+            state_data,
             provenance="session_seed",
+        )
+        await _complete_guided_start_authority(
+            service,
+            session_id=parent.id,
+            root_message=root,
+            state=state,
+            state_data=state_data,
         )
         fork_message = await service.add_message(
             parent.id,

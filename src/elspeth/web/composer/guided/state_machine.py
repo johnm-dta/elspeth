@@ -47,9 +47,9 @@ from elspeth.web.composer.guided.resolved import (
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PresentBase, ProposalBase, reviewed_anchor_hash
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Schema 9 is a pre-release hard cut. There is no older-schema decoder or
-# converter: session epoch 33 owns the current store recreation boundary.
-GUIDED_SESSION_SCHEMA_VERSION = 9
+# Schema 10 is a pre-release hard cut. There is no older-schema decoder or
+# converter: session epoch 34 owns the current store recreation boundary.
+GUIDED_SESSION_SCHEMA_VERSION = 10
 GUIDED_MAX_DEFERRED_INTENTS = 256
 GUIDED_MAX_CONSTRAINTS_PER_INTENT = 64
 GUIDED_MAX_TOTAL_CONSTRAINTS = 4_096
@@ -69,8 +69,6 @@ _GUIDED_SESSION_KEYS = frozenset(
         "step",
         "history",
         "profile",
-        "advisor_checkpoint_passes_used",
-        "advisor_signoff_escape_offered",
         "terminal",
         "transition_consumed",
         "chat_history",
@@ -82,6 +80,7 @@ _GUIDED_SESSION_KEYS = frozenset(
         "reviewed_outputs",
         "pending_output_intents",
         "deferred_intents",
+        "correction_messages",
         "active_proposal",
         "active_edit_target",
         "root_intent_message_id",
@@ -688,6 +687,38 @@ class GuidedProposalRef:
         )
 
 
+class GuidedCorrectionMessageRefData(TypedDict):
+    message_id: str
+    content_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class GuidedCorrectionMessageRef:
+    """Immutable custody reference for private Step 4 correction feedback."""
+
+    message_id: UUID
+    content_hash: str
+
+    def __post_init__(self) -> None:
+        _require_uuid(self.message_id, "GuidedCorrectionMessageRef.message_id")
+        _require_hash(self.content_hash, "GuidedCorrectionMessageRef.content_hash")
+
+    def to_dict(self) -> GuidedCorrectionMessageRefData:
+        return {"message_id": str(self.message_id), "content_hash": self.content_hash}
+
+    @classmethod
+    def from_dict(cls, value: object) -> GuidedCorrectionMessageRef:
+        record = _require_exact_dict(
+            value,
+            frozenset({"message_id", "content_hash"}),
+            "GuidedCorrectionMessageRef.from_dict",
+        )
+        return cls(
+            message_id=_uuid_from_text(record["message_id"], "GuidedCorrectionMessageRef.message_id"),
+            content_hash=_require_hash(record["content_hash"], "GuidedCorrectionMessageRef.content_hash"),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ComponentTarget:
     kind: Literal["source", "node", "edge", "output"]
@@ -891,13 +922,11 @@ def guided_reviewed_anchor_hash(
 
 @dataclass(frozen=True, slots=True)
 class GuidedSession:
-    """The only persisted guided checkpoint shape: closed schema version 8."""
+    """The only persisted guided checkpoint shape: closed schema version 10."""
 
     step: GuidedStep
     history: tuple[TurnRecord, ...] = ()
     profile: WorkflowProfile = EMPTY_PROFILE
-    advisor_checkpoint_passes_used: int = 0
-    advisor_signoff_escape_offered: bool = False
     terminal: TerminalState | None = None
     transition_consumed: bool = False
     chat_history: tuple[ChatTurn, ...] = ()
@@ -909,6 +938,7 @@ class GuidedSession:
     reviewed_outputs: Mapping[str, SinkOutputResolved] = field(default_factory=dict)
     pending_output_intents: Mapping[str, SinkIntent] = field(default_factory=dict)
     deferred_intents: tuple[DeferredStageIntent, ...] = ()
+    correction_messages: tuple[GuidedCorrectionMessageRef, ...] = ()
     active_proposal: GuidedProposalRef | None = None
     active_edit_target: ComponentTarget | None = None
     root_intent_message_id: str | None = None
@@ -926,10 +956,6 @@ class GuidedSession:
             raise InvariantError(f"GuidedSession.history aggregate summaries exceed {GUIDED_MAX_HISTORY_SUMMARY_CHARS} characters")
         if type(self.profile) is not WorkflowProfile:
             raise TypeError(f"profile must be WorkflowProfile, got {type(self.profile).__name__}")
-        if type(self.advisor_checkpoint_passes_used) is not int or self.advisor_checkpoint_passes_used < 0:
-            raise TypeError("advisor_checkpoint_passes_used must be a non-negative int")
-        if type(self.advisor_signoff_escape_offered) is not bool:
-            raise TypeError(f"advisor_signoff_escape_offered must be bool, got {type(self.advisor_signoff_escape_offered).__name__}")
         if self.terminal is not None and type(self.terminal) is not TerminalState:
             raise TypeError("terminal must be TerminalState or None")
         if type(self.transition_consumed) is not bool:
@@ -956,6 +982,15 @@ class GuidedSession:
             raise InvariantError("GuidedSession.chat_turn_seq must be the exact next unused persisted chat seq")
         if self.root_intent_message_id is not None:
             _canonical_uuid_text(self.root_intent_message_id, "GuidedSession.root_intent_message_id")
+        if type(self.correction_messages) is not tuple or any(
+            type(reference) is not GuidedCorrectionMessageRef for reference in self.correction_messages
+        ):
+            raise TypeError("GuidedSession.correction_messages must be an exact tuple of GuidedCorrectionMessageRef")
+        if len(self.correction_messages) > GUIDED_MAX_HISTORY_RECORDS:
+            raise InvariantError("GuidedSession.correction_messages exceeds the guided history limit")
+        correction_ids = tuple(reference.message_id for reference in self.correction_messages)
+        if len(set(correction_ids)) != len(correction_ids):
+            raise InvariantError("GuidedSession.correction_messages must not repeat a message_id")
 
         for mapping, field_name in (
             (self.reviewed_sources, "reviewed_sources"),
@@ -1125,6 +1160,7 @@ class GuidedSession:
             "reviewed_outputs",
             "pending_output_intents",
             "deferred_intents",
+            "correction_messages",
         )
 
     @staticmethod
@@ -1151,14 +1187,12 @@ class GuidedSession:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the exact schema-9 keyset to a JSON-safe dictionary."""
+        """Serialize the exact schema-10 keyset to a JSON-safe dictionary."""
         return {
             "schema_version": GUIDED_SESSION_SCHEMA_VERSION,
             "step": self.step.value,
             "history": [r.to_dict() for r in self.history],
             "profile": self.profile.to_dict(),
-            "advisor_checkpoint_passes_used": self.advisor_checkpoint_passes_used,
-            "advisor_signoff_escape_offered": self.advisor_signoff_escape_offered,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
             "chat_history": [
@@ -1181,6 +1215,7 @@ class GuidedSession:
             "reviewed_outputs": {stable_id: output.to_dict() for stable_id, output in self.reviewed_outputs.items()},
             "pending_output_intents": {stable_id: intent.to_dict() for stable_id, intent in self.pending_output_intents.items()},
             "deferred_intents": [intent.to_dict() for intent in self.deferred_intents],
+            "correction_messages": [reference.to_dict() for reference in self.correction_messages],
             "active_proposal": self.active_proposal.to_dict() if self.active_proposal is not None else None,
             "active_edit_target": self.active_edit_target.to_dict() if self.active_edit_target is not None else None,
             "root_intent_message_id": self.root_intent_message_id,
@@ -1188,7 +1223,7 @@ class GuidedSession:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GuidedSession:
-        """Restore and revalidate one exact schema-9 checkpoint."""
+        """Restore and revalidate one exact schema-10 checkpoint."""
         try:
             if type(d) is not dict:
                 raise InvariantError("GuidedSession.from_dict: record must be an exact dict")
@@ -1214,16 +1249,10 @@ class GuidedSession:
                         )
             history = tuple(TurnRecord.from_dict(record) for record in history_raw)
             profile_raw = d["profile"]
-            advisor_checkpoint_passes_used_raw = d["advisor_checkpoint_passes_used"]
-            advisor_signoff_escape_offered_raw = d["advisor_signoff_escape_offered"]
             try:
                 profile = WorkflowProfile.from_dict(profile_raw)
             except InvariantError as exc:
                 raise InvariantError("GuidedSession.from_dict: malformed profile") from exc
-            if type(advisor_checkpoint_passes_used_raw) is not int or advisor_checkpoint_passes_used_raw < 0:
-                raise InvariantError("GuidedSession.from_dict: advisor_checkpoint_passes_used must be a non-negative int")
-            if type(advisor_signoff_escape_offered_raw) is not bool:
-                raise InvariantError("GuidedSession.from_dict: advisor_signoff_escape_offered must be bool")
             terminal_raw = d["terminal"]
             transition_consumed = _require_guided_bool(d["transition_consumed"], "transition_consumed")
             chat_history_raw = _require_guided_sequence(d["chat_history"], "chat_history")
@@ -1290,6 +1319,9 @@ class GuidedSession:
                     raise InvariantError(
                         f"GuidedSession.from_dict: deferred constraints exceed the {GUIDED_MAX_TOTAL_CONSTRAINTS}-constraint limit"
                     )
+            correction_messages_raw = _require_guided_sequence(d["correction_messages"], "correction_messages")
+            if len(correction_messages_raw) > GUIDED_MAX_HISTORY_RECORDS:
+                raise InvariantError("GuidedSession.from_dict: correction_messages exceeds the guided history limit")
             chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
             active_proposal_raw = d["active_proposal"]
             active_edit_target_raw = d["active_edit_target"]
@@ -1297,8 +1329,6 @@ class GuidedSession:
                 step=GuidedStep(d["step"]),
                 history=history,
                 profile=profile,
-                advisor_checkpoint_passes_used=advisor_checkpoint_passes_used_raw,
-                advisor_signoff_escape_offered=advisor_signoff_escape_offered_raw,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
                 transition_consumed=transition_consumed,
                 chat_history=chat_history,
@@ -1322,6 +1352,7 @@ class GuidedSession:
                     for stable_id, intent in pending_outputs_raw.items()
                 },
                 deferred_intents=tuple(DeferredStageIntent.from_dict(intent) for intent in deferred_raw),
+                correction_messages=tuple(GuidedCorrectionMessageRef.from_dict(reference) for reference in correction_messages_raw),
                 active_proposal=GuidedProposalRef.from_dict(active_proposal_raw) if active_proposal_raw is not None else None,
                 active_edit_target=ComponentTarget.from_dict(active_edit_target_raw) if active_edit_target_raw is not None else None,
                 root_intent_message_id=(

@@ -247,8 +247,8 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_epoch_32_database() -> None:
-    """An epoch-32 DB without the admission barrier fails at boot.
+def test_initialize_session_schema_rejects_epoch_34_database() -> None:
+    """An epoch-34 DB without exclusive proposal admission fails at boot.
 
     Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
     Because the SQL shape and cross-dialect identity row remain current, the
@@ -257,12 +257,12 @@ def test_initialize_session_schema_rejects_epoch_32_database() -> None:
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 32 WHERE store_kind = 'session'"))
-        conn.execute(text("PRAGMA user_version = 32"))
+        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 34 WHERE store_kind = 'session'"))
+        conn.execute(text("PRAGMA user_version = 34"))
     assert probe_current_schema(eng) is False
     with pytest.raises(
         SessionSchemaError,
-        match=r"Session DB schema version 32 does not match SESSION_SCHEMA_EPOCH=33.*Delete the session DB file and restart",
+        match=r"Session DB schema version 34 does not match SESSION_SCHEMA_EPOCH=35.*Delete the session DB file and restart",
     ):
         initialize_session_schema(eng)
 
@@ -302,7 +302,7 @@ def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with
 
     with pytest.raises(
         SessionSchemaError,
-        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=33.*"
+        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=35.*"
         r"Delete the session DB file and restart",
     ):
         initialize_session_schema(stale_engine)

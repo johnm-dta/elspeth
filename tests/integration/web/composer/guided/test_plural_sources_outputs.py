@@ -403,34 +403,42 @@ def test_plural_sources_outputs_survive_hydration_and_stage_ordered_proposal(
     assert [item["stable_id"] for item in proposal_payload["outputs"]] == [output_b, output_c]
     assert _hydrate(client, session_id).active_proposal is not None
 
-    accepted = _respond(
+    reviewed = _respond(
         client,
         session_id,
-        chosen=["accept"],
+        chosen=["review_wiring"],
         proposal_id=proposal_payload["proposal_id"],
         draft_hash=proposal_payload["draft_hash"],
     )
-    assert accepted["guided_session"]["step"] == "step_4_wire"
-    assert accepted["next_turn"]["type"] == "confirm_wiring"
+    assert reviewed["guided_session"]["step"] == "step_4_wire"
+    assert reviewed["next_turn"]["type"] == "confirm_wiring"
+    assert _hydrate(client, session_id).active_proposal is not None
+    assert [output["label"] for output in reviewed["next_turn"]["payload"]["outputs"]] == [
+        output["label"] for output in proposal_payload["outputs"]
+    ]
+
+    confirmed = _respond(
+        client,
+        session_id,
+        chosen=["confirm_wiring"],
+        proposal_id=proposal_payload["proposal_id"],
+        draft_hash=proposal_payload["draft_hash"],
+    )
     assert _hydrate(client, session_id).active_proposal is None
-    assert [output["name"] for output in accepted["composition_state"]["outputs"]] == ["output_2", "output"]
-    assert [output["options"]["path"] for output in accepted["composition_state"]["outputs"]] == [
+    assert [output["name"] for output in confirmed["composition_state"]["outputs"]] == ["output_2", "output"]
+    assert [output["options"]["path"] for output in confirmed["composition_state"]["outputs"]] == [
         revised_path,
         output_c_path,
     ]
-    assert [output["sink_name"] for output in accepted["next_turn"]["payload"]["topology"]["outputs"]] == [
-        "output_2",
-        "output",
-    ]
     authoritative = _get(client, session_id)
-    assert authoritative["guided_session"] == accepted["guided_session"]
-    assert authoritative["terminal"] == accepted["terminal"]
-    assert authoritative["composition_state"] == accepted["composition_state"]
+    assert authoritative["guided_session"] == confirmed["guided_session"]
+    assert authoritative["terminal"] == confirmed["terminal"]
+    assert authoritative["composition_state"] == confirmed["composition_state"]
     assert [output["name"] for output in authoritative["composition_state"]["outputs"]] == [
         "output_2",
         "output",
     ]
-    assert authoritative["next_turn"] == accepted["next_turn"]
+    assert authoritative["next_turn"] is None
 
 
 def test_rejected_plural_proposal_is_terminal_and_cannot_execute(composer_test_client: TestClient) -> None:

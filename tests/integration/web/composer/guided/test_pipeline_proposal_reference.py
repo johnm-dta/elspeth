@@ -272,9 +272,11 @@ async def _command(
             affects=("pipeline",),
             arguments_redacted_json=redacted,
             catalog_plugin_ids=CATALOG_IDS,
+            proposal_projection=projection,
             actor="composer_route",
             user_message_id=None,
             user_message_content_hash=None,
+            originating_message=None,
             supersedes_proposal_id=None,
             response=GuidedResponseDescriptor(
                 kind="guided_respond",
@@ -407,9 +409,11 @@ async def _successor_command(
                 telemetry=NoopRedactionTelemetry(),
             ),
             catalog_plugin_ids=CATALOG_IDS,
+            proposal_projection=projection,
             actor="composer_route",
             user_message_id=None,
             user_message_content_hash=None,
+            originating_message=None,
             supersedes_proposal_id=predecessor_command.proposal_id,
             response=GuidedResponseDescriptor(
                 kind="guided_respond",

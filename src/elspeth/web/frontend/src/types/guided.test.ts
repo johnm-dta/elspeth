@@ -52,20 +52,19 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(7);
   });
 
-  it("ControlSignal union has 5 values (C-3: added back + passthrough, fixing pre-existing drift from protocol.py)", () => {
+  it("ControlSignal union has exactly 4 values", () => {
     const _exact: Equals<
       ControlSignal,
-      "exit_to_freeform" | "request_advisor" | "reject" | "back" | "passthrough"
+      "exit_to_freeform" | "reject" | "back" | "passthrough"
     > = true;
     const all: ControlSignal[] = [
       "exit_to_freeform",
-      "request_advisor",
       "reject",
       "back",
       "passthrough",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(5);
+    expect(all).toHaveLength(4);
   });
 
   it("GuidedStep union has exactly 4 values", () => {
@@ -121,10 +120,14 @@ describe("guided protocol types", () => {
     const payload: WireStageData = {
       proposal_id: "00000000-0000-4000-8000-000000000001",
       draft_hash: "d".repeat(64),
-      topology: { sources: {}, nodes: [], outputs: [] },
-      edge_contracts: [],
+      sources: [],
+      nodes: [],
+      outputs: [],
+      connections: [],
       semantic_contracts: [],
       warnings: [],
+      blockers: [],
+      can_confirm: true,
     };
     expect(payload.proposal_id).toMatch(/^[0-9a-f-]{36}$/);
   });
@@ -362,27 +365,25 @@ describe("guided protocol types", () => {
 });
 
 describe("WorkflowProfile wire type", () => {
-  it("carries exactly the three wire-visible boolean flags", () => {
-    // Compile-time exhaustive check: the wire profile is exactly these three
+  it("carries exactly the two active wire-visible boolean flags", () => {
+    // Compile-time exhaustive check: the wire profile is exactly these two
     // behavior flags — adding any other key here would fail tsc.
     const _exact: Equals<
       keyof WorkflowProfile,
-      "coaching" | "bookends" | "advisor_checkpoints"
+      "coaching" | "bookends"
     > = true;
     const profile: WorkflowProfile = {
       coaching: true,
       bookends: true,
-      advisor_checkpoints: true,
     };
     expect(_exact).toBe(true);
-    expect(profile.advisor_checkpoints).toBe(true);
+    expect(profile.bookends).toBe(true);
   });
 
   it("rides GuidedSession.profile; null is the empty/live-guided profile", () => {
     const profile: WorkflowProfile = {
       coaching: false,
       bookends: false,
-      advisor_checkpoints: false,
     };
     const seeded: Pick<GuidedSession, "profile"> = { profile };
     expect(seeded.profile).not.toBeNull();
@@ -392,60 +393,35 @@ describe("WorkflowProfile wire type", () => {
 });
 
 describe("WireStageData wire shape", () => {
-  it("uses topology ids and edge_contracts from/to keys", () => {
+  it("uses proposal-stable component and connection identities", () => {
+    const _exact: Equals<
+      keyof WireStageData,
+      | "proposal_id"
+      | "draft_hash"
+      | "sources"
+      | "nodes"
+      | "outputs"
+      | "connections"
+      | "semantic_contracts"
+      | "warnings"
+      | "blockers"
+      | "can_confirm"
+    > = true;
     const data: WireStageData = {
       proposal_id: "00000000-0000-4000-8000-000000000001",
       draft_hash: "d".repeat(64),
-      topology: {
-        sources: {
-          source: {
-            id: "source",
-            plugin: "inline_blob",
-            on_success: "chain_in",
-            on_validation_failure: "discard",
-          },
-        },
-        nodes: [
-          {
-            id: "scrape",
-            node_type: "transform",
-            plugin: "web_scrape",
-            input: "chain_in",
-            on_success: "scraped",
-            on_error: "scrape_error",
-            routes: { retry: "chain_in" },
-            fork_to: ["audit_stream"],
-            branches: null,
-          },
-        ],
-        outputs: [
-          {
-            id: "output:jsonl_out",
-            sink_name: "jsonl_out",
-            plugin: "json",
-            on_write_failure: "discard",
-          },
-        ],
-      },
-      edge_contracts: [
-        {
-          from: "scrape",
-          to: "output:jsonl_out",
-          producer_guarantees: ["url", "body"],
-          consumer_requires: ["body"],
-          missing_fields: [],
-          satisfied: true,
-        },
-      ],
+      sources: [{ stable_id: "00000000-0000-4000-8000-000000000010", label: "source-1", plugin: "inline_blob", on_validation_failure: "discard", guaranteed_fields: [], row_cardinality: { input: "none", output: "zero_or_many", expected_output_count: null } }],
+      nodes: [],
+      outputs: [{ stable_id: "00000000-0000-4000-8000-000000000020", label: "output-1", plugin: "json", on_write_failure: "discard", required_fields: [], business_schema: { mode: "observed", fields: [], guaranteed_fields: [], required_fields: [] } }],
+      connections: [{ stable_id: "00000000-0000-4000-8000-000000000030", from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000010" }, to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000020" }, flow: { kind: "source_success", branch: null }, schema_contract: null }],
       semantic_contracts: [],
       warnings: [],
-      advisor_findings: "Prompt shield warning reviewed.",
-      signoff_outcome: "approved",
+      blockers: [],
+      can_confirm: true,
     };
 
-    expect(data.edge_contracts[0].from).toBe("scrape");
-    expect(data.edge_contracts[0].to).toBe("output:jsonl_out");
-    // @ts-expect-error edge_contracts keys are from/to, NOT from_id.
-    expect(data.edge_contracts[0].from_id).toBeUndefined();
+    expect(_exact).toBe(true);
+    expect(data.connections[0].from_endpoint.stable_id).toBe(data.sources[0].stable_id);
+    expect(data.connections[0].to_endpoint.kind).toBe("output");
   });
 });

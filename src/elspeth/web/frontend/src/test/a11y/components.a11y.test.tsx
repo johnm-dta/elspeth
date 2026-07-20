@@ -470,58 +470,10 @@ describe("WireStageTurn", () => {
   const wireBase: WireStageData = {
     proposal_id: "00000000-0000-4000-8000-000000000001",
     draft_hash: "d".repeat(64),
-    topology: {
-      sources: {
-        source: {
-          id: "source",
-          plugin: "inline_blob",
-          on_success: "chain_in",
-          on_validation_failure: "discard",
-        },
-      },
-      nodes: [
-        {
-          id: "scrape",
-          node_type: "transform",
-          plugin: "web_scrape",
-          input: "chain_in",
-          on_success: "scraped",
-          on_error: "scrape_error",
-          routes: null,
-          fork_to: null,
-          branches: null,
-        },
-        {
-          id: "mapper",
-          node_type: "transform",
-          plugin: "field_mapper",
-          input: "scraped",
-          on_success: "jsonl_out",
-          on_error: null,
-          routes: null,
-          fork_to: null,
-          branches: null,
-        },
-      ],
-      outputs: [
-        {
-          id: "output:jsonl_out",
-          sink_name: "jsonl_out",
-          plugin: "json",
-          on_write_failure: "discard",
-        },
-      ],
-    },
-    edge_contracts: [
-      {
-        from: "scrape",
-        to: "mapper",
-        producer_guarantees: ["body"],
-        consumer_requires: ["body"],
-        missing_fields: [],
-        satisfied: true,
-      },
-    ],
+    sources: [{ stable_id: "00000000-0000-4000-8000-000000000010", label: "source-1", plugin: "inline_blob", on_validation_failure: "discard", guaranteed_fields: ["body"], row_cardinality: { input: "none", output: "zero_or_many", expected_output_count: null } }],
+    nodes: [],
+    outputs: [{ stable_id: "00000000-0000-4000-8000-000000000020", label: "output-1", plugin: "json", on_write_failure: "discard", required_fields: ["body"], business_schema: { mode: "observed", fields: [], guaranteed_fields: [], required_fields: ["body"] } }],
+    connections: [{ stable_id: "00000000-0000-4000-8000-000000000030", from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000010" }, to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000020" }, flow: { kind: "source_success", branch: null }, schema_contract: null }],
     semantic_contracts: [],
     warnings: [
       {
@@ -529,6 +481,8 @@ describe("WireStageTurn", () => {
         message: "Prompt shield advisory: source text was reviewed.",
       },
     ],
+    blockers: [],
+    can_confirm: true,
   };
 
   // Initial confirm turn (no outcome): the bare "Confirm wiring" action area.
@@ -539,38 +493,12 @@ describe("WireStageTurn", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  // Revise: findings block + the cost-disclosing Ask-advisor button + Exit.
-  it("has no axe violations (revise: findings + Ask advisor + Exit)", async () => {
+  it("has no axe violations with the freeform exit available", async () => {
     const { container } = render(
       <WireStageTurn
-        data={{
-          ...wireBase,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: tighten the source allowlist.",
-          passes_remaining: 2,
-        }}
+        data={wireBase}
         onConfirm={() => {}}
         confirmDisabled={false}
-        onAskAdvisor={() => {}}
-        onExitToFreeform={() => {}}
-      />,
-    );
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  // Escape: the complete-without-sign-off button (only emitted here) + Exit.
-  it("has no axe violations (escape_unavailable: complete-without-signoff + Exit)", async () => {
-    const { container } = render(
-      <WireStageTurn
-        data={{
-          ...wireBase,
-          signoff_outcome: "escape_unavailable",
-          advisor_findings: "Advisor unreachable.",
-          passes_remaining: 0,
-        }}
-        onConfirm={() => {}}
-        confirmDisabled={false}
-        onCompleteWithoutSignoff={() => {}}
         onExitToFreeform={() => {}}
       />,
     );

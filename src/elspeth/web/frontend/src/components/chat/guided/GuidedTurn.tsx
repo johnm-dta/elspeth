@@ -151,24 +151,25 @@ export function GuidedTurn({
           validationIssues={wireValidationIssues}
           onConfirm={() =>
             guardedSubmit({
-              chosen: ["confirm"],
+              chosen: ["confirm_wiring"],
               edited_values: null,
               custom_inputs: null,
-              proposal_id: null,
-              draft_hash: null,
+              proposal_id: turn.payload.proposal_id,
+              draft_hash: turn.payload.draft_hash,
               edit_target: null,
               control_signal: null,
             })
           }
-          onAskAdvisor={() =>
+          onCorrect={(editTarget, correctionFeedback) =>
             guardedSubmit({
               chosen: null,
               edited_values: null,
               custom_inputs: null,
-              proposal_id: null,
-              draft_hash: null,
-              edit_target: null,
-              control_signal: "request_advisor",
+              proposal_id: turn.payload.proposal_id,
+              draft_hash: turn.payload.draft_hash,
+              edit_target: editTarget,
+              correction_feedback: correctionFeedback,
+              control_signal: null,
             })
           }
           onExitToFreeform={() =>
@@ -180,17 +181,6 @@ export function GuidedTurn({
               draft_hash: null,
               edit_target: null,
               control_signal: "exit_to_freeform",
-            })
-          }
-          onCompleteWithoutSignoff={() =>
-            guardedSubmit({
-              chosen: ["complete_without_signoff"],
-              edited_values: null,
-              custom_inputs: null,
-              proposal_id: null,
-              draft_hash: null,
-              edit_target: null,
-              control_signal: null,
             })
           }
         />

@@ -244,8 +244,11 @@ function proposalRetryActionForBody(
   body: GuidedRespondAction,
 ): GuidedProposalRetryAction | null {
   if (body.proposal_id === null) return null;
-  if (body.chosen !== null) return { kind: "accept" };
+  if (body.chosen !== null) {
+    return { kind: body.chosen[0] === "confirm_wiring" ? "confirm_wiring" : "review_wiring" };
+  }
   if (body.control_signal === "reject") return { kind: "reject" };
+  if ("correction_feedback" in body) return null;
   if (body.edit_target !== null) {
     return { kind: "revise", edit_target: body.edit_target };
   }

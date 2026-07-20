@@ -89,4 +89,3 @@ def test_workflow_profile_response_none_for_empty_profile() -> None:
     assert resp is not None
     assert resp.coaching is TUTORIAL_PROFILE.coaching
     assert resp.bookends is TUTORIAL_PROFILE.bookends
-    assert resp.advisor_checkpoints is TUTORIAL_PROFILE.advisor_checkpoints

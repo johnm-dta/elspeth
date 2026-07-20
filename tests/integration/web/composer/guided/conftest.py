@@ -177,20 +177,60 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
                 },
             )
 
-        async def plan_guided_pipeline(self, *, guided, base, supersedes_draft_hash, recorder, **_kwargs):
+        async def plan_guided_pipeline(
+            self,
+            *,
+            guided,
+            base,
+            supersedes_draft_hash,
+            recorder,
+            correction_target=None,
+            **_kwargs,
+        ):
             output_names = [guided.reviewed_outputs[stable_id].name for stable_id in guided.output_order]
+            corrected_source = correction_target is not None and correction_target.owner_kind == "source"
             pipeline = {
                 "sources": {
                     guided.reviewed_sources[stable_id].name: {
                         "plugin": guided.reviewed_sources[stable_id].plugin,
                         "options": deep_thaw(guided.reviewed_sources[stable_id].options),
-                        "on_success": output_names[index % len(output_names)],
+                        "on_success": (
+                            f"{correction_target.owner_key}_corrected_rows"
+                            if corrected_source and guided.reviewed_sources[stable_id].name == correction_target.owner_key
+                            else output_names[index % len(output_names)]
+                        ),
                         "on_validation_failure": guided.reviewed_sources[stable_id].on_validation_failure,
                     }
                     for index, stable_id in enumerate(guided.source_order)
                 },
-                "nodes": [],
-                "edges": [],
+                "nodes": (
+                    [
+                        {
+                            "id": f"{correction_target.owner_key}_correction",
+                            "node_type": "transform",
+                            "plugin": "passthrough",
+                            "input": f"{correction_target.owner_key}_corrected_rows",
+                            "on_success": output_names[0],
+                            "on_error": "discard",
+                            "options": {"schema": {"mode": "observed"}},
+                        }
+                    ]
+                    if corrected_source
+                    else []
+                ),
+                "edges": (
+                    [
+                        {
+                            "id": f"{correction_target.owner_key}_to_correction",
+                            "from_node": correction_target.owner_key,
+                            "to_node": f"{correction_target.owner_key}_correction",
+                            "edge_type": "on_success",
+                            "label": None,
+                        }
+                    ]
+                    if corrected_source
+                    else []
+                ),
                 "outputs": [
                     {
                         "sink_name": guided.reviewed_outputs[stable_id].name,
@@ -222,7 +262,7 @@ def composer_test_client(request: pytest.FixtureRequest, tmp_path: Path) -> Iter
                 ),
                 {
                     "source": frozenset(source.plugin for source in guided.reviewed_sources.values()),
-                    "transform": frozenset(),
+                    "transform": frozenset({"passthrough"}) if corrected_source else frozenset(),
                     "sink": frozenset(output.plugin for output in guided.reviewed_outputs.values()),
                 },
             )

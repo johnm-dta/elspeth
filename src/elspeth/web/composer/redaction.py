@@ -3475,16 +3475,21 @@ def redact_guided_snapshot_storage_paths(
         snap_options = snapshot["options"]
         if type(snap_options) is not dict:
             raise ValueError(f"redact_guided_snapshot_storage_paths: guided_session.reviewed_sources[{stable_id!r}].options must be a dict")
+        sentinels: dict[str, str] = {}
+        for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
+            candidate = snap_options.get(key)
+            if type(candidate) is str and candidate.startswith("blob:"):
+                sentinels[key] = candidate
+        if sentinels:
+            sentinel_ids = {validate_guided_reviewed_blob_ref(sentinel.removeprefix("blob:")) for sentinel in sentinels.values()}
+            if len(sentinel_ids) != 1 or (
+                "blob_ref" in snap_options and validate_guided_reviewed_blob_ref(snap_options["blob_ref"]) not in sentinel_ids
+            ):
+                raise AuditIntegrityError("guided reviewed blob sentinel and blob_ref differ")
+            sentinel_bindings[name] = sentinels
+            reviewed_out[stable_id] = snapshot
+            continue
         if "blob_ref" not in snap_options:
-            sentinels: dict[str, str] = {}
-            for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
-                candidate = snap_options.get(key)
-                if type(candidate) is str and candidate.startswith("blob:"):
-                    sentinels[key] = candidate
-            if sentinels:
-                for sentinel in sentinels.values():
-                    validate_guided_reviewed_blob_ref(sentinel.removeprefix("blob:"))
-                sentinel_bindings[name] = sentinels
             reviewed_out[stable_id] = snapshot
             continue
 

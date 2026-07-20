@@ -81,8 +81,6 @@ from elspeth.web.composer.tools.blobs import (
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _session_blob_lock,
-    _sync_get_blob_by_id,
-    _sync_get_blob_by_storage_path,
     _sync_list_blobs,
 )
 from elspeth.web.composer.tools.discovery import (
@@ -100,10 +98,7 @@ from elspeth.web.composer.tools.generation import (
     compute_proof_diagnostics,
     get_expression_grammar,
 )
-from elspeth.web.composer.tools.outputs import (
-    _execute_patch_output_options,
-    _execute_set_output,
-)
+from elspeth.web.composer.tools.outputs import _execute_patch_output_options
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
@@ -168,7 +163,6 @@ __all__ = [
     "_execute_patch_output_options",
     "_execute_patch_source_options",
     "_execute_preview_pipeline",
-    "_execute_set_output",
     "_execute_set_pipeline",
     "_execute_set_source",
     "_execute_set_source_from_blob",
@@ -182,8 +176,6 @@ __all__ = [
     "_prevalidate_plugin_options",
     "_resolve_source_blob",
     "_session_blob_lock",
-    "_sync_get_blob_by_id",
-    "_sync_get_blob_by_storage_path",
     "_sync_list_blobs",
     "_utc_day_start",
     "build_set_pipeline_candidate",

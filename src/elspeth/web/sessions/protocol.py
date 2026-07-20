@@ -1468,9 +1468,11 @@ class GuidedPipelineProposalStageCommand:
     affects: tuple[str, ...]
     arguments_redacted_json: Mapping[str, Any]
     catalog_plugin_ids: Mapping[str, frozenset[str]]
+    proposal_projection: Mapping[str, Any]
     actor: str
     user_message_id: UUID | None
     user_message_content_hash: str | None
+    originating_message: GuidedOriginatingUserMessageDraft | None
     supersedes_proposal_id: UUID | None
     response: GuidedResponseDescriptor
     payloads: tuple[PreparedGuidedJsonPayload, ...]
@@ -1507,6 +1509,8 @@ class GuidedPipelineProposalStageCommand:
             for plugin_ids in self.catalog_plugin_ids.values()
         ):
             raise AuditIntegrityError("Guided proposal stage catalog snapshot values must be exact plugin-id frozensets")
+        if type(self.proposal_projection) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("Guided proposal stage projection must be an exact mapping")
         if type(self.actor) is not str or not self.actor:
             raise AuditIntegrityError("GuidedPipelineProposalStageCommand.actor must be non-empty")
         if self.user_message_id is not None and type(self.user_message_id) is not UUID:
@@ -1518,12 +1522,22 @@ class GuidedPipelineProposalStageCommand:
                 self.user_message_content_hash,
                 "GuidedPipelineProposalStageCommand.user_message_content_hash",
             )
+        if self.originating_message is not None:
+            if type(self.originating_message) is not GuidedOriginatingUserMessageDraft:
+                raise AuditIntegrityError("Guided proposal stage originating_message must be an exact draft or None")
+            if self.user_message_id != self.originating_message.message_id:
+                raise AuditIntegrityError("Guided proposal stage originating message id differs from proposal lineage")
+            if self.user_message_content_hash != stable_hash(self.originating_message.content):
+                raise AuditIntegrityError("Guided proposal stage originating message hash differs from proposal lineage")
         if self.supersedes_proposal_id is not None and type(self.supersedes_proposal_id) is not UUID:
             raise AuditIntegrityError("GuidedPipelineProposalStageCommand.supersedes_proposal_id must be a UUID or None")
         if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
             raise AuditIntegrityError("Guided proposal stage response must be guided_respond")
-        if self.response.next_turn is None or self.response.next_turn.turn_type is not TurnType.PROPOSE_PIPELINE:
-            raise AuditIntegrityError("Guided proposal stage response must carry propose_pipeline")
+        if self.response.next_turn is None or self.response.next_turn.turn_type not in {
+            TurnType.PROPOSE_PIPELINE,
+            TurnType.CONFIRM_WIRING,
+        }:
+            raise AuditIntegrityError("Guided proposal stage response must carry a proposal or wire-review turn")
         if type(self.payloads) is not tuple or not self.payloads:
             raise AuditIntegrityError("Guided proposal stage requires prepared payloads")
         payloads_by_id = {payload.payload_id: payload for payload in self.payloads}
@@ -1532,7 +1546,7 @@ class GuidedPipelineProposalStageCommand:
             raise AuditIntegrityError("Guided proposal stage payload does not bind the response")
         if type(self.audit_evidence) is not GuidedAuditEvidence:
             raise AuditIntegrityError("Guided proposal stage audit evidence must be exact")
-        freeze_fields(self, "affects", "arguments_redacted_json", "catalog_plugin_ids", "payloads")
+        freeze_fields(self, "affects", "arguments_redacted_json", "catalog_plugin_ids", "proposal_projection", "payloads")
 
 
 @final
@@ -1666,7 +1680,7 @@ class GuidedPipelineProposalAcceptCommand:
     state: CompositionStateData
     candidate_content_hash: str
     executor_content_hash: str
-    invocation: ComposerToolInvocation
+    dispatch: PipelineDispatchAuditBinding
     actor: str
     response: GuidedResponseDescriptor
     payloads: tuple[PreparedGuidedJsonPayload, ...]
@@ -1684,14 +1698,10 @@ class GuidedPipelineProposalAcceptCommand:
             _require_guided_sha256(getattr(self, name), f"guided accept {name}")
         if type(self.reviewed_facts) not in {dict, MappingProxyType}:
             raise AuditIntegrityError("guided accept reviewed facts must be a mapping")
-        if type(self.state) is not CompositionStateData or type(self.invocation) is not ComposerToolInvocation:
-            raise AuditIntegrityError("guided accept state/invocation must be exact")
-        if (
-            self.invocation.tool_name != "set_pipeline"
-            or self.invocation.status is not ComposerToolStatus.SUCCESS
-            or self.invocation.result_hash is None
-        ):
-            raise AuditIntegrityError("guided accept requires one exact successful set_pipeline invocation")
+        from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
+
+        if type(self.state) is not CompositionStateData or type(self.dispatch) is not PipelineDispatchAuditBinding:
+            raise AuditIntegrityError("guided accept state/dispatch must be exact")
         if type(self.actor) is not str or not self.actor:
             raise AuditIntegrityError("guided accept actor must be non-empty")
         if type(self.response) is not GuidedResponseDescriptor or self.response.kind != "guided_respond":
@@ -1699,6 +1709,67 @@ class GuidedPipelineProposalAcceptCommand:
         if type(self.payloads) is not tuple or type(self.audit_evidence) is not GuidedAuditEvidence:
             raise AuditIntegrityError("guided accept payload/audit cohort must be exact")
         freeze_fields(self, "reviewed_facts", "payloads")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineConfirmationAdmissionCommand:
+    """Acquire exclusive database authority before dispatching a proposal."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided confirmation admission fence must be exact")
+        for name in ("expected_current_state_id", "proposal_id"):
+            if type(getattr(self, name)) is not UUID:
+                raise AuditIntegrityError(f"guided confirmation admission {name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("guided confirmation admission expected version must be positive")
+        _require_guided_sha256(self.draft_hash, "guided confirmation admission draft_hash")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("guided confirmation admission reviewed facts must be a mapping")
+        freeze_fields(self, "reviewed_facts")
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class GuidedPipelineDispatchRecordCommand:
+    """Persist the exact successful dispatch while confirmation owns admission."""
+
+    fence: GuidedOperationFence
+    expected_current_state_id: UUID
+    expected_current_state_version: int
+    proposal_id: UUID
+    draft_hash: str
+    reviewed_facts: Mapping[str, Any]
+    invocation: ComposerToolInvocation
+
+    def __post_init__(self) -> None:
+        if type(self.fence) is not GuidedOperationFence:
+            raise AuditIntegrityError("guided dispatch record fence must be exact")
+        for name in ("expected_current_state_id", "proposal_id"):
+            if type(getattr(self, name)) is not UUID:
+                raise AuditIntegrityError(f"guided dispatch record {name} must be a UUID")
+        if type(self.expected_current_state_version) is not int or self.expected_current_state_version < 1:
+            raise AuditIntegrityError("guided dispatch record expected version must be positive")
+        _require_guided_sha256(self.draft_hash, "guided dispatch record draft_hash")
+        if type(self.reviewed_facts) not in {dict, MappingProxyType}:
+            raise AuditIntegrityError("guided dispatch record reviewed facts must be a mapping")
+        if type(self.invocation) is not ComposerToolInvocation:
+            raise AuditIntegrityError("guided dispatch record invocation must be exact")
+        if (
+            self.invocation.tool_name != "set_pipeline"
+            or self.invocation.status is not ComposerToolStatus.SUCCESS
+            or self.invocation.result_hash is None
+        ):
+            raise AuditIntegrityError("guided dispatch record requires one successful set_pipeline invocation")
+        freeze_fields(self, "reviewed_facts")
 
 
 @final
@@ -2109,6 +2180,8 @@ class SessionServiceProtocol(Protocol):
         fence: GuidedOperationFence,
         *,
         state_id: UUID,
+        expected_current_state_id: UUID,
+        expected_current_state_version: int,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
     ) -> CompositionStateRecord: ...
@@ -2164,6 +2237,16 @@ class SessionServiceProtocol(Protocol):
         *,
         payload_store: PayloadStore | None = None,
     ) -> GuidedPipelineProposalStageSettlement: ...
+
+    async def admit_guided_pipeline_confirmation(
+        self,
+        command: GuidedPipelineConfirmationAdmissionCommand,
+    ) -> PipelineDispatchRecovery | None: ...
+
+    async def record_guided_pipeline_dispatch(
+        self,
+        command: GuidedPipelineDispatchRecordCommand,
+    ) -> PipelineDispatchRecovery: ...
 
     async def back_edit_guided_pipeline_proposal(
         self,

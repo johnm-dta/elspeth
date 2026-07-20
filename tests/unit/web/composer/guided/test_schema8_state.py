@@ -251,13 +251,13 @@ def _full_session() -> GuidedSession:
     )
 
 
-def test_schema8_round_trip_retains_plural_order_and_stable_ids_after_restart() -> None:
+def test_schema10_round_trip_retains_plural_order_and_stable_ids_after_restart() -> None:
     session = _full_session()
 
     encoded = session.to_dict()
     restored = GuidedSession.from_dict(encoded)
 
-    assert GUIDED_SESSION_SCHEMA_VERSION == 9
+    assert GUIDED_SESSION_SCHEMA_VERSION == 10
     assert restored == session
     assert restored.source_order == (SOURCE_B, SOURCE_A)
     assert restored.output_order == (OUTPUT_B, OUTPUT_A)
@@ -270,8 +270,6 @@ def test_schema8_round_trip_retains_plural_order_and_stable_ids_after_restart() 
         "step",
         "history",
         "profile",
-        "advisor_checkpoint_passes_used",
-        "advisor_signoff_escape_offered",
         "terminal",
         "transition_consumed",
         "chat_history",
@@ -283,6 +281,7 @@ def test_schema8_round_trip_retains_plural_order_and_stable_ids_after_restart() 
         "reviewed_outputs",
         "pending_output_intents",
         "deferred_intents",
+        "correction_messages",
         "active_proposal",
         "active_edit_target",
         "root_intent_message_id",

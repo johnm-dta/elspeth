@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.composer.guided.emitters import (
     _step_index,
     build_component_review_turn,
@@ -13,7 +14,8 @@ from elspeth.web.composer.guided.emitters import (
     build_step_2_schema_form_turn,
     build_step_4_wire_turn,
 )
-from elspeth.web.composer.guided.protocol import GuidedStep, TurnType, validate_payload
+from elspeth.web.composer.guided.planning import _node_behavior
+from elspeth.web.composer.guided.protocol import GuidedStep, ProposePipelinePayload, TurnType, validate_payload
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
@@ -113,6 +115,124 @@ def _queue_state() -> CompositionState:
         metadata=PipelineMetadata(name="Queue fan-in", description=""),
         version=1,
     )
+
+
+def _schema_output_state(fields: list[object]) -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="primary",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="primary",
+                plugin="json",
+                options={
+                    "path": "/private/result.jsonl",
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": fields,
+                        "guaranteed_fields": ["id"],
+                        "required_fields": ["email"],
+                    },
+                },
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Public schema review", description=""),
+        version=1,
+    )
+
+
+def _stable_id(index: int) -> str:
+    return f"00000000-0000-4000-8000-{index:012d}"
+
+
+def _wire_authority(state: CompositionState) -> tuple[ProposePipelinePayload, GuidedSession]:
+    source_items = [
+        {
+            "stable_id": _stable_id(index),
+            "label": f"source-{index}",
+            "plugin": {"kind": "source", "id": source.plugin},
+        }
+        for index, source in enumerate(state.sources.values(), start=1)
+    ]
+    node_offset = len(source_items) + 1
+    node_items = [
+        {
+            "stable_id": _stable_id(node_offset + index),
+            "label": f"node-{index + 1}",
+            "node_type": node.node_type,
+            "plugin": ({"kind": "transform", "id": node.plugin} if node.plugin is not None else None),
+            "behavior": {"kind": node.node_type},
+        }
+        for index, node in enumerate(state.nodes)
+    ]
+    output_offset = node_offset + len(node_items)
+    output_items = [
+        {
+            "stable_id": _stable_id(output_offset + index),
+            "label": f"output-{index + 1}",
+            "plugin": {"kind": "sink", "id": output.plugin},
+        }
+        for index, output in enumerate(state.outputs)
+    ]
+    projection: ProposePipelinePayload = {
+        "proposal_id": "00000000-0000-4000-8000-000000000001",
+        "draft_hash": "d" * 64,
+        "summary": "Review the proposed pipeline.",
+        "rationale": "Verify the exact candidate wiring.",
+        "component_counts": {
+            "sources": len(source_items),
+            "nodes": len(node_items),
+            "edges": 0,
+            "outputs": len(output_items),
+        },
+        "blockers": [],
+        "graph": {"sources": source_items, "edges": []},
+        "nodes": node_items,
+        "outputs": output_items,
+        "edit_targets": [],
+    }
+    reviewed_sources = {
+        public["stable_id"]: SourceResolved(
+            name=name,
+            plugin=source.plugin,
+            options=source.options,
+            observed_columns=(),
+            sample_rows=(),
+            on_validation_failure=source.on_validation_failure,
+        )
+        for public, (name, source) in zip(source_items, state.sources.items(), strict=True)
+    }
+    reviewed_outputs = {
+        public["stable_id"]: SinkOutputResolved(
+            name=output.name,
+            plugin=output.plugin,
+            options=deep_thaw(output.options),
+            required_fields=(),
+            schema_mode="observed",
+            on_write_failure=output.on_write_failure,
+        )
+        for public, output in zip(output_items, state.outputs, strict=True)
+    }
+    guided = GuidedSession(
+        step=GuidedStep.STEP_4_WIRE,
+        source_order=tuple(reviewed_sources),
+        reviewed_sources=reviewed_sources,
+        output_order=tuple(reviewed_outputs),
+        reviewed_outputs=reviewed_outputs,
+    )
+    return projection, guided
+
+
+def _wire_turn(state: CompositionState):
+    projection, guided = _wire_authority(state)
+    return build_step_4_wire_turn(state, proposal_projection=projection, guided=guided)
 
 
 class TestBuildSchemaFormTurns:
@@ -297,39 +417,98 @@ class TestStep4WireEmitter:
         assert _step_index(GuidedStep.STEP_4_WIRE) == 3
 
     def test_builds_confirm_wiring_skeleton_payload(self) -> None:
-        turn = build_step_4_wire_turn(_empty_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
+        turn = _wire_turn(_empty_state())
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert turn["step_index"] == 3
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
         payload = turn["payload"]
         assert set(payload.keys()) == {
-            "topology",
             "proposal_id",
             "draft_hash",
-            "edge_contracts",
+            "sources",
+            "nodes",
+            "outputs",
+            "connections",
             "semantic_contracts",
             "warnings",
+            "blockers",
+            "can_confirm",
         }
-        assert payload["topology"]["sources"] == {}
-        assert payload["edge_contracts"] == []
+        assert payload["sources"] == []
+        assert payload["nodes"] == []
+        assert payload["outputs"] == []
+        assert payload["connections"] == []
         assert payload["semantic_contracts"] == []
         assert payload["warnings"] == []
+        assert len(payload["blockers"]) == 2
+        assert payload["can_confirm"] is False
 
     def test_emits_queue_node_generically_without_a_queue_branch(self) -> None:
         # A declared queue fan-in flows through the generic emitter unchanged:
         # the canonical queue row appears in the topology and the payload
         # validates, with no queue-specific emitter mutation
         # (elspeth-a5b86149d4 / elspeth-6421ffa028).
-        turn = build_step_4_wire_turn(_queue_state(), proposal_id="00000000-0000-4000-8000-000000000001", draft_hash="d" * 64)
+        turn = _wire_turn(_queue_state())
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
-        queue = next(node for node in turn["payload"]["topology"]["nodes"] if node["node_type"] == "queue")
-        assert queue["id"] == "inbound"
-        assert queue["input"] == "inbound"
+        queue = next(node for node in turn["payload"]["nodes"] if node["node_type"] == "queue")
+        assert queue["label"] == "node-1"
         assert queue["plugin"] is None
-        assert queue["on_success"] is None
+        assert queue["behavior"] == {"kind": "queue"}
+
+    def test_preserves_string_and_mapping_business_schema_fields_without_private_options(self) -> None:
+        state = _schema_output_state(
+            [
+                "id: int",
+                {"name": "email", "type": "str", "required": False, "nullable": True},
+            ]
+        )
+
+        turn = _wire_turn(state)
+
+        business_schema = turn["payload"]["outputs"][0]["business_schema"]
+        assert business_schema == {
+            "mode": "fixed",
+            "fields": [
+                {"name": "id", "type": "int", "required": True, "nullable": False},
+                {"name": "email", "type": "str", "required": False, "nullable": True},
+            ],
+            "guaranteed_fields": ["id"],
+            "required_fields": ["email"],
+        }
+        assert "/private/result.jsonl" not in str(turn)
+        assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
+
+    def test_aggregation_projection_uses_the_canonical_trigger_contract(self) -> None:
+        node = NodeSpec(
+            id="batch",
+            node_type="aggregation",
+            plugin="batch_stats",
+            input="batch",
+            on_success="primary",
+            on_error="discard",
+            options={"schema": {"mode": "observed"}},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+            trigger={"count": 25, "timeout_seconds": 12.5, "condition": "batch_ready"},
+            output_mode="transform",
+            expected_output_count=1,
+        )
+
+        assert _node_behavior(node, route_aliases={}, branch_aliases={}) == {
+            "kind": "aggregation",
+            "trigger_kinds": ["count", "timeout", "condition"],
+            "count": "25",
+            "timeout_seconds": 12.5,
+            "output_mode": "transform",
+            "expected_output_count": "1",
+        }
 
 
 class _SourceCatalog:

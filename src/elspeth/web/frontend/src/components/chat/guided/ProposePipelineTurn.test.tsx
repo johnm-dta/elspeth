@@ -240,12 +240,12 @@ describe("ProposePipelineTurn", () => {
 
     expect(screen.getByText("A complete pipeline is ready for review.")).toBeVisible();
     expect(
-      screen.getByText("Review its structure, routes, and blockers before accepting it."),
+      screen.getByText("Review its structure, routes, and blockers before checking the detailed wiring."),
     ).toBeVisible();
     expect(screen.queryByText("guided.proposal.rationale.review_required.v1")).toBeNull();
   });
 
-  it("submits exact proposal-bound accept, reject, and target-only revise actions", async () => {
+  it("submits exact proposal-bound review, reject, and target-only revise actions", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
@@ -256,13 +256,13 @@ describe("ProposePipelineTurn", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Accept pipeline" }));
+    await user.click(screen.getByRole("button", { name: "Review wiring" }));
     await user.click(screen.getByRole("button", { name: "Reject proposal" }));
     await user.click(screen.getByRole("button", { name: "Revise node-1" }));
 
     expect(onSubmit.mock.calls).toEqual([
       [{
-        chosen: ["accept"],
+        chosen: ["review_wiring"],
         edited_values: null,
         custom_inputs: null,
         proposal_id: IDS.proposal,
@@ -301,7 +301,7 @@ describe("ProposePipelineTurn", () => {
         onSubmit={onSubmit}
       />,
     );
-    const accept = screen.getByRole("button", { name: "Accept pipeline" });
+    const accept = screen.getByRole("button", { name: "Review wiring" });
     accept.focus();
     await user.keyboard("{Enter}");
     expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -321,7 +321,7 @@ describe("ProposePipelineTurn", () => {
     expect(accept).toBeDisabled();
   });
 
-  it("renders allowlisted blockers, disables acceptance, and keeps stable revise controls available", () => {
+  it("renders allowlisted blockers, disables wiring review, and keeps stable revise controls available", () => {
     const blocked = payload();
     blocked.blockers = [
       {
@@ -339,8 +339,8 @@ describe("ProposePipelineTurn", () => {
       />,
     );
 
-    expect(screen.getByText("A policy review is required before this pipeline can be accepted.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Accept pipeline" })).toBeDisabled();
+    expect(screen.getByText("A policy review is required before this pipeline can advance.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Revise node-1" })).toBeEnabled();
   });
 
@@ -358,14 +358,14 @@ describe("ProposePipelineTurn", () => {
           onSubmit={vi.fn()}
         />,
       );
-      expect(screen.getByRole("button", { name: "Accept pipeline" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "Reject proposal" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "Revise node-1" })).toBeDisabled();
     },
   );
 
   it.each([
-    ["accept", { kind: "accept" }, "Accept pipeline"],
+    ["accept", { kind: "review_wiring" }, "Review wiring"],
     ["reject", { kind: "reject" }, "Reject proposal"],
     [
       "one exact revise target",
@@ -413,7 +413,7 @@ describe("ProposePipelineTurn", () => {
       />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent(/could not be loaded/i);
-    expect(screen.getByRole("button", { name: "Accept pipeline" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Reject proposal" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Revise node-1" })).toBeDisabled();
   });
@@ -429,7 +429,7 @@ describe("ProposePipelineTurn", () => {
     );
     expect(screen.getByRole("img", { name: /pipeline proposal graph/i })).toBeVisible();
     expect(screen.getByText("source-1 · csv")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Accept pipeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
   });

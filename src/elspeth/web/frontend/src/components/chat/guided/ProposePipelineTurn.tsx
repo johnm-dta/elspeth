@@ -28,9 +28,9 @@ const DISCARD_NODE_ID = "guided-proposal-discard";
 
 const BLOCKER_COPY: Record<ProposePipelinePayload["blockers"][number]["code"], string> = {
   pipeline_invalid: "The proposed pipeline has validation problems that must be revised.",
-  policy_review_required: "A policy review is required before this pipeline can be accepted.",
+  policy_review_required: "A policy review is required before this pipeline can advance.",
   plugin_unavailable: "A required plugin is unavailable and must be replaced.",
-  interpretation_required: "A pending interpretation must be resolved before acceptance.",
+  interpretation_required: "A pending interpretation must be resolved before wiring review.",
 };
 
 function proposalBindingMatches(
@@ -225,7 +225,7 @@ export function ProposePipelineTurn({
       <header className="guided-proposal__header">
         <h3 id="guided-proposal-heading">Review pipeline proposal</h3>
         <p>A complete pipeline is ready for review.</p>
-        <p>Review its structure, routes, and blockers before accepting it.</p>
+        <p>Review its structure, routes, and blockers before checking the detailed wiring.</p>
         <p className="guided-proposal__counts">
           {payload.component_counts.sources} sources · {payload.component_counts.nodes} nodes ·{" "}
           {payload.component_counts.edges} routes · {payload.component_counts.outputs} outputs
@@ -245,7 +245,7 @@ export function ProposePipelineTurn({
 
       {payload.blockers.length > 0 ? (
         <section className="guided-proposal__blockers" aria-labelledby="guided-proposal-blockers">
-          <h4 id="guided-proposal-blockers">Before acceptance</h4>
+          <h4 id="guided-proposal-blockers">Before wiring review</h4>
           <ul>
             {payload.blockers.map((blocker, index) => (
               <li key={`${blocker.code}-${blocker.edit_target?.stable_id ?? index}`}>
@@ -295,9 +295,9 @@ export function ProposePipelineTurn({
             <button
               type="button"
               className="guided-turn-primary"
-              disabled={!actionEnabled({ kind: "accept" }) || payload.blockers.length > 0}
+              disabled={!actionEnabled({ kind: "review_wiring" }) || payload.blockers.length > 0}
               onClick={() => onSubmit({
-                chosen: ["accept"],
+                chosen: ["review_wiring"],
                 edited_values: null,
                 custom_inputs: null,
                 edit_target: null,
@@ -306,7 +306,7 @@ export function ProposePipelineTurn({
                 draft_hash: payload.draft_hash,
               } satisfies GuidedRespondAction)}
             >
-              Accept pipeline
+              Review wiring
             </button>
             <button
               type="button"

@@ -290,6 +290,37 @@ def test_redact_guided_snapshot_projects_canonical_blob_sentinel_by_exact_name()
     assert composer_meta["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]["options"]["path"] == sentinel
 
 
+def test_redact_guided_snapshot_accepts_matching_fork_sentinel_and_blob_ref() -> None:
+    blob_id = "11111111-1111-4111-8111-111111111111"
+    sentinel = f"blob:{blob_id}"
+    real_path = "/internal/blobs/child/source.csv"
+    sources = {"source": {"options": {"path": real_path, "blob_ref": blob_id}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": "source",
+                    "options": {"path": sentinel, "blob_ref": blob_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == sentinel
+    reviewed = meta_out["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]
+    assert reviewed["options"] == {"path": sentinel, "blob_ref": blob_id}
+    assert real_path not in str((sources_out, meta_out))
+
+    composer_meta["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]["options"]["blob_ref"] = (
+        "33333333-3333-4333-8333-333333333333"
+    )
+    with pytest.raises(AuditIntegrityError):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
 @pytest.mark.parametrize(
     ("source_name", "sentinel"),
     [

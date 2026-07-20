@@ -121,9 +121,8 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #        websocket reconnects can replay in insertion order and de-duplicate
 #        live queue events already delivered by the persisted replay.
 #   24 -> no SQL-shape change; bumped in lockstep with GUIDED_SESSION_SCHEMA_VERSION
-#        5->6 (composer_meta JSON adds GuidedSession.profile +
-#        advisor_checkpoint_passes_used + advisor_signoff_escape_offered) so a
-#        stale sessions.db fail-closes at boot via _assert_schema_sentinels instead
+#        5->6 (composer_meta JSON adds GuidedSession.profile state); stale
+#        sessions.db fail-closes at boot via _assert_schema_sentinels instead
 #        of lazy-500-ing per guided row on GuidedSession.from_dict. Pre-release
 #        delete-and-recreate policy; see docs/runbooks/staging-session-db-recreation.md.
 #   25 -> no SQL-shape change; bumped in lockstep with GUIDED_SESSION_SCHEMA_VERSION
@@ -159,7 +158,15 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #   33 -> guided-start reconciliation gains a durable append-only negative
 #        admission barrier. Epoch 32 cannot represent a cancelled operation id
 #        before reservation and is rejected outright; no migration exists.
-SESSION_SCHEMA_EPOCH = 33
+#   34 -> guided checkpoint schema 10 removes persisted advisor counters and
+#        the workflow-profile advisor flag. Schema 9 and epoch 33 are rejected
+#        outright; no decoder, backfill, or migration exists.
+#   35 -> guided confirmation admission is now a database-enforced, exclusive
+#        proposal lease. A partial unique index prevents independent workers
+#        from dispatching the same pending proposal under competing operations.
+#        Epoch 34 is rejected outright; no migration or compatibility decoder
+#        exists.
+SESSION_SCHEMA_EPOCH = 35
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -801,6 +808,14 @@ guided_operations_table = Table(
     ).ddl_if(dialect="postgresql"),
 )
 Index("ix_guided_operations_status_lease", guided_operations_table.c.status, guided_operations_table.c.lease_expires_at)
+Index(
+    "uq_guided_operations_active_proposal_admission",
+    guided_operations_table.c.session_id,
+    guided_operations_table.c.proposal_id,
+    unique=True,
+    sqlite_where=(guided_operations_table.c.status == "in_progress") & guided_operations_table.c.proposal_id.is_not(None),
+    postgresql_where=(guided_operations_table.c.status == "in_progress") & guided_operations_table.c.proposal_id.is_not(None),
+)
 
 
 # Append-only evidence for initial claims, renewals, takeovers, and terminal

@@ -117,7 +117,7 @@ def test_reachable_surfaces_share_one_planner_implementation_boundary() -> None:
     assert service_module.plan_pipeline is pipeline_planner.plan_pipeline
     assert _call_count(freeform, "_plan_and_stage_empty_pipeline") == 1
     assert _call_count(freeform_planner, "plan_pipeline") == 1
-    assert _call_count(guided_route, "plan_guided_pipeline") == 2
+    assert _call_count(guided_route, "plan_guided_pipeline") == 3
     assert _call_count(guided, "plan_pipeline") == 1
     assert _call_count(guided_full_route, "plan_guided_full_pipeline") == 1
     assert _call_count(guided_full_route, "plan_pipeline") == 0

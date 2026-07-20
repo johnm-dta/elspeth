@@ -24,6 +24,7 @@ import type {
   TerminalState,
   TurnPayload,
   TurnType,
+  WireRowCardinality,
   WireStageData,
 } from "@/types/guided";
 
@@ -657,63 +658,15 @@ function validateWirePayload(value: unknown, path: string): void {
   const payload = exactRecord(
     value,
     path,
-    ["proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"],
-    ["advisor_findings", "signoff_outcome", "passes_remaining"],
+    ["proposal_id", "draft_hash", "sources", "nodes", "outputs", "connections", "semantic_contracts", "warnings", "blockers", "can_confirm"],
   );
   canonicalUuid(payload.proposal_id, `${path}.proposal_id`);
   const draftHash = stringValue(payload.draft_hash, `${path}.draft_hash`);
   if (!SHA256.test(draftHash)) invalid(`${path}.draft_hash`, "expected lowercase SHA-256");
-  const topology = exactRecord(payload.topology, `${path}.topology`, ["sources", "nodes", "outputs"]);
-  for (const [name, item] of Object.entries(record(topology.sources, `${path}.topology.sources`))) {
-    const source = exactRecord(item, `${path}.topology.sources.${name}`, [
-      "id", "plugin", "on_success", "on_validation_failure",
-    ]);
-    stringValue(source.id, `${path}.topology.sources.${name}.id`);
-    stringValue(source.plugin, `${path}.topology.sources.${name}.plugin`);
-    nullableString(source.on_success, `${path}.topology.sources.${name}.on_success`);
-    stringValue(source.on_validation_failure, `${path}.topology.sources.${name}.on_validation_failure`);
+  for (const key of ["sources", "nodes", "outputs", "connections", "semantic_contracts", "warnings", "blockers"] as const) {
+    arrayValue(payload[key], `${path}.${key}`);
   }
-  arrayValue(topology.nodes, `${path}.topology.nodes`).forEach((item, index) => {
-    const nodePath = `${path}.topology.nodes[${index}]`;
-    const node = exactRecord(item, nodePath, [
-      "id", "node_type", "plugin", "input", "on_success", "on_error", "routes", "fork_to", "branches",
-    ]);
-    stringValue(node.id, `${nodePath}.id`);
-    stringValue(node.node_type, `${nodePath}.node_type`);
-    nullableString(node.plugin, `${nodePath}.plugin`);
-    nullableString(node.input, `${nodePath}.input`);
-    nullableString(node.on_success, `${nodePath}.on_success`);
-    nullableString(node.on_error, `${nodePath}.on_error`);
-    if (node.routes !== null) {
-      Object.entries(record(node.routes, `${nodePath}.routes`)).forEach(([key, itemValue]) => stringValue(itemValue, `${nodePath}.routes.${key}`));
-    }
-    if (node.fork_to !== null) stringArray(node.fork_to, `${nodePath}.fork_to`);
-    if (node.branches !== null) {
-      if (Array.isArray(node.branches)) stringArray(node.branches, `${nodePath}.branches`);
-      else Object.entries(record(node.branches, `${nodePath}.branches`)).forEach(([key, itemValue]) => stringValue(itemValue, `${nodePath}.branches.${key}`));
-    }
-  });
-  arrayValue(topology.outputs, `${path}.topology.outputs`).forEach((item, index) => {
-    const output = exactRecord(item, `${path}.topology.outputs[${index}]`, ["id", "sink_name", "plugin", "on_write_failure"]);
-    Object.entries(output).forEach(([key, itemValue]) => stringValue(itemValue, `${path}.topology.outputs[${index}].${key}`));
-  });
-  arrayValue(payload.edge_contracts, `${path}.edge_contracts`).forEach((item, index) => {
-    const edgePath = `${path}.edge_contracts[${index}]`;
-    const edge = exactRecord(item, edgePath, [
-      "from", "to", "producer_guarantees", "consumer_requires", "missing_fields", "satisfied",
-    ]);
-    stringValue(edge.from, `${edgePath}.from`);
-    stringValue(edge.to, `${edgePath}.to`);
-    stringArray(edge.producer_guarantees, `${edgePath}.producer_guarantees`);
-    stringArray(edge.consumer_requires, `${edgePath}.consumer_requires`);
-    stringArray(edge.missing_fields, `${edgePath}.missing_fields`);
-    booleanValue(edge.satisfied, `${edgePath}.satisfied`);
-  });
-  arrayValue(payload.semantic_contracts, `${path}.semantic_contracts`).forEach((item, index) => record(item, `${path}.semantic_contracts[${index}]`));
-  arrayValue(payload.warnings, `${path}.warnings`).forEach((item, index) => record(item, `${path}.warnings[${index}]`));
-  if (payload.advisor_findings !== undefined) stringValue(payload.advisor_findings, `${path}.advisor_findings`);
-  if (payload.signoff_outcome !== undefined) stringValue(payload.signoff_outcome, `${path}.signoff_outcome`);
-  if (payload.passes_remaining !== undefined) integerValue(payload.passes_remaining, `${path}.passes_remaining`);
+  booleanValue(payload.can_confirm, `${path}.can_confirm`);
 }
 
 function decodeTurnType(value: unknown, path: string): TurnType {
@@ -1047,6 +1000,25 @@ function decodeProposalBehavior(
       ]);
       const rawTriggers = stringArray(exact.trigger_kinds, `${behaviorPath}.trigger_kinds`);
       const trigger_kinds = TRIGGER_KINDS.filter((trigger) => rawTriggers.includes(trigger));
+      if (
+        new Set(rawTriggers).size !== rawTriggers.length
+        || trigger_kinds.length !== rawTriggers.length
+        || trigger_kinds.some((trigger, index) => trigger !== rawTriggers[index])
+      ) {
+        invalid(`${behaviorPath}.trigger_kinds`, "not a unique canonical trigger subsequence");
+      }
+      const count = exact.count === null
+        ? null
+        : canonicalIntegerString(exact.count, `${behaviorPath}.count`, true);
+      if ((count !== null) !== trigger_kinds.includes("count")) {
+        invalid(`${behaviorPath}.count`, "does not match count trigger kind");
+      }
+      const timeoutSeconds = exact.timeout_seconds === null
+        ? null
+        : finitePositiveNumber(exact.timeout_seconds, `${behaviorPath}.timeout_seconds`);
+      if ((timeoutSeconds !== null) !== trigger_kinds.includes("timeout")) {
+        invalid(`${behaviorPath}.timeout_seconds`, "does not match timeout trigger kind");
+      }
       const outputMode = stringValue(exact.output_mode, `${behaviorPath}.output_mode`);
       if (outputMode !== "default" && outputMode !== "passthrough" && outputMode !== "transform") {
         invalid(`${behaviorPath}.output_mode`, "unknown mode");
@@ -1054,10 +1026,8 @@ function decodeProposalBehavior(
       return {
         kind: "aggregation",
         trigger_kinds,
-        count: exact.count === null ? null : canonicalIntegerString(exact.count, `${behaviorPath}.count`, true),
-        timeout_seconds: exact.timeout_seconds === null
-          ? null
-          : finitePositiveNumber(exact.timeout_seconds, `${behaviorPath}.timeout_seconds`),
+        count,
+        timeout_seconds: timeoutSeconds,
         output_mode: outputMode,
         expected_output_count: exact.expected_output_count === null
           ? null
@@ -1182,74 +1152,143 @@ function decodeProposalPayload(value: unknown, path: string): ProposePipelinePay
 
 function decodeWirePayload(value: unknown, path: string): WireStageData {
   validateWirePayload(value, path);
-  const payload = exactRecord(value, path, ["proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"], [
-    "advisor_findings", "signoff_outcome", "passes_remaining",
+  const payload = exactRecord(value, path, [
+    "proposal_id", "draft_hash", "sources", "nodes", "outputs", "connections",
+    "semantic_contracts", "warnings", "blockers", "can_confirm",
   ]);
-  const topology = exactRecord(payload.topology, `${path}.topology`, ["sources", "nodes", "outputs"]);
+  const decodeCardinality = (value: unknown, cardinalityPath: string) => {
+    const cardinality = exactRecord(value, cardinalityPath, ["input", "output", "expected_output_count"]);
+    const input = stringValue(cardinality.input, `${cardinalityPath}.input`);
+    const output = stringValue(cardinality.output, `${cardinalityPath}.output`);
+    const allowedInputs: WireRowCardinality["input"][] = ["none", "one", "batch", "branches", "many_producers"];
+    const allowedOutputs: WireRowCardinality["output"][] = [
+      "one", "zero_or_one", "zero_or_many", "one_per_item", "one_per_branch_set", "expected_count",
+    ];
+    if (!allowedInputs.includes(input as WireRowCardinality["input"])) invalid(`${cardinalityPath}.input`, "unknown cardinality");
+    if (!allowedOutputs.includes(output as WireRowCardinality["output"])) invalid(`${cardinalityPath}.output`, "unknown cardinality");
+    const expectedOutputCount = cardinality.expected_output_count === null
+      ? null
+      : canonicalIntegerString(cardinality.expected_output_count, `${cardinalityPath}.expected_output_count`, false);
+    if ((output === "expected_count") !== (expectedOutputCount !== null)) {
+      invalid(`${cardinalityPath}.expected_output_count`, "does not match output cardinality");
+    }
+    return {
+      input: input as WireRowCardinality["input"],
+      output: output as WireRowCardinality["output"],
+      expected_output_count: expectedOutputCount,
+    };
+  };
+  const decodeContract = (value: unknown, contractPath: string) => {
+    const contract = exactRecord(value, contractPath, [
+      "from", "to", "producer_guarantees", "consumer_requires", "missing_fields", "satisfied",
+    ]);
+    return {
+      from: stringValue(contract.from, `${contractPath}.from`),
+      to: stringValue(contract.to, `${contractPath}.to`),
+      producer_guarantees: stringArray(contract.producer_guarantees, `${contractPath}.producer_guarantees`),
+      consumer_requires: stringArray(contract.consumer_requires, `${contractPath}.consumer_requires`),
+      missing_fields: stringArray(contract.missing_fields, `${contractPath}.missing_fields`),
+      satisfied: booleanValue(contract.satisfied, `${contractPath}.satisfied`),
+    };
+  };
   return {
     proposal_id: canonicalUuid(payload.proposal_id, `${path}.proposal_id`),
     draft_hash: stringValue(payload.draft_hash, `${path}.draft_hash`),
-    topology: {
-      sources: Object.fromEntries(
-        Object.entries(record(topology.sources, `${path}.topology.sources`)).map(([name, item]) => {
-          const sourcePath = `${path}.topology.sources.${name}`;
-          const source = exactRecord(item, sourcePath, ["id", "plugin", "on_success", "on_validation_failure"]);
-          return [name, {
-            id: stringValue(source.id, `${sourcePath}.id`),
-            plugin: stringValue(source.plugin, `${sourcePath}.plugin`),
-            on_success: nullableString(source.on_success, `${sourcePath}.on_success`),
-            on_validation_failure: stringValue(source.on_validation_failure, `${sourcePath}.on_validation_failure`),
-          }];
-        }),
-      ),
-      nodes: arrayValue(topology.nodes, `${path}.topology.nodes`).map((item, index) => {
-        const nodePath = `${path}.topology.nodes[${index}]`;
-        const node = exactRecord(item, nodePath, [
-          "id", "node_type", "plugin", "input", "on_success", "on_error", "routes", "fork_to", "branches",
-        ]);
-        return {
-          id: stringValue(node.id, `${nodePath}.id`),
-          node_type: stringValue(node.node_type, `${nodePath}.node_type`),
-          plugin: nullableString(node.plugin, `${nodePath}.plugin`),
-          input: nullableString(node.input, `${nodePath}.input`),
-          on_success: nullableString(node.on_success, `${nodePath}.on_success`),
-          on_error: nullableString(node.on_error, `${nodePath}.on_error`),
-          routes: node.routes === null ? null : Object.fromEntries(
-            Object.entries(record(node.routes, `${nodePath}.routes`)).map(([key, target]) => [key, stringValue(target, `${nodePath}.routes.${key}`)]),
-          ),
-          fork_to: node.fork_to === null ? null : stringArray(node.fork_to, `${nodePath}.fork_to`),
-          branches: node.branches === null
-            ? null
-            : Array.isArray(node.branches)
-              ? stringArray(node.branches, `${nodePath}.branches`)
-              : Object.fromEntries(
-                  Object.entries(record(node.branches, `${nodePath}.branches`)).map(([key, target]) => [key, stringValue(target, `${nodePath}.branches.${key}`)]),
-                ),
-        };
-      }),
-      outputs: arrayValue(topology.outputs, `${path}.topology.outputs`).map((item, index) => {
-        const outputPath = `${path}.topology.outputs[${index}]`;
-        const output = exactRecord(item, outputPath, ["id", "sink_name", "plugin", "on_write_failure"]);
-        return {
-          id: stringValue(output.id, `${outputPath}.id`),
-          sink_name: stringValue(output.sink_name, `${outputPath}.sink_name`),
-          plugin: stringValue(output.plugin, `${outputPath}.plugin`),
-          on_write_failure: stringValue(output.on_write_failure, `${outputPath}.on_write_failure`),
-        };
-      }),
-    },
-    edge_contracts: arrayValue(payload.edge_contracts, `${path}.edge_contracts`).map((item, index) => {
-      const edgePath = `${path}.edge_contracts[${index}]`;
-      const edge = exactRecord(item, edgePath, [
-        "from", "to", "producer_guarantees", "consumer_requires", "missing_fields", "satisfied",
+    sources: arrayValue(payload.sources, `${path}.sources`).map((item, index) => {
+      const sourcePath = `${path}.sources[${index}]`;
+      const source = exactRecord(item, sourcePath, [
+        "stable_id", "label", "plugin", "on_validation_failure", "guaranteed_fields", "row_cardinality",
       ]);
       return {
-        from: stringValue(edge.from, `${edgePath}.from`),
-        to: stringValue(edge.to, `${edgePath}.to`),
-        producer_guarantees: stringArray(edge.producer_guarantees, `${edgePath}.producer_guarantees`),
-        consumer_requires: stringArray(edge.consumer_requires, `${edgePath}.consumer_requires`),
-        missing_fields: stringArray(edge.missing_fields, `${edgePath}.missing_fields`),
-        satisfied: booleanValue(edge.satisfied, `${edgePath}.satisfied`),
+        stable_id: canonicalUuid(source.stable_id, `${sourcePath}.stable_id`),
+        label: stringValue(source.label, `${sourcePath}.label`),
+        plugin: stringValue(source.plugin, `${sourcePath}.plugin`),
+        on_validation_failure: stringValue(source.on_validation_failure, `${sourcePath}.on_validation_failure`),
+        guaranteed_fields: stringArray(source.guaranteed_fields, `${sourcePath}.guaranteed_fields`),
+        row_cardinality: decodeCardinality(source.row_cardinality, `${sourcePath}.row_cardinality`),
+      };
+    }),
+    nodes: arrayValue(payload.nodes, `${path}.nodes`).map((item, index) => {
+      const nodePath = `${path}.nodes[${index}]`;
+      const node = exactRecord(item, nodePath, [
+        "stable_id", "label", "node_type", "plugin", "behavior", "required_fields", "guaranteed_fields",
+        "row_cardinality", "structured_output_fields",
+      ]);
+      const nodeType = decodeProposalNodeType(node.node_type, `${nodePath}.node_type`);
+      return {
+        stable_id: canonicalUuid(node.stable_id, `${nodePath}.stable_id`),
+        label: stringValue(node.label, `${nodePath}.label`),
+        node_type: nodeType,
+        plugin: nullableString(node.plugin, `${nodePath}.plugin`),
+        behavior: decodeProposalBehavior(node.behavior, nodeType, nodePath),
+        required_fields: stringArray(node.required_fields, `${nodePath}.required_fields`),
+        guaranteed_fields: stringArray(node.guaranteed_fields, `${nodePath}.guaranteed_fields`),
+        row_cardinality: decodeCardinality(node.row_cardinality, `${nodePath}.row_cardinality`),
+        structured_output_fields: arrayValue(node.structured_output_fields, `${nodePath}.structured_output_fields`).map(
+          (item, fieldIndex) => {
+            const fieldPath = `${nodePath}.structured_output_fields[${fieldIndex}]`;
+            const field = exactRecord(item, fieldPath, ["query", "field", "type", "enum_values"]);
+            return {
+              query: stringValue(field.query, `${fieldPath}.query`),
+              field: stringValue(field.field, `${fieldPath}.field`),
+              type: stringValue(field.type, `${fieldPath}.type`),
+              enum_values: stringArray(field.enum_values, `${fieldPath}.enum_values`),
+            };
+          },
+        ),
+      };
+    }),
+    outputs: arrayValue(payload.outputs, `${path}.outputs`).map((item, index) => {
+      const outputPath = `${path}.outputs[${index}]`;
+      const output = exactRecord(item, outputPath, [
+        "stable_id", "label", "plugin", "on_write_failure", "required_fields", "business_schema",
+      ]);
+      const schemaPath = `${outputPath}.business_schema`;
+      const schema = exactRecord(output.business_schema, schemaPath, [
+        "mode", "fields", "guaranteed_fields", "required_fields",
+      ]);
+      return {
+        stable_id: canonicalUuid(output.stable_id, `${outputPath}.stable_id`),
+        label: stringValue(output.label, `${outputPath}.label`),
+        plugin: stringValue(output.plugin, `${outputPath}.plugin`),
+        on_write_failure: stringValue(output.on_write_failure, `${outputPath}.on_write_failure`),
+        required_fields: stringArray(output.required_fields, `${outputPath}.required_fields`),
+        business_schema: {
+          mode: stringValue(schema.mode, `${schemaPath}.mode`),
+          fields: arrayValue(schema.fields, `${schemaPath}.fields`).map((item, fieldIndex) => {
+            const fieldPath = `${schemaPath}.fields[${fieldIndex}]`;
+            const field = exactRecord(item, fieldPath, ["name", "type", "required", "nullable"]);
+            return {
+              name: stringValue(field.name, `${fieldPath}.name`),
+              type: stringValue(field.type, `${fieldPath}.type`),
+              required: booleanValue(field.required, `${fieldPath}.required`),
+              nullable: booleanValue(field.nullable, `${fieldPath}.nullable`),
+            };
+          }),
+          guaranteed_fields: stringArray(schema.guaranteed_fields, `${schemaPath}.guaranteed_fields`),
+          required_fields: stringArray(schema.required_fields, `${schemaPath}.required_fields`),
+        },
+      };
+    }),
+    connections: arrayValue(payload.connections, `${path}.connections`).map((item, index) => {
+      const connectionPath = `${path}.connections[${index}]`;
+      const connection = exactRecord(item, connectionPath, [
+        "stable_id", "from_endpoint", "to_endpoint", "flow", "schema_contract",
+      ]);
+      const target = record(connection.to_endpoint, `${connectionPath}.to_endpoint`);
+      return {
+        stable_id: canonicalUuid(connection.stable_id, `${connectionPath}.stable_id`),
+        from_endpoint: decodeProposalEndpoint(connection.from_endpoint, `${connectionPath}.from_endpoint`),
+        to_endpoint: target.kind === "discard"
+          ? (() => {
+              exactRecord(target, `${connectionPath}.to_endpoint`, ["kind"]);
+              return { kind: "discard" as const };
+            })()
+          : decodeProposalEndpoint(connection.to_endpoint, `${connectionPath}.to_endpoint`),
+        flow: decodeProposalFlow(connection.flow, `${connectionPath}.flow`),
+        schema_contract: connection.schema_contract === null
+          ? null
+          : decodeContract(connection.schema_contract, `${connectionPath}.schema_contract`),
       };
     }),
     semantic_contracts: arrayValue(payload.semantic_contracts, `${path}.semantic_contracts`).map(
@@ -1258,15 +1297,10 @@ function decodeWirePayload(value: unknown, path: string): WireStageData {
     warnings: arrayValue(payload.warnings, `${path}.warnings`).map(
       (item, index) => jsonRecord(item, `${path}.warnings[${index}]`),
     ),
-    ...(payload.advisor_findings === undefined
-      ? {}
-      : { advisor_findings: stringValue(payload.advisor_findings, `${path}.advisor_findings`) }),
-    ...(payload.signoff_outcome === undefined
-      ? {}
-      : { signoff_outcome: stringValue(payload.signoff_outcome, `${path}.signoff_outcome`) }),
-    ...(payload.passes_remaining === undefined
-      ? {}
-      : { passes_remaining: integerValue(payload.passes_remaining, `${path}.passes_remaining`) }),
+    blockers: arrayValue(payload.blockers, `${path}.blockers`).map(
+      (item, index) => jsonRecord(item, `${path}.blockers[${index}]`),
+    ),
+    can_confirm: booleanValue(payload.can_confirm, `${path}.can_confirm`),
   };
 }
 
@@ -1393,11 +1427,10 @@ function decodeSession(value: unknown, path: string): GuidedSession {
   const profile = session.profile === null
     ? null
     : (() => {
-        const profile = exactRecord(session.profile, `${path}.profile`, ["coaching", "bookends", "advisor_checkpoints"]);
+        const profile = exactRecord(session.profile, `${path}.profile`, ["coaching", "bookends"]);
         return {
           coaching: booleanValue(profile.coaching, `${path}.profile.coaching`),
           bookends: booleanValue(profile.bookends, `${path}.profile.bookends`),
-          advisor_checkpoints: booleanValue(profile.advisor_checkpoints, `${path}.profile.advisor_checkpoints`),
         };
       })();
   return {

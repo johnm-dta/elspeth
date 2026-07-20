@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, cast
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
+    from elspeth.web.composer.guided.planning import GuidedCorrectionTarget
     from elspeth.web.composer.guided.state_machine import TerminalState
     from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
     from elspeth.web.sessions.protocol import GuidedOperationFence, SessionServiceProtocol
@@ -2218,11 +2219,13 @@ class ComposerServiceImpl:
         recorder: BufferingRecorder,
         operation_fence: GuidedOperationFence,
         progress: ComposerProgressSink | None = None,
+        correction_target: GuidedCorrectionTarget | None = None,
     ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
         """Run one shared planner call for the current guided checkpoint."""
 
         from elspeth.web.composer.guided.deferred_intents import evaluate_deferred_intent_coverage
         from elspeth.web.composer.guided.planning import (
+            GuidedCorrectionTarget,
             bind_guided_reviewed_components,
             guided_private_reviewed_facts,
             guided_redacted_current_state_context,
@@ -2240,6 +2243,8 @@ class ComposerServiceImpl:
 
         if type(operation_fence) is not GuidedOperationFence:
             raise TypeError("operation_fence must be an exact GuidedOperationFence")
+        if correction_target is not None and type(correction_target) is not GuidedCorrectionTarget:
+            raise TypeError("correction_target must be an exact GuidedCorrectionTarget or None")
         if str(operation_fence.session_id) != originating_message.session_id:
             raise AuditIntegrityError("guided planner operation fence targets a different session")
         if guided.active_proposal is not None:
@@ -2254,6 +2259,11 @@ class ComposerServiceImpl:
         plugin_snapshot, policy_catalog = self._plugin_policy_context(user_id)
         reviewed_facts = guided_private_reviewed_facts(guided)
         reviewed_context = guided_redacted_planner_context(guided)
+        if correction_target is not None:
+            reviewed_context = {
+                **reviewed_context,
+                "correction_target": correction_target.planner_context(),
+            }
 
         def evaluate_claims(candidate: CompositionState, claimed_intent_ids: tuple[str, ...]) -> tuple[str, ...]:
             return evaluate_deferred_intent_coverage(

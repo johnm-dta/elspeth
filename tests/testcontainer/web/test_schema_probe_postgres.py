@@ -9,12 +9,11 @@ import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import structlog
-from sqlalchemy import Connection, Engine, create_engine, event, insert, inspect, select, text, update
+from sqlalchemy import Connection, Engine, create_engine, event, inspect, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
@@ -46,7 +45,6 @@ from elspeth.web.schema_probe import (
 )
 from elspeth.web.sessions.models import (
     SESSION_SCHEMA_EPOCH,
-    composition_states_table,
     guided_operation_events_table,
     guided_operations_table,
     skill_markdown_history_table,
@@ -54,6 +52,7 @@ from elspeth.web.sessions.models import (
 from elspeth.web.sessions.models import metadata as session_metadata
 from elspeth.web.sessions.models import schema_identity_table as session_schema_identity_table
 from elspeth.web.sessions.protocol import (
+    CompositionStateData,
     GuidedCompositionStateResult,
     GuidedOperationActive,
     GuidedOperationClaimed,
@@ -276,18 +275,12 @@ async def test_postgres_guided_operation_takeover_fences_late_worker(postgres_en
         log=structlog.get_logger("test.guided-operation-postgres-b"),
     )
     session_id = (await service_a.create_session("alice", "PostgreSQL guided operation", "local")).id
-    state_id = uuid.uuid4()
-    with postgres_engine.begin() as conn:
-        conn.execute(
-            insert(composition_states_table).values(
-                id=str(state_id),
-                session_id=str(session_id),
-                version=1,
-                is_valid=False,
-                provenance="session_seed",
-                created_at=datetime.now(UTC),
-            )
-        )
+    state = await service_a.save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=False),
+        provenance="session_seed",
+    )
+    state_id = state.id
 
     operation_id = "postgres-takeover"
     request_hash = "a" * 64
@@ -567,6 +560,11 @@ def test_postgres_session_audit_triggers_are_installed_and_enforced(postgres_eng
         "trg_guided_operations_terminal_immutable",
         "trg_guided_operation_events_no_update",
         "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
     }
 
     protected_session = "trigger-protected"

@@ -170,15 +170,11 @@ async def test_guided_start_seeds_tutorial_profile_and_persists(tmp_path) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    # Wire carries the tutorial profile (advisor_checkpoints OFF as the demo
-    # bypass; bookends on).
-    assert body["guided_session"]["profile"] is not None
-    assert body["guided_session"]["profile"]["advisor_checkpoints"] is False
-    assert body["guided_session"]["profile"]["bookends"] is True
+    assert body["guided_session"]["profile"] == {"coaching": True, "bookends": True}
 
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
-    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
+    assert get_resp.json()["guided_session"]["profile"] == {"coaching": True, "bookends": True}
 
 
 @pytest.mark.asyncio
@@ -202,8 +198,7 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     body = resp.json()
 
     # The tutorial profile is on the wire (populated subset).
-    assert body["guided_session"]["profile"] is not None
-    assert body["guided_session"]["profile"]["advisor_checkpoints"] is False
+    assert body["guided_session"]["profile"] == {"coaching": True, "bookends": True}
 
     # D contract: start does NOT materialize a chat turn or any topology.
     # Empty CompositionState on the wire: sources={} (mapping), nodes/edges/
@@ -221,7 +216,7 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
     get_body = get_resp.json()
-    assert get_body["guided_session"]["profile"]["advisor_checkpoints"] is False
+    assert get_body["guided_session"]["profile"] == {"coaching": True, "bookends": True}
     assert get_body["guided_session"]["chat_history"] == []
 
     # Re-read the persisted record: empty source/topology (tuples on the record).
@@ -332,8 +327,7 @@ async def test_guided_start_is_idempotent(tmp_path) -> None:
     )
     assert second.status_code == 200
     assert second.json() == first.json()
-    assert second.json()["guided_session"]["profile"] is not None
-    assert second.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
+    assert second.json()["guided_session"]["profile"] == {"coaching": True, "bookends": True}
 
     from sqlalchemy import text
 
@@ -618,7 +612,6 @@ async def test_guided_start_rejects_client_supplied_profile_object_without_echo(
             "profile": {
                 "kind": "tutorial",
                 "injected": {"sources": {"evil": "client-owned"}},
-                "advisor_checkpoints": False,
             },
         },
     )
@@ -1301,10 +1294,8 @@ async def test_guided_respond_success_preserves_tutorial_profile(tmp_path) -> No
     )
     assert resp.status_code == 200
     profile = resp.json()["guided_session"]["profile"]
-    assert profile is not None
-    assert profile["advisor_checkpoints"] is False
-    assert profile["bookends"] is True
+    assert profile == {"coaching": True, "bookends": True}
 
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
-    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
+    assert get_resp.json()["guided_session"]["profile"] == {"coaching": True, "bookends": True}

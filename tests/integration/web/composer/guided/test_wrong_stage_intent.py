@@ -817,7 +817,7 @@ def test_management_provider_api_error_completes_unavailable_turn_without_mutati
     assert operation["result_state_id"] is not None
 
 
-def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_without_rewriting_committed_proposal_lineage(
+def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_reviewed_pending_proposal(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -872,18 +872,18 @@ def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_without_rewr
     monkeypatch.setattr(planner, "plan_guided_pipeline", plan_without_claiming_intent)
     staged = TestStep2IntraStep()._stage_proposal(client, session_id, filename="schema8-passed-output.jsonl")
     proposal = staged["next_turn"]["payload"]
-    accepted = client.post(
+    reviewed = client.post(
         f"/api/sessions/{session_id}/guided/respond",
         json={
             "operation_id": str(uuid4()),
             "turn_token": staged["next_turn"]["turn_token"],
             "proposal_id": proposal["proposal_id"],
             "draft_hash": proposal["draft_hash"],
-            "chosen": ["accept"],
+            "chosen": ["review_wiring"],
         },
     )
-    assert accepted.status_code == 200, accepted.json()
-    assert accepted.json()["guided_session"]["step"] == "step_4_wire"
+    assert reviewed.status_code == 200, reviewed.json()
+    assert reviewed.json()["guided_session"]["step"] == "step_4_wire"
     assert [intent.intent_id for intent in _guided(client, session_id).deferred_intents] == [retained.intent_id]
 
     monkeypatch.setattr(
@@ -916,7 +916,7 @@ def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_without_rewr
         client,
         session_id,
         operation_id=str(uuid4()),
-        turn_token=accepted.json()["next_turn"]["turn_token"],
+        turn_token=reviewed.json()["next_turn"]["turn_token"],
         message="Revise the passed output instruction.",
     )
 
@@ -941,8 +941,8 @@ def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_without_rewr
             .scalars()
             .all()
         )
-    assert proposal_row["status"] == "committed"
-    assert events == ["proposal.created", "proposal.accepted"]
+    assert proposal_row["status"] == "rejected"
+    assert events == ["proposal.created", "proposal.rejected"]
 
 
 @pytest.mark.parametrize("fault_point", ("proposal_event", "proposal_update"))

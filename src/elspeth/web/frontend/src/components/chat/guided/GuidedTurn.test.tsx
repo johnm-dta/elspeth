@@ -100,81 +100,14 @@ const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
 const WIRE_STAGE_PAYLOAD: WireStageData = {
   proposal_id: "00000000-0000-4000-8000-000000000001",
   draft_hash: "d".repeat(64),
-  topology: {
-    sources: {
-      source: {
-        id: "source",
-        plugin: "inline_blob",
-        on_success: "source_records",
-        on_validation_failure: "discard",
-      },
-    },
-    nodes: [
-      {
-        id: "scrape",
-        node_type: "transform",
-        plugin: "web_scrape",
-        input: "source_records",
-        on_success: "scraped",
-        on_error: "scrape_error",
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-      {
-        id: "mapper",
-        node_type: "transform",
-        plugin: "field_mapper",
-        input: "scraped",
-        on_success: "jsonl_out",
-        on_error: null,
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-      {
-        id: "error_handler",
-        node_type: "transform",
-        plugin: "dead_letter",
-        input: "scrape_error",
-        on_success: null,
-        on_error: null,
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-    ],
-    outputs: [
-      {
-        id: "output:jsonl_out",
-        sink_name: "jsonl_out",
-        plugin: "json",
-        on_write_failure: "discard",
-      },
-    ],
-  },
-  edge_contracts: [
-    {
-      from: "scrape",
-      to: "mapper",
-      producer_guarantees: ["body", "status"],
-      consumer_requires: ["body"],
-      missing_fields: [],
-      satisfied: true,
-    },
-    {
-      from: "mapper",
-      to: "output:jsonl_out",
-      producer_guarantees: ["mapped"],
-      consumer_requires: ["mapped"],
-      missing_fields: [],
-      satisfied: true,
-    },
-  ],
+  sources: [{ stable_id: "00000000-0000-4000-8000-000000000010", label: "source-1", plugin: "inline_blob", on_validation_failure: "discard", guaranteed_fields: [], row_cardinality: { input: "none", output: "zero_or_many", expected_output_count: null } }],
+  nodes: [],
+  outputs: [{ stable_id: "00000000-0000-4000-8000-000000000020", label: "output-1", plugin: "json", on_write_failure: "discard", required_fields: [], business_schema: { mode: "observed", fields: [], guaranteed_fields: [], required_fields: [] } }],
+  connections: [{ stable_id: "00000000-0000-4000-8000-000000000030", from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000010" }, to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000020" }, flow: { kind: "source_success", branch: null }, schema_contract: null }],
   semantic_contracts: [],
   warnings: [],
-  // Initial confirm_wiring turn shape: no advisor pass has run, so signoff_outcome
-  // is absent and the dispatcher routes to the actionable "Confirm wiring" action.
+  blockers: [],
+  can_confirm: true,
 };
 
 const PROPOSAL_PAYLOAD: ProposePipelinePayload = {
@@ -339,7 +272,7 @@ describe("GuidedTurn dispatcher — routing", () => {
       />,
     );
     expect(screen.getByRole("heading", { name: "Review pipeline proposal" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Accept pipeline" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
   });
 
   it("confirm_wiring: renders WireStageTurn UI", () => {
@@ -351,8 +284,7 @@ describe("GuidedTurn dispatcher — routing", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Review wiring" })).toBeTruthy();
-    // Wiring rows carry human step names, not internal ids (elspeth-016f463ff0).
-    expect(screen.getByRole("listitem", { name: /Source to Fetch step/ })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: /source-1 to output-1/ })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Confirm wiring" }),
     ).toBeTruthy();
@@ -416,44 +348,39 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith({
-      chosen: ["confirm"],
+      chosen: ["confirm_wiring"],
       edited_values: null,
       custom_inputs: null,
-      proposal_id: null,
-      draft_hash: null,
+      proposal_id: WIRE_STAGE_PAYLOAD.proposal_id,
+      draft_hash: WIRE_STAGE_PAYLOAD.draft_hash,
       edit_target: null,
       control_signal: null,
     });
   });
 
-  it("confirm_wiring Ask advisor forwards the request_advisor body", async () => {
+  it("confirm_wiring correction forwards the exact stable target and feedback", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: review",
-          passes_remaining: 2,
-        })}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
-    );
+    await user.type(screen.getByLabelText("What should change?"), "Change the source route.");
+    await user.click(screen.getByRole("button", { name: "Re-plan wiring" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith({
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      proposal_id: null,
-      draft_hash: null,
-      edit_target: null,
-      control_signal: "request_advisor",
+      proposal_id: WIRE_STAGE_PAYLOAD.proposal_id,
+      draft_hash: WIRE_STAGE_PAYLOAD.draft_hash,
+      edit_target: { kind: "source", stable_id: WIRE_STAGE_PAYLOAD.sources[0].stable_id },
+      correction_feedback: "Change the source route.",
+      control_signal: null,
     });
   });
 
@@ -462,12 +389,7 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: review",
-          passes_remaining: 2,
-        })}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
       />,
     );
@@ -483,41 +405,6 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       draft_hash: null,
       edit_target: null,
       control_signal: "exit_to_freeform",
-    });
-  });
-
-  it("confirm_wiring Complete without sign-off forwards chosen=['complete_without_signoff']", async () => {
-    // Governance-critical: chosen is string[], so this literal is NOT
-    // type-checked. The forwarded body must match the backend escape guard
-    // (_helpers.py: chosen in (['confirm'], ['complete_without_signoff'])); a
-    // typo here would silently 400 the only sanctioned advisor-unreachable exit.
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    render(
-      <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "escape_unavailable",
-          advisor_findings: "Advisor unreachable.",
-          passes_remaining: 0,
-        })}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "Complete without sign-off" }),
-    );
-
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith({
-      chosen: ["complete_without_signoff"],
-      edited_values: null,
-      custom_inputs: null,
-      proposal_id: null,
-      draft_hash: null,
-      edit_target: null,
-      control_signal: null,
     });
   });
 

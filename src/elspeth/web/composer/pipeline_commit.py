@@ -329,8 +329,6 @@ async def prepare_pipeline_proposal_commit(
     if (recovery_dispatch is None) != (recovery_executor_content_hash is None):
         raise AuditIntegrityError("pipeline recovery dispatch and executor hash must be supplied together")
     if recovery_dispatch is not None:
-        if settlement_surface != "generic":
-            raise AuditIntegrityError("guided pipeline settlement cannot recover a prior dispatch")
         assert recovery_executor_content_hash is not None
         if candidate_hash != recovery_executor_content_hash:
             raise PipelineCommitMismatchError(None, recovery_dispatch)

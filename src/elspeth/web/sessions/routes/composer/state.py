@@ -23,10 +23,11 @@ from elspeth.web.interpretation_state import parse_interpretation_requirements
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
-from elspeth.web.sessions.protocol import GuidedCompositionStateResult
+from elspeth.web.sessions.protocol import GuidedCompositionStateResult, GuidedOperationSettlementConflictError
 from elspeth.web.sessions.routes.guided_operations import (
     GuidedOperationLease,
     guided_response_hash,
+    raise_guided_operation_failure,
     reserve_or_replay_guided_operation,
 )
 
@@ -507,6 +508,9 @@ async def revert_state(
             raise HTTPException(status_code=404, detail="State not found") from None
         if target_state.session_id != session.id:
             raise HTTPException(status_code=404, detail="State not found")
+        expected_current = await service.get_current_state(session.id)
+        if expected_current is None:
+            raise AuditIntegrityError("State revert session unexpectedly has no current checkpoint")
 
     async def _replay(result: object) -> CompositionStateResponse:
         if type(result) is not GuidedCompositionStateResult:
@@ -531,11 +535,20 @@ async def revert_state(
             new_state = await service.revert_state_for_guided_operation(
                 reserved.fence,
                 state_id=body.state_id,
+                expected_current_state_id=expected_current.id,
+                expected_current_state_version=expected_current.version,
                 actor="composer_route",
                 response_hash_factory=lambda record: guided_response_hash(_state_response(record, policy_catalog=catalog)),
             )
         except ValueError:
             raise HTTPException(status_code=404, detail="State not found") from None
+        except GuidedOperationSettlementConflictError:
+            failure = await service.fail_guided_operation(
+                reserved.fence,
+                failure_code="stale_conflict",
+                actor="composer_route",
+            )
+            raise_guided_operation_failure(failure)
 
     return _state_response(new_state, policy_catalog=catalog)
 

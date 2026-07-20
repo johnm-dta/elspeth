@@ -110,6 +110,26 @@ def _guided_proposal_ref() -> GuidedProposalRef:
     )
 
 
+def _empty_wire_payload(
+    *,
+    proposal_id: str = str(_GUIDED_PROPOSAL_ID),
+    draft_hash: str = _GUIDED_PROPOSAL_DRAFT_HASH,
+    warnings: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "proposal_id": proposal_id,
+        "draft_hash": draft_hash,
+        "sources": [],
+        "nodes": [],
+        "outputs": [],
+        "connections": [],
+        "semantic_contracts": [],
+        "warnings": warnings or [],
+        "blockers": [],
+        "can_confirm": True,
+    }
+
+
 _MALFORMED_CURRENT_TURNS: tuple[tuple[GuidedStep, TurnType, Mapping[str, object]], ...] = (
     (
         GuidedStep.STEP_1_SOURCE,
@@ -233,20 +253,15 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
     raw_turn = {
         "type": "confirm_wiring",
         "step_index": 3,
-        "payload": {
-            "proposal_id": str(_GUIDED_PROPOSAL_ID),
-            "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
-            "topology": {"sources": {}, "nodes": [], "outputs": []},
-            "edge_contracts": [],
-            "semantic_contracts": [],
-            "warnings": [
+        "payload": _empty_wire_payload(
+            warnings=[
                 {
                     "component": "node:llm",
                     "message": f"lead {PROMPT_SHIELD_WARNING_DRAFT}",
                     "severity": "medium",
                 }
-            ],
-        },
+            ]
+        ),
     }
     finalized = _finalize_guided_turn(raw_turn, shield_available=shield_available)
     guided = replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
@@ -283,14 +298,7 @@ def test_confirm_wiring_cas_is_exact_finalized_wire_authority(
         {
             "type": "confirm_wiring",
             "step_index": 0,
-            "payload": {
-                "proposal_id": str(_GUIDED_PROPOSAL_ID),
-                "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
-                "topology": {"sources": {}, "nodes": [], "outputs": []},
-                "edge_contracts": [],
-                "semantic_contracts": [],
-                "warnings": [],
-            },
+            "payload": _empty_wire_payload(),
         },
     ],
 )
@@ -424,14 +432,7 @@ def test_durable_current_turn_rejects_wrong_step_type_matrix(tmp_path: Path) -> 
     from elspeth.web.sessions.routes.composer.guided import _load_durable_current_turn
 
     store = FilesystemPayloadStore(tmp_path / "wrong-turn-matrix")
-    payload = {
-        "proposal_id": str(_GUIDED_PROPOSAL_ID),
-        "draft_hash": _GUIDED_PROPOSAL_DRAFT_HASH,
-        "topology": {"sources": {}, "nodes": [], "outputs": []},
-        "edge_contracts": [],
-        "semantic_contracts": [],
-        "warnings": [],
-    }
+    payload = _empty_wire_payload()
     prepared = preparation.prepare_guided_json_payload(store, purpose="turn", payload=payload)
     guided = replace(
         GuidedSession.initial(),
@@ -469,14 +470,7 @@ def test_durable_confirm_wiring_requires_exact_active_proposal_binding(
     prepared = preparation.prepare_guided_json_payload(
         store,
         purpose="turn",
-        payload={
-            "proposal_id": proposal_id,
-            "draft_hash": draft_hash,
-            "topology": {"sources": {}, "nodes": [], "outputs": []},
-            "edge_contracts": [],
-            "semantic_contracts": [],
-            "warnings": [],
-        },
+        payload=_empty_wire_payload(proposal_id=proposal_id, draft_hash=draft_hash),
     )
     guided = replace(
         GuidedSession.initial(),

@@ -77,7 +77,7 @@ def _create_session(client: TestClient) -> str:
 
 
 def _with_active_step3(guided: GuidedSession, active: GuidedProposalRef) -> GuidedSession:
-    """Attach schema-9 proposal authority to its sole unanswered turn."""
+    """Attach schema-10 proposal authority to its sole unanswered turn."""
     return replace(
         guided,
         step=GuidedStep.STEP_3_TRANSFORMS,
@@ -508,18 +508,19 @@ def test_step3_matching_proposal_binding_requires_durable_payload_before_reserva
     guided = _with_active_step3(initial, active)
     _persist_guided(composer_test_client, session_id, guided)
 
-    with pytest.raises(AuditIntegrityError, match="replay payload is unavailable or corrupt"):
-        composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "operation_id": str(uuid4()),
-                "turn_token": "a" * 64,
-                "chosen": ["accept"],
-                "proposal_id": str(proposal_id),
-                "draft_hash": draft_hash,
-            },
-        )
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": "a" * 64,
+            "chosen": ["review_wiring"],
+            "proposal_id": str(proposal_id),
+            "draft_hash": draft_hash,
+        },
+    )
 
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
     assert _respond_operation_count(composer_test_client, session_id) == 0
 
 
@@ -749,16 +750,20 @@ def test_preflight_invariant_is_sanitized_without_reservation_or_mutation(
                 "payload": {
                     "proposal_id": "00000000-0000-4000-8000-000000000001",
                     "draft_hash": "d" * 64,
-                    "topology": {"sources": {}, "nodes": [], "outputs": []},
-                    "edge_contracts": [],
+                    "sources": [],
+                    "nodes": [],
+                    "outputs": [],
+                    "connections": [],
                     "semantic_contracts": [],
                     "warnings": [],
+                    "blockers": [],
+                    "can_confirm": True,
                 },
             },
         ),
     ],
 )
-def test_unsupported_schema8_stage_rejects_before_reservation_or_mutation(
+def test_orphan_wire_occurrence_fails_closed_before_reservation_or_mutation(
     composer_test_client: TestClient,
     step: GuidedStep,
     turn: dict[str, object],
@@ -777,13 +782,13 @@ def test_unsupported_schema8_stage_rejects_before_reservation_or_mutation(
     payloads_before = _payload_file_count(composer_test_client)
     body = _live_body(
         {"turn_token": guided_turn_token(guided)},
-        chosen=["accept"],
+        chosen=["confirm_wiring"],
     )
 
     response = composer_test_client.post(f"/api/sessions/{session_id}/guided/respond", json=body)
 
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "guided_respond_stage_unsupported"
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Server invariant violated. See application audit log for diagnostic detail."
     assert _respond_operation_count(composer_test_client, session_id) == 0
     assert asyncio.run(composer_test_client.app.state.session_service.get_state_versions(UUID(session_id))) == versions_before
     assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before

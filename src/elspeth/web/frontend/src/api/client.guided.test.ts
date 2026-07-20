@@ -757,7 +757,7 @@ describe("api/client guided functions", () => {
       ["accept", {
         operation_id: "00000000-0000-4000-8000-000000000611",
         turn_token: "b".repeat(64),
-        chosen: ["accept"],
+        chosen: ["review_wiring"],
         edited_values: null,
         custom_inputs: null,
         proposal_id: "00000000-0000-4000-8000-000000000612",
@@ -876,7 +876,6 @@ describe("api/client guided functions", () => {
       body.guided_session.profile = {
         coaching: true,
         bookends: true,
-        advisor_checkpoints: true,
       };
       fetchSpy.mockResolvedValue({
         ok: true,
@@ -903,7 +902,7 @@ describe("api/client guided functions", () => {
         profile: "tutorial",
         operation_id: "00000000-0000-4000-8000-000000000001",
       });
-      expect(result.guided_session.profile?.advisor_checkpoints).toBe(true);
+      expect(result.guided_session.profile?.bookends).toBe(true);
     });
 
     it("includes the exact ordinary root intent for live start", async () => {

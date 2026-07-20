@@ -2402,7 +2402,6 @@ def _workflow_profile_response(guided: GuidedSession) -> WorkflowProfileResponse
     return WorkflowProfileResponse(
         coaching=guided.profile.coaching,
         bookends=guided.profile.bookends,
-        advisor_checkpoints=guided.profile.advisor_checkpoints,
     )
 
 

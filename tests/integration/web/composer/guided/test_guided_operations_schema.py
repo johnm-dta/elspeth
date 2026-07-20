@@ -1,23 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+from uuid import UUID
 
 import pytest
+import structlog
 from sqlalchemy import delete, insert, inspect, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_proposals_table,
-    composition_states_table,
     guided_operation_admission_blocks_table,
     guided_operation_events_table,
     guided_operations_table,
     metadata,
     sessions_table,
 )
+from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import SessionSchemaError, initialize_session_schema
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 SESSION_ID = "00000000-0000-4000-8000-000000000001"
 OPERATION_ID = "00000000-0000-4000-8000-000000000002"
@@ -40,7 +47,11 @@ def _empty_failure_audit_cohort() -> dict[str, object]:
 
 @pytest.fixture
 def engine():
-    engine = create_session_engine("sqlite:///:memory:")
+    engine = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     initialize_session_schema(engine)
     with engine.begin() as connection:
         connection.execute(
@@ -70,16 +81,6 @@ def engine():
             )
         )
         connection.execute(
-            insert(composition_states_table).values(
-                id=STATE_ID,
-                session_id=SESSION_ID,
-                version=1,
-                is_valid=False,
-                provenance="session_seed",
-                created_at=NOW,
-            )
-        )
-        connection.execute(
             insert(composition_proposals_table).values(
                 id=PROPOSAL_ID,
                 session_id=SESSION_ID,
@@ -95,6 +96,20 @@ def engine():
                 updated_at=NOW,
             )
         )
+    service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test.guided-operation-schema"),
+    )
+    with patch("elspeth.web.sessions.service.uuid.uuid4", return_value=UUID(STATE_ID)):
+        state = asyncio.run(
+            service.save_composition_state(
+                UUID(SESSION_ID),
+                CompositionStateData(is_valid=False),
+                provenance="session_seed",
+            )
+        )
+    assert str(state.id) == STATE_ID
     return engine
 
 

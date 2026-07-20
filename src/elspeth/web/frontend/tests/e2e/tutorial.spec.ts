@@ -98,7 +98,6 @@ function guidedSession(step: string): Record<string, unknown> {
     profile: {
       coaching: true,
       bookends: true,
-      advisor_checkpoints: true,
     },
   };
 }

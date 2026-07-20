@@ -467,7 +467,6 @@ class WorkflowProfileResponse(_StrictResponse):
 
     coaching: bool
     bookends: bool
-    advisor_checkpoints: bool
 
 
 class GuidedSessionResponse(_StrictResponse):
@@ -663,7 +662,15 @@ class GuidedRespondRequest(_GuidedOperationRequest):
     proposal_id: pydantic.StrictStr | None = None
     draft_hash: pydantic.StrictStr | None = None
     edit_target: GuidedEditTargetRequest | None = None
+    correction_feedback: str | None = pydantic.Field(default=None, min_length=1, max_length=4096)
     component_action: GuidedComponentAction | None = None
+
+    @field_validator("correction_feedback")
+    @classmethod
+    def _validate_correction_feedback(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_visible_content(value, field_label="Correction feedback")
 
     @model_validator(mode="after")
     def _validate_token_action_shape(self) -> GuidedRespondRequest:
@@ -676,6 +683,7 @@ class GuidedRespondRequest(_GuidedOperationRequest):
             self.proposal_id,
             self.draft_hash,
             self.edit_target,
+            self.correction_feedback,
         )
         response_fields = (*turn_response_fields, *proposal_fields, self.component_action)
         if self.turn_token is None:
@@ -691,6 +699,12 @@ class GuidedRespondRequest(_GuidedOperationRequest):
             raise ValueError("proposal_id and draft_hash must be supplied together")
         if self.edit_target is not None and self.proposal_id is None:
             raise ValueError("edit_target requires a complete proposal binding")
+        if self.correction_feedback is not None:
+            if self.proposal_id is None or self.edit_target is None:
+                raise ValueError("correction_feedback requires a complete proposal binding and edit_target")
+            if any(value is not None for value in (*turn_response_fields, self.control_signal)):
+                raise ValueError("correction_feedback cannot be combined with another guided response action")
+            return self
         if self.control_signal is not None and any(value is not None for value in turn_response_fields):
             raise ValueError("control_signal cannot be combined with turn response fields")
         if self.control_signal == "exit_to_freeform" and any(value is not None for value in proposal_fields):

@@ -297,7 +297,7 @@ def test_completed_exit_reentry_requires_reconfirmation_after_content_change(com
 
     assert response.status_code == 200, response.json()
     assert response.json()["terminal"] is None
-    assert response.json()["next_turn"]["type"] == "confirm_wiring"
+    assert response.json()["next_turn"]["type"] == "single_select"
 
 
 @pytest.mark.parametrize("corrupt_marker", [None, {"composition_hash": 42}])

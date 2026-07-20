@@ -72,6 +72,7 @@ _LOCK_HELPER_NAMES = (
 
 _SESSION_WRITE_LOCK_NAME = "_session_write_lock"
 _LOCK_HELD_ASSERT_NAME = "_assert_session_write_lock_held"
+_PAIRED_SESSION_WRITE_LOCK_NAME = "_session_pair_locked_begin"
 
 # Resolved at module import to avoid recomputing per-test.
 _SCANNER_SELF_PATH = Path(__file__).resolve()
@@ -228,6 +229,17 @@ def _enclosing_with_blocks(node: ast.AST) -> Iterator[ast.With | ast.AsyncWith]:
         if isinstance(cursor, (ast.With, ast.AsyncWith)):
             yield cursor
         cursor = getattr(cursor, "parent", None)
+
+
+def _enclosing_function(node: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Return the nearest function whose lock precondition governs ``node``."""
+
+    cursor: ast.AST | None = getattr(node, "parent", None)
+    while cursor is not None:
+        if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cursor
+        cursor = getattr(cursor, "parent", None)
+    return None
 
 
 def _call_callable_name(call: ast.Call) -> str:
@@ -428,17 +440,84 @@ def _codebase_defines_symbol(symbol: str, roots: Sequence[Path]) -> bool:
     return False
 
 
-def _with_block_calls_session_write_lock(with_node: ast.With | ast.AsyncWith) -> bool:
-    """Return True iff any ``with`` item is a call to ``_session_write_lock``."""
+def _with_block_establishes_session_write_lock(with_node: ast.With | ast.AsyncWith, writer: ast.Call) -> bool:
+    """Return True iff a context locks this writer's exact connection/session."""
+
+    writer_conn = _argument(writer, 0, "conn")
+    writer_session = _argument(writer, 1, "session_id")
+    if writer_conn is None or writer_session is None:
+        return False
 
     for item in with_node.items:
         ctx = item.context_expr
-        if isinstance(ctx, ast.Call):
-            func = ctx.func
-            if isinstance(func, ast.Attribute) and func.attr == _SESSION_WRITE_LOCK_NAME:
+        if not isinstance(ctx, ast.Call):
+            continue
+        func_name = _call_callable_name(ctx)
+        if func_name == _SESSION_WRITE_LOCK_NAME:
+            if _same_expression(writer_conn, _argument(ctx, 0, "conn")) and _same_expression(
+                writer_session,
+                _argument(ctx, 1, "session_id"),
+            ):
                 return True
-            if isinstance(func, ast.Name) and func.id == _SESSION_WRITE_LOCK_NAME:
+        elif func_name == _PAIRED_SESSION_WRITE_LOCK_NAME:
+            if not isinstance(item.optional_vars, ast.expr) or not _same_bound_name(writer_conn, item.optional_vars):
+                continue
+            first_session = _argument(ctx, 0, "first_session_id")
+            second_session = _argument(ctx, 1, "second_session_id")
+            if _same_expression(writer_session, first_session) or _same_expression(writer_session, second_session):
                 return True
+    return False
+
+
+def _argument(call: ast.Call, position: int, keyword: str) -> ast.expr | None:
+    if len(call.args) > position:
+        return call.args[position]
+    return next((item.value for item in call.keywords if item.arg == keyword), None)
+
+
+def _same_expression(left: ast.expr | None, right: ast.expr | None) -> bool:
+    return left is not None and right is not None and ast.dump(left, include_attributes=False) == ast.dump(right, include_attributes=False)
+
+
+def _same_bound_name(use: ast.expr, binding: ast.expr) -> bool:
+    """Compare a loaded connection name with a ``with ... as`` store target."""
+
+    return isinstance(use, ast.Name) and isinstance(binding, ast.Name) and use.id == binding.id
+
+
+def _is_matching_lock_assertion(statement: ast.stmt, writer: ast.Call) -> bool:
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return False
+    assertion = statement.value
+    func = assertion.func
+    if not (
+        (isinstance(func, ast.Name) and func.id == _LOCK_HELD_ASSERT_NAME)
+        or (isinstance(func, ast.Attribute) and func.attr == _LOCK_HELD_ASSERT_NAME)
+    ):
+        return False
+    return _same_expression(_argument(assertion, 0, "conn"), _argument(writer, 0, "conn")) and _same_expression(
+        _argument(assertion, 1, "session_id"),
+        _argument(writer, 1, "session_id"),
+    )
+
+
+def _call_has_dominating_matching_lock_assertion(call: ast.Call) -> bool:
+    """Accept only a prior, guaranteed assertion over this call's conn/session."""
+
+    child: ast.AST = call
+    parent = getattr(child, "parent", None)
+    while parent is not None:
+        for field in ("body", "orelse", "finalbody"):
+            statements = getattr(parent, field, None)
+            if not isinstance(statements, list) or child not in statements:
+                continue
+            index = statements.index(child)
+            if any(_is_matching_lock_assertion(statement, call) for statement in statements[:index]):
+                return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return False
+        child = parent
+        parent = getattr(parent, "parent", None)
     return False
 
 
@@ -490,7 +569,9 @@ def check_lock_discipline(
             helper_name = _called_helper_name(node)
             if helper_name is None:
                 continue
-            inside_lock = any(_with_block_calls_session_write_lock(w) for w in _enclosing_with_blocks(node))
+            inside_lock = any(_with_block_establishes_session_write_lock(w, node) for w in _enclosing_with_blocks(node))
+            if not inside_lock:
+                inside_lock = _call_has_dominating_matching_lock_assertion(node)
             if inside_lock:
                 continue
             enclosing_symbol = _qualified_symbol(node)
@@ -639,7 +720,7 @@ def check_inline_state_version_allocation(
             simple_name = symbol.rsplit(".", 1)[-1]
             if simple_name not in {"save_composition_state", "set_active_state"}:
                 continue
-            inside_lock = any(_with_block_calls_session_write_lock(w) for w in _enclosing_with_blocks(node))
+            inside_lock = any(_with_block_establishes_session_write_lock(w) for w in _enclosing_with_blocks(node))
             if inside_lock:
                 continue
             line = getattr(node, "lineno", 0)
@@ -1659,7 +1740,7 @@ def test_static_helper_lock_guard_rejects_unlocked_allocator(tmp_path: Path) -> 
             yield
 
 
-        def _insert_chat_message(conn, record):
+        def _insert_chat_message(conn, *, session_id):
             pass
 
 
@@ -1668,12 +1749,12 @@ def test_static_helper_lock_guard_rejects_unlocked_allocator(tmp_path: Path) -> 
 
 
         class Service:
-            def use_helper_unlocked(self, conn, record):
-                _insert_chat_message(conn, record)
+            def use_helper_unlocked(self, conn, sid):
+                _insert_chat_message(conn, session_id=sid)
 
-            def use_helper_locked(self, conn, record):
-                with _session_write_lock(conn, "sid"):
-                    _insert_chat_message(conn, record)
+            def use_helper_locked(self, conn, sid):
+                with _session_write_lock(conn, sid):
+                    _insert_chat_message(conn, session_id=sid)
     """)
     )
     findings = check_lock_discipline([synthetic_root], path_anchor=tmp_path)
@@ -1681,6 +1762,120 @@ def test_static_helper_lock_guard_rejects_unlocked_allocator(tmp_path: Path) -> 
     locked = [v for v in findings if v.enclosing_symbol.endswith("use_helper_locked")]
     assert unlocked, f"lock-discipline checker failed to detect helper call outside _session_write_lock; findings={findings}"
     assert not locked, f"lock-discipline checker over-triggered on properly-locked call site; locked-findings={locked}"
+
+
+def test_lock_assertion_must_dominate_and_match_the_writer_arguments(tmp_path: Path) -> None:
+    """A decorative, unreachable, late, or differently-bound assertion grants no exemption."""
+
+    synthetic_root = tmp_path / "src"
+    synthetic_root.mkdir()
+    (synthetic_root / "synthetic_module.py").write_text(
+        textwrap.dedent("""\
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _session_write_lock(conn, sid):
+            yield
+
+        def _assert_session_write_lock_held(conn, sid, *, caller):
+            pass
+
+        def _insert_chat_message(conn, *, session_id):
+            pass
+
+        def valid(conn, sid):
+            _assert_session_write_lock_held(conn, sid, caller="valid")
+            _insert_chat_message(conn, session_id=sid)
+
+        def assertion_after_write(conn, sid):
+            _insert_chat_message(conn, session_id=sid)
+            _assert_session_write_lock_held(conn, sid, caller="late")
+
+        def unreachable_assertion(conn, sid):
+            if False:
+                _assert_session_write_lock_held(conn, sid, caller="unreachable")
+            _insert_chat_message(conn, session_id=sid)
+
+        def wrong_connection(conn, other_conn, sid):
+            _assert_session_write_lock_held(other_conn, sid, caller="wrong conn")
+            _insert_chat_message(conn, session_id=sid)
+
+        def wrong_session(conn, sid, other_sid):
+            _assert_session_write_lock_held(conn, other_sid, caller="wrong session")
+            _insert_chat_message(conn, session_id=sid)
+    """)
+    )
+
+    findings = check_lock_discipline([synthetic_root], path_anchor=tmp_path)
+    symbols = {finding.enclosing_symbol for finding in findings}
+    assert "valid" not in symbols
+    assert {
+        "assertion_after_write",
+        "unreachable_assertion",
+        "wrong_connection",
+        "wrong_session",
+    } <= symbols
+
+
+def test_lock_context_must_match_writer_connection_and_session_member(tmp_path: Path) -> None:
+    """A named lock context protects only its exact connection and session member."""
+
+    synthetic_root = tmp_path / "src"
+    synthetic_root.mkdir()
+    (synthetic_root / "synthetic_module.py").write_text(
+        textwrap.dedent("""\
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _session_write_lock(conn, session_id):
+            yield
+
+        @contextmanager
+        def _session_pair_locked_begin(first_session_id, second_session_id):
+            yield object()
+
+        def _insert_chat_message(conn, *, session_id):
+            pass
+
+        def valid_single(conn, sid):
+            with _session_write_lock(conn, sid):
+                _insert_chat_message(conn, session_id=sid)
+
+        def wrong_single_connection(conn, other_conn, sid):
+            with _session_write_lock(other_conn, sid):
+                _insert_chat_message(conn, session_id=sid)
+
+        def wrong_single_session(conn, sid, other_sid):
+            with _session_write_lock(conn, other_sid):
+                _insert_chat_message(conn, session_id=sid)
+
+        def valid_pair_first(first_sid, second_sid):
+            with _session_pair_locked_begin(first_sid, second_sid) as conn:
+                _insert_chat_message(conn, session_id=first_sid)
+
+        def valid_pair_second(first_sid, second_sid):
+            with _session_pair_locked_begin(first_sid, second_sid) as conn:
+                _insert_chat_message(conn, session_id=second_sid)
+
+        def wrong_pair_connection(other_conn, first_sid, second_sid):
+            with _session_pair_locked_begin(first_sid, second_sid) as conn:
+                _insert_chat_message(other_conn, session_id=first_sid)
+
+        def wrong_pair_member(first_sid, second_sid, unrelated_sid):
+            with _session_pair_locked_begin(first_sid, second_sid) as conn:
+                _insert_chat_message(conn, session_id=unrelated_sid)
+    """)
+    )
+
+    findings = check_lock_discipline([synthetic_root], path_anchor=tmp_path)
+    symbols = {finding.enclosing_symbol for finding in findings}
+    assert {"valid_single", "valid_pair_first", "valid_pair_second"}.isdisjoint(symbols)
+    assert {
+        "wrong_single_connection",
+        "wrong_single_session",
+        "wrong_pair_connection",
+        "wrong_pair_member",
+    } <= symbols
 
 
 def test_lock_discipline_allowlist_exempts_negative_precondition_test(tmp_path: Path) -> None:

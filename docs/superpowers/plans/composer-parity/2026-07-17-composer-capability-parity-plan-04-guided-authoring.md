@@ -654,9 +654,12 @@ in browser retry storage.
   Prove that Step-3 Review Wiring changes only the guided checkpoint and leaves
   the proposal row pending, the canonical composition state uncommitted, and
   deferred intents unconsumed. Prove that Step-4 Confirm Wiring is the only
-  action that prepares/dispatches the candidate, writes `proposal.accepted`,
-  commits the state, clears the reference, and consumes the mechanically
-  covered ids in one transaction.
+  action that computes the pure in-memory candidate and can record its durable
+  logical dispatch. A crash after computation but before that record may repeat
+  the computation; it must still produce exactly one successful durable
+  dispatch record, one `proposal.accepted` event, and one committed state. The
+  acceptance transaction clears the reference and consumes only the
+  mechanically covered ids.
 
 - [ ] **Step 2: Derive wire review from the pending candidate**
 
@@ -694,10 +697,19 @@ in browser retry storage.
   proposal row, creation event, private candidate, projection payload,
   reviewed-fact anchor, current policy/catalog snapshot, and all root/deferred/
   correction messages. Recheck every content hash, mechanically re-evaluate
-  claimed deferred intent, prepare one exact dispatch, accept the proposal,
-  persist the committed state and answered wire turn, consume only verified
-  ids, and complete the guided operation together. Any fault or lease loss
-  rolls the whole acceptance back.
+  claimed deferred intent, acquire database-exclusive proposal admission, and
+  compute the exact candidate through the pure in-memory `set_pipeline`
+  executor. Reject candidates that try to persist an inline prepared blob on
+  this path: computation before the durable boundary must have no external
+  side effect. `record_guided_pipeline_dispatch()` is the first durable logical
+  dispatch boundary. A process death after computation but before that call can
+  cause takeover to compute again, so raw computation is intentionally
+  at-least-once; no outbox is needed because it is pure. Persist exactly one
+  successful logical dispatch record before final acceptance. Then accept the
+  proposal, persist the committed state and answered wire turn, consume only
+  verified ids, and complete the guided operation together. Takeover recovers
+  a recorded dispatch without creating another durable dispatch, acceptance
+  event, or state publication.
 
 - [ ] **Step 6: Update revert/fork and frontend semantics**
 
@@ -752,5 +764,9 @@ in browser retry storage.
   final acceptance consumes them.
 - A guided proposal remains pending through arbitrary-DAG wire review;
   corrections supersede it immutably; Confirm Wiring is the sole commit point.
-- Guided schema 9 / session epoch 33 is a hard cut with no schema-8,
-  epoch-31, epoch-32, migration, or compatibility path.
+- Candidate computation is pure and at-least-once across a process death before
+  dispatch recording. The durable contract is exactly one successful logical
+  dispatch, one acceptance event, and one state publication.
+- Guided schema 10 / session epoch 35 is a hard cut with no schema-9,
+  epoch-34-or-older, migration, or compatibility path. Epoch 35 adds exclusive
+  proposal admission for guided confirmation.

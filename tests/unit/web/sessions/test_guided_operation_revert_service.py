@@ -18,6 +18,7 @@ import pytest
 import structlog
 from sqlalchemy import delete, event, func, select, update
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.dml import Insert, Update
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
@@ -52,10 +53,12 @@ from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateRecord,
     GuidedCompositionStateResult,
+    GuidedOperationActive,
     GuidedOperationClaimed,
     GuidedOperationCompleted,
     GuidedOperationFence,
     GuidedOperationFenceLostError,
+    GuidedOperationSettlementConflictError,
     GuidedOperationTakenOver,
     GuidedStartStateConverged,
     GuidedStartStateSeeded,
@@ -112,6 +115,27 @@ def durable_engine(request: pytest.FixtureRequest, tmp_path: Path):
 
 def _service_for(engine: Any) -> SessionServiceImpl:
     return SessionServiceImpl(engine, telemetry=build_sessions_telemetry(), log=structlog.get_logger("test.revert-race"))
+
+
+async def _revert_at_current(
+    service: SessionServiceImpl,
+    fence: GuidedOperationFence,
+    *,
+    state_id: UUID,
+    actor: str,
+    response_hash_factory: Callable[[CompositionStateRecord], str],
+) -> CompositionStateRecord:
+    """Bind a direct service-level revert test to its observed session head."""
+    current = await service.get_current_state(fence.session_id)
+    assert current is not None
+    return await service.revert_state_for_guided_operation(
+        fence,
+        state_id=state_id,
+        expected_current_state_id=current.id,
+        expected_current_state_version=current.version,
+        actor=actor,
+        response_hash_factory=response_hash_factory,
+    )
 
 
 async def _service_lock_contention(
@@ -253,8 +277,6 @@ async def _attach_pending_guided_pipeline_proposal(
                 emitter="server",
             ),
         ),
-        advisor_checkpoint_passes_used=2,
-        advisor_signoff_escape_offered=True,
         transition_consumed=True,
         active_proposal=GuidedProposalRef(
             proposal_id=row.id,
@@ -306,7 +328,8 @@ async def _assert_revert_integrity_failure_is_atomic(
         ).scalar_one()
 
     with pytest.raises(AuditIntegrityError, match=match):
-        await service.revert_state_for_guided_operation(
+        await _revert_at_current(
+            service,
             fence,
             state_id=target_state_id,
             actor="route",
@@ -475,6 +498,8 @@ async def _prepare_accept_revert_race(
         return await revert_service.revert_state_for_guided_operation(
             fence,
             state_id=target.id,
+            expected_current_state_id=current.id,
+            expected_current_state_version=current.version,
             actor="composer_route",
             response_hash_factory=lambda state: stable_hash({"state_id": str(state.id), "version": state.version}),
         )
@@ -497,7 +522,8 @@ async def test_revert_state_and_system_message_settle_in_fence_transaction(servi
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=first.id,
         actor="route",
@@ -548,7 +574,8 @@ async def test_revert_older_guided_proposal_checkpoint_rejects_pending_and_scrub
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -574,8 +601,6 @@ async def test_revert_older_guided_proposal_checkpoint_rejects_pending_and_scrub
     assert restored is not None
     assert restored.step is GuidedStep.STEP_3_TRANSFORMS
     assert restored.history == ()
-    assert restored.advisor_checkpoint_passes_used == 0
-    assert restored.advisor_signoff_escape_offered is False
     assert restored.terminal is None
     assert restored.transition_consumed is False
     assert restored.active_proposal is None
@@ -668,7 +693,8 @@ async def test_revert_freeform_target_rejects_current_guided_pending_proposal(se
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -722,7 +748,8 @@ async def test_revert_early_guided_checkpoint_preserves_stage_and_unanswered_tur
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -751,8 +778,6 @@ async def test_revert_completed_guided_checkpoint_preserves_terminal_step_and_st
                 emitter="server",
             ),
         ),
-        advisor_checkpoint_passes_used=2,
-        advisor_signoff_escape_offered=True,
         terminal=TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="pipeline: {}"),
         transition_consumed=True,
     )
@@ -779,7 +804,8 @@ async def test_revert_completed_guided_checkpoint_preserves_terminal_step_and_st
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -818,7 +844,8 @@ async def test_revert_step3_non_proposal_unanswered_turn_remains_valid(service) 
     )
     fence = await _claim(service, session.id)
 
-    reverted = await service.revert_state_for_guided_operation(
+    reverted = await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -866,7 +893,8 @@ async def test_revert_rejects_distinct_current_and_target_pending_refs_once_each
     )
     fence = await _claim(service, session.id)
 
-    await service.revert_state_for_guided_operation(
+    await _revert_at_current(
+        service,
         fence,
         state_id=target.id,
         actor="route",
@@ -928,7 +956,8 @@ async def test_revert_reference_mismatch_rolls_back_proposals_state_message_and_
     fence = await _claim(service, session.id)
 
     with pytest.raises(AuditIntegrityError, match="reference differs"):
-        await service.revert_state_for_guided_operation(
+        await _revert_at_current(
+            service,
             fence,
             state_id=target.id,
             actor="route",
@@ -986,6 +1015,14 @@ async def test_revert_guided_ref_wrong_checkpoint_base_rolls_back_every_surface(
     current = await service.save_composition_state(
         session.id,
         CompositionStateData(
+            sources={
+                "other": {
+                    "plugin": "csv",
+                    "on_success": "discard",
+                    "options": {},
+                    "on_validation_failure": "discard",
+                }
+            },
             composer_meta={"guided_session": GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS).to_dict()},
             metadata_={"name": "Current", "description": ""},
             is_valid=True,
@@ -999,6 +1036,7 @@ async def test_revert_guided_ref_wrong_checkpoint_base_rolls_back_every_surface(
         guided=GuidedSession(step=GuidedStep.STEP_3_TRANSFORMS),
         proposal_base_state=current,
     )
+    assert composition_content_hash(state_from_record(target)) != composition_content_hash(state_from_record(current))
     fence = await _claim(service, session.id)
 
     await _assert_revert_integrity_failure_is_atomic(
@@ -1008,7 +1046,7 @@ async def test_revert_guided_ref_wrong_checkpoint_base_rolls_back_every_surface(
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="checkpoint base",
+        match="base content binding",
     )
 
 
@@ -1045,7 +1083,7 @@ async def test_revert_guided_ref_wrong_checkpoint_content_rolls_back_every_surfa
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="checkpoint content",
+        match="base content binding",
     )
 
 
@@ -1147,7 +1185,7 @@ async def test_revert_guided_ref_without_trailing_proposal_turn_rolls_back_every
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="schema-9 authority is malformed",
+        match="schema-10 authority is malformed",
     )
 
 
@@ -1198,7 +1236,7 @@ async def test_revert_guided_ref_with_multiple_unanswered_turns_rolls_back_every
         target_state_id=target.id,
         fence=fence,
         proposal_id=proposal.id,
-        match="schema-9 authority is malformed",
+        match="schema-10 authority is malformed",
     )
 
 
@@ -1272,22 +1310,32 @@ async def test_revert_fault_rolls_back_every_settlement_surface(service, engine,
     )
     fence = await _claim(service, session.id)
 
-    def inject(_conn, _cursor, statement, _parameters, _context, _executemany):
-        normalized = " ".join(statement.lower().split())
-        should_fail = (
-            (fault_point == "proposal_event" and normalized.startswith("insert into proposal_events"))
-            or (fault_point == "proposal_update" and normalized.startswith("update composition_proposals"))
-            or (fault_point == "state_insert" and normalized.startswith("insert into composition_states"))
-            or (fault_point == "message_insert" and normalized.startswith("insert into chat_messages"))
-            or (fault_point == "operation_complete" and normalized.startswith("update guided_operations") and "status" in normalized)
-        )
+    def inject(_conn, _cursor, _statement, _parameters, context, _executemany):
+        compiled = context.compiled
+        statement = compiled.statement if compiled is not None else None
+        table_name = getattr(getattr(statement, "table", None), "name", None)
+        value_keys = set(compiled.params) if compiled is not None else set()
+        operation: str | None = None
+        if isinstance(statement, Insert):
+            operation = {
+                "proposal_events": "proposal_event",
+                "composition_states": "state_insert",
+                "chat_messages": "message_insert",
+            }.get(table_name)
+        elif isinstance(statement, Update):
+            if table_name == "composition_proposals":
+                operation = "proposal_update"
+            elif table_name == "guided_operations" and "status" in value_keys:
+                operation = "operation_complete"
+        should_fail = fault_point == operation
         if should_fail:
             raise RuntimeError(f"injected {fault_point}")
 
     event.listen(engine, "before_cursor_execute", inject)
     try:
         with pytest.raises(RuntimeError, match=fault_point):
-            await service.revert_state_for_guided_operation(
+            await _revert_at_current(
+                service,
                 fence,
                 state_id=target.id,
                 actor="route",
@@ -1349,9 +1397,9 @@ async def test_accept_vs_revert_serializes_on_real_session_lock(durable_engine, 
                 revert,
             )
             assert not isinstance(accept_result, BaseException)
-            assert not isinstance(revert_result, BaseException)
+            assert isinstance(revert_result, GuidedOperationSettlementConflictError)
             expected_status = "committed"
-            expected_versions = [1, 2, 3, 4]
+            expected_versions = [1, 2, 3]
         else:
             revert_result, accept_result = await _service_lock_contention(
                 revert_service,
@@ -1379,21 +1427,22 @@ async def test_accept_vs_revert_serializes_on_real_session_lock(durable_engine, 
         versions = await accept_service.get_state_versions(session.id)
         assert [state.version for state in versions] == expected_versions
         current = versions[-1]
-        assert current.derived_from_state_id == target.id
-        assert current.sources == target.sources
         if winner == "accept":
-            assert proposal_row.committed_state_id == str(versions[-2].id)
+            assert proposal_row.committed_state_id == str(current.id)
         else:
             assert proposal_row.committed_state_id is None
+            assert current.derived_from_state_id == target.id
+            assert current.sources == target.sources
         messages = await accept_service.get_messages(session.id, limit=None)
-        assert [message.content for message in messages if message.role == "system"] == ["Pipeline reverted to version 1."]
+        expected_system_messages = [] if winner == "accept" else ["Pipeline reverted to version 1."]
+        assert [message.content for message in messages if message.role == "system"] == expected_system_messages
         operation = await accept_service.get_guided_operation(
             session_id=session.id,
             operation_id=fence.operation_id,
             kind="state_revert",
             request_hash="f" * 64,
         )
-        assert isinstance(operation, GuidedOperationCompleted)
+        assert isinstance(operation, GuidedOperationActive if winner == "accept" else GuidedOperationCompleted)
     finally:
         with durable_engine.begin() as conn:
             conn.execute(delete(sessions_table).where(sessions_table.c.id == str(session.id)))
@@ -1422,7 +1471,8 @@ async def test_stale_revert_fence_writes_nothing(service, engine) -> None:
     assert isinstance(takeover, GuidedOperationTakenOver)
 
     with pytest.raises(GuidedOperationFenceLostError):
-        await service.revert_state_for_guided_operation(
+        await _revert_at_current(
+            service,
             stale_fence,
             state_id=first.id,
             actor="route-a",

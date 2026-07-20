@@ -196,8 +196,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_guided_admission_barrier_schema_epoch_is_33() -> None:
-    assert SESSION_SCHEMA_EPOCH == 33
+def test_guided_confirmation_admission_hard_cut_schema_epoch_is_35() -> None:
+    assert SESSION_SCHEMA_EPOCH == 35
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:

@@ -141,6 +141,16 @@ def _guided_chat_body(guided_response: Mapping[str, Any], message: str) -> dict[
     }
 
 
+def _start_live_guided_session(client: TestClient, session_id: uuid.UUID, intent: str) -> Any:
+    """Start the authoritative guided checkpoint used by later chat turns."""
+    response = client.post(
+        f"/api/sessions/{session_id}/guided/start",
+        json={"operation_id": str(uuid.uuid4()), "profile": "live", "intent": intent},
+    )
+    assert response.status_code == 200, response.json()
+    return response
+
+
 def _guided_respond_body(guided_response: Mapping[str, Any], **overrides: Any) -> dict[str, Any]:
     turn = guided_response["next_turn"]
     assert turn is not None
@@ -2713,6 +2723,10 @@ class TestIDORCoverageDrift:
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
+            # Guided-start reconciliation is session-scoped and admits or
+            # rejects a caller-supplied operation id only after proving the
+            # caller owns this session.
+            "reconcile_guided_start_operation",
             # Freeform→guided convert endpoint (``POST /api/sessions/
             # {session_id}/guided/convert``, elspeth-e2c3dba6b5). Gates on
             # ``_verify_session_ownership`` like every other session-scoped
@@ -4268,8 +4282,7 @@ class TestMessageRoutes:
         resp = client.post("/api/sessions", json={"title": "Guided chat"})
         session_id = uuid.UUID(resp.json()["id"])
 
-        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
-        assert guided_resp.status_code == 200
+        guided_resp = _start_live_guided_session(client, session_id, "help me")
 
         async def failing_settlement(*args: Any, **kwargs: Any) -> Any:
             del args, kwargs
@@ -4317,9 +4330,10 @@ class TestMessageRoutes:
         client = TestClient(app)
         resp = client.post("/api/sessions", json={"title": "Guided chat"})
         session_id = resp.json()["id"]
-        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
-        assert guided_resp.status_code == 200
+        guided_resp = _start_live_guided_session(client, uuid.UUID(session_id), "help me")
         chat_body = _guided_chat_body(guided_resp.json(), "help me")
+        state_versions_before = asyncio.run(service.get_state_versions(uuid.UUID(session_id)))
+        messages_before = asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None))
 
         async def drive() -> tuple[list[dict[str, Any]], bool]:
             solver_started = asyncio.Event()
@@ -4412,8 +4426,8 @@ class TestMessageRoutes:
         assert cancelled_operation["originating_message_id"] is None
         assert cancelled_operation["result_state_id"] is None
         assert cancelled_operation["response_hash"] is None
-        assert asyncio.run(service.get_state_versions(uuid.UUID(session_id))) == []
-        assert asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None)) == []
+        assert asyncio.run(service.get_state_versions(uuid.UUID(session_id))) == state_versions_before
+        assert asyncio.run(service.get_messages(uuid.UUID(session_id), limit=None)) == messages_before
 
         old_provider = AsyncMock(side_effect=AssertionError("terminal replay called provider"))
         with patch(
@@ -4472,8 +4486,7 @@ class TestMessageRoutes:
 
         resp = client.post("/api/sessions", json={"title": "Guided chat source failure"})
         session_id = uuid.UUID(resp.json()["id"])
-        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
-        assert guided_resp.status_code == 200
+        guided_resp = _start_live_guided_session(client, session_id, "Use this source")
         raw_row_secret = "raw-customer-ssn-123-45-6789"
         tool_result_private_detail = "REDACTED tool result detail"
         failing_tool_result = ToolResult(

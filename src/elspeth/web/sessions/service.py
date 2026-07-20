@@ -166,6 +166,8 @@ from elspeth.web.sessions.protocol import (
     GuidedOperationTakenOver,
     GuidedOriginatingUserMessageDraft,
     GuidedPendingProposalInvalidation,
+    GuidedPipelineConfirmationAdmissionCommand,
+    GuidedPipelineDispatchRecordCommand,
     GuidedPipelineProposalAcceptCommand,
     GuidedPipelineProposalBackEditCommand,
     GuidedPipelineProposalRejectCommand,
@@ -796,6 +798,91 @@ def _verify_guided_deferred_message_authority(
             raise AuditIntegrityError("guided deferred intent message content hash mismatch")
 
 
+def _verify_guided_correction_message_authority(
+    conn: Connection,
+    *,
+    session_id: str,
+    guided: Any,
+) -> None:
+    """Re-resolve every private wire-correction row under settlement lock."""
+
+    message_ids = tuple(str(reference.message_id) for reference in guided.correction_messages)
+    if not message_ids:
+        return
+    rows = conn.execute(
+        select(chat_messages_table.c.id, chat_messages_table.c.role, chat_messages_table.c.content)
+        .where(chat_messages_table.c.session_id == session_id)
+        .where(chat_messages_table.c.id.in_(message_ids))
+    ).fetchall()
+    rows_by_id = {row.id: row for row in rows}
+    if set(rows_by_id) != set(message_ids):
+        raise AuditIntegrityError("guided correction message is missing or cross-session")
+    for reference in guided.correction_messages:
+        row = rows_by_id[str(reference.message_id)]
+        if row.role != "user":
+            raise AuditIntegrityError("guided correction must originate from a user message")
+        if stable_hash(row.content) != reference.content_hash:
+            raise AuditIntegrityError("guided correction message content hash mismatch")
+
+
+def _verify_guided_root_message_authority(
+    conn: Connection,
+    *,
+    service: Any,
+    session_id: str,
+    guided: Any,
+) -> None:
+    """Re-derive the live root message from its immutable start operation."""
+
+    if guided.root_intent_message_id is None:
+        return
+    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+    from elspeth.web.sessions.schemas import StartGuidedRequest
+
+    message_id = guided.root_intent_message_id
+    message_row = conn.execute(
+        select(chat_messages_table.c.role, chat_messages_table.c.content, chat_messages_table.c.writer_principal)
+        .where(chat_messages_table.c.session_id == session_id)
+        .where(chat_messages_table.c.id == message_id)
+    ).one_or_none()
+    if message_row is None or message_row.role != "user" or message_row.writer_principal != "route_user_message":
+        raise AuditIntegrityError("guided root intent row failed session/role/writer custody")
+    operations = conn.execute(
+        select(guided_operations_table)
+        .where(guided_operations_table.c.session_id == session_id)
+        .where(guided_operations_table.c.kind == "guided_start")
+        .where(guided_operations_table.c.status == "completed")
+        .where(guided_operations_table.c.originating_message_id == message_id)
+        .where(guided_operations_table.c.result_kind == "composition_state")
+    ).fetchall()
+    if len(operations) != 1:
+        raise AuditIntegrityError("guided root intent has absent or ambiguous start-operation authority")
+    operation = operations[0]
+    request = StartGuidedRequest.model_validate(
+        {"operation_id": operation.operation_id, "profile": "live", "intent": message_row.content},
+        strict=True,
+    )
+    if (
+        guided_operation_request_hash(
+            session_id=UUID(session_id),
+            kind="guided_start",
+            request=request,
+        )
+        != operation.request_hash
+    ):
+        raise AuditIntegrityError("guided root intent content no longer matches its start request hash")
+    state_row = conn.execute(
+        select(composition_states_table)
+        .where(composition_states_table.c.session_id == session_id)
+        .where(composition_states_table.c.id == operation.result_state_id)
+    ).one_or_none()
+    if state_row is None:
+        raise AuditIntegrityError("guided root intent start result state is missing")
+    start_guided = state_from_record(service._row_to_state_record(state_row)).guided_session
+    if start_guided is None or start_guided.root_intent_message_id != message_id:
+        raise AuditIntegrityError("guided root intent differs from its live start checkpoint")
+
+
 def _require_exact_guided_intent_cancellation_audit(
     command: GuidedStateOperationCommand,
     existing_intent: DeferredStageIntent,
@@ -1131,11 +1218,11 @@ def _strip_guided_profile_in_meta(
     source_to_child_message_id: Mapping[str, str],
     source_messages_by_id: Mapping[str, ChatMessageRecord],
 ) -> dict[str, Any] | None:
-    """Prepare one schema-9 guided checkpoint for a child session.
+    """Prepare one schema-10 guided checkpoint for a child session.
 
     A fork preserves reviewed facts and deferred intent, but proposal authority
     and parent-session chat identities cannot cross the session boundary. Parse
-    through the strict schema-9 decoder, rebuild the typed checkpoint, and fail
+    through the strict schema-10 decoder, rebuild the typed checkpoint, and fail
     before the fork transaction if any message reference is outside the copied
     slice.
     """
@@ -1152,11 +1239,11 @@ def _strip_guided_profile_in_meta(
     if guided_raw is None:
         return thawed
     if type(guided_raw) is not dict:
-        raise AuditIntegrityError("fork guided metadata is not an exact schema-9 object")
+        raise AuditIntegrityError("fork guided metadata is not an exact schema-10 object")
     try:
         guided = GuidedSession.from_dict(guided_raw)
     except (InvariantError, KeyError, TypeError, ValueError) as exc:
-        raise AuditIntegrityError("fork guided schema-9 authority is malformed") from exc
+        raise AuditIntegrityError("fork guided schema-10 authority is malformed") from exc
 
     unanswered_indices = [index for index, record in enumerate(guided.history) if record.response_hash is None]
     trailing = guided.history[-1] if guided.history else None
@@ -1216,6 +1303,15 @@ def _strip_guided_profile_in_meta(
             )
         )
     remapped_deferred = tuple(remapped_deferred_list)
+    remapped_corrections = []
+    for reference in guided.correction_messages:
+        child_message_id, source_message = _child_user_message(
+            str(reference.message_id),
+            "correction_messages.message_id",
+        )
+        if _message_content_hash(source_message.content) != reference.content_hash:
+            raise AuditIntegrityError("fork guided correction message content hash mismatch")
+        remapped_corrections.append(replace(reference, message_id=UUID(child_message_id)))
     rewinds_to_topology = guided.active_proposal is not None or guided.step in {GuidedStep.STEP_3_TRANSFORMS, GuidedStep.STEP_4_WIRE}
     reconciled_history = guided.history
     if rewinds_to_topology:
@@ -1223,17 +1319,21 @@ def _strip_guided_profile_in_meta(
             raise AuditIntegrityError("fork guided topology rewind has malformed unanswered history")
         if unanswered_indices:
             reconciled_history = guided.history[:-1]
-    forked_step = GuidedStep.STEP_3_TRANSFORMS if rewinds_to_topology else guided.step
+    # A proposal cannot cross the session boundary. Rewind to the reviewed
+    # output boundary, whose existing ``finish`` action deterministically
+    # re-enters the shared planner and stages child-local proposal authority.
+    # Leaving the child at Step 3 with no proposal would produce no GET turn
+    # and no legal POST, permanently stranding the fork.
+    forked_step = GuidedStep.STEP_2_SINK if rewinds_to_topology else guided.step
     forked_guided = replace(
         guided,
         step=forked_step,
         history=reconciled_history,
         profile=EMPTY_PROFILE,
-        advisor_checkpoint_passes_used=0 if rewinds_to_topology else guided.advisor_checkpoint_passes_used,
-        advisor_signoff_escape_offered=False if rewinds_to_topology else guided.advisor_signoff_escape_offered,
         terminal=None if rewinds_to_topology else guided.terminal,
         transition_consumed=False if rewinds_to_topology else guided.transition_consumed,
         deferred_intents=remapped_deferred,
+        correction_messages=tuple(remapped_corrections),
         active_proposal=None,
         active_edit_target=None,
         root_intent_message_id=remapped_root,
@@ -1785,10 +1885,20 @@ def _require_pending_guided_checkpoint_proposal_authority(
         raise AuditIntegrityError(f"{role} guided proposal reference differs from canonical authority")
     if proposal.surface not in {PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE}:
         raise AuditIntegrityError(f"{role} guided proposal authority has an invalid surface")
-    if type(proposal.base) is not PresentBase or proposal.base.state_id != checkpoint.id:
+    if type(proposal.base) is not PresentBase:
         raise AuditIntegrityError(f"{role} guided proposal checkpoint base is malformed")
+    base_row = conn.execute(
+        select(composition_states_table)
+        .where(composition_states_table.c.session_id == session_id)
+        .where(composition_states_table.c.id == str(proposal.base.state_id))
+    ).one_or_none()
+    if base_row is None:
+        raise AuditIntegrityError(f"{role} guided proposal base is missing or cross-session")
+    base_record = service._row_to_state_record(base_row)
+    if composition_content_hash(state_from_record(base_record)) != proposal.base.composition_content_hash:
+        raise AuditIntegrityError(f"{role} guided proposal base content binding is malformed")
     if proposal.base.composition_content_hash != composition_content_hash(state_from_record(checkpoint)):
-        raise AuditIntegrityError(f"{role} guided proposal checkpoint content binding is malformed")
+        raise AuditIntegrityError(f"{role} guided proposal checkpoint base content binding is malformed")
     if authority.row.status != "pending":
         raise AuditIntegrityError(f"{role} guided checkpoint references a terminal pipeline proposal")
     return authority
@@ -1875,8 +1985,18 @@ def _verify_guided_pending_proposal_invalidation(
         or proposal.supersedes_draft_hash != active.supersedes_draft_hash
     ):
         raise AuditIntegrityError("guided proposal invalidation restored authority differs from checkpoint")
-    if type(proposal.base) is not PresentBase or proposal.base.state_id != context.current_record.id:
-        raise AuditIntegrityError("guided proposal invalidation base differs from current checkpoint")
+    if type(proposal.base) is not PresentBase:
+        raise AuditIntegrityError("guided proposal invalidation base is not a persisted checkpoint")
+    base_row = conn.execute(
+        select(composition_states_table)
+        .where(composition_states_table.c.session_id == context.session_id)
+        .where(composition_states_table.c.id == str(proposal.base.state_id))
+    ).one_or_none()
+    if base_row is None:
+        raise AuditIntegrityError("guided proposal invalidation base is missing or cross-session")
+    base_record = context.service._row_to_state_record(base_row)
+    if composition_content_hash(state_from_record(base_record)) != proposal.base.composition_content_hash:
+        raise AuditIntegrityError("guided proposal invalidation base content binding changed")
     if proposal.base.composition_content_hash != context.expected_current_content_hash:
         raise AuditIntegrityError("guided proposal invalidation base content hash changed")
     return authority
@@ -1893,6 +2013,12 @@ def _reject_guided_pending_proposal(
 
     session_id = str(authority.row.session_id)
     proposal_id = str(authority.row.id)
+    _require_no_active_guided_confirmation_admission(
+        conn,
+        session_id=session_id,
+        proposal_id=proposal_id,
+        now=created_at,
+    )
     event_id = str(uuid.uuid4())
     conn.execute(
         insert(proposal_events_table).values(
@@ -1919,6 +2045,44 @@ def _reject_guided_pending_proposal(
     )
     if updated.rowcount != 1:
         raise AuditIntegrityError("guided proposal invalidation lost the pending proposal CAS")
+
+
+def _require_no_active_guided_confirmation_admission(
+    conn: Connection,
+    *,
+    session_id: str,
+    proposal_id: str,
+    now: datetime,
+) -> None:
+    """Fail a competing mutation while a live confirmation owns dispatch.
+
+    Expired leases cannot dispatch or persist under their old fence, so their
+    proposal locator is released before the active-owner check. This prevents
+    an abandoned admission from fencing the proposal forever.
+    """
+
+    conn.execute(
+        update(guided_operations_table)
+        .where(
+            guided_operations_table.c.session_id == session_id,
+            guided_operations_table.c.proposal_id == proposal_id,
+            guided_operations_table.c.status == "in_progress",
+            guided_operations_table.c.lease_expires_at <= now,
+        )
+        .values(proposal_id=None, updated_at=now)
+    )
+    active = conn.execute(
+        select(guided_operations_table.c.operation_id)
+        .where(
+            guided_operations_table.c.session_id == session_id,
+            guided_operations_table.c.proposal_id == proposal_id,
+            guided_operations_table.c.status == "in_progress",
+            guided_operations_table.c.lease_expires_at > now,
+        )
+        .limit(1)
+    ).one_or_none()
+    if active is not None:
+        raise GuidedOperationSettlementConflictError()
 
 
 def _classify_authoritative_composition_proposal(
@@ -5718,29 +5882,10 @@ class SessionServiceImpl:
         """Return one content-bound durable dispatch for pending recovery."""
         if type(authority) is not AuthoritativePipelineProposal:
             raise TypeError("authority must be an exact AuthoritativePipelineProposal")
-        sid = str(authority.row.session_id)
-        expected_arguments_hash = stable_hash(authority.row.arguments_redacted_json)
 
         def _sync() -> PipelineDispatchRecovery | None:
             with self._engine.begin() as conn:
-                rows = conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == sid)).fetchall()
-                matches: list[PipelineDispatchRecovery] = []
-                for row in rows:
-                    if type(row.tool_calls) is not list:
-                        continue
-                    for envelope in row.tool_calls:
-                        recovery = _pipeline_dispatch_recovery_from_envelope(
-                            envelope,
-                            expected_tool_call_id=authority.row.tool_call_id,
-                        )
-                        if recovery is None:
-                            continue
-                        if recovery.binding.arguments_hash != expected_arguments_hash:
-                            raise AuditIntegrityError("pipeline recovery dispatch arguments do not match authority")
-                        matches.append(recovery)
-                if len(matches) > 1:
-                    raise AuditIntegrityError("pipeline recovery has duplicate successful content-bound dispatches")
-                return matches[0] if matches else None
+                return self._pipeline_dispatch_recovery_on_connection(conn, authority=authority)
 
         return cast(PipelineDispatchRecovery | None, await self._run_sync(_sync))
 
@@ -8229,6 +8374,8 @@ class SessionServiceImpl:
         fence: GuidedOperationFence,
         *,
         state_id: UUID,
+        expected_current_state_id: UUID,
+        expected_current_state_version: int,
         actor: str,
         response_hash_factory: Callable[[CompositionStateRecord], str],
     ) -> CompositionStateRecord:
@@ -8248,6 +8395,12 @@ class SessionServiceImpl:
         def _sync() -> CompositionStateRecord:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 self.require_guided_operation_fence_on_connection(conn, fence)
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=expected_current_state_id,
+                    expected_state_version=expected_current_state_version,
+                )
                 prior_row = conn.execute(
                     select(composition_states_table).where(composition_states_table.c.id == target_state_id)
                 ).one_or_none()
@@ -8282,7 +8435,7 @@ class SessionServiceImpl:
                     try:
                         guided = GuidedSession.from_dict(metadata["guided_session"])
                     except (InvariantError, KeyError, TypeError, ValueError) as exc:
-                        raise AuditIntegrityError(f"{role} checkpoint guided schema-9 authority is malformed") from exc
+                        raise AuditIntegrityError(f"{role} checkpoint guided schema-10 authority is malformed") from exc
                     return checkpoint, guided
 
                 target_record, target_guided = _guided_checkpoint(prior_row, role="target")
@@ -8346,6 +8499,12 @@ class SessionServiceImpl:
                 # write.  A malformed ref, event, row, or reviewed-facts
                 # binding therefore rolls the whole revert back untouched.
                 for authority in pending_authorities:
+                    _require_no_active_guided_confirmation_admission(
+                        conn,
+                        session_id=sid,
+                        proposal_id=str(authority.row.id),
+                        now=now,
+                    )
                     event_id = str(uuid.uuid4())
                     conn.execute(
                         insert(proposal_events_table).values(
@@ -8406,8 +8565,6 @@ class SessionServiceImpl:
                             target_guided,
                             step=GuidedStep.STEP_3_TRANSFORMS,
                             history=history,
-                            advisor_checkpoint_passes_used=0,
-                            advisor_signoff_escape_offered=False,
                             terminal=None,
                             transition_consumed=False,
                             active_proposal=None,
@@ -9297,11 +9454,12 @@ class SessionServiceImpl:
         if type(metadata) is not dict or set(metadata) != {"guided_session"}:
             raise AuditIntegrityError("guided proposal checkpoint metadata is malformed")
         from elspeth.web.composer.guided.planning import (
+            guided_candidate_state,
             guided_private_reviewed_facts,
             verified_remaining_deferred_intents,
             verify_guided_proposal_projection,
         )
-        from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
+        from elspeth.web.composer.guided.protocol import GuidedStep, Turn, TurnType, validate_current_turn
         from elspeth.web.composer.guided.state_machine import GuidedSession
 
         guided = GuidedSession.from_dict(metadata["guided_session"])
@@ -9324,38 +9482,81 @@ class SessionServiceImpl:
         next_turn = command.response.next_turn
         if next_turn is None:  # pragma: no cover - command type guards this
             raise AuditIntegrityError("guided proposal stage response lost its proposal turn")
-        proposal_payloads = [
+        turn_payloads = [
             payload for payload in command.payloads if payload.payload_id == next_turn.payload_id and payload.purpose == "turn"
         ]
-        if len(proposal_payloads) != 1:
-            raise AuditIntegrityError("guided proposal stage requires one exact durable proposal payload")
+        if len(turn_payloads) != 1:
+            raise AuditIntegrityError("guided proposal stage requires one exact durable response turn")
         if not guided.history:
             raise AuditIntegrityError("guided proposal checkpoint has no durable proposal turn")
-        proposal_turn = guided.history[-1]
+        durable_turn = guided.history[-1]
+        expected_step = GuidedStep.STEP_3_TRANSFORMS if next_turn.turn_type is TurnType.PROPOSE_PIPELINE else GuidedStep.STEP_4_WIRE
+        expected_step_index = 2 if expected_step is GuidedStep.STEP_3_TRANSFORMS else 3
         if (
-            guided.step is not GuidedStep.STEP_3_TRANSFORMS
-            or proposal_turn.step is not GuidedStep.STEP_3_TRANSFORMS
-            or proposal_turn.turn_type is not TurnType.PROPOSE_PIPELINE
-            or proposal_turn.payload_hash != next_turn.payload_id
-            or proposal_turn.response_hash is not None
-            or proposal_turn.emitter != "server"
-            or next_turn.turn_type is not TurnType.PROPOSE_PIPELINE
-            or next_turn.step_index != 2
+            guided.step is not expected_step
+            or durable_turn.step is not expected_step
+            or durable_turn.turn_type is not next_turn.turn_type
+            or durable_turn.payload_hash != next_turn.payload_id
+            or durable_turn.response_hash is not None
+            or durable_turn.emitter != "server"
+            or next_turn.step_index != expected_step_index
         ):
-            raise AuditIntegrityError("guided proposal checkpoint turn differs from the durable proposal response")
-        proposal_payload = proposal_payloads[0]
-        proposal_payload_json = cast(Mapping[str, Any], deep_thaw(proposal_payload.payload))
+            raise AuditIntegrityError("guided proposal checkpoint turn differs from the durable response")
+        durable_payload_json = cast(Mapping[str, Any], deep_thaw(turn_payloads[0].payload))
+        proposal_projection_json = cast(Mapping[str, Any], deep_thaw(command.proposal_projection))
         verify_guided_proposal_projection(
-            payload=proposal_payload_json,
+            payload=proposal_projection_json,
             proposal_id=command.proposal_id,
             proposal=proposal,
             guided=guided,
             catalog_plugin_ids=command.catalog_plugin_ids,
         )
+        if next_turn.turn_type is TurnType.PROPOSE_PIPELINE:
+            if durable_payload_json != proposal_projection_json:
+                raise AuditIntegrityError("guided proposal turn differs from its verified public projection")
+        else:
+            from elspeth.web.composer.guided.emitters import build_step_4_wire_turn
+
+            candidate = guided_candidate_state(proposal)
+            validation_summary = candidate.validate()
+            expected_wire = build_step_4_wire_turn(
+                candidate,
+                proposal_projection=cast("Any", proposal_projection_json),
+                guided=guided,
+                catalog=None,
+                validation_state=candidate,
+                validation_summary=validation_summary,
+            )
+            try:
+                validate_current_turn(
+                    GuidedStep.STEP_4_WIRE,
+                    Turn(type=TurnType.CONFIRM_WIRING.value, step_index=3, payload=cast("Any", durable_payload_json)),
+                )
+            except ValueError as exc:
+                raise AuditIntegrityError("guided correction produced an invalid wire-review turn") from exc
+            for key in (
+                "proposal_id",
+                "draft_hash",
+                "sources",
+                "nodes",
+                "outputs",
+                "connections",
+                "semantic_contracts",
+            ):
+                if durable_payload_json.get(key) != expected_wire["payload"].get(key):
+                    raise AuditIntegrityError(f"guided correction wire projection differs at {key}")
         verified_remaining_deferred_intents(
             guided=guided,
             proposal=proposal,
         )
+        if command.originating_message is not None:
+            if not guided.correction_messages:
+                raise AuditIntegrityError("guided correction checkpoint lost its private message reference")
+            correction_ref = guided.correction_messages[-1]
+            if correction_ref.message_id != command.originating_message.message_id or correction_ref.content_hash != stable_hash(
+                command.originating_message.content
+            ):
+                raise AuditIntegrityError("guided correction checkpoint does not bind its originating message")
 
         normalized = _normalize_proposal_composer_provenance(
             composer_model_identifier=command.plan.model_identifier,
@@ -9418,12 +9619,23 @@ class SessionServiceImpl:
                     session_id=sid,
                     guided=current_guided,
                 )
+                _verify_guided_correction_message_authority(
+                    conn,
+                    session_id=sid,
+                    guided=current_guided,
+                )
+                _verify_guided_root_message_authority(
+                    conn,
+                    service=self,
+                    session_id=sid,
+                    guided=current_guided,
+                )
                 verified_remaining_deferred_intents(
                     guided=current_guided,
                     proposal=proposal,
                 )
 
-                if command.user_message_id is not None:
+                if command.user_message_id is not None and command.originating_message is None:
                     message_row = conn.execute(
                         select(chat_messages_table.c.role, chat_messages_table.c.content)
                         .where(chat_messages_table.c.session_id == sid)
@@ -9433,6 +9645,22 @@ class SessionServiceImpl:
                         raise AuditIntegrityError("guided proposal originating message is missing or cross-session")
                     if stable_hash(message_row.content) != command.user_message_content_hash:
                         raise AuditIntegrityError("guided proposal originating message content changed")
+
+                if command.originating_message is None:
+                    if guided.correction_messages != current_guided.correction_messages:
+                        raise AuditIntegrityError("guided proposal staging changed private correction custody")
+                else:
+                    expected_corrections = (
+                        *current_guided.correction_messages,
+                        guided.correction_messages[-1],
+                    )
+                    if guided.correction_messages != expected_corrections:
+                        raise AuditIntegrityError("guided correction staging did not append exactly one custody reference")
+                    existing_correction = conn.execute(
+                        select(chat_messages_table.c.id).where(chat_messages_table.c.id == str(command.originating_message.message_id))
+                    ).one_or_none()
+                    if existing_correction is not None:
+                        raise AuditIntegrityError("guided correction message id already belongs to a persisted row")
 
                 if command.supersedes_proposal_id is not None:
                     if current_guided is None or current_guided.active_proposal is None:
@@ -9478,6 +9706,12 @@ class SessionServiceImpl:
                         or superseded_authority.proposal.draft_hash != proposal.supersedes_draft_hash
                     ):
                         raise AuditIntegrityError("guided proposal revision predecessor is no longer pending")
+                    _require_no_active_guided_confirmation_admission(
+                        conn,
+                        session_id=sid,
+                        proposal_id=str(command.supersedes_proposal_id),
+                        now=now,
+                    )
                     superseded_event_id = str(uuid.uuid4())
                     conn.execute(
                         insert(proposal_events_table).values(
@@ -9523,6 +9757,24 @@ class SessionServiceImpl:
                     created_at=now,
                     state_id=str(command.checkpoint_state_id),
                 )
+                correction_sequence_no: int | None = None
+                if command.originating_message is not None:
+                    correction_sequence_no = self._reserve_sequence_range(conn, sid, count=1 + len(audit_rows))
+                    self._insert_chat_message(
+                        conn,
+                        session_id=sid,
+                        role="user",
+                        content=command.originating_message.content,
+                        raw_content=None,
+                        tool_calls=None,
+                        sequence_no=correction_sequence_no,
+                        writer_principal="route_user_message",
+                        composition_state_id=checkpoint_id,
+                        tool_call_id=None,
+                        parent_assistant_id=None,
+                        created_at=now,
+                        message_id=str(command.originating_message.message_id),
+                    )
                 conn.execute(
                     insert(proposal_events_table).values(
                         id=event_id,
@@ -9572,7 +9824,11 @@ class SessionServiceImpl:
                 )
                 proposal_record = replace(record, pipeline_metadata=_pipeline_public_metadata(authority))
 
-                sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows)) if audit_rows else None
+                sequence_no = (
+                    correction_sequence_no + 1
+                    if correction_sequence_no is not None
+                    else (self._reserve_sequence_range(conn, sid, count=len(audit_rows)) if audit_rows else None)
+                )
                 audit_messages = self._insert_prepared_guided_audit_rows_on_connection(
                     conn,
                     session_id=sid,
@@ -9581,7 +9837,7 @@ class SessionServiceImpl:
                     sequence_no=sequence_no,
                     created_at=now,
                 )
-                if audit_rows:
+                if audit_rows or command.originating_message is not None:
                     conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
 
                 response = project_guided_response(result_state, payloads=command.payloads)
@@ -9590,6 +9846,7 @@ class SessionServiceImpl:
                 self.bind_guided_operation_on_connection(
                     conn,
                     command.fence,
+                    originating_message_id=(command.originating_message.message_id if command.originating_message is not None else None),
                     proposal_id=command.proposal_id,
                     result_state_id=result_state.id,
                 )
@@ -10154,6 +10411,204 @@ class SessionServiceImpl:
         _PIPELINE_SETTLEMENT_COUNTER.add(1, {"surface": "guided_staged", "result": "rejected"})
         return settlement
 
+    @staticmethod
+    def _pipeline_dispatch_recovery_on_connection(
+        conn: Connection,
+        *,
+        authority: AuthoritativePipelineProposal,
+    ) -> PipelineDispatchRecovery | None:
+        sid = str(authority.row.session_id)
+        expected_arguments_hash = stable_hash(authority.row.arguments_redacted_json)
+        rows = conn.execute(select(chat_messages_table.c.tool_calls).where(chat_messages_table.c.session_id == sid)).fetchall()
+        matches: list[PipelineDispatchRecovery] = []
+        for row in rows:
+            if type(row.tool_calls) is not list:
+                continue
+            for envelope in row.tool_calls:
+                recovery = _pipeline_dispatch_recovery_from_envelope(
+                    envelope,
+                    expected_tool_call_id=authority.row.tool_call_id,
+                )
+                if recovery is None:
+                    continue
+                if recovery.binding.arguments_hash != expected_arguments_hash:
+                    raise AuditIntegrityError("pipeline recovery dispatch arguments do not match authority")
+                matches.append(recovery)
+        if len(matches) > 1:
+            raise AuditIntegrityError("pipeline recovery has duplicate successful content-bound dispatches")
+        return matches[0] if matches else None
+
+    def _restore_guided_confirmation_authority_on_connection(
+        self,
+        conn: Connection,
+        *,
+        session_id: str,
+        proposal_id: UUID,
+        draft_hash: str,
+        reviewed_facts: Mapping[str, Any],
+    ) -> AuthoritativePipelineProposal:
+        proposal_row = conn.execute(
+            select(composition_proposals_table)
+            .where(composition_proposals_table.c.session_id == session_id)
+            .where(composition_proposals_table.c.id == str(proposal_id))
+        ).one_or_none()
+        if proposal_row is None:
+            raise AuditIntegrityError("guided confirmation proposal authority is missing")
+        creation_rows = conn.execute(
+            select(proposal_events_table)
+            .where(proposal_events_table.c.session_id == session_id)
+            .where(proposal_events_table.c.proposal_id == str(proposal_id))
+            .where(proposal_events_table.c.event_type == "proposal.created")
+        ).fetchall()
+        if len(creation_rows) != 1:
+            raise AuditIntegrityError("guided confirmation requires one creation event")
+        authority = _restore_authoritative_pipeline_proposal(
+            conn=conn,
+            row=_proposal_record_from_row(proposal_row),
+            creation_event=_proposal_event_record_from_row(creation_rows[0]),
+            reviewed_facts=deep_thaw(reviewed_facts),
+        )
+        _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
+        if authority.row.status != "pending" or authority.proposal.draft_hash != draft_hash:
+            raise GuidedOperationSettlementConflictError()
+        return authority
+
+    async def admit_guided_pipeline_confirmation(
+        self,
+        command: GuidedPipelineConfirmationAdmissionCommand,
+    ) -> PipelineDispatchRecovery | None:
+        """Acquire the proposal fence before any set_pipeline dispatch."""
+
+        if type(command) is not GuidedPipelineConfirmationAdmissionCommand:
+            raise TypeError("command must be an exact GuidedPipelineConfirmationAdmissionCommand")
+        sid = str(command.fence.session_id)
+
+        def _sync() -> PipelineDispatchRecovery | None:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                operation, now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation["kind"] != "guided_respond":
+                    raise AuditIntegrityError("guided confirmation admission requires guided_respond")
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=command.expected_current_state_id,
+                    expected_state_version=command.expected_current_state_version,
+                )
+                authority = self._restore_guided_confirmation_authority_on_connection(
+                    conn,
+                    session_id=sid,
+                    proposal_id=command.proposal_id,
+                    draft_hash=command.draft_hash,
+                    reviewed_facts=command.reviewed_facts,
+                )
+                current_row = conn.execute(
+                    select(composition_states_table).where(
+                        composition_states_table.c.session_id == sid,
+                        composition_states_table.c.id == str(command.expected_current_state_id),
+                    )
+                ).one()
+                guided = state_from_record(self._row_to_state_record(current_row)).guided_session
+                if (
+                    guided is None
+                    or guided.active_proposal is None
+                    or guided.active_proposal.proposal_id != command.proposal_id
+                    or guided.active_proposal.draft_hash != command.draft_hash
+                ):
+                    raise GuidedOperationSettlementConflictError()
+
+                conn.execute(
+                    update(guided_operations_table)
+                    .where(
+                        guided_operations_table.c.session_id == sid,
+                        guided_operations_table.c.proposal_id == str(command.proposal_id),
+                        guided_operations_table.c.status == "in_progress",
+                        guided_operations_table.c.lease_expires_at <= now,
+                    )
+                    .values(proposal_id=None, updated_at=now)
+                )
+                owner = conn.execute(
+                    select(guided_operations_table.c.operation_id)
+                    .where(
+                        guided_operations_table.c.session_id == sid,
+                        guided_operations_table.c.proposal_id == str(command.proposal_id),
+                        guided_operations_table.c.status == "in_progress",
+                        guided_operations_table.c.lease_expires_at > now,
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+                if owner is not None and owner != command.fence.operation_id:
+                    raise GuidedOperationSettlementConflictError()
+                self.bind_guided_operation_on_connection(conn, command.fence, proposal_id=command.proposal_id)
+                return self._pipeline_dispatch_recovery_on_connection(conn, authority=authority)
+
+        try:
+            return cast(PipelineDispatchRecovery | None, await self._run_sync(_sync))
+        except IntegrityError as exc:
+            raise GuidedOperationSettlementConflictError() from exc
+
+    async def record_guided_pipeline_dispatch(
+        self,
+        command: GuidedPipelineDispatchRecordCommand,
+    ) -> PipelineDispatchRecovery:
+        """Durably record the successful dispatch before final publication."""
+
+        if type(command) is not GuidedPipelineDispatchRecordCommand:
+            raise TypeError("command must be an exact GuidedPipelineDispatchRecordCommand")
+        prepared = prepare_guided_audit_rows(invocations=(command.invocation,), llm_calls=(), chat_turns=())
+        if len(prepared) != 1 or prepared[0].kind != "tool":
+            raise AuditIntegrityError("guided dispatch record requires one prepared tool audit row")
+        invocation_binding = PipelineDispatchAuditBinding.from_invocation(command.invocation)
+        expected_binding = PipelineDispatchAuditBinding.from_persisted_envelope(cast(dict[str, Any], deep_thaw(prepared[0].envelope)))
+        sid = str(command.fence.session_id)
+        now = self._now()
+
+        def _sync() -> PipelineDispatchRecovery:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                operation, _database_now = self.require_guided_operation_fence_on_connection(conn, command.fence)
+                if operation["kind"] != "guided_respond" or operation["proposal_id"] != str(command.proposal_id):
+                    raise GuidedOperationSettlementConflictError()
+                self._require_guided_expected_current_state_on_connection(
+                    conn,
+                    session_id=sid,
+                    expected_state_id=command.expected_current_state_id,
+                    expected_state_version=command.expected_current_state_version,
+                )
+                authority = self._restore_guided_confirmation_authority_on_connection(
+                    conn,
+                    session_id=sid,
+                    proposal_id=command.proposal_id,
+                    draft_hash=command.draft_hash,
+                    reviewed_facts=command.reviewed_facts,
+                )
+                if (
+                    invocation_binding.tool_call_id != authority.row.tool_call_id
+                    or invocation_binding.arguments_hash != authority.row.tool_arguments_hash
+                    or expected_binding.tool_call_id != authority.row.tool_call_id
+                    or expected_binding.arguments_hash != stable_hash(authority.row.arguments_redacted_json)
+                ):
+                    raise AuditIntegrityError("guided dispatch record differs from proposal authority")
+                existing = self._pipeline_dispatch_recovery_on_connection(conn, authority=authority)
+                if existing is not None:
+                    if existing.binding != expected_binding:
+                        raise AuditIntegrityError("guided dispatch retry differs from durable dispatch")
+                    return existing
+                sequence_no = self._reserve_sequence_range(conn, sid, count=1)
+                self._insert_prepared_guided_audit_rows_on_connection(
+                    conn,
+                    session_id=sid,
+                    composition_state_id=command.expected_current_state_id,
+                    audit_rows=prepared,
+                    sequence_no=sequence_no,
+                    created_at=now,
+                )
+                conn.execute(update(sessions_table).where(sessions_table.c.id == sid).values(updated_at=now))
+                recovery = self._pipeline_dispatch_recovery_on_connection(conn, authority=authority)
+                if recovery is None or recovery.binding != expected_binding:
+                    raise AuditIntegrityError("guided dispatch did not become durably recoverable")
+                return recovery
+
+        return cast(PipelineDispatchRecovery, await self._run_sync(_sync))
+
     async def accept_guided_pipeline_proposal(
         self,
         command: GuidedPipelineProposalAcceptCommand,
@@ -10173,15 +10628,7 @@ class SessionServiceImpl:
             payloads=command.payloads,
             payload_store=payload_store,
         )
-        dispatch_rows = prepare_guided_audit_rows(
-            invocations=(command.invocation,),
-            llm_calls=(),
-            chat_turns=(),
-        )
-        if len(dispatch_rows) != 1 or dispatch_rows[0].kind != "tool":
-            raise AuditIntegrityError("guided proposal acceptance requires one prepared dispatch audit row")
-        dispatch = PipelineDispatchAuditBinding.from_persisted_envelope(cast(dict[str, Any], deep_thaw(dispatch_rows[0].envelope)))
-        all_audit_rows = (*dispatch_rows, *audit_rows)
+        dispatch = command.dispatch
         sid = str(command.fence.session_id)
         pid = str(command.proposal_id)
         now = self._now()
@@ -10189,7 +10636,7 @@ class SessionServiceImpl:
         def _sync() -> GuidedPipelineProposalStageSettlement:
             with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
                 operation_row, _ = self.require_guided_operation_fence_on_connection(conn, command.fence)
-                if operation_row["kind"] != "guided_respond":
+                if operation_row["kind"] != "guided_respond" or operation_row["proposal_id"] != pid:
                     raise AuditIntegrityError("guided proposal acceptance requires guided_respond")
                 self._require_guided_expected_current_state_on_connection(
                     conn,
@@ -10225,15 +10672,20 @@ class SessionServiceImpl:
                 _verify_pipeline_lifecycle_authority(conn, service=self, authority=authority)
                 if authority.row.status != "pending" or authority.proposal.draft_hash != command.draft_hash:
                     raise AuditIntegrityError("guided proposal acceptance does not name the active pending draft")
-                if type(authority.proposal.base) is not PresentBase or authority.proposal.base.state_id != current_record.id:
-                    raise AuditIntegrityError("guided proposal acceptance base differs from current checkpoint")
+                if type(authority.proposal.base) is not PresentBase:
+                    raise AuditIntegrityError("guided proposal acceptance base is not present")
+                base_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .where(composition_states_table.c.id == str(authority.proposal.base.state_id))
+                ).one_or_none()
+                if base_row is None:
+                    raise AuditIntegrityError("guided proposal acceptance base checkpoint is missing or cross-session")
+                base_record = self._row_to_state_record(base_row)
+                if composition_content_hash(state_from_record(base_record)) != authority.proposal.base.composition_content_hash:
+                    raise AuditIntegrityError("guided proposal acceptance base checkpoint hash changed")
                 if composition_content_hash(state_from_record(current_record)) != authority.proposal.base.composition_content_hash:
-                    raise AuditIntegrityError("guided proposal acceptance base content hash changed")
-                if (
-                    command.invocation.tool_call_id != authority.row.tool_call_id
-                    or command.invocation.arguments_hash != authority.row.tool_arguments_hash
-                ):
-                    raise AuditIntegrityError("guided proposal acceptance invocation differs from private authority")
+                    raise AuditIntegrityError("guided proposal acceptance review checkpoint changed authored content")
                 if dispatch.tool_call_id != authority.row.tool_call_id:
                     raise AuditIntegrityError("guided proposal acceptance dispatch differs from authority")
                 if dispatch.arguments_hash != stable_hash(authority.row.arguments_redacted_json):
@@ -10245,6 +10697,17 @@ class SessionServiceImpl:
                     raise AuditIntegrityError("guided proposal acceptance checkpoint metadata is malformed")
                 _verify_guided_deferred_message_authority(
                     conn,
+                    session_id=sid,
+                    guided=current_guided,
+                )
+                _verify_guided_correction_message_authority(
+                    conn,
+                    session_id=sid,
+                    guided=current_guided,
+                )
+                _verify_guided_root_message_authority(
+                    conn,
+                    service=self,
                     session_id=sid,
                     guided=current_guided,
                 )
@@ -10262,6 +10725,8 @@ class SessionServiceImpl:
                     or final_guided.deferred_intents != remaining
                     or final_guided.reviewed_sources != current_guided.reviewed_sources
                     or final_guided.reviewed_outputs != current_guided.reviewed_outputs
+                    or final_guided.correction_messages != current_guided.correction_messages
+                    or final_guided.root_intent_message_id != current_guided.root_intent_message_id
                 ):
                     raise AuditIntegrityError("guided accepted checkpoint did not clear and consume exact authority")
 
@@ -10275,15 +10740,18 @@ class SessionServiceImpl:
                 )
                 result_row = conn.execute(select(composition_states_table).where(composition_states_table.c.id == state_id)).one()
                 result_state = self._row_to_state_record(result_row)
-                sequence_no = self._reserve_sequence_range(conn, sid, count=len(all_audit_rows))
-                audit_messages = self._insert_prepared_guided_audit_rows_on_connection(
-                    conn,
-                    session_id=sid,
-                    composition_state_id=result_state.id,
-                    audit_rows=all_audit_rows,
-                    sequence_no=sequence_no,
-                    created_at=now,
-                )
+                if audit_rows:
+                    sequence_no = self._reserve_sequence_range(conn, sid, count=len(audit_rows))
+                    audit_messages = self._insert_prepared_guided_audit_rows_on_connection(
+                        conn,
+                        session_id=sid,
+                        composition_state_id=result_state.id,
+                        audit_rows=audit_rows,
+                        sequence_no=sequence_no,
+                        created_at=now,
+                    )
+                else:
+                    audit_messages = ()
                 if _persisted_pipeline_dispatch_content_hashes(
                     conn,
                     session_id=sid,
@@ -10976,7 +11444,7 @@ class SessionServiceImpl:
                         try:
                             source_guided = GuidedSession.from_dict(source_meta["guided_session"])
                         except (InvariantError, KeyError, TypeError, ValueError) as exc:
-                            raise AuditIntegrityError("fork guided schema-9 authority is malformed") from exc
+                            raise AuditIntegrityError("fork guided schema-10 authority is malformed") from exc
                         _require_pending_guided_checkpoint_proposal_authority(
                             conn,
                             service=self,
@@ -10985,6 +11453,13 @@ class SessionServiceImpl:
                             guided=source_guided,
                             role="fork source",
                         )
+                        if source_guided.root_intent_message_id is not None:
+                            _verify_guided_root_message_authority(
+                                conn,
+                                service=self,
+                                session_id=parent_session_id_str,
+                                guided=source_guided,
+                            )
 
                 plan = tuple(
                     BlobForkPlanEntry(
@@ -11130,6 +11605,42 @@ class SessionServiceImpl:
                 current_state_id = UUID(current_state_row.id) if current_state_row is not None else None
                 if current_state_id != command.expected_current_state_id:
                     raise AuditIntegrityError("Guided fork settlement staged current state changed")
+                child_guided_root: tuple[str, str] | None = None
+                if current_state_row is not None:
+                    current_record = self._row_to_state_record(current_state_row)
+                    current_meta = deep_thaw(current_record.composer_meta)
+                    if type(current_meta) is dict and current_meta.get("guided_session") is not None:
+                        from elspeth.web.composer.guided.errors import InvariantError
+                        from elspeth.web.composer.guided.state_machine import GuidedSession
+
+                        try:
+                            child_guided = GuidedSession.from_dict(current_meta["guided_session"])
+                        except (InvariantError, KeyError, TypeError, ValueError) as exc:
+                            raise AuditIntegrityError("Guided fork settlement child checkpoint is malformed") from exc
+                    else:
+                        child_guided = None
+                    if child_guided is not None and child_guided.root_intent_message_id is not None:
+                        existing_starts = conn.execute(
+                            select(guided_operations_table.c.operation_id).where(
+                                guided_operations_table.c.session_id == child_session_id_str,
+                                guided_operations_table.c.kind == "guided_start",
+                            )
+                        ).all()
+                        if existing_starts:
+                            raise AuditIntegrityError("Guided fork staged child has premature start authority")
+                        child_root = conn.execute(
+                            select(
+                                chat_messages_table.c.role,
+                                chat_messages_table.c.content,
+                                chat_messages_table.c.writer_principal,
+                            ).where(
+                                chat_messages_table.c.session_id == child_session_id_str,
+                                chat_messages_table.c.id == child_guided.root_intent_message_id,
+                            )
+                        ).one_or_none()
+                        if child_root is None or child_root.role != "user" or child_root.writer_principal != "route_user_message":
+                            raise AuditIntegrityError("Guided fork staged root intent failed child custody")
+                        child_guided_root = (child_guided.root_intent_message_id, child_root.content)
 
                 edited_message = conn.execute(
                     select(chat_messages_table)
@@ -11178,25 +11689,6 @@ class SessionServiceImpl:
                 )
 
                 if command.rewritten_state is not None and command.rewritten_state_id is not None:
-                    detached = conn.execute(
-                        update(chat_messages_table)
-                        .where(
-                            chat_messages_table.c.id == str(command.edited_message_id),
-                            chat_messages_table.c.session_id == child_session_id_str,
-                            chat_messages_table.c.composition_state_id == str(command.expected_current_state_id),
-                        )
-                        .values(composition_state_id=None)
-                    )
-                    if detached.rowcount != 1:
-                        raise AuditIntegrityError("Guided fork settlement lost edited-message compare-and-swap")
-                    removed_staged_state = conn.execute(
-                        delete(composition_states_table).where(
-                            composition_states_table.c.id == str(command.expected_current_state_id),
-                            composition_states_table.c.session_id == child_session_id_str,
-                        )
-                    )
-                    if removed_staged_state.rowcount != 1:
-                        raise AuditIntegrityError("Guided fork settlement could not remove superseded staged state")
                     self._insert_composition_state(
                         conn,
                         session_id=child_session_id_str,
@@ -11213,12 +11705,107 @@ class SessionServiceImpl:
                         .where(
                             chat_messages_table.c.id == str(command.edited_message_id),
                             chat_messages_table.c.session_id == child_session_id_str,
-                            chat_messages_table.c.composition_state_id.is_(None),
+                            chat_messages_table.c.composition_state_id == str(command.expected_current_state_id),
                         )
                         .values(composition_state_id=str(command.rewritten_state_id))
                     )
                     if repointed.rowcount != 1:
                         raise AuditIntegrityError("Guided fork settlement could not bind replacement state")
+                    removed_staged_state = conn.execute(
+                        delete(composition_states_table).where(
+                            composition_states_table.c.id == str(command.expected_current_state_id),
+                            composition_states_table.c.session_id == child_session_id_str,
+                        )
+                    )
+                    if removed_staged_state.rowcount != 1:
+                        raise AuditIntegrityError("Guided fork settlement could not remove superseded staged state")
+
+                final_state_id = command.rewritten_state_id or command.expected_current_state_id
+                if child_guided_root is not None:
+                    if final_state_id is None:
+                        raise AuditIntegrityError("Guided fork start authority has no final child state")
+                    from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+                    from elspeth.web.sessions.schemas import StartGuidedRequest
+
+                    child_root_id, child_root_content = child_guided_root
+                    child_start_operation_id = str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"elspeth:fork-guided-start:{child_session_id_str}:{child_root_id}",
+                        )
+                    )
+                    child_start_request = StartGuidedRequest.model_validate(
+                        {
+                            "operation_id": child_start_operation_id,
+                            "profile": "live",
+                            "intent": child_root_content,
+                        },
+                        strict=True,
+                    )
+                    child_request_hash = guided_operation_request_hash(
+                        session_id=command.child_session_id,
+                        kind="guided_start",
+                        request=child_start_request,
+                    )
+                    child_response_hash = stable_hash(
+                        {
+                            "schema": "fork-guided-start-lineage.v1",
+                            "session_id": child_session_id_str,
+                            "operation_id": child_start_operation_id,
+                            "root_intent_message_id": child_root_id,
+                            "result_state_id": str(final_state_id),
+                        }
+                    )
+                    conn.execute(
+                        insert(guided_operations_table).values(
+                            session_id=child_session_id_str,
+                            operation_id=child_start_operation_id,
+                            kind="guided_start",
+                            status="completed",
+                            request_hash=child_request_hash,
+                            lease_token=None,
+                            lease_expires_at=None,
+                            attempt=1,
+                            originating_message_id=child_root_id,
+                            proposal_id=None,
+                            result_kind="composition_state",
+                            result_state_id=str(final_state_id),
+                            result_session_id=None,
+                            response_hash=child_response_hash,
+                            failure_code=None,
+                            created_at=now,
+                            updated_at=now,
+                            settled_at=now,
+                        )
+                    )
+                    self._insert_guided_operation_event(
+                        conn,
+                        session_id=child_session_id_str,
+                        operation_id=child_start_operation_id,
+                        event_kind="completed",
+                        actor="session_fork",
+                        attempt=1,
+                        prior_attempt=None,
+                        lease_expires_at=None,
+                        request_hash=child_request_hash,
+                        failure_audit_cohort=None,
+                        occurred_at=now,
+                    )
+                    final_state_row = conn.execute(
+                        select(composition_states_table).where(
+                            composition_states_table.c.session_id == child_session_id_str,
+                            composition_states_table.c.id == str(final_state_id),
+                        )
+                    ).one()
+                    final_guided = state_from_record(self._row_to_state_record(final_state_row)).guided_session
+                    if final_guided is None:
+                        raise AuditIntegrityError("Guided fork final state lost guided authority")
+                    _verify_guided_root_message_authority(
+                        conn,
+                        service=self,
+                        session_id=child_session_id_str,
+                        guided=final_guided,
+                    )
 
                 activated = conn.execute(
                     update(sessions_table)

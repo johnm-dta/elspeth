@@ -1,4 +1,4 @@
-"""Retry/replay regressions for schema-9 guided mutation routes."""
+"""Retry/replay regressions for schema-10 guided mutation routes."""
 
 from __future__ import annotations
 

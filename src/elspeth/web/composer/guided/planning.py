@@ -9,13 +9,15 @@ closed ``PROPOSE_PIPELINE`` wire contract.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, NotRequired, TypedDict, cast
+from dataclasses import dataclass
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.guided.connection_consumers import canonical_connection_consumers
 from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError, evaluate_deferred_intent_coverage
 from elspeth.web.composer.guided.protocol import (
@@ -35,7 +37,7 @@ from elspeth.web.composer.guided.stage_subjects import (
     OptionValueConstraint,
     SubjectPresenceConstraint,
 )
-from elspeth.web.composer.guided.state_machine import DeferredStageIntent, GuidedSession
+from elspeth.web.composer.guided.state_machine import ComponentTarget, DeferredStageIntent, GuidedSession
 from elspeth.web.composer.pipeline_proposal import PipelineProposal
 from elspeth.web.composer.state import CompositionState, NodeSpec
 
@@ -66,6 +68,241 @@ class GuidedBoundPipeline(TypedDict):
     edges: list[dict[str, JsonValue]]
     outputs: list[GuidedBoundOutput]
     metadata: NotRequired[dict[str, JsonValue] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class GuidedCorrectionTarget:
+    """One closed public selection plus its authoritative private owner."""
+
+    requested: ComponentTarget
+    owner_kind: Literal["source", "node", "output"]
+    owner_key: str
+    authority_key: str | None
+    public_target: Mapping[str, Any]
+    before_fingerprint: str
+
+    def __post_init__(self) -> None:
+        if (self.requested.kind == "edge") != (self.authority_key is None):
+            raise ValueError("edge correction targets must not claim a private positional edge identity")
+        freeze_fields(self, "public_target")
+
+    def planner_context(self) -> dict[str, object]:
+        return {
+            "kind": self.requested.kind,
+            "stable_id": self.requested.stable_id,
+            "owner_kind": self.owner_kind,
+            "owner_key": self.owner_key,
+            "target": deep_thaw(self.public_target),
+        }
+
+
+def _wire_target_fingerprint(
+    payload: Mapping[str, Any],
+    *,
+    collection: Literal["sources", "nodes", "connections", "outputs"],
+    index: int,
+    authority: CompositionState,
+) -> str | None:
+    """Fingerprint selected public semantics independent of regenerated IDs."""
+
+    raw_collection = payload.get(collection)
+    if type(raw_collection) is not list or index >= len(raw_collection) or type(raw_collection[index]) is not dict:
+        return None
+    component = cast(dict[str, Any], deep_thaw(raw_collection[index]))
+    stable_id = component.pop("stable_id", None)
+
+    authority_keys = {
+        "source": tuple(authority.sources),
+        "node": tuple(node.id for node in authority.nodes),
+        "output": tuple(output.name for output in authority.outputs),
+    }
+    identities: dict[tuple[str, str], str] = {}
+    for component_kind, collection_name in (("source", "sources"), ("node", "nodes"), ("output", "outputs")):
+        values = payload.get(collection_name)
+        keys = authority_keys[component_kind]
+        if type(values) is not list or len(values) != len(keys):
+            raise AuditIntegrityError("guided correction wire projection lost identity collections")
+        for position, value in enumerate(values):
+            if type(value) is not dict or type(value.get("stable_id")) is not str:
+                raise AuditIntegrityError("guided correction wire projection has malformed stable identities")
+            identities[(component_kind, value["stable_id"])] = keys[position]
+
+    def normalize_endpoint(value: object) -> object:
+        if type(value) is not dict:
+            return value
+        kind = value.get("kind")
+        endpoint_id = value.get("stable_id")
+        if kind == "discard":
+            return {"kind": "discard"}
+        if type(kind) is not str or type(endpoint_id) is not str or (kind, endpoint_id) not in identities:
+            raise AuditIntegrityError("guided correction wire edge has an unbound endpoint")
+        return {"kind": kind, "key": identities[(kind, endpoint_id)]}
+
+    if collection == "connections":
+        component["from_endpoint"] = normalize_endpoint(component.get("from_endpoint"))
+        component["to_endpoint"] = normalize_endpoint(component.get("to_endpoint"))
+    else:
+        connections = payload.get("connections")
+        if type(connections) is not list:
+            raise AuditIntegrityError("guided correction wire projection lost connections")
+        incident = []
+        for connection in connections:
+            if type(connection) is not dict:
+                raise AuditIntegrityError("guided correction wire projection has a malformed connection")
+            origin = connection.get("from_endpoint")
+            destination = connection.get("to_endpoint")
+            is_origin = type(origin) is dict and origin.get("stable_id") == stable_id
+            is_destination = type(destination) is dict and destination.get("stable_id") == stable_id
+            if not is_origin and not is_destination:
+                continue
+            normalized = cast(dict[str, Any], deep_thaw(connection))
+            normalized.pop("stable_id", None)
+            normalized["from_endpoint"] = normalize_endpoint(normalized.get("from_endpoint"))
+            normalized["to_endpoint"] = normalize_endpoint(normalized.get("to_endpoint"))
+            incident.append(normalized)
+        component["incident_connections"] = incident
+    return stable_hash(component)
+
+
+def resolve_guided_correction_target(
+    *,
+    requested: ComponentTarget,
+    wire_payload: Mapping[str, Any],
+    predecessor: CompositionState,
+) -> GuidedCorrectionTarget:
+    """Resolve one exact public stable ID without inventing private edge identity."""
+
+    def resolve_owner(kind: str, stable_id: str) -> tuple[Literal["source", "node", "output"], str, int]:
+        collection_name = {"source": "sources", "node": "nodes", "output": "outputs"}.get(kind)
+        if collection_name is None:
+            raise AuditIntegrityError("guided correction edge has an unsupported origin kind")
+        components = wire_payload.get(collection_name)
+        if type(components) is not list:
+            raise AuditIntegrityError("guided correction wire projection lost a component collection")
+        positions = [index for index, item in enumerate(components) if type(item) is dict and item.get("stable_id") == stable_id]
+        if len(positions) != 1:
+            raise AuditIntegrityError("guided correction stable target does not resolve exactly once")
+        index = positions[0]
+        if kind == "source":
+            names = list(predecessor.sources)
+            if index >= len(names):
+                raise AuditIntegrityError("guided correction source target differs from private authority")
+            return "source", names[index], index
+        if kind == "node":
+            if index >= len(predecessor.nodes):
+                raise AuditIntegrityError("guided correction node target differs from private authority")
+            return "node", predecessor.nodes[index].id, index
+        if index >= len(predecessor.outputs):
+            raise AuditIntegrityError("guided correction output target differs from private authority")
+        return "output", predecessor.outputs[index].name, index
+
+    if requested.kind == "edge":
+        connections = wire_payload.get("connections")
+        if type(connections) is not list:
+            raise AuditIntegrityError("guided correction wire projection lost connections")
+        matches = [item for item in connections if type(item) is dict and item.get("stable_id") == requested.stable_id]
+        if len(matches) != 1 or type(matches[0].get("from_endpoint")) is not dict:
+            raise AuditIntegrityError("guided correction edge target differs from private authority")
+        origin = matches[0]["from_endpoint"]
+        owner_kind, owner_key, _owner_index = resolve_owner(origin.get("kind"), origin.get("stable_id"))
+        collection_index = connections.index(matches[0])
+        collection: Literal["sources", "nodes", "connections", "outputs"] = "connections"
+        authority_key = None
+        public_target = matches[0]
+    else:
+        owner_kind, owner_key, collection_index = resolve_owner(requested.kind, requested.stable_id)
+        authority_key = owner_key
+        if requested.kind == "source":
+            collection = "sources"
+        elif requested.kind == "node":
+            collection = "nodes"
+        else:
+            collection = "outputs"
+        components = wire_payload.get(collection)
+        if type(components) is not list or type(components[collection_index]) is not dict:
+            raise AuditIntegrityError("guided correction target differs from public wire authority")
+        public_target = components[collection_index]
+    before_fingerprint = _wire_target_fingerprint(
+        wire_payload,
+        collection=collection,
+        index=collection_index,
+        authority=predecessor,
+    )
+    if before_fingerprint is None:
+        raise AuditIntegrityError("guided correction target owner is absent from wire authority")
+    if requested.kind == "edge":
+        edge_connections = wire_payload.get("connections")
+        if type(edge_connections) is not list:
+            raise AuditIntegrityError("guided correction wire projection lost connections")
+        matching_fingerprints = sum(
+            _wire_target_fingerprint(
+                wire_payload,
+                collection="connections",
+                index=index,
+                authority=predecessor,
+            )
+            == before_fingerprint
+            for index in range(len(edge_connections))
+        )
+        if matching_fingerprints != 1:
+            raise AuditIntegrityError("guided correction edge semantics do not resolve exactly once")
+    return GuidedCorrectionTarget(
+        requested=requested,
+        owner_kind=owner_kind,
+        owner_key=owner_key,
+        authority_key=authority_key,
+        public_target=public_target,
+        before_fingerprint=before_fingerprint,
+    )
+
+
+def require_guided_correction_target_changed(
+    wire_payload: Mapping[str, Any],
+    target: GuidedCorrectionTarget,
+    successor: CompositionState,
+) -> None:
+    """Reject a plan that edited elsewhere while leaving exact target semantics intact."""
+
+    if target.requested.kind == "edge":
+        connections = wire_payload.get("connections")
+        if type(connections) is not list:
+            raise AuditIntegrityError("guided correction successor lost public connections")
+        fingerprints = tuple(
+            _wire_target_fingerprint(
+                wire_payload,
+                collection="connections",
+                index=index,
+                authority=successor,
+            )
+            for index in range(len(connections))
+        )
+        if target.before_fingerprint in fingerprints:
+            raise AuditIntegrityError("guided correction planner did not change the selected component")
+        return
+
+    if target.requested.kind == "source":
+        collection: Literal["sources", "nodes", "outputs"] = "sources"
+        successor_keys = tuple(successor.sources)
+    elif target.requested.kind == "node":
+        collection = "nodes"
+        successor_keys = tuple(node.id for node in successor.nodes)
+    else:
+        collection = "outputs"
+        successor_keys = tuple(output.name for output in successor.outputs)
+    positions = [index for index, key in enumerate(successor_keys) if key == target.authority_key]
+    if not positions:
+        return
+    if len(positions) != 1:
+        raise AuditIntegrityError("guided correction successor duplicated the selected component")
+
+    fingerprint = _wire_target_fingerprint(
+        wire_payload,
+        collection=collection,
+        index=positions[0],
+        authority=successor,
+    )
+    if fingerprint == target.before_fingerprint:
+        raise AuditIntegrityError("guided correction planner did not change the selected component")
 
 
 def guided_private_reviewed_facts(guided: GuidedSession) -> dict[str, object]:
@@ -298,6 +535,16 @@ def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
         raise AuditIntegrityError("guided proposal private pipeline is not canonical") from exc
 
 
+def guided_candidate_state(proposal: PipelineProposal) -> CompositionState:
+    """Restore the immutable candidate named by a durable proposal.
+
+    Wire review inspects this candidate, never the uncommitted composition
+    checkpoint and never topology reconstructed from guided dialogue.
+    """
+
+    return _state_from_proposal(proposal)
+
+
 def _component_target(kind: str, stable_id: str) -> dict[str, str]:
     return {"kind": kind, "stable_id": stable_id}
 
@@ -328,9 +575,16 @@ def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_a
     if node.node_type == "aggregation":
         trigger = dict(deep_thaw(node.trigger or {}))
         # Preserve the executable scalar semantics, never free-form prose.
+        trigger_kinds = [
+            name for name in ("count", "timeout", "condition") if trigger.get(name if name != "timeout" else "timeout_seconds") is not None
+        ]
+        count = trigger.get("count")
+        timeout_seconds = trigger.get("timeout_seconds")
         return {
             "kind": "aggregation",
-            "trigger": trigger,
+            "trigger_kinds": trigger_kinds,
+            "count": str(count) if count is not None else None,
+            "timeout_seconds": float(timeout_seconds) if timeout_seconds is not None else None,
             "output_mode": node.output_mode,
             "expected_output_count": (str(node.expected_output_count) if node.expected_output_count is not None else None),
         }
@@ -626,11 +880,15 @@ def verified_remaining_deferred_intents(
 
 
 __all__ = [
+    "GuidedCorrectionTarget",
     "bind_guided_reviewed_components",
     "build_guided_proposal_projection",
+    "guided_candidate_state",
     "guided_private_reviewed_facts",
     "guided_redacted_current_state_context",
     "guided_redacted_planner_context",
+    "require_guided_correction_target_changed",
+    "resolve_guided_correction_target",
     "verified_remaining_deferred_intents",
     "verify_guided_proposal_projection",
 ]

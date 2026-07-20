@@ -149,8 +149,7 @@ test.describe("composer-guided — source/output live walk", () => {
         const blob = await uploadBlob(ctx, sessionId, BLOB_FILENAME, SAMPLE_CSV);
 
         // ── Navigate + enter guided mode ─────────────────────────────────────
-        // "Switch to guided" resolves to the live/empty profile
-        // (advisor_checkpoints=false) via GET /guided — the D13 opt-out path.
+        // "Switch to guided" resolves to the live/empty profile via GET /guided.
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();

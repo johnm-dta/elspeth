@@ -25,6 +25,7 @@ import keyword
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from elspeth.contracts.schema import FieldDefinition
 from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
 from elspeth.web.composer.guided._display import plugin_display_label
@@ -39,14 +40,23 @@ from elspeth.web.composer.guided.protocol import (
     Turn,
     TurnType,
     WireStageData,
-    WireTopology,
     _Observed,
     _Option,
+    _WireBusinessSchema,
+    _WireConnectionReview,
+    _WireNodeReview,
+    _WireOutputReview,
+    _WireProjection,
+    _WireRowCardinality,
+    _WireSchemaField,
+    _WireSourceReview,
+    _WireStructuredOutputField,
 )
-from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
+from elspeth.web.composer.tools._common import _semantic_contracts_payload
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
+    from elspeth.web.composer.guided.protocol import ProposePipelinePayload
     from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
     from elspeth.web.composer.guided.state_machine import GuidedSession, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
@@ -453,41 +463,35 @@ def build_step_2_multi_select_turn(
 def build_step_4_wire_turn(
     state: CompositionState,
     *,
-    proposal_id: str,
-    draft_hash: str,
+    proposal_projection: ProposePipelinePayload,
+    guided: GuidedSession,
     catalog: CatalogServiceProtocol | None = None,
     validation_state: CompositionState | None = None,
     validation_summary: ValidationSummary | None = None,
-    advisor_findings: str | None = None,
-    signoff_outcome: str | None = None,
-    passes_remaining: int | None = None,
 ) -> Turn:
-    """Build a ``confirm_wiring`` Turn from topology and validation reads.
-
-    ``passes_remaining`` is the advisor sign-off budget left AFTER the pass that
-    produced this turn. The emitter stays dumb — it folds the caller-computed
-    value only when not None (the re-emit sites supply it; the initial turn does
-    not, so its absence is what keeps the advisor-off tutorial cost-copy-free).
-    """
+    """Build one stable-ID wire review from an immutable proposal candidate."""
     del catalog  # Reserved for future catalog-backed presentation enrichment.
-    # The topology is always the public, persisted composition. Operator-profile
-    # bindings exist only in a lowered in-memory state supplied by the route;
-    # use that copy for executable contract probes without exposing it here.
     validation = validation_summary or (validation_state or state).validate()
+    executable_state = validation_state or state
+    projected = _build_wire_projection(
+        state,
+        executable_state=executable_state,
+        proposal_projection=proposal_projection,
+        guided=guided,
+        validation=validation,
+    )
     payload: WireStageData = {
-        "proposal_id": proposal_id,
-        "draft_hash": draft_hash,
-        "topology": _build_wire_topology(state),
-        "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+        "proposal_id": proposal_projection["proposal_id"],
+        "draft_hash": proposal_projection["draft_hash"],
+        "sources": projected["sources"],
+        "nodes": projected["nodes"],
+        "outputs": projected["outputs"],
+        "connections": projected["connections"],
         "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
         "warnings": [w.to_dict() for w in validation.warnings],
+        "blockers": [error.to_dict() for error in validation.errors],
+        "can_confirm": validation.is_valid,
     }
-    if advisor_findings is not None:
-        payload["advisor_findings"] = advisor_findings
-    if signoff_outcome is not None:
-        payload["signoff_outcome"] = signoff_outcome
-    if passes_remaining is not None:
-        payload["passes_remaining"] = passes_remaining
     return Turn(
         type=TurnType.CONFIRM_WIRING.value,
         step_index=_step_index(GuidedStep.STEP_4_WIRE),
@@ -495,42 +499,185 @@ def build_step_4_wire_turn(
     )
 
 
-def _build_wire_topology(state: CompositionState) -> WireTopology:
-    """Build the label topology used by the wire-stage renderer."""
-    full_state = _serialize_full_pipeline_state(state, requested_component="pipeline")
-    sources = {
-        source_name: {
-            "id": source_producer_id(source_name),
-            "plugin": source["plugin"],
-            "on_success": source["on_success"],
-            "on_validation_failure": source["on_validation_failure"],
-        }
-        for source_name, source in full_state["sources"].items()
+def _wire_schema(options: Mapping[str, Any]) -> _WireBusinessSchema:
+    """Project only the business schema, never adjacent path/secret options."""
+
+    raw = options.get("schema", options.get("schema_config", {}))
+    schema = raw if isinstance(raw, Mapping) else {}
+    fields: list[_WireSchemaField] = []
+    raw_fields = schema.get("fields")
+    if isinstance(raw_fields, Sequence) and not isinstance(raw_fields, str | bytes):
+        for field in raw_fields:
+            if not isinstance(field, str | Mapping):
+                continue
+            try:
+                parsed = FieldDefinition.parse(field)
+            except ValueError:
+                continue
+            fields.append(cast(_WireSchemaField, parsed.to_dict()))
+
+    def names(key: str) -> list[str]:
+        value = schema.get(key)
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+            return []
+        return [item for item in value if type(item) is str]
+
+    mode = schema.get("mode")
+    return {
+        "mode": mode if type(mode) is str else "observed",
+        "fields": fields,
+        "guaranteed_fields": names("guaranteed_fields"),
+        "required_fields": names("required_fields"),
     }
-    nodes = [
+
+
+def _structured_output_fields(options: Mapping[str, Any]) -> list[_WireStructuredOutputField]:
+    """Return typed LLM result fields without prompts, templates, or values."""
+
+    queries = options.get("queries")
+    if isinstance(queries, Mapping):
+        entries = [(name, value) for name, value in queries.items() if type(name) is str and isinstance(value, Mapping)]
+    elif isinstance(queries, Sequence) and not isinstance(queries, str | bytes):
+        entries = [(item["name"], item) for item in queries if isinstance(item, Mapping) and type(item.get("name")) is str]
+    else:
+        return []
+    projected: list[_WireStructuredOutputField] = []
+    for query_name, query in entries:
+        fields = query.get("output_fields")
+        if not isinstance(fields, Sequence) or isinstance(fields, str | bytes):
+            continue
+        for field in fields:
+            if not isinstance(field, Mapping) or type(field.get("suffix")) is not str or type(field.get("type")) is not str:
+                continue
+            values = field.get("values")
+            projected.append(
+                {
+                    "query": query_name,
+                    "field": f"{query_name}_{field['suffix']}",
+                    "type": field["type"],
+                    "enum_values": (
+                        [item for item in values if type(item) is str]
+                        if isinstance(values, Sequence) and not isinstance(values, str | bytes)
+                        else []
+                    ),
+                }
+            )
+    return projected
+
+
+def _node_cardinality(node: Any, executable_node: Any) -> _WireRowCardinality:
+    if node.node_type == "aggregation":
+        if node.expected_output_count is not None:
+            return {"input": "batch", "output": "expected_count", "expected_output_count": str(node.expected_output_count)}
+        return {"input": "batch", "output": "zero_or_many", "expected_output_count": None}
+    if node.node_type == "coalesce":
+        return {"input": "branches", "output": "one_per_branch_set", "expected_output_count": None}
+    if node.node_type == "queue":
+        return {"input": "many_producers", "output": "one_per_item", "expected_output_count": None}
+    if node.node_type == "gate":
+        return {"input": "one", "output": "one", "expected_output_count": None}
+    if executable_node.plugin is None:
+        raise InvariantError("wire projection transform lost its plugin")
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.composer._validation_probe import prepare_validation_probe_options
+
+    transform = get_shared_plugin_manager().create_transform(
+        executable_node.plugin,
+        prepare_validation_probe_options(executable_node.options),
+    )
+    output: Literal["one", "zero_or_one", "zero_or_many"]
+    if transform.creates_tokens:
+        output = "zero_or_many"
+    elif transform.can_drop_rows:
+        output = "zero_or_one"
+    else:
+        output = "one"
+    return {"input": "one", "output": output, "expected_output_count": None}
+
+
+def _build_wire_projection(
+    state: CompositionState,
+    *,
+    executable_state: CompositionState,
+    proposal_projection: ProposePipelinePayload,
+    guided: GuidedSession,
+    validation: ValidationSummary,
+) -> _WireProjection:
+    """Bind candidate semantics to the proposal's already-advertised IDs."""
+
+    public_sources = list(proposal_projection["graph"]["sources"])
+    public_nodes = list(proposal_projection["nodes"])
+    public_outputs = list(proposal_projection["outputs"])
+    if len(public_sources) != len(state.sources) or len(public_nodes) != len(state.nodes) or len(public_outputs) != len(state.outputs):
+        raise InvariantError("wire projection component counts differ from the proposal")
+    source_canonical = {public_sources[index]["stable_id"]: source_producer_id(name) for index, name in enumerate(state.sources)}
+    node_canonical = {public_nodes[index]["stable_id"]: node.id for index, node in enumerate(state.nodes)}
+    output_canonical = {public_outputs[index]["stable_id"]: f"output:{output.name}" for index, output in enumerate(state.outputs)}
+    canonical_by_stable = {**source_canonical, **node_canonical, **output_canonical}
+    contracts = {(item.from_id, item.to_id): item.to_dict() for item in validation.edge_contracts}
+
+    def fields_for(stable_id: str, *, produced: bool) -> list[str]:
+        canonical = canonical_by_stable[stable_id]
+        values: set[str] = set()
+        for (from_id, to_id), contract in contracts.items():
+            if produced and from_id == canonical:
+                values.update(contract["producer_guarantees"])
+            if not produced and to_id == canonical:
+                values.update(contract["consumer_requires"])
+        return sorted(values)
+
+    sources: list[_WireSourceReview] = [
         {
-            "id": node["id"],
-            "node_type": node["node_type"],
-            "plugin": node["plugin"],
-            "input": node["input"],
-            "on_success": node["on_success"],
-            "on_error": node["on_error"],
-            "routes": node["routes"],
-            "fork_to": node["fork_to"],
-            "branches": node["branches"],
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "plugin": source.plugin,
+            "on_validation_failure": source.on_validation_failure,
+            "guaranteed_fields": fields_for(public["stable_id"], produced=True),
+            "row_cardinality": {"input": "none", "output": "zero_or_many", "expected_output_count": None},
         }
-        for node in full_state["nodes"]
+        for public, source in zip(public_sources, state.sources.values(), strict=True)
     ]
-    outputs = [
+    executable_nodes = {node.id: node for node in executable_state.nodes}
+    nodes: list[_WireNodeReview] = [
         {
-            "id": f"output:{output['sink_name']}",
-            "sink_name": output["sink_name"],
-            "plugin": output["plugin"],
-            "on_write_failure": output["on_write_failure"],
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "node_type": node.node_type,
+            "plugin": node.plugin,
+            "behavior": public["behavior"],
+            "required_fields": fields_for(public["stable_id"], produced=False),
+            "guaranteed_fields": fields_for(public["stable_id"], produced=True),
+            "row_cardinality": _node_cardinality(node, executable_nodes[node.id]),
+            "structured_output_fields": _structured_output_fields(node.options) if node.plugin == "llm" else [],
         }
-        for output in full_state["outputs"]
+        for public, node in zip(public_nodes, state.nodes, strict=True)
     ]
-    return cast(WireTopology, {"sources": sources, "nodes": nodes, "outputs": outputs})
+    outputs: list[_WireOutputReview] = [
+        {
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "plugin": output.plugin,
+            "on_write_failure": output.on_write_failure,
+            "required_fields": list(guided.reviewed_outputs[public["stable_id"]].required_fields),
+            "business_schema": _wire_schema(output.options),
+        }
+        for public, output in zip(public_outputs, state.outputs, strict=True)
+    ]
+    connections: list[_WireConnectionReview] = []
+    for edge in proposal_projection["graph"]["edges"]:
+        from_id = canonical_by_stable[edge["from_endpoint"]["stable_id"]]
+        destination = edge["to_endpoint"]
+        to_id = canonical_by_stable[destination["stable_id"]] if destination["kind"] != "discard" else None
+        connections.append(
+            {
+                "stable_id": edge["stable_id"],
+                "from_endpoint": edge["from_endpoint"],
+                "to_endpoint": destination,
+                "flow": edge["flow"],
+                "schema_contract": contracts.get((from_id, to_id)) if to_id is not None else None,
+            }
+        )
+    return {"sources": sources, "nodes": nodes, "outputs": outputs, "connections": connections}
 
 
 def _build_inspect_and_confirm_turn(

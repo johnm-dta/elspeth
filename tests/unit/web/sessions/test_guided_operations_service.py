@@ -27,7 +27,6 @@ from elspeth.web.sessions.guided_operations import guided_operation_request_hash
 from elspeth.web.sessions.models import (
     chat_messages_table,
     composition_proposals_table,
-    composition_states_table,
     guided_operation_admission_blocks_table,
     guided_operation_events_table,
     guided_operations_table,
@@ -197,21 +196,13 @@ def _expire_operation(engine, *, session_id: UUID, operation_id: str) -> None:
         )
 
 
-def _seed_state(engine, *, session_id: UUID) -> UUID:
-    state_id = uuid4()
-    now = datetime.now(UTC)
-    with engine.begin() as conn:
-        conn.execute(
-            insert(composition_states_table).values(
-                id=str(state_id),
-                session_id=str(session_id),
-                version=1,
-                is_valid=False,
-                provenance="session_seed",
-                created_at=now,
-            )
-        )
-    return state_id
+async def _seed_state(engine, *, session_id: UUID) -> UUID:
+    state = await _service(engine).save_composition_state(
+        session_id,
+        CompositionStateData(is_valid=False),
+        provenance="session_seed",
+    )
+    return state.id
 
 
 def _seed_proposal(engine, *, session_id: UUID) -> UUID:
@@ -476,6 +467,7 @@ async def test_failure_audit_read_rejects_lineage_tamper(file_engine, tamper: st
     await service.fail_guided_operation_with_audit(_failure_command(claims[0], marker="tamper-a"))
     await service.fail_guided_operation_with_audit(_failure_command(claims[1], marker="tamper-b"))
 
+    forged_clone: tuple[str, list[dict[str, Any]]] | None = None
     with file_engine.begin() as conn:
         rows = conn.execute(
             select(
@@ -502,22 +494,7 @@ async def test_failure_audit_read_rejects_lineage_tamper(file_engine, tamper: st
             first_envelope["_guided_failure_lineage"] = forged_lineage
             forged_content = json.loads(rows[0].content)
             forged_content["_guided_failure_lineage"] = forged_lineage
-            conn.execute(
-                insert(chat_messages_table).values(
-                    id=str(uuid4()),
-                    session_id=str(session_id),
-                    role="audit",
-                    content=json.dumps(forged_content),
-                    raw_content=None,
-                    tool_calls=[first_envelope],
-                    tool_call_id=None,
-                    sequence_no=rows[-1].sequence_no + 1,
-                    writer_principal="compose_loop",
-                    created_at=datetime.now(UTC),
-                    composition_state_id=None,
-                    parent_assistant_id=None,
-                )
-            )
+            forged_clone = (json.dumps(forged_content), [first_envelope])
         elif tamper == "cross_swap":
             first_envelope = second_envelope
         elif tamper == "ambiguous_event":
@@ -544,6 +521,16 @@ async def test_failure_audit_read_rejects_lineage_tamper(file_engine, tamper: st
             )
         if tamper not in {"attempt", "request_hash", "ambiguous_event"}:
             conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(tool_calls=[first_envelope]))
+
+    if forged_clone is not None:
+        content, tool_calls = forged_clone
+        await service.add_message(
+            session_id,
+            "audit",
+            content,
+            writer_principal="compose_loop",
+            tool_calls=tool_calls,
+        )
 
     with pytest.raises(AuditIntegrityError, match="guided failure audit lineage"):
         await service.get_messages(session_id, limit=None)
@@ -579,6 +566,7 @@ async def test_failure_audit_read_rejects_exact_cohort_tamper(file_engine, tampe
     await service.fail_guided_operation_with_audit(_failure_command(claim, marker="exact-cohort", evidence_count=2))
     assert len(await service.get_messages(session_id, limit=None)) == 2
 
+    cloned_row: tuple[str, list[dict[str, Any]], str] | None = None
     with file_engine.begin() as conn:
         rows = conn.execute(
             select(chat_messages_table)
@@ -601,22 +589,7 @@ async def test_failure_audit_read_rejects_exact_cohort_tamper(file_engine, tampe
             tool_calls[0]["call"]["error_class"] = "ForgedFailure"
             conn.execute(update(chat_messages_table).where(chat_messages_table.c.id == rows[0].id).values(tool_calls=tool_calls))
         elif tamper == "extra_clone":
-            conn.execute(
-                insert(chat_messages_table).values(
-                    id=str(uuid4()),
-                    session_id=str(session_id),
-                    role=rows[0].role,
-                    content=rows[0].content,
-                    raw_content=rows[0].raw_content,
-                    tool_calls=rows[0].tool_calls,
-                    tool_call_id=None,
-                    sequence_no=rows[-1].sequence_no + 1,
-                    writer_principal=rows[0].writer_principal,
-                    created_at=datetime.now(UTC),
-                    composition_state_id=None,
-                    parent_assistant_id=None,
-                )
-            )
+            cloned_row = (rows[0].content, rows[0].tool_calls, rows[0].writer_principal)
         elif tamper == "missing_row":
             conn.exec_driver_sql("DROP TRIGGER trg_chat_messages_no_delete")
             conn.execute(delete(chat_messages_table).where(chat_messages_table.c.id == rows[0].id))
@@ -666,6 +639,16 @@ async def test_failure_audit_read_rejects_exact_cohort_tamper(file_engine, tampe
                     occurred_at=datetime.now(UTC),
                 )
             )
+
+    if cloned_row is not None:
+        content, tool_calls, writer_principal = cloned_row
+        await service.add_message(
+            session_id,
+            "audit",
+            content,
+            writer_principal=writer_principal,
+            tool_calls=tool_calls,
+        )
 
     with pytest.raises(AuditIntegrityError, match="guided failure audit cohort"):
         await service.get_messages(session_id, limit=1)
@@ -824,7 +807,7 @@ async def test_corrupt_in_progress_row_is_integrity_error_before_conflict(file_e
 async def test_corrupt_terminal_row_is_integrity_error_before_conflict(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     operation_id = "operation-corrupt-terminal"
     claimed = await service.reserve_guided_operation(
         session_id=session_id,
@@ -869,7 +852,7 @@ async def test_expired_takeover_rotates_fence_and_old_worker_cannot_bind_or_sett
     service_a = _service(file_engine)
     service_b = _service(file_engine)
     session_id = await _create_session(service_a)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     request_hash = "c" * 64
     operation_id = "operation-race"
     first = await service_a.reserve_guided_operation(
@@ -1264,7 +1247,7 @@ async def test_reconcile_guided_start_settles_expired_attempt_once_with_exact_em
 async def test_reconcile_guided_start_returns_existing_terminal_outcome(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     completed_claim = await service.reserve_guided_operation(
         session_id=session_id,
         operation_id="completed-guided-start",
@@ -1358,7 +1341,7 @@ async def test_file_backed_sqlite_concurrent_takeover_has_one_winner(file_engine
     service_b = _service(file_engine)
     service_c = _service(file_engine)
     session_id = await _create_session(service_a)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     operation_id = "operation-contended"
     request_hash = "3" * 64
     first = await service_a.reserve_guided_operation(
@@ -1479,7 +1462,7 @@ async def test_expired_guided_start_reconciliation_race_rejects_stale_completion
     reconcile_service = _service(durable_engine)
     completion_service = _service(durable_engine)
     session_id = await _create_session(reconcile_service)
-    state_id = _seed_state(durable_engine, session_id=session_id)
+    state_id = await _seed_state(durable_engine, session_id=session_id)
     operation_id = f"reconcile-complete-{uuid4()}"
     claim = await reconcile_service.reserve_guided_operation(
         session_id=session_id,
@@ -1702,7 +1685,7 @@ async def test_absent_reconciliation_race_with_revised_start_leaves_only_revised
 async def test_terminal_replay_uses_closed_per_kind_locator(file_engine, kind: str, result_factory: str) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     proposal_id = _seed_proposal(file_engine, session_id=session_id)
     child_session_id = (await service.create_session("alice", "Fork result", "local")).id
     with file_engine.begin() as conn:
@@ -1794,7 +1777,7 @@ async def test_fork_completion_rejects_target_without_exact_lineage_and_principa
 async def test_failed_operation_replays_only_closed_safe_failure(file_engine) -> None:
     service = _service(file_engine)
     session_id = await _create_session(service)
-    state_id = _seed_state(file_engine, session_id=session_id)
+    state_id = await _seed_state(file_engine, session_id=session_id)
     proposal_id = _seed_proposal(file_engine, session_id=session_id)
     claimed = await service.reserve_guided_operation(
         session_id=session_id,

@@ -2926,8 +2926,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 29 does not match
-SESSION_SCHEMA_EPOCH=30. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 34 does not match
+SESSION_SCHEMA_EPOCH=35. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 
@@ -2968,7 +2968,12 @@ exhausts and the unit goes into `failed` state.
 | 27 | Adds the account-wide freeform-primer dismissal preference. |
 | 28 | Adds the cross-dialect application/store/epoch identity proof. |
 | 29 | Adds guided schema 8 and durable fenced guided-operation reservations. |
-| 30 | Current schema; adds the closed `quota_exceeded` failure code for stable HTTP 413 fork replay. |
+| 30 | Adds the closed `quota_exceeded` failure code for stable HTTP 413 fork replay. |
+| 31 | Adds guided schema 9 and durable pipeline-proposal replay locators. |
+| 32 | Binds exact audit evidence to failed guided operations. |
+| 33 | Adds the durable guided-start negative admission barrier. |
+| 34 | Adds guided schema 10 and removes obsolete advisor counters. |
+| 35 | Current schema; adds exclusive guided-confirmation proposal admission. |
 
 The constant should be the authoritative reference; this table is a
 durability aid for operators reading the runbook in isolation.

@@ -511,7 +511,7 @@ describe("ChatPanel mode discriminator", () => {
         draft_hash: proposalHash,
         message: "The proposal response was not received. Retry the same action.",
         retryable: true,
-        retry_action: { kind: "accept" },
+        retry_action: { kind: "review_wiring" },
       };
     }
     return { status, proposal_id: proposalId, draft_hash: proposalHash };
@@ -537,9 +537,9 @@ describe("ChatPanel mode discriminator", () => {
       render(<ChatPanel />);
 
       expect(screen.getByText("Review pipeline proposal")).toBeVisible();
-      const accept = screen.getByRole("button", { name: "Accept pipeline" });
-      if (acceptDisabled) expect(accept).toBeDisabled();
-      else expect(accept).toBeEnabled();
+      const review = screen.getByRole("button", { name: "Review wiring" });
+      if (acceptDisabled) expect(review).toBeDisabled();
+      else expect(review).toBeEnabled();
       if (statusMessage !== null) expect(screen.getByText(statusMessage)).toBeVisible();
     },
   );
@@ -558,7 +558,7 @@ describe("ChatPanel mode discriminator", () => {
 
     expect(screen.getByText("Review pipeline proposal")).toBeVisible();
     expect(screen.getByText("orders-source · csv")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Accept pipeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
   });
 

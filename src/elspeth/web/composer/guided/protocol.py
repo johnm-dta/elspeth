@@ -9,7 +9,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
@@ -287,62 +287,97 @@ class ProposePipelinePayload(TypedDict):
     edit_targets: Sequence[ComponentTargetPayload]
 
 
-class _WireSourceTopo(TypedDict):
-    id: str
+class _WireRowCardinality(TypedDict):
+    input: Literal["none", "one", "batch", "branches", "many_producers"]
+    output: Literal["one", "zero_or_one", "zero_or_many", "one_per_item", "one_per_branch_set", "expected_count"]
+    expected_output_count: str | None
+
+
+class _WireSchemaField(TypedDict):
+    name: str
+    type: str
+    required: bool
+    nullable: bool
+
+
+class _WireStructuredOutputField(TypedDict):
+    query: str
+    field: str
+    type: str
+    enum_values: Sequence[str]
+
+
+class _WireSourceReview(TypedDict):
+    stable_id: str
+    label: str
     plugin: str
-    on_success: str | None
     on_validation_failure: str
+    guaranteed_fields: Sequence[str]
+    row_cardinality: _WireRowCardinality
 
 
-class _WireNodeTopo(TypedDict):
-    id: str
+class _WireNodeReview(TypedDict):
+    stable_id: str
+    label: str
     node_type: str
     plugin: str | None
-    input: str | None
-    on_success: str | None
-    on_error: str | None
-    routes: Mapping[str, str] | None
-    fork_to: Sequence[str] | None
-    branches: Sequence[str] | Mapping[str, str] | None
+    behavior: Mapping[str, Any]
+    required_fields: Sequence[str]
+    guaranteed_fields: Sequence[str]
+    row_cardinality: _WireRowCardinality
+    structured_output_fields: Sequence[_WireStructuredOutputField]
 
 
-class _WireOutputTopo(TypedDict):
-    id: str
-    sink_name: str
+class _WireBusinessSchema(TypedDict):
+    mode: str
+    fields: Sequence[_WireSchemaField]
+    guaranteed_fields: Sequence[str]
+    required_fields: Sequence[str]
+
+
+class _WireOutputReview(TypedDict):
+    stable_id: str
+    label: str
     plugin: str
     on_write_failure: str
+    required_fields: Sequence[str]
+    business_schema: _WireBusinessSchema
 
 
-class WireTopology(TypedDict):
-    """Connection-label topology for the wire stage (from get_pipeline_state)."""
+class _WireConnectionReview(TypedDict):
+    stable_id: str
+    from_endpoint: _ProposalEndpoint
+    to_endpoint: _ProposalEndpoint | _ProposalDiscardEndpoint
+    flow: Mapping[str, Any]
+    schema_contract: Mapping[str, Any] | None
 
-    sources: Mapping[str, _WireSourceTopo]
-    nodes: Sequence[_WireNodeTopo]
-    outputs: Sequence[_WireOutputTopo]
+
+class _WireProjection(TypedDict):
+    sources: Sequence[_WireSourceReview]
+    nodes: Sequence[_WireNodeReview]
+    outputs: Sequence[_WireOutputReview]
+    connections: Sequence[_WireConnectionReview]
 
 
 class WireStageData(TypedDict):
-    """STEP_4_WIRE turn payload: topology + validate() contract overlay.
-
-    edge_contracts entries carry keys from/to, not from_id/to_id. warnings carries the live prompt-shield advisory. Renderers reconstruct edges from topology labels, never state.edges. Source rows carry id values matching validation producer ids (`source` or `source:<name>`); output rows carry id values matching validation sink ids (`output:<sink_name>`). sink_name remains the connection label; output.id is the edge target for overlay.
-    """
+    """Authoritative arbitrary-DAG review of one immutable candidate."""
 
     proposal_id: str
     draft_hash: str
-    topology: WireTopology
-    edge_contracts: Sequence[Mapping[str, Any]]
+    sources: Sequence[_WireSourceReview]
+    nodes: Sequence[_WireNodeReview]
+    outputs: Sequence[_WireOutputReview]
+    connections: Sequence[_WireConnectionReview]
     semantic_contracts: Sequence[Mapping[str, Any]]
     warnings: Sequence[Mapping[str, Any]]
-    advisor_findings: NotRequired[str]
-    signoff_outcome: NotRequired[str]
-    passes_remaining: NotRequired[int]
+    blockers: Sequence[Mapping[str, Any]]
+    can_confirm: bool
 
 
 class ControlSignal(StrEnum):
     """Out-of-band signals carried in a TurnResponse instead of (or alongside) data."""
 
     EXIT_TO_FREEFORM = "exit_to_freeform"
-    REQUEST_ADVISOR = "request_advisor"
     REJECT = "reject"
     BACK = "back"
     # Explicit "pass all fields through" escape hatch for MULTI_SELECT_WITH_CUSTOM
@@ -579,7 +614,20 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
             "edit_targets",
         }
     ),
-    TurnType.CONFIRM_WIRING: frozenset({"proposal_id", "draft_hash", "topology", "edge_contracts", "semantic_contracts", "warnings"}),
+    TurnType.CONFIRM_WIRING: frozenset(
+        {
+            "proposal_id",
+            "draft_hash",
+            "sources",
+            "nodes",
+            "outputs",
+            "connections",
+            "semantic_contracts",
+            "warnings",
+            "blockers",
+            "can_confirm",
+        }
+    ),
 }
 
 _ALLOWED_KEYS: Mapping[TurnType, frozenset[str]] = {
@@ -591,15 +639,16 @@ _ALLOWED_KEYS: Mapping[TurnType, frozenset[str]] = {
     TurnType.PROPOSE_PIPELINE: _REQUIRED_KEYS[TurnType.PROPOSE_PIPELINE],
     TurnType.CONFIRM_WIRING: frozenset(
         {
-            "topology",
             "proposal_id",
             "draft_hash",
-            "edge_contracts",
+            "sources",
+            "nodes",
+            "outputs",
+            "connections",
             "semantic_contracts",
             "warnings",
-            "advisor_findings",
-            "signoff_outcome",
-            "passes_remaining",
+            "blockers",
+            "can_confirm",
         }
     ),
 }
@@ -1014,76 +1063,150 @@ def _validate_wire_payload(payload: Mapping[str, Any]) -> str | None:
     draft_hash = payload["draft_hash"]
     if type(draft_hash) is not str or len(draft_hash) != 64 or any(char not in "0123456789abcdef" for char in draft_hash):
         return "payload.draft_hash must be 64 lowercase hexadecimal characters"
-    topology = payload["topology"]
-    if (error := _exact_nested_keys(topology, frozenset({"sources", "nodes", "outputs"}), "payload.topology")) is not None:
+    cardinality_keys = frozenset({"input", "output", "expected_output_count"})
+    cardinality_inputs = frozenset({"none", "one", "batch", "branches", "many_producers"})
+    cardinality_outputs = frozenset({"one", "zero_or_one", "zero_or_many", "one_per_item", "one_per_branch_set", "expected_count"})
+
+    def validate_cardinality(value: object, path: str) -> str | None:
+        if (nested_error := _exact_nested_keys(value, cardinality_keys, path)) is not None:
+            return nested_error
+        assert isinstance(value, Mapping)
+        if value["input"] not in cardinality_inputs or value["output"] not in cardinality_outputs:
+            return f"{path} is outside the closed cardinality vocabulary"
+        count = value["expected_output_count"]
+        if count is not None and (nested_error := _canonical_integer_string_error(count, f"{path}.expected_output_count", positive=False)):
+            return nested_error
+        if (count is not None) != (value["output"] == "expected_count"):
+            return f"{path}.expected_output_count must exactly bind expected_count"
+        return None
+
+    sources, error = _current_sequence(payload["sources"], "payload.sources")
+    if error is not None:
         return error
-    assert isinstance(topology, Mapping)
-    sources = topology["sources"]
-    if not isinstance(sources, Mapping) or len(sources) > _MAX_CURRENT_TURN_ITEMS:
-        return "payload.topology.sources must be a bounded mapping"
-    source_keys = frozenset({"id", "plugin", "on_success", "on_validation_failure"})
-    for name, source in sources.items():
-        if (error := _current_text_error(name, "payload.topology.sources key", nonempty=True)) is not None:
-            return error
-        source_path = f"payload.topology.sources.{name}"
-        if (error := _exact_nested_keys(source, source_keys, source_path)) is not None:
+    nodes, error = _current_sequence(payload["nodes"], "payload.nodes")
+    if error is not None:
+        return error
+    outputs, error = _current_sequence(payload["outputs"], "payload.outputs")
+    if error is not None:
+        return error
+    assert sources is not None and nodes is not None and outputs is not None
+    component_ids: dict[str, str] = {}
+    source_keys = frozenset({"stable_id", "label", "plugin", "on_validation_failure", "guaranteed_fields", "row_cardinality"})
+    for index, source in enumerate(sources):
+        path = f"payload.sources[{index}]"
+        if (error := _exact_nested_keys(source, source_keys, path)) is not None:
             return error
         assert isinstance(source, Mapping)
-        for key in ("id", "plugin", "on_validation_failure"):
-            if (error := _current_text_error(source[key], f"{source_path}.{key}", nonempty=True)) is not None:
-                return error
-        if (error := _current_text_error(source["on_success"], f"{source_path}.on_success", nullable=True)) is not None:
+        if (error := _canonical_uuid_error(source["stable_id"], f"{path}.stable_id")) is not None:
+            return error
+        if source["stable_id"] in component_ids:
+            return f"{path}.stable_id duplicates another component"
+        component_ids[source["stable_id"]] = "source"
+        if (error := _current_text_error(source["label"], f"{path}.label", nonempty=True)) is not None:
+            return error
+        if (error := _catalog_plugin_id_error(source["plugin"], f"{path}.plugin")) is not None:
+            return error
+        if error := _current_text_error(source["on_validation_failure"], f"{path}.on_validation_failure", nonempty=True):
+            return error
+        if (error := _current_string_sequence(source["guaranteed_fields"], f"{path}.guaranteed_fields")[1]) is not None:
+            return error
+        if (error := validate_cardinality(source["row_cardinality"], f"{path}.row_cardinality")) is not None:
             return error
 
-    nodes, error = _current_sequence(topology["nodes"], "payload.topology.nodes")
-    if error is not None:
-        return error
-    assert nodes is not None
-    node_keys = frozenset({"id", "node_type", "plugin", "input", "on_success", "on_error", "routes", "fork_to", "branches"})
+    node_keys = frozenset(
+        {
+            "stable_id",
+            "label",
+            "node_type",
+            "plugin",
+            "behavior",
+            "required_fields",
+            "guaranteed_fields",
+            "row_cardinality",
+            "structured_output_fields",
+        }
+    )
     for index, node in enumerate(nodes):
-        node_path = f"payload.topology.nodes[{index}]"
-        if (error := _exact_nested_keys(node, node_keys, node_path)) is not None:
+        path = f"payload.nodes[{index}]"
+        if (error := _exact_nested_keys(node, node_keys, path)) is not None:
             return error
         assert isinstance(node, Mapping)
-        for key in ("id", "node_type"):
-            if (error := _current_text_error(node[key], f"{node_path}.{key}", nonempty=True)) is not None:
-                return error
-        for key in ("plugin", "input", "on_success", "on_error"):
-            if (error := _current_text_error(node[key], f"{node_path}.{key}", nullable=True)) is not None:
-                return error
-        if node["routes"] is not None and (error := _validate_string_mapping(node["routes"], f"{node_path}.routes")) is not None:
+        if (error := _canonical_uuid_error(node["stable_id"], f"{path}.stable_id")) is not None:
             return error
-        if node["fork_to"] is not None and (error := _current_string_sequence(node["fork_to"], f"{node_path}.fork_to")[1]) is not None:
+        if node["stable_id"] in component_ids:
+            return f"{path}.stable_id duplicates another component"
+        component_ids[node["stable_id"]] = "node"
+        if (error := _current_text_error(node["label"], f"{path}.label", nonempty=True)) is not None:
             return error
-        branches = node["branches"]
-        if branches is not None:
-            if isinstance(branches, Mapping):
-                if (error := _validate_string_mapping(branches, f"{node_path}.branches")) is not None:
-                    return error
-            elif (error := _current_string_sequence(branches, f"{node_path}.branches")[1]) is not None:
+        if node["plugin"] is not None and (error := _catalog_plugin_id_error(node["plugin"], f"{path}.plugin")) is not None:
+            return error
+        if (error := _validate_node_behavior(node["node_type"], node["behavior"], path)) is not None:
+            return error
+        for name in ("required_fields", "guaranteed_fields"):
+            if (error := _current_string_sequence(node[name], f"{path}.{name}")[1]) is not None:
                 return error
+        if (error := validate_cardinality(node["row_cardinality"], f"{path}.row_cardinality")) is not None:
+            return error
+        if (error := _public_json_error(node["structured_output_fields"], f"{path}.structured_output_fields")) is not None:
+            return error
 
-    outputs, error = _current_sequence(topology["outputs"], "payload.topology.outputs")
-    if error is not None:
-        return error
-    assert outputs is not None
-    output_keys = frozenset({"id", "sink_name", "plugin", "on_write_failure"})
+    output_keys = frozenset({"stable_id", "label", "plugin", "on_write_failure", "required_fields", "business_schema"})
+    schema_keys = frozenset({"mode", "fields", "guaranteed_fields", "required_fields"})
     for index, output in enumerate(outputs):
-        output_path = f"payload.topology.outputs[{index}]"
-        if (error := _exact_nested_keys(output, output_keys, output_path)) is not None:
+        path = f"payload.outputs[{index}]"
+        if (error := _exact_nested_keys(output, output_keys, path)) is not None:
             return error
         assert isinstance(output, Mapping)
-        for key in output_keys:
-            if (error := _current_text_error(output[key], f"{output_path}.{key}", nonempty=True)) is not None:
+        if (error := _canonical_uuid_error(output["stable_id"], f"{path}.stable_id")) is not None:
+            return error
+        if output["stable_id"] in component_ids:
+            return f"{path}.stable_id duplicates another component"
+        component_ids[output["stable_id"]] = "output"
+        for name in ("label", "on_write_failure"):
+            if (error := _current_text_error(output[name], f"{path}.{name}", nonempty=True)) is not None:
                 return error
+        if (error := _catalog_plugin_id_error(output["plugin"], f"{path}.plugin")) is not None:
+            return error
+        if (error := _current_string_sequence(output["required_fields"], f"{path}.required_fields")[1]) is not None:
+            return error
+        schema = output["business_schema"]
+        if (error := _exact_nested_keys(schema, schema_keys, f"{path}.business_schema")) is not None:
+            return error
+        if (error := _public_json_error(schema, f"{path}.business_schema")) is not None:
+            return error
 
-    contracts, error = _current_sequence(payload["edge_contracts"], "payload.edge_contracts")
+    connections, error = _current_sequence(payload["connections"], "payload.connections")
     if error is not None:
         return error
-    assert contracts is not None
+    assert connections is not None
     contract_keys = frozenset({"from", "to", "producer_guarantees", "consumer_requires", "missing_fields", "satisfied"})
-    for index, contract in enumerate(contracts):
-        contract_path = f"payload.edge_contracts[{index}]"
+    connection_keys = frozenset({"stable_id", "from_endpoint", "to_endpoint", "flow", "schema_contract"})
+    seen_connections: set[str] = set()
+    for index, connection in enumerate(connections):
+        path = f"payload.connections[{index}]"
+        if (error := _exact_nested_keys(connection, connection_keys, path)) is not None:
+            return error
+        assert isinstance(connection, Mapping)
+        if (error := _canonical_uuid_error(connection["stable_id"], f"{path}.stable_id")) is not None:
+            return error
+        if connection["stable_id"] in seen_connections:
+            return f"{path}.stable_id duplicates another connection"
+        seen_connections.add(connection["stable_id"])
+        if error := _validate_proposal_endpoint(connection["from_endpoint"], f"{path}.from_endpoint", allow_discard=False):
+            return error
+        if error := _validate_proposal_endpoint(connection["to_endpoint"], f"{path}.to_endpoint", allow_discard=True):
+            return error
+        assert isinstance(connection["from_endpoint"], Mapping) and isinstance(connection["to_endpoint"], Mapping)
+        for endpoint_name in ("from_endpoint", "to_endpoint"):
+            endpoint = connection[endpoint_name]
+            if endpoint.get("kind") != "discard" and component_ids.get(endpoint.get("stable_id")) != endpoint.get("kind"):
+                return f"{path}.{endpoint_name} does not resolve to its advertised component kind"
+        if (error := _validate_proposal_flow(connection["flow"], f"{path}.flow")) is not None:
+            return error
+        contract = connection["schema_contract"]
+        if contract is None:
+            continue
+        contract_path = f"{path}.schema_contract"
         if (error := _exact_nested_keys(contract, contract_keys, contract_path)) is not None:
             return error
         assert isinstance(contract, Mapping)
@@ -1096,7 +1219,7 @@ def _validate_wire_payload(payload: Mapping[str, Any]) -> str | None:
         if type(contract["satisfied"]) is not bool:
             return f"{contract_path}.satisfied must be a bool"
 
-    for field_name in ("semantic_contracts", "warnings"):
+    for field_name in ("semantic_contracts", "warnings", "blockers"):
         items, error = _current_sequence(payload[field_name], f"payload.{field_name}")
         if error is not None:
             return error
@@ -1106,11 +1229,10 @@ def _validate_wire_payload(payload: Mapping[str, Any]) -> str | None:
                 return f"payload.{field_name}[{index}] must be a mapping"
             if (error := _public_json_error(item, f"payload.{field_name}[{index}]")) is not None:
                 return error
-    for field_name in ("advisor_findings", "signoff_outcome"):
-        if field_name in payload and (error := _current_text_error(payload[field_name], f"payload.{field_name}")) is not None:
-            return error
-    if "passes_remaining" in payload and (type(payload["passes_remaining"]) is not int or payload["passes_remaining"] < 0):
-        return "payload.passes_remaining must be a non-negative integer"
+    if type(payload["can_confirm"]) is not bool:
+        return "payload.can_confirm must be a bool"
+    if payload["can_confirm"] != (not payload["blockers"]):
+        return "payload.can_confirm must exactly reflect the absence of blockers"
     return None
 
 

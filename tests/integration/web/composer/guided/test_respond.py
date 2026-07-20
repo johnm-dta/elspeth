@@ -12,7 +12,6 @@ import asyncio
 import json
 import threading
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +23,7 @@ import structlog
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, func, select
+from sqlalchemy.sql.dml import Insert, Update
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
@@ -151,6 +151,36 @@ def _finish_review(client: TestClient, session_id: str, component_kind: str) -> 
         client,
         session_id,
         component_action={"action": "finish", "component_kind": component_kind},
+    )
+
+
+def _review_wiring(client: TestClient, session_id: str) -> dict:
+    """Review the current pending proposal without committing it."""
+    current = _get_guided(client, session_id)
+    turn = current["next_turn"]
+    assert turn["type"] == "propose_pipeline"
+    payload = turn["payload"]
+    return _respond(
+        client,
+        session_id,
+        proposal_id=payload["proposal_id"],
+        draft_hash=payload["draft_hash"],
+        chosen=["review_wiring"],
+    )
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    """Confirm the reviewed wire projection and commit its proposal."""
+    current = _get_guided(client, session_id)
+    turn = current["next_turn"]
+    assert turn["type"] == "confirm_wiring"
+    payload = turn["payload"]
+    return _respond(
+        client,
+        session_id,
+        proposal_id=payload["proposal_id"],
+        draft_hash=payload["draft_hash"],
+        chosen=["confirm_wiring"],
     )
 
 
@@ -1162,19 +1192,11 @@ class TestStep2IntraStep:
             },
         )
         _respond(composer_test_client, session_id, chosen=[], custom_inputs=["text"])
-        staged = _finish_review(composer_test_client, session_id, "output")
-        proposal = staged["next_turn"]["payload"]
+        _finish_review(composer_test_client, session_id, "output")
+        _review_wiring(composer_test_client, session_id)
+        accepted = _confirm_wiring(composer_test_client, session_id)
 
-        accepted = _post_current_response(
-            composer_test_client,
-            session_id,
-            proposal_id=proposal["proposal_id"],
-            draft_hash=proposal["draft_hash"],
-            chosen=["accept"],
-        )
-
-        assert accepted.status_code == 200, accepted.json()
-        accepted_source = next(iter(accepted.json()["composition_state"]["sources"].values()))
+        accepted_source = next(iter(accepted["composition_state"]["sources"].values()))
         assert accepted_source["options"]["path"] == str(source_path)
 
     @pytest.mark.parametrize("target_kind", ("source", "output"))
@@ -1253,17 +1275,17 @@ class TestStep2IntraStep:
         assert [event.event_type for event in old_events] == ["proposal.created", "proposal.rejected"]
         assert old_events[-1].payload["reason_code"] == "superseded"
 
-        old_accept = composer_test_client.post(
+        old_review = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
             json={
                 "operation_id": str(uuid4()),
                 "turn_token": old_turn["turn_token"],
                 "proposal_id": old_payload["proposal_id"],
                 "draft_hash": old_payload["draft_hash"],
-                "chosen": ["accept"],
+                "chosen": ["review_wiring"],
             },
         )
-        assert old_accept.status_code == 409, old_accept.json()
+        assert old_review.status_code == 409, old_review.json()
         proposals_after = {
             str(proposal.id): proposal
             for proposal in asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
@@ -1607,44 +1629,32 @@ class TestStep2IntraStep:
         observed_writes: set[str] = set()
         operation_event_predecessors: set[str] | None = None
 
-        def inject_fault(_conn, _cursor, statement, _parameters, _context, _executemany):
+        def inject_fault(_conn, _cursor, _statement, _parameters, context, _executemany):
             nonlocal armed, operation_event_predecessors
             if not armed:
                 return
-            normalized = " ".join(statement.lower().split())
-            if normalized.startswith("insert into composition_states"):
-                observed_writes.add("state_insert")
-            elif normalized.startswith("insert into proposal_events"):
-                observed_writes.add("proposal_event")
-            elif normalized.startswith("update composition_proposals"):
-                observed_writes.add("proposal_update")
-            elif normalized.startswith("insert into chat_messages"):
-                observed_writes.add("audit_insert")
-            elif normalized.startswith("update guided_operations") and " set originating_message_id" in normalized:
-                observed_writes.add("operation_bind")
-            elif normalized.startswith("update guided_operations") and " set status" in normalized:
-                observed_writes.add("operation_complete")
-            matched = (
-                (fault_point == "state_insert" and normalized.startswith("insert into composition_states"))
-                or (fault_point == "proposal_event" and normalized.startswith("insert into proposal_events"))
-                or (fault_point == "proposal_update" and normalized.startswith("update composition_proposals"))
-                or (fault_point == "audit_insert" and normalized.startswith("insert into chat_messages"))
-                or (
-                    fault_point == "operation_bind"
-                    and normalized.startswith("update guided_operations")
-                    and " set originating_message_id" in normalized
-                )
-                or (
-                    fault_point == "operation_complete"
-                    and normalized.startswith("update guided_operations")
-                    and " set status" in normalized
-                )
-                or (
-                    fault_point == "operation_event"
-                    and "operation_complete" in observed_writes
-                    and normalized.startswith("insert into guided_operation_events")
-                )
-            )
+            compiled = context.compiled
+            statement = compiled.statement if compiled is not None else None
+            table_name = getattr(getattr(statement, "table", None), "name", None)
+            value_keys = set(compiled.params) if compiled is not None else set()
+            operation: str | None = None
+            if isinstance(statement, Insert):
+                operation = {
+                    "composition_states": "state_insert",
+                    "proposal_events": "proposal_event",
+                    "chat_messages": "audit_insert",
+                    "guided_operation_events": "operation_event",
+                }.get(table_name)
+            elif isinstance(statement, Update):
+                if table_name == "composition_proposals":
+                    operation = "proposal_update"
+                elif table_name == "guided_operations" and "originating_message_id" in value_keys:
+                    operation = "operation_bind"
+                elif table_name == "guided_operations" and "status" in value_keys:
+                    operation = "operation_complete"
+            if operation is not None:
+                observed_writes.add(operation)
+            matched = fault_point == operation and (operation != "operation_event" or "operation_complete" in observed_writes)
             if matched:
                 if fault_point == "operation_event":
                     operation_event_predecessors = set(observed_writes)
@@ -1806,10 +1816,7 @@ class TestStep2IntraStep:
 
     @pytest.mark.parametrize(
         "composer_test_client",
-        (
-            pytest.param("sqlite", id="sqlite"),
-            pytest.param("postgres", id="postgres", marks=pytest.mark.testcontainer),
-        ),
+        (pytest.param("postgres", id="postgres", marks=pytest.mark.testcontainer),),
         indirect=True,
     )
     def test_failed_proposal_planning_retains_only_closed_failure_code(
@@ -2024,7 +2031,7 @@ class TestStep2IntraStep:
         ),
         indirect=True,
     )
-    def test_accept_vs_revise_race_has_one_winner_and_exact_revision_replay(
+    def test_review_vs_revise_race_has_one_winner_and_exact_revision_replay(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -2049,7 +2056,7 @@ class TestStep2IntraStep:
             "turn_token": turn["turn_token"],
             "proposal_id": payload["proposal_id"],
             "draft_hash": payload["draft_hash"],
-            "chosen": ["accept"],
+            "chosen": ["review_wiring"],
         }
 
         async def race():
@@ -2140,266 +2147,210 @@ class TestStep2IntraStep:
 
     @pytest.mark.parametrize(
         "composer_test_client",
-        (pytest.param("postgres", marks=pytest.mark.testcontainer),),
+        (
+            pytest.param("sqlite", id="sqlite"),
+            pytest.param("postgres", id="postgres", marks=pytest.mark.testcontainer),
+        ),
         indirect=True,
     )
-    @pytest.mark.parametrize("db_winner", ("accept", "revise"))
-    def test_independent_postgres_workers_serialize_accept_vs_revise_at_settlement(
+    @pytest.mark.parametrize("db_winner", ("confirm", "correct"))
+    def test_independent_workers_serialize_confirm_vs_correction_at_admission(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
         db_winner: str,
     ) -> None:
+        from elspeth.web.composer import pipeline_commit
+
         session_id = _create_session(composer_test_client)
-        staged = self._stage_proposal(composer_test_client, session_id, filename=f"independent-{db_winner}.jsonl")
-        turn = staged["next_turn"]
-        proposal_payload = turn["payload"]
-        target = proposal_payload["edit_targets"][0]
+        staged = self._stage_proposal(composer_test_client, session_id, filename=f"admission-{db_winner}.jsonl")
+        proposal_payload = staged["next_turn"]["payload"]
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
         accept_operation_id = str(uuid4())
         revise_operation_id = str(uuid4())
-        accept_request = {
-            "operation_id": accept_operation_id,
-            "turn_token": turn["turn_token"],
-            "proposal_id": proposal_payload["proposal_id"],
-            "draft_hash": proposal_payload["draft_hash"],
-            "chosen": ["accept"],
-        }
-        revise_request = {
-            "operation_id": revise_operation_id,
-            "turn_token": turn["turn_token"],
-            "proposal_id": proposal_payload["proposal_id"],
-            "draft_hash": proposal_payload["draft_hash"],
-            "edit_target": target,
+        requests = {
+            "confirm": {
+                "operation_id": accept_operation_id,
+                "turn_token": turn["turn_token"],
+                "proposal_id": proposal_payload["proposal_id"],
+                "draft_hash": proposal_payload["draft_hash"],
+                "chosen": ["confirm_wiring"],
+            },
+            "correct": {
+                "operation_id": revise_operation_id,
+                "turn_token": turn["turn_token"],
+                "proposal_id": proposal_payload["proposal_id"],
+                "draft_hash": proposal_payload["draft_hash"],
+                "edit_target": turn["payload"]["connections"][0]["from_endpoint"],
+                "correction_feedback": "Route this source through a corrected topology.",
+            },
         }
 
         primary_app = composer_test_client.app
         peer_app = _independent_guided_peer_app(composer_test_client)
-        assert primary_app.state.session_service is not peer_app.state.session_service
-        assert primary_app.state.composer_service is not peer_app.state.composer_service
+        accept_service = primary_app.state.session_service
+        revise_service = peer_app.state.session_service
+        assert accept_service is not revise_service
         assert primary_app.state.session_engine is peer_app.state.session_engine
         assert primary_app.state.session_compose_lock_registry is not peer_app.state.session_compose_lock_registry
 
-        accept_service = primary_app.state.session_service
-        revise_service = peer_app.state.session_service
-        original_accept = accept_service.accept_guided_pipeline_proposal
-        original_back_edit = revise_service.back_edit_guided_pipeline_proposal
-        original_accept_lock = accept_service._session_write_lock
-        original_revise_lock = revise_service._session_write_lock
-        accept_ready = asyncio.Event()
-        revise_ready = asyncio.Event()
-        release_winner = asyncio.Event()
-        winner_db_locked = threading.Event()
-        loser_db_attempted = threading.Event()
-        accept_armed = threading.Event()
-        revise_armed = threading.Event()
-        accept_commands = []
-        revise_commands = []
+        original_admit = accept_service.admit_guided_pipeline_confirmation
+        original_stage = revise_service.stage_guided_pipeline_proposal
+        original_prepare = pipeline_commit.prepare_pipeline_proposal_commit
+        original_execute = pipeline_commit.execute_tool
+        entered = {"confirm": asyncio.Event(), "correct": asyncio.Event()}
+        release = asyncio.Event()
+        winner_settled = asyncio.Event()
+        admission_commands = []
+        stage_commands = []
+        prepare_calls = []
+        execute_calls = []
 
-        async def gated_accept(command, *, payload_store=None):
-            accept_commands.append(command)
-            assert command.invocation.tool_name == "set_pipeline"
-            assert command.invocation.status.value == "success"
-            accept_ready.set()
-            await release_winner.wait()
-            if db_winner != "accept":
-                assert await asyncio.to_thread(winner_db_locked.wait, 10)
-            accept_armed.set()
+        async def gated_admit(command):
+            admission_commands.append(command)
+            entered["confirm"].set()
+            await release.wait()
+            if db_winner != "confirm":
+                await winner_settled.wait()
             try:
-                return await original_accept(command, payload_store=payload_store)
+                return await original_admit(command)
             finally:
-                accept_armed.clear()
+                if db_winner == "confirm":
+                    winner_settled.set()
 
-        async def gated_back_edit(command, *, payload_store=None):
-            revise_commands.append(command)
-            assert str(command.proposal_id) == proposal_payload["proposal_id"]
-            assert command.edit_target.to_dict() == target
-            revise_ready.set()
-            await release_winner.wait()
-            if db_winner != "revise":
-                assert await asyncio.to_thread(winner_db_locked.wait, 10)
-            revise_armed.set()
+        async def gated_stage(command, *, payload_store=None):
+            stage_commands.append(command)
+            entered["correct"].set()
+            await release.wait()
+            if db_winner != "correct":
+                await winner_settled.wait()
             try:
-                return await original_back_edit(command, payload_store=payload_store)
+                return await original_stage(command, payload_store=payload_store)
             finally:
-                revise_armed.clear()
+                if db_winner == "correct":
+                    winner_settled.set()
 
-        @contextmanager
-        def accept_db_lock(conn, locked_session_id):
-            if not accept_armed.is_set():
-                with original_accept_lock(conn, locked_session_id):
-                    yield
-                return
-            if db_winner == "accept":
-                with original_accept_lock(conn, locked_session_id):
-                    winner_db_locked.set()
-                    assert loser_db_attempted.wait(10)
-                    yield
-                return
-            loser_db_attempted.set()
-            with original_accept_lock(conn, locked_session_id):
-                yield
+        async def counted_prepare(**kwargs):
+            prepare_calls.append(kwargs)
+            return await original_prepare(**kwargs)
 
-        @contextmanager
-        def revise_db_lock(conn, locked_session_id):
-            if not revise_armed.is_set():
-                with original_revise_lock(conn, locked_session_id):
-                    yield
-                return
-            if db_winner == "revise":
-                with original_revise_lock(conn, locked_session_id):
-                    winner_db_locked.set()
-                    assert loser_db_attempted.wait(10)
-                    yield
-                return
-            loser_db_attempted.set()
-            with original_revise_lock(conn, locked_session_id):
-                yield
+        def counted_execute(*args, **kwargs):
+            execute_calls.append((args, kwargs))
+            return original_execute(*args, **kwargs)
 
-        monkeypatch.setattr(accept_service, "accept_guided_pipeline_proposal", gated_accept)
-        monkeypatch.setattr(revise_service, "back_edit_guided_pipeline_proposal", gated_back_edit)
-        monkeypatch.setattr(accept_service, "_session_write_lock", accept_db_lock)
-        monkeypatch.setattr(revise_service, "_session_write_lock", revise_db_lock)
+        monkeypatch.setattr(accept_service, "admit_guided_pipeline_confirmation", gated_admit)
+        monkeypatch.setattr(revise_service, "stage_guided_pipeline_proposal", gated_stage)
+        monkeypatch.setattr(pipeline_commit, "prepare_pipeline_proposal_commit", counted_prepare)
+        monkeypatch.setattr(pipeline_commit, "execute_tool", counted_execute)
 
         engine = primary_app.state.session_engine
         with engine.connect() as conn:
-            state_count_before = conn.execute(
-                select(composition_states_table.c.id).where(composition_states_table.c.session_id == session_id)
-            ).all()
+            state_count_before = conn.scalar(
+                select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
+            )
 
         async def race_and_replay():
             async with (
-                AsyncClient(transport=ASGITransport(app=primary_app), base_url="http://accept-worker") as accept_client,
-                AsyncClient(transport=ASGITransport(app=peer_app), base_url="http://revise-worker") as revise_client,
+                AsyncClient(transport=ASGITransport(app=primary_app), base_url="http://confirm-worker") as accept_client,
+                AsyncClient(transport=ASGITransport(app=peer_app), base_url="http://correct-worker") as revise_client,
             ):
-                accept_task = asyncio.create_task(accept_client.post(f"/api/sessions/{session_id}/guided/respond", json=accept_request))
-                revise_task = asyncio.create_task(revise_client.post(f"/api/sessions/{session_id}/guided/respond", json=revise_request))
-                await asyncio.wait_for(asyncio.gather(accept_ready.wait(), revise_ready.wait()), timeout=10)
-                release_winner.set()
-                accept_response, revise_response = await asyncio.wait_for(
-                    asyncio.gather(accept_task, revise_task),
-                    timeout=20,
+                tasks = {
+                    "confirm": asyncio.create_task(
+                        accept_client.post(f"/api/sessions/{session_id}/guided/respond", json=requests["confirm"])
+                    ),
+                    "correct": asyncio.create_task(
+                        revise_client.post(f"/api/sessions/{session_id}/guided/respond", json=requests["correct"])
+                    ),
+                }
+                await asyncio.wait_for(
+                    asyncio.gather(entered["confirm"].wait(), entered["correct"].wait()),
+                    timeout=10,
                 )
-                accept_replay = await revise_client.post(
-                    f"/api/sessions/{session_id}/guided/respond",
-                    json=accept_request,
+                release.set()
+                responses = dict(
+                    zip(
+                        ("confirm", "correct"),
+                        await asyncio.wait_for(asyncio.gather(tasks["confirm"], tasks["correct"]), timeout=20),
+                        strict=True,
+                    )
                 )
-                revise_replay = await accept_client.post(
-                    f"/api/sessions/{session_id}/guided/respond",
-                    json=revise_request,
-                )
-                accept_conflict = await revise_client.post(
-                    f"/api/sessions/{session_id}/guided/respond",
-                    json={**revise_request, "operation_id": accept_operation_id},
-                )
-                revise_conflict = await accept_client.post(
-                    f"/api/sessions/{session_id}/guided/respond",
-                    json={**accept_request, "operation_id": revise_operation_id},
-                )
-                return (
-                    accept_response,
-                    revise_response,
-                    accept_replay,
-                    revise_replay,
-                    accept_conflict,
-                    revise_conflict,
-                )
+                replays = {
+                    "confirm": await revise_client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json=requests["confirm"],
+                    ),
+                    "correct": await accept_client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json=requests["correct"],
+                    ),
+                }
+                return responses, replays
 
-        (
-            accept_response,
-            revise_response,
-            accept_replay,
-            revise_replay,
-            accept_conflict,
-            revise_conflict,
-        ) = asyncio.run(race_and_replay())
-
-        responses = {"accept": accept_response, "revise": revise_response}
-        replays = {"accept": accept_replay, "revise": revise_replay}
-        loser = "revise" if db_winner == "accept" else "accept"
+        responses, replays = asyncio.run(race_and_replay())
+        loser = "correct" if db_winner == "confirm" else "confirm"
         assert responses[db_winner].status_code == 200, responses[db_winner].json()
         assert responses[loser].status_code == 409, responses[loser].json()
         assert responses[loser].json()["detail"]["failure_code"] == "stale_conflict"
-        for action in ("accept", "revise"):
+        for action in ("confirm", "correct"):
             assert replays[action].status_code == responses[action].status_code
             assert replays[action].json() == responses[action].json()
-        assert accept_conflict.status_code == revise_conflict.status_code == 409
-        assert len(accept_commands) == len(revise_commands) == 1
-        assert winner_db_locked.is_set() and loser_db_attempted.is_set()
+        assert len(admission_commands) == len(stage_commands) == 1
 
         service = primary_app.state.session_service
-        proposals = {str(proposal.id): proposal for proposal in asyncio.run(service.list_composition_proposals(UUID(session_id)))}
+        proposals = {str(item.id): item for item in asyncio.run(service.list_composition_proposals(UUID(session_id)))}
         events = asyncio.run(service.list_proposal_events(UUID(session_id)))
         messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
         dispatches = [
             envelope
             for message in messages
-            for envelope in message.tool_calls
+            for envelope in (message.tool_calls or ())
             if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
             and envelope.get("invocation", {}).get("status") == "success"
         ]
         with engine.connect() as conn:
-            operation_rows = (
-                conn.execute(
+            operations = {
+                row["operation_id"]: row
+                for row in conn.execute(
                     select(guided_operations_table)
                     .where(guided_operations_table.c.session_id == session_id)
                     .where(guided_operations_table.c.operation_id.in_((accept_operation_id, revise_operation_id)))
-                )
-                .mappings()
-                .all()
+                ).mappings()
+            }
+            state_count_after = conn.scalar(
+                select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
             )
-            operation_event_rows = (
-                conn.execute(
-                    select(guided_operation_events_table)
-                    .where(guided_operation_events_table.c.session_id == session_id)
-                    .where(guided_operation_events_table.c.operation_id.in_((accept_operation_id, revise_operation_id)))
-                    .order_by(guided_operation_events_table.c.operation_id, guided_operation_events_table.c.sequence)
-                )
-                .mappings()
-                .all()
-            )
-            state_count_after = conn.execute(
-                select(composition_states_table.c.id).where(composition_states_table.c.session_id == session_id)
-            ).all()
-        operations = {row["operation_id"]: row for row in operation_rows}
-        operation_events = {
-            operation_id: [row["event_kind"] for row in operation_event_rows if row["operation_id"] == operation_id]
-            for operation_id in (accept_operation_id, revise_operation_id)
-        }
-        winner_operation_id = accept_operation_id if db_winner == "accept" else revise_operation_id
-        loser_operation_id = revise_operation_id if db_winner == "accept" else accept_operation_id
-        assert set(operations) == {accept_operation_id, revise_operation_id}
+        assert len(operations) == 2
+        winner_operation_id = accept_operation_id if db_winner == "confirm" else revise_operation_id
+        loser_operation_id = revise_operation_id if db_winner == "confirm" else accept_operation_id
         assert operations[winner_operation_id]["status"] == "completed"
-        assert operations[winner_operation_id]["failure_code"] is None
-        assert operations[winner_operation_id]["result_kind"] == "composition_state"
-        assert operations[winner_operation_id]["result_state_id"] is not None
         assert operations[loser_operation_id]["status"] == "failed"
         assert operations[loser_operation_id]["failure_code"] == "stale_conflict"
-        assert operations[loser_operation_id]["result_kind"] is None
-        assert operations[loser_operation_id]["result_state_id"] is None
-        assert operations[loser_operation_id]["proposal_id"] is None
-        assert operation_events[winner_operation_id] == ["claimed", "renewed", "completed"]
-        assert operation_events[loser_operation_id] == ["claimed", "renewed", "failed"]
-        assert len(state_count_after) == len(state_count_before) + 1
+        assert state_count_before is not None and state_count_after == state_count_before + 1
 
         original_id = proposal_payload["proposal_id"]
         original_events = [event.event_type for event in events if str(event.proposal_id) == original_id]
         current = _get_guided(composer_test_client, session_id)
-        if db_winner == "accept":
+        if db_winner == "confirm":
+            assert len(prepare_calls) == len(execute_calls) == 1
             assert set(proposals) == {original_id}
-            assert len(events) == 2
             assert proposals[original_id].status == "committed"
             assert original_events == ["proposal.created", "proposal.accepted"]
             assert len(dispatches) == 1
-            assert current["next_turn"]["type"] == "confirm_wiring"
+            assert current["next_turn"] is None
         else:
-            assert set(proposals) == {original_id}
-            assert len(events) == 2
+            assert prepare_calls == execute_calls == []
+            assert len(proposals) == 2
             assert proposals[original_id].status == "rejected"
+            assert proposals[original_id].committed_state_id is None
             assert original_events == ["proposal.created", "proposal.rejected"]
+            assert all(event.event_type != "proposal.accepted" for event in events)
             assert dispatches == []
-            assert current["next_turn"]["type"] == "schema_form"
+            successor = next(item for proposal_id, item in proposals.items() if proposal_id != original_id)
+            assert successor.status == "pending"
+            assert current["next_turn"]["type"] == "confirm_wiring"
 
-    def test_accept_atomically_commits_pipeline_consumes_coverage_and_advances_to_wire(
+    def test_confirm_wiring_atomically_commits_pipeline_consumes_coverage_and_completes_guided_authoring(
         self,
         composer_test_client: TestClient,
     ) -> None:
@@ -2421,7 +2372,7 @@ class TestStep2IntraStep:
         )
         _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
         staged = _finish_review(composer_test_client, session_id, "output")
-        turn = staged["next_turn"]
+        assert staged["next_turn"]["type"] == "propose_pipeline"
         with composer_test_client.app.state.session_engine.connect() as conn:
             storage_paths = tuple(conn.execute(select(blobs_table.c.storage_path).where(blobs_table.c.session_id == session_id)).scalars())
         assert storage_paths
@@ -2431,17 +2382,19 @@ class TestStep2IntraStep:
             assert storage_path not in json.dumps(staged)
             assert storage_path not in repr(proposal.arguments_json)
 
+        reviewed = _review_wiring(composer_test_client, session_id)
+        wire_turn = reviewed["next_turn"]
         operation_id = str(uuid4())
-        accept_request = {
+        confirm_request = {
             "operation_id": operation_id,
-            "turn_token": turn["turn_token"],
-            "proposal_id": turn["payload"]["proposal_id"],
-            "draft_hash": turn["payload"]["draft_hash"],
-            "chosen": ["accept"],
+            "turn_token": wire_turn["turn_token"],
+            "proposal_id": wire_turn["payload"]["proposal_id"],
+            "draft_hash": wire_turn["payload"]["draft_hash"],
+            "chosen": ["confirm_wiring"],
         }
         accepted = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json=accept_request,
+            json=confirm_request,
         )
 
         assert accepted.status_code == 200, accepted.json()
@@ -2449,13 +2402,13 @@ class TestStep2IntraStep:
         guided = _full_guided_session(body)
         assert guided["active_proposal"] is None
         assert guided["deferred_intents"] == []
-        assert body["guided_session"]["step"] == "step_4_wire"
-        assert body["next_turn"]["type"] == "confirm_wiring"
+        assert body["terminal"]["kind"] == "completed"
+        assert body["next_turn"] is None
         assert body["composition_state"]["outputs"]
         events = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
         replayed = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json=accept_request,
+            json=confirm_request,
         )
         assert replayed.status_code == 200, replayed.json()
         assert replayed.json() == body
@@ -2466,7 +2419,7 @@ class TestStep2IntraStep:
             assert storage_path not in json.dumps(restored)
             assert all(storage_path not in repr(event.payload) for event in events)
 
-    def test_accept_failure_after_dispatch_audit_insert_rolls_back_entire_cohort(
+    def test_confirm_wiring_failure_after_dispatch_audit_insert_preserves_failure_evidence_only(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -2475,7 +2428,9 @@ class TestStep2IntraStep:
 
         session_id = _create_session(composer_test_client)
         staged = self._stage_proposal(composer_test_client, session_id, filename="accept-audit-rollback.jsonl")
-        turn = staged["next_turn"]
+        assert staged["next_turn"]["type"] == "propose_pipeline"
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
         messages_before = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
         state_before = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
         events_before = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
@@ -2495,20 +2450,106 @@ class TestStep2IntraStep:
                 "turn_token": turn["turn_token"],
                 "proposal_id": turn["payload"]["proposal_id"],
                 "draft_hash": turn["payload"]["draft_hash"],
-                "chosen": ["accept"],
+                "chosen": ["confirm_wiring"],
             },
         )
 
         assert failed.status_code == 500, failed.json()
-        assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before
+        messages_after = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+        new_messages = [message for message in messages_after if message.id not in {item.id for item in messages_before}]
+        assert len(new_messages) == 1
+        assert new_messages[0].role == "audit"
+        assert len(new_messages[0].tool_calls or ()) == 1
+        invocation = (new_messages[0].tool_calls or ())[0]["invocation"]
+        assert invocation["tool_name"] == "set_pipeline"
+        assert invocation["status"] == "success"
+        assert "accept-audit-rollback.jsonl" not in repr(new_messages[0].tool_calls)
         assert asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id))) == events_before
         state_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
         assert state_before is not None and state_after is not None and state_after.id == state_before.id
         proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         assert len(proposals) == 1 and proposals[0].status == "pending"
 
+    def test_confirm_wiring_prepare_failure_persists_its_dispatch_evidence_with_the_failed_operation(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer import pipeline_commit
+        from elspeth.web.composer.audit import begin_dispatch, finish_success
+        from elspeth.web.composer.pipeline_commit import PipelineCommitError
+
+        session_id = _create_session(composer_test_client)
+        self._stage_proposal(composer_test_client, session_id, filename="confirm-prepare-audit.jsonl")
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
+        operation_id = str(uuid4())
+
+        async def fail_after_recording_dispatch(**kwargs: Any):
+            authority = kwargs["authority"]
+            recorder = kwargs["recorder"]
+            audit = begin_dispatch(
+                authority.row.tool_call_id,
+                "set_pipeline",
+                deep_thaw(authority.proposal.pipeline),
+                version_before=0,
+                actor=kwargs["actor"],
+            )
+            invocation = finish_success(
+                audit,
+                result_payload={"success": False, "failure_code": "validation_failed"},
+                version_after=0,
+            )
+            recorder.record(invocation)
+            raise PipelineCommitError(
+                "pipeline proposal failed current executor validation",
+                code="VALIDATION_FAILED",
+                invocation=invocation,
+            )
+
+        monkeypatch.setattr(pipeline_commit, "prepare_pipeline_proposal_commit", fail_after_recording_dispatch)
+
+        failed = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": operation_id,
+                "turn_token": turn["turn_token"],
+                "proposal_id": turn["payload"]["proposal_id"],
+                "draft_hash": turn["payload"]["draft_hash"],
+                "chosen": ["confirm_wiring"],
+            },
+        )
+
+        assert failed.status_code == 500, failed.json()
+        assert failed.json()["detail"]["failure_code"] == "operation_failed"
+        service = composer_test_client.app.state.session_service
+        proposals = asyncio.run(service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "pending"
+        messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+        dispatches = [
+            envelope
+            for message in messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
+        ]
+        assert len(dispatches) == 1
+        assert dispatches[0]["invocation"]["status"] == "success"
+        with composer_test_client.app.state.session_engine.connect() as conn:
+            operation = (
+                conn.execute(
+                    select(guided_operations_table)
+                    .where(guided_operations_table.c.session_id == session_id)
+                    .where(guided_operations_table.c.operation_id == operation_id)
+                )
+                .mappings()
+                .one()
+            )
+        assert operation["status"] == "failed"
+        assert operation["failure_code"] == "operation_failed"
+
     @pytest.mark.parametrize("revalidation", ("message", "mechanical"))
-    def test_accept_revalidates_deferred_authority_before_any_write(
+    def test_confirm_wiring_revalidates_deferred_authority_before_any_write(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -2559,7 +2600,9 @@ class TestStep2IntraStep:
         )
         assert retained.status_code == 200, retained.json()
         staged = self._stage_proposal(composer_test_client, session_id, filename="accept-deferred-revalidation.jsonl")
-        turn = staged["next_turn"]
+        assert staged["next_turn"]["type"] == "propose_pipeline"
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
         state_before = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
         events_before = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
         messages_before = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
@@ -2589,7 +2632,7 @@ class TestStep2IntraStep:
                 "turn_token": turn["turn_token"],
                 "proposal_id": turn["payload"]["proposal_id"],
                 "draft_hash": turn["payload"]["draft_hash"],
-                "chosen": ["accept"],
+                "chosen": ["confirm_wiring"],
             },
         )
 
@@ -2597,27 +2640,46 @@ class TestStep2IntraStep:
         state_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
         assert state_before is not None and state_after is not None and state_after.id == state_before.id
         assert asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id))) == events_before
-        assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before
+        messages_after = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+        new_messages = [message for message in messages_after if message.id not in {item.id for item in messages_before}]
+        assert len(new_messages) == 1
+        assert new_messages[0].role == "audit"
+        assert len(new_messages[0].tool_calls or ()) == 1
+        invocation = (new_messages[0].tool_calls or ())[0]["invocation"]
+        assert invocation["tool_name"] == "set_pipeline"
+        assert invocation["status"] == "success"
+        assert "accept-deferred-revalidation.jsonl" not in repr(new_messages[0].tool_calls)
         proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         assert len(proposals) == 1 and proposals[0].status == "pending"
         if revalidation == "mechanical":
             assert verification_calls == 2
 
-    def test_accept_cancellation_before_service_settlement_persists_no_dispatch_audit(
+    def test_confirm_wiring_cancellation_after_dispatch_cannot_orphan_acceptance_audit(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         session_id = _create_session(composer_test_client)
         staged = self._stage_proposal(composer_test_client, session_id, filename="accept-cancel-before-service.jsonl")
-        turn = staged["next_turn"]
-        messages_before = asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+        assert staged["next_turn"]["type"] == "propose_pipeline"
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
+        service = composer_test_client.app.state.session_service
+        original_accept = service.accept_guided_pipeline_proposal
         entered = asyncio.Event()
-        never = asyncio.Event()
+        release = asyncio.Event()
+        request_body = {
+            "operation_id": str(uuid4()),
+            "turn_token": turn["turn_token"],
+            "proposal_id": turn["payload"]["proposal_id"],
+            "draft_hash": turn["payload"]["draft_hash"],
+            "chosen": ["confirm_wiring"],
+        }
 
-        async def blocked_accept(*_args, **_kwargs):
+        async def blocked_accept(command, *, payload_store=None):
             entered.set()
-            await never.wait()
+            await release.wait()
+            return await original_accept(command, payload_store=payload_store)
 
         monkeypatch.setattr(
             composer_test_client.app.state.session_service,
@@ -2625,7 +2687,7 @@ class TestStep2IntraStep:
             blocked_accept,
         )
 
-        async def cancel_before_settlement() -> None:
+        async def cancel_after_dispatch():
             async with AsyncClient(
                 transport=ASGITransport(app=composer_test_client.app),
                 base_url="http://test",
@@ -2633,42 +2695,52 @@ class TestStep2IntraStep:
                 task = asyncio.create_task(
                     client.post(
                         f"/api/sessions/{session_id}/guided/respond",
-                        json={
-                            "operation_id": str(uuid4()),
-                            "turn_token": turn["turn_token"],
-                            "proposal_id": turn["payload"]["proposal_id"],
-                            "draft_hash": turn["payload"]["draft_hash"],
-                            "chosen": ["accept"],
-                        },
+                        json=request_body,
                     )
                 )
                 await asyncio.wait_for(entered.wait(), timeout=5)
                 task.cancel()
+                release.set()
                 with pytest.raises(asyncio.CancelledError):
                     await task
+                return await client.post(
+                    f"/api/sessions/{session_id}/guided/respond",
+                    json=request_body,
+                )
 
-        asyncio.run(cancel_before_settlement())
+        replayed = asyncio.run(cancel_after_dispatch())
 
-        assert asyncio.run(composer_test_client.app.state.session_service.get_messages(UUID(session_id), limit=None)) == messages_before
-        events = asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id)))
-        assert [event.event_type for event in events] == ["proposal.created"]
-        proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
-        assert len(proposals) == 1 and proposals[0].status == "pending"
+        assert replayed.status_code == 200, replayed.json()
+        events = asyncio.run(service.list_proposal_events(UUID(session_id)))
+        assert [event.event_type for event in events] == ["proposal.created", "proposal.accepted"]
+        proposals = asyncio.run(service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "committed"
+        messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+        dispatches = [
+            envelope
+            for message in messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
+            and envelope.get("invocation", {}).get("status") == "success"
+        ]
+        assert len(dispatches) == 1
 
-    def test_accept_cancellation_during_worker_settlement_is_exactly_replayable(
+    def test_confirm_wiring_cancellation_during_worker_settlement_is_exactly_replayable(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         session_id = _create_session(composer_test_client)
         staged = self._stage_proposal(composer_test_client, session_id, filename="accept-cancel-during-worker.jsonl")
-        turn = staged["next_turn"]
+        assert staged["next_turn"]["type"] == "propose_pipeline"
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
         request_body = {
             "operation_id": str(uuid4()),
             "turn_token": turn["turn_token"],
             "proposal_id": turn["payload"]["proposal_id"],
             "draft_hash": turn["payload"]["draft_hash"],
-            "chosen": ["accept"],
+            "chosen": ["confirm_wiring"],
         }
         service = composer_test_client.app.state.session_service
         original_insert = service._insert_prepared_guided_audit_rows_on_connection
@@ -2702,9 +2774,9 @@ class TestStep2IntraStep:
                 inserted = await asyncio.to_thread(audit_inserted.wait, 5)
                 assert inserted is True
                 first.cancel()
+                release_worker.set()
                 with pytest.raises(asyncio.CancelledError):
                     await first
-                release_worker.set()
                 return await asyncio.wait_for(
                     client.post(
                         f"/api/sessions/{session_id}/guided/respond",

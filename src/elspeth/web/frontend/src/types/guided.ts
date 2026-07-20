@@ -36,7 +36,6 @@ export type TurnType =
  */
 export type ControlSignal =
   | "exit_to_freeform"
-  | "request_advisor"
   | "reject"
   | "back"
   | "passthrough";
@@ -112,7 +111,6 @@ export interface ChatTurn {
 export interface WorkflowProfile {
   coaching: boolean;
   bookends: boolean;
-  advisor_checkpoints: boolean;
 }
 
 /**
@@ -244,7 +242,7 @@ export type GuidedRespondAction =
       control_signal: Exclude<ControlSignal, "reject">;
     })
   | (BoundProposalFields & {
-      chosen: ["accept"];
+      chosen: ["review_wiring"] | ["confirm_wiring"];
       edited_values: null;
       custom_inputs: null;
       edit_target: null;
@@ -264,6 +262,14 @@ export type GuidedRespondAction =
       edit_target: GuidedEditTarget;
       control_signal: null;
     })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: GuidedEditTarget;
+      correction_feedback: string;
+      control_signal: null;
+    })
   | (UnboundProposalFields & {
       chosen: null;
       edited_values: null;
@@ -274,7 +280,7 @@ export type GuidedRespondAction =
 
 /** Exact proposal control whose retry descriptor remains in local custody. */
 export type GuidedProposalRetryAction =
-  | { kind: "accept" }
+  | { kind: "review_wiring" | "confirm_wiring" }
   | { kind: "reject" }
   | { kind: "revise"; edit_target: GuidedEditTarget };
 
@@ -595,63 +601,87 @@ export interface ProposePipelinePayload {
   edit_targets: GuidedEditTarget[];
 }
 
-/**
- * Wire data for the step-4 wiring review: topology describes source/node/output
- * connection labels, while contracts overlay producer/consumer compatibility.
- * Source ids use `source` or `source:<name>` and output ids use
- * `output:<sink_name>`. Warnings and advisor/signoff fields are optional
- * advisory metadata emitted when the backend has something to report.
- */
+export interface WireRowCardinality {
+  input: "none" | "one" | "batch" | "branches" | "many_producers";
+  output: "one" | "zero_or_one" | "zero_or_many" | "one_per_item" | "one_per_branch_set" | "expected_count";
+  expected_output_count: string | null;
+}
+
+export interface WireStructuredOutputField {
+  query: string;
+  field: string;
+  type: string;
+  enum_values: string[];
+}
+
+export interface WireSchemaField {
+  name: string;
+  type: string;
+  required: boolean;
+  nullable: boolean;
+}
+
+export interface WireBusinessSchema {
+  mode: string;
+  fields: WireSchemaField[];
+  guaranteed_fields: string[];
+  required_fields: string[];
+}
+
+export interface WireEndpoint {
+  kind: "source" | "node" | "output";
+  stable_id: string;
+}
+
+/** Candidate-derived arbitrary-DAG review using proposal-stable identities. */
 export interface WireStageData {
   proposal_id: string;
   draft_hash: string;
-  topology: {
-    sources: Record<
-      string,
-      {
-        id: string;
-        plugin: string;
-        on_success: string | null;
-        on_validation_failure: string;
-      }
-    >;
-    nodes: Array<{
-      id: string;
-      node_type: string;
-      plugin: string | null;
-      input: string | null;
-      on_success: string | null;
-      on_error: string | null;
-      routes: Record<string, string> | null;
-      fork_to: string[] | null;
-      branches: string[] | Record<string, string> | null;
-    }>;
-    outputs: Array<{
-      id: string;
-      sink_name: string;
-      plugin: string;
-      on_write_failure: string;
-    }>;
-  };
-  edge_contracts: Array<{
-    from: string;
-    to: string;
-    producer_guarantees: string[];
-    consumer_requires: string[];
-    missing_fields: string[];
-    satisfied: boolean;
+  sources: Array<{
+    stable_id: string;
+    label: string;
+    plugin: string;
+    on_validation_failure: string;
+    guaranteed_fields: string[];
+    row_cardinality: WireRowCardinality;
+  }>;
+  nodes: Array<{
+    stable_id: string;
+    label: string;
+    node_type: string;
+    plugin: string | null;
+    behavior: ProposalNodeBehavior;
+    required_fields: string[];
+    guaranteed_fields: string[];
+    row_cardinality: WireRowCardinality;
+    structured_output_fields: WireStructuredOutputField[];
+  }>;
+  outputs: Array<{
+    stable_id: string;
+    label: string;
+    plugin: string;
+    on_write_failure: string;
+    required_fields: string[];
+    business_schema: WireBusinessSchema;
+  }>;
+  connections: Array<{
+    stable_id: string;
+    from_endpoint: WireEndpoint;
+    to_endpoint: WireEndpoint | { kind: "discard" };
+    flow: ProposalFlow;
+    schema_contract: null | {
+      from: string;
+      to: string;
+      producer_guarantees: string[];
+      consumer_requires: string[];
+      missing_fields: string[];
+      satisfied: boolean;
+    };
   }>;
   semantic_contracts: Array<Record<string, unknown>>;
   warnings: Array<Record<string, unknown>>;
-  advisor_findings?: string;
-  signoff_outcome?: string;
-  /**
-   * Advisor sign-off passes left AFTER the pass that produced this turn. Present
-   * only on a RE-EMITTED wire turn (the two sites where the pass budget is in
-   * scope); ABSENT on the initial turn and the advisor-off tutorial, so the
-   * wire-stage cost copy gates on `passes_remaining !== undefined`.
-   */
-  passes_remaining?: number;
+  blockers: Array<Record<string, unknown>>;
+  can_confirm: boolean;
 }
 
 /**

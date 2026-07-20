@@ -36,7 +36,7 @@ from elspeth.web.composer.guided.stage_transitions import (
     transition_source_plugin_selection,
     transition_source_schema_form,
 )
-from elspeth.web.composer.guided.state_machine import ComponentTarget
+from elspeth.web.composer.guided.state_machine import ComponentTarget, GuidedCorrectionMessageRef
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.tutorial_sample import (
@@ -158,6 +158,7 @@ from .pipeline_settlement import (
     _GUIDED_ATOMIC_SETTLEMENT_FAILURE,
     _await_guided_atomic_settlement,
     _await_with_deferred_cancellation,
+    _DeferredCancellationState,
 )
 
 if TYPE_CHECKING:
@@ -446,19 +447,7 @@ def _build_get_guided_turn(
     if step is GuidedStep.STEP_3_TRANSFORMS:
         return None
     if step is GuidedStep.STEP_4_WIRE:
-        active = guided.active_proposal
-        if active is None:
-            raise InvariantError("STEP_4 wire review requires an active proposal binding")
-        policy_validation = catalog.validate_composition_state(state)
-        validation_state = state if policy_validation.validation.errors else policy_validation.executable_state
-        return build_step_4_wire_turn(
-            state,
-            proposal_id=str(active.proposal_id),
-            draft_hash=active.draft_hash,
-            catalog=catalog,
-            validation_state=validation_state,
-            validation_summary=policy_validation.validation,
-        )
+        raise InvariantError("STEP_4 wire review requires one durable candidate-derived occurrence")
     return None
 
 
@@ -1144,6 +1133,7 @@ async def post_guided_reenter(
         )
 
         restored_terminal: TerminalState | None = None
+        completed_content_changed = False
         if completed_terminal_raw is not _MISSING_COMPLETED_TERMINAL_MARKER:
             try:
                 if not isinstance(completed_terminal_raw, Mapping):
@@ -1163,6 +1153,8 @@ async def post_guided_reenter(
                         reason=None,
                         pipeline_yaml=generate_public_yaml(state),
                     )
+                else:
+                    completed_content_changed = True
             except InvariantError as exc:
                 slog.error(
                     "guided.invariant_violated",
@@ -1186,7 +1178,14 @@ async def post_guided_reenter(
             prepared_turn = None
             audit_evidence = GuidedAuditEvidence()
         else:
-            active_guided = _replace(guided, terminal=None)
+            active_guided = _replace(
+                guided,
+                terminal=None,
+                step=(GuidedStep.STEP_2_SINK if completed_content_changed else guided.step),
+                active_proposal=None,
+                active_edit_target=None,
+                transition_consumed=False if completed_content_changed else guided.transition_consumed,
+            )
             active_state = _replace(state, guided_session=active_guided)
             rebuilt_turn = _build_get_guided_turn(active_state, active_guided, catalog=catalog)
             if rebuilt_turn is None:
@@ -2144,6 +2143,8 @@ async def post_guided_respond(
     from elspeth.web.composer.guided.planning import (
         build_guided_proposal_projection,
         guided_private_reviewed_facts,
+        require_guided_correction_target_changed,
+        resolve_guided_correction_target,
         verified_remaining_deferred_intents,
     )
     from elspeth.web.composer.guided.protocol import PROPOSAL_RATIONALE_TEMPLATE, PROPOSAL_SUMMARY_TEMPLATE
@@ -2151,6 +2152,7 @@ async def post_guided_respond(
     from elspeth.web.composer.pipeline_commit import (
         PipelineCommitConfig,
         PreparedPipelineCommit,
+        RecoveredPipelineCommit,
         prepare_pipeline_proposal_commit,
     )
     from elspeth.web.composer.pipeline_planner import PlannerOriginatingMessage
@@ -2163,6 +2165,8 @@ async def post_guided_respond(
         GuidedOperationFailureCommand,
         GuidedOperationFenceLostError,
         GuidedOperationSettlementConflictError,
+        GuidedPipelineConfirmationAdmissionCommand,
+        GuidedPipelineDispatchRecordCommand,
         GuidedPipelineProposalAcceptCommand,
         GuidedPipelineProposalBackEditCommand,
         GuidedPipelineProposalRejectCommand,
@@ -2213,6 +2217,31 @@ async def post_guided_respond(
                 raise HTTPException(status_code=409, detail="edit_target does not identify a current proposal component")
             raise AuditIntegrityError("guided proposal revision target changed after reservation")
 
+    def _require_bound_wire_target(current_turn: Turn, *, public_error: bool) -> None:
+        """Require one exact component identity from the current wire projection."""
+
+        if body.edit_target is None:
+            raise AuditIntegrityError("guided wire correction is missing its target")
+        payload = current_turn["payload"]
+        collection_key = {
+            "source": "sources",
+            "node": "nodes",
+            "edge": "connections",
+            "output": "outputs",
+        }[body.edit_target.kind]
+        raw_components = payload.get(collection_key)
+        if type(raw_components) is not list:
+            raise AuditIntegrityError("guided wire projection lost its component collection")
+        matches = [
+            component
+            for component in raw_components
+            if type(component) is dict and component.get("stable_id") == body.edit_target.stable_id
+        ]
+        if len(matches) != 1:
+            if public_error:
+                raise HTTPException(status_code=409, detail="edit_target does not identify a current wire component")
+            raise AuditIntegrityError("guided wire correction target changed after reservation")
+
     async def _preflight_attempt(attempt_stable_id: UUID) -> SourceInspectionFacts | None:
         observed = await service.get_current_state(session_id)
         observed_state = _state_from_record(observed) if observed is not None else _initial_composition_state_with_guided_session()
@@ -2241,8 +2270,8 @@ async def post_guided_respond(
                 raise HTTPException(status_code=409, detail="turn_token does not identify the current unanswered turn.")
             if current_turn["type"] != TurnType.PROPOSE_PIPELINE.value:
                 raise AuditIntegrityError("guided Step 3 active turn is not a pipeline proposal")
-            is_accept = (
-                body.chosen == ["accept"]
+            is_review_wiring = (
+                body.chosen == ["review_wiring"]
                 and body.control_signal is None
                 and body.edited_values is None
                 and body.custom_inputs is None
@@ -2262,10 +2291,57 @@ async def post_guided_respond(
                 and body.custom_inputs is None
                 and body.control_signal is None
             )
-            if sum((is_accept, is_reject, is_revise)) != 1:
+            if sum((is_review_wiring, is_reject, is_revise)) != 1:
                 raise HTTPException(status_code=400, detail="Guided proposal action has an invalid closed shape.")
             if is_revise:
                 _require_bound_revision_target(current_turn, public_error=True)
+            return None
+        if not is_active_exit and observed_guided.step is GuidedStep.STEP_4_WIRE:
+            if observed_guided.correction_messages:
+                correction_ids = {str(reference.message_id) for reference in observed_guided.correction_messages}
+                correction_rows = {
+                    str(message.id): message
+                    for message in await service.get_messages(session_id, limit=None)
+                    if str(message.id) in correction_ids
+                }
+                if set(correction_rows) != correction_ids or any(
+                    correction_rows[str(reference.message_id)].role != "user"
+                    or _message_content_hash(correction_rows[str(reference.message_id)].content) != reference.content_hash
+                    for reference in observed_guided.correction_messages
+                ):
+                    raise HTTPException(status_code=409, detail="wire correction message authority changed")
+            prospective, current_turn, _prepared_current = _schema8_prospective_occurrence(
+                observed_state,
+                observed_guided,
+                catalog=catalog,
+                shield_available=shield_available,
+                payload_store=payload_store,
+            )
+            if body.turn_token != guided_turn_token(prospective):
+                raise HTTPException(status_code=409, detail="turn_token does not identify the current unanswered turn.")
+            if current_turn["type"] != TurnType.CONFIRM_WIRING.value:
+                raise AuditIntegrityError("guided Step 4 active turn is not a wire review")
+            is_confirm_wiring = (
+                body.chosen == ["confirm_wiring"]
+                and body.control_signal is None
+                and body.edited_values is None
+                and body.custom_inputs is None
+                and body.edit_target is None
+                and body.proposal_id is not None
+            )
+            is_correction = (
+                body.correction_feedback is not None
+                and body.chosen is None
+                and body.control_signal is None
+                and body.edited_values is None
+                and body.custom_inputs is None
+                and body.edit_target is not None
+                and body.proposal_id is not None
+            )
+            if sum((is_confirm_wiring, is_correction)) != 1:
+                raise HTTPException(status_code=400, detail="Guided wire action has an invalid closed shape.")
+            if is_correction:
+                _require_bound_wire_target(current_turn, public_error=True)
             return None
         if not is_active_exit and observed_guided.step not in {GuidedStep.STEP_1_SOURCE, GuidedStep.STEP_2_SINK}:
             raise _schema8_unsupported_stage(observed_guided.step)
@@ -2309,7 +2385,7 @@ async def post_guided_respond(
     async def _preflight_or_sanitize(attempt_stable_id: UUID) -> SourceInspectionFacts | None:
         try:
             return await _preflight_attempt(attempt_stable_id)
-        except InvariantError as exc:
+        except (AuditIntegrityError, InvariantError) as exc:
             with contextlib.suppress(Exception):
                 slog.error(
                     "guided.invariant_violated",
@@ -2771,11 +2847,13 @@ async def post_guided_respond(
                                             telemetry=NoopRedactionTelemetry(),
                                         ),
                                         catalog_plugin_ids=catalog_ids,
+                                        proposal_projection=projection,
                                         actor="composer_route",
                                         user_message_id=root_message.id if root_message is not None else None,
                                         user_message_content_hash=(
                                             _message_content_hash(root_message.content) if root_message is not None else None
                                         ),
+                                        originating_message=None,
                                         supersedes_proposal_id=authority.row.id,
                                         response=stage_response,
                                         payloads=(prepared_response, prepared_proposal),
@@ -2789,47 +2867,28 @@ async def post_guided_respond(
                             )
                             return _response_from_record(stage_settlement.result_state)
 
-                        user_message_content: str | None = None
-                        if authority.row.user_message_id is not None:
-                            matches = [
-                                message
-                                for message in await service.get_messages(session_id, limit=None)
-                                if message.id == authority.row.user_message_id
-                            ]
-                            if len(matches) != 1 or matches[0].role != "user":
-                                raise AuditIntegrityError("guided proposal user-message lineage is missing")
-                            user_message_content = matches[0].content
-                        commit_recorder = BufferingRecorder()
-                        prepared = await prepare_pipeline_proposal_commit(
-                            authority=authority,
-                            reviewed_facts=reviewed_facts,
-                            current_state=state,
-                            current_state_id=state_record.id,
-                            policy_catalog=catalog,
-                            plugin_snapshot=plugin_snapshot,
-                            config=PipelineCommitConfig(
-                                data_dir=str(request.app.state.settings.data_dir),
-                                session_engine=request.app.state.session_engine,
-                                secret_service=request.app.state.scoped_secret_resolver,
-                                user_id=user.user_id,
-                                user_message_content=user_message_content,
-                                max_blob_storage_per_session_bytes=(request.app.state.settings.max_blob_storage_per_session_bytes),
-                                runtime_preflight=None,
-                                timeout_seconds=request.app.state.settings.composer_timeout_seconds,
-                            ),
-                            recorder=commit_recorder,
-                            actor=f"user:{user.user_id}",
-                            settlement_surface="guided",
+                        from elspeth.web.composer.guided.planning import (
+                            guided_candidate_state,
+                            verify_guided_proposal_projection,
                         )
-                        if type(prepared) is not PreparedPipelineCommit:
-                            raise AuditIntegrityError("guided proposal acceptance requires one fresh exact dispatch")
 
-                        remaining = verified_remaining_deferred_intents(
-                            guided=guided,
+                        catalog_ids = {
+                            "source": frozenset(item.name for item in catalog.list_sources()),
+                            "transform": frozenset(item.name for item in catalog.list_transforms()),
+                            "sink": frozenset(item.name for item in catalog.list_sinks()),
+                        }
+                        verify_guided_proposal_projection(
+                            payload=current_turn["payload"],
+                            proposal_id=guided.active_proposal.proposal_id,
                             proposal=authority.proposal,
+                            guided=guided,
+                            catalog_plugin_ids=catalog_ids,
                         )
+                        candidate = guided_candidate_state(authority.proposal)
+                        policy_validation = catalog.validate_composition_state(candidate)
+                        validation_state = candidate if policy_validation.validation.errors else policy_validation.executable_state
                         response_payload = {
-                            "action": "accept",
+                            "action": "review_wiring",
                             "proposal_id": str(authority.row.id),
                             "draft_hash": authority.proposal.draft_hash,
                         }
@@ -2841,15 +2900,12 @@ async def post_guided_respond(
                         answered = _replace(
                             guided.history[-1],
                             response_hash=prepared_response.payload_id,
-                            summary="Guided pipeline proposal accepted.",
+                            summary="Guided pipeline proposal advanced to wiring review.",
                         )
-                        accepted_state = _replace(prepared.result.updated_state, guided_session=guided)
-                        policy_validation = catalog.validate_composition_state(accepted_state)
-                        validation_state = accepted_state if policy_validation.validation.errors else policy_validation.executable_state
                         wire_turn = build_step_4_wire_turn(
-                            accepted_state,
-                            proposal_id=str(authority.row.id),
-                            draft_hash=authority.proposal.draft_hash,
+                            candidate,
+                            proposal_projection=cast("Any", current_turn["payload"]),
+                            guided=guided,
                             catalog=catalog,
                             validation_state=validation_state,
                             validation_summary=policy_validation.validation,
@@ -2875,11 +2931,10 @@ async def post_guided_respond(
                             guided,
                             step=GuidedStep.STEP_4_WIRE,
                             history=(*guided.history[:-1], answered, wire_record),
-                            deferred_intents=remaining,
                             active_proposal=guided.active_proposal,
                             active_edit_target=None,
                         )
-                        accepted_state = _replace(accepted_state, guided_session=final_guided)
+                        reviewed_state = _replace(state, guided_session=final_guided)
                         emit_turn_answered(
                             recorder,
                             step=GuidedStep.STEP_3_TRANSFORMS,
@@ -2908,35 +2963,26 @@ async def post_guided_respond(
                             composition_version=state.version,
                             actor=user.user_id,
                         )
-                        from .._helpers import _state_data_from_composer_state
-
-                        state_data, _validation = await _state_data_from_composer_state(
-                            accepted_state,
-                            settings=request.app.state.settings,
-                            secret_service=request.app.state.scoped_secret_resolver,
-                            user_id=user.user_id,
-                            session_id=session_id,
-                            plugin_snapshot=plugin_snapshot,
-                            profile_registry=request.app.state.operator_profile_registry,
-                            catalog=request.app.state.catalog_service,
-                            runtime_preflight=prepared.result.runtime_preflight,
-                            preflight_exception_policy="raise",
-                            initial_version=state.version,
-                            telemetry_source="convergence",
+                        reviewed_dict = reviewed_state.to_dict()
+                        state_data = CompositionStateData(
+                            sources=reviewed_dict["sources"],
+                            nodes=reviewed_dict["nodes"],
+                            edges=reviewed_dict["edges"],
+                            outputs=reviewed_dict["outputs"],
+                            metadata_=reviewed_dict["metadata"],
+                            is_valid=state_record.is_valid,
+                            validation_errors=state_record.validation_errors,
                             composer_meta={"guided_session": final_guided.to_dict()},
                         )
-                        accepted = await service.accept_guided_pipeline_proposal(
-                            GuidedPipelineProposalAcceptCommand(
+                        settlement = await service.settle_guided_state_operation(
+                            GuidedStateOperationCommand(
                                 fence=fence,
                                 expected_current_state_id=state_record.id,
                                 expected_current_state_version=state_record.version,
-                                proposal_id=authority.row.id,
-                                draft_hash=authority.proposal.draft_hash,
-                                reviewed_facts=reviewed_facts,
+                                expected_current_content_hash=composition_content_hash(state),
+                                state_id=uuid4(),
                                 state=state_data,
-                                candidate_content_hash=prepared.candidate_content_hash,
-                                executor_content_hash=prepared.executor_content_hash,
-                                invocation=prepared.invocation,
+                                provenance="convergence_persist",
                                 actor="composer_route",
                                 response=GuidedResponseDescriptor(
                                     kind="guided_respond",
@@ -2952,6 +2998,426 @@ async def post_guided_respond(
                             ),
                             payload_store=payload_store,
                         )
+                        return _response_from_record(settlement.result_state)
+                    elif guided.step is GuidedStep.STEP_4_WIRE:
+                        if state_record is None or guided.active_proposal is None:
+                            raise AuditIntegrityError("guided wire action requires a persisted active proposal")
+                        prospective, current_turn, _planned_current = _schema8_prospective_occurrence(
+                            state,
+                            guided,
+                            catalog=catalog,
+                            shield_available=shield_available,
+                            payload_store=payload_store,
+                        )
+                        if body.turn_token != guided_turn_token(prospective):
+                            raise AuditIntegrityError("guided wire turn custody changed after reservation")
+                        reviewed_facts = guided_private_reviewed_facts(guided)
+                        authority = await service.get_authoritative_pipeline_proposal(
+                            session_id=session_id,
+                            proposal_id=guided.active_proposal.proposal_id,
+                            reviewed_facts=reviewed_facts,
+                        )
+                        if (
+                            authority.row.status != "pending"
+                            or authority.proposal.draft_hash != guided.active_proposal.draft_hash
+                            or body.proposal_id != str(guided.active_proposal.proposal_id)
+                            or body.draft_hash != guided.active_proposal.draft_hash
+                        ):
+                            raise AuditIntegrityError("guided wire confirmation authority changed after reservation")
+                        if body.correction_feedback is not None:
+                            _require_bound_wire_target(current_turn, public_error=False)
+                            edit_target = body.edit_target
+                            if edit_target is None:
+                                raise AuditIntegrityError("guided wire correction lost its exact edit target")
+                            target = {
+                                "kind": edit_target.kind,
+                                "stable_id": edit_target.stable_id,
+                            }
+                            response_payload = {
+                                "action": "correct_wiring",
+                                "proposal_id": str(authority.row.id),
+                                "draft_hash": authority.proposal.draft_hash,
+                                "edit_target": target,
+                            }
+                            prepared_response = prepare_guided_json_payload(
+                                payload_store,
+                                purpose="turn_response",
+                                payload=response_payload,
+                            )
+                            answered = _replace(
+                                guided.history[-1],
+                                response_hash=prepared_response.payload_id,
+                                summary="Guided pipeline wiring correction requested.",
+                            )
+                            correction_message = GuidedOriginatingUserMessageDraft(
+                                message_id=uuid4(),
+                                content=body.correction_feedback,
+                            )
+                            planning_guided = _replace(
+                                guided,
+                                history=(*guided.history[:-1], answered),
+                                active_proposal=None,
+                                active_edit_target=None,
+                                correction_messages=(
+                                    *guided.correction_messages,
+                                    GuidedCorrectionMessageRef(
+                                        message_id=correction_message.message_id,
+                                        content_hash=_message_content_hash(correction_message.content),
+                                    ),
+                                ),
+                            )
+                            from elspeth.web.composer.guided.planning import guided_candidate_state
+
+                            predecessor_candidate = guided_candidate_state(authority.proposal)
+                            correction_target = resolve_guided_correction_target(
+                                requested=ComponentTarget(
+                                    kind=edit_target.kind,
+                                    stable_id=edit_target.stable_id,
+                                ),
+                                wire_payload=current_turn["payload"],
+                                predecessor=predecessor_candidate,
+                            )
+                            checkpoint_id = uuid4()
+                            successor_proposal_id = uuid4()
+                            predecessor_hash = composition_content_hash(state)
+                            plan, catalog_ids = await composer.plan_guided_pipeline(
+                                intent=body.correction_feedback,
+                                current_state=predecessor_candidate,
+                                guided=planning_guided,
+                                originating_message=PlannerOriginatingMessage(
+                                    session_id=str(session_id),
+                                    message_id=str(correction_message.message_id),
+                                    content=correction_message.content,
+                                    user_id=user.user_id,
+                                ),
+                                base=PresentBase(
+                                    state_id=checkpoint_id,
+                                    composition_content_hash=predecessor_hash,
+                                ),
+                                user_id=user.user_id,
+                                supersedes_draft_hash=authority.proposal.draft_hash,
+                                recorder=planner_recorder,
+                                operation_fence=fence,
+                                correction_target=correction_target,
+                            )
+                            projection = build_guided_proposal_projection(
+                                proposal_id=successor_proposal_id,
+                                proposal=plan.proposal,
+                                guided=planning_guided,
+                                catalog_plugin_ids=catalog_ids,
+                            )
+                            successor_candidate = guided_candidate_state(plan.proposal)
+                            policy_validation = catalog.validate_composition_state(successor_candidate)
+                            validation_state = (
+                                successor_candidate if policy_validation.validation.errors else policy_validation.executable_state
+                            )
+                            wire_turn = build_step_4_wire_turn(
+                                successor_candidate,
+                                proposal_projection=projection,
+                                guided=planning_guided,
+                                catalog=catalog,
+                                validation_state=validation_state,
+                                validation_summary=policy_validation.validation,
+                            )
+                            wire_turn = _finalize_guided_turn(wire_turn, shield_available=shield_available)
+                            require_guided_correction_target_changed(
+                                wire_turn["payload"],
+                                correction_target,
+                                successor_candidate,
+                            )
+                            successor_guided, _wire_record, wire_type, prepared_wire = _prepare_server_turn_occurrence(
+                                planning_guided,
+                                current_step=GuidedStep.STEP_4_WIRE,
+                                turn=wire_turn,
+                                payload_store=payload_store,
+                            )
+                            if wire_type is not TurnType.CONFIRM_WIRING:
+                                raise AuditIntegrityError("guided correction did not produce a wire-review turn")
+                            successor_guided = _replace(
+                                successor_guided,
+                                active_proposal=GuidedProposalRef(
+                                    proposal_id=successor_proposal_id,
+                                    draft_hash=plan.proposal.draft_hash,
+                                    base=plan.proposal.base,
+                                    reviewed_anchor_hash=plan.proposal.reviewed_anchor_hash,
+                                    covered_deferred_intent_ids=plan.proposal.covered_deferred_intent_ids,
+                                    creation_event_schema="pipeline_proposal_created.v1",
+                                    supersedes_proposal_id=authority.row.id,
+                                    supersedes_draft_hash=authority.proposal.draft_hash,
+                                ),
+                            )
+                            successor_state = _replace(state, guided_session=successor_guided)
+                            state_dict = successor_state.to_dict()
+                            is_valid, validation_errors = _guided_persisted_validity(successor_state, catalog=catalog)
+                            stage_state = CompositionStateData(
+                                sources=state_dict["sources"],
+                                nodes=state_dict["nodes"],
+                                edges=state_dict["edges"],
+                                outputs=state_dict["outputs"],
+                                metadata_=state_dict["metadata"],
+                                is_valid=is_valid,
+                                validation_errors=validation_errors,
+                                composer_meta={"guided_session": successor_guided.to_dict()},
+                            )
+                            emit_turn_answered(
+                                recorder,
+                                step=GuidedStep.STEP_4_WIRE,
+                                turn_type=TurnType.CONFIRM_WIRING,
+                                response_hash=prepared_response.payload_id,
+                                response_payload_id=prepared_response.payload_id,
+                                control_signal=None,
+                                composition_version=state.version,
+                                actor=user.user_id,
+                            )
+                            emit_turn_emitted(
+                                recorder,
+                                step=GuidedStep.STEP_4_WIRE,
+                                turn_type=TurnType.CONFIRM_WIRING,
+                                payload_hash=prepared_wire.payload_id,
+                                payload_payload_id=prepared_wire.payload_id,
+                                emitter="server",
+                                composition_version=state.version,
+                                actor=user.user_id,
+                            )
+                            stage_response = GuidedResponseDescriptor(
+                                kind="guided_respond",
+                                next_turn=GuidedReplayTurn(
+                                    turn_type=TurnType.CONFIRM_WIRING,
+                                    step_index=3,
+                                    payload_id=prepared_wire.payload_id,
+                                ),
+                                assistant_turn_seq=None,
+                            )
+                            stage_settlement = await _await_guided_atomic_settlement(
+                                service.stage_guided_pipeline_proposal(
+                                    GuidedPipelineProposalStageCommand(
+                                        fence=fence,
+                                        expected_current_state_id=state_record.id,
+                                        expected_current_state_version=state_record.version,
+                                        expected_current_content_hash=predecessor_hash,
+                                        checkpoint_state_id=checkpoint_id,
+                                        proposal_id=successor_proposal_id,
+                                        state=stage_state,
+                                        plan=plan,
+                                        summary=PROPOSAL_SUMMARY_TEMPLATE,
+                                        rationale=PROPOSAL_RATIONALE_TEMPLATE,
+                                        affects=("pipeline",),
+                                        arguments_redacted_json=redact_tool_call_arguments(
+                                            "set_pipeline",
+                                            deep_thaw(plan.proposal.pipeline),
+                                            telemetry=NoopRedactionTelemetry(),
+                                        ),
+                                        catalog_plugin_ids=catalog_ids,
+                                        proposal_projection=projection,
+                                        actor="composer_route",
+                                        user_message_id=correction_message.message_id,
+                                        user_message_content_hash=_message_content_hash(correction_message.content),
+                                        originating_message=correction_message,
+                                        supersedes_proposal_id=authority.row.id,
+                                        response=stage_response,
+                                        payloads=(prepared_response, prepared_wire),
+                                        audit_evidence=GuidedAuditEvidence(
+                                            invocations=(*planner_recorder.invocations, *recorder.invocations),
+                                            llm_calls=planner_recorder.llm_calls,
+                                        ),
+                                    ),
+                                    payload_store=payload_store,
+                                )
+                            )
+                            return _response_from_record(stage_settlement.result_state)
+                        if body.chosen != ["confirm_wiring"]:
+                            raise AuditIntegrityError("guided wire action changed after reservation")
+                        if type(authority.proposal.base) is not PresentBase:
+                            raise AuditIntegrityError("guided wire confirmation requires one present proposal base")
+                        base_record = await service.get_state_in_session(authority.proposal.base.state_id, session_id)
+                        base_state = _state_from_record(base_record)
+                        if (
+                            composition_content_hash(base_state) != authority.proposal.base.composition_content_hash
+                            or composition_content_hash(state) != authority.proposal.base.composition_content_hash
+                        ):
+                            raise AuditIntegrityError("guided wire confirmation base content changed")
+
+                        cancellation_state = _DeferredCancellationState()
+                        recovery, _ = await _await_with_deferred_cancellation(
+                            service.admit_guided_pipeline_confirmation(
+                                GuidedPipelineConfirmationAdmissionCommand(
+                                    fence=fence,
+                                    expected_current_state_id=state_record.id,
+                                    expected_current_state_version=state_record.version,
+                                    proposal_id=authority.row.id,
+                                    draft_hash=authority.proposal.draft_hash,
+                                    reviewed_facts=reviewed_facts,
+                                )
+                            ),
+                            state=cancellation_state,
+                        )
+
+                        user_message_content: str | None = None
+                        if authority.row.user_message_id is not None:
+                            messages, _ = await _await_with_deferred_cancellation(
+                                service.get_messages(session_id, limit=None),
+                                state=cancellation_state,
+                            )
+                            matches = [message for message in messages if message.id == authority.row.user_message_id]
+                            if len(matches) != 1 or matches[0].role != "user":
+                                raise AuditIntegrityError("guided proposal user-message lineage is missing")
+                            user_message_content = matches[0].content
+                        dispatch_recorder = BufferingRecorder()
+                        try:
+                            prepared, _ = await _await_with_deferred_cancellation(
+                                prepare_pipeline_proposal_commit(
+                                    authority=authority,
+                                    reviewed_facts=reviewed_facts,
+                                    current_state=base_state,
+                                    current_state_id=base_record.id,
+                                    policy_catalog=catalog,
+                                    plugin_snapshot=plugin_snapshot,
+                                    config=PipelineCommitConfig(
+                                        data_dir=str(request.app.state.settings.data_dir),
+                                        session_engine=request.app.state.session_engine,
+                                        secret_service=request.app.state.scoped_secret_resolver,
+                                        user_id=user.user_id,
+                                        user_message_content=user_message_content,
+                                        max_blob_storage_per_session_bytes=(request.app.state.settings.max_blob_storage_per_session_bytes),
+                                        runtime_preflight=None,
+                                        timeout_seconds=request.app.state.settings.composer_timeout_seconds,
+                                    ),
+                                    recorder=dispatch_recorder,
+                                    actor=f"user:{user.user_id}",
+                                    settlement_surface="guided",
+                                    recovery_dispatch=recovery.binding if recovery is not None else None,
+                                    recovery_executor_content_hash=(recovery.executor_content_hash if recovery is not None else None),
+                                ),
+                                state=cancellation_state,
+                            )
+                        except BaseException:
+                            for invocation in dispatch_recorder.invocations:
+                                planner_recorder.record(invocation)
+                            raise
+                        if type(prepared) is PreparedPipelineCommit:
+                            try:
+                                recovery, _ = await _await_with_deferred_cancellation(
+                                    service.record_guided_pipeline_dispatch(
+                                        GuidedPipelineDispatchRecordCommand(
+                                            fence=fence,
+                                            expected_current_state_id=state_record.id,
+                                            expected_current_state_version=state_record.version,
+                                            proposal_id=authority.row.id,
+                                            draft_hash=authority.proposal.draft_hash,
+                                            reviewed_facts=reviewed_facts,
+                                            invocation=prepared.invocation,
+                                        )
+                                    ),
+                                    state=cancellation_state,
+                                )
+                            except BaseException:
+                                for invocation in dispatch_recorder.invocations:
+                                    planner_recorder.record(invocation)
+                                raise
+                        elif type(prepared) is not RecoveredPipelineCommit:
+                            raise AuditIntegrityError("guided wire confirmation produced an unsupported commit preparation")
+                        if (
+                            recovery is None
+                            or recovery.binding.tool_call_id != prepared.dispatch.tool_call_id
+                            or recovery.executor_content_hash != prepared.executor_content_hash
+                        ):
+                            raise AuditIntegrityError("guided wire confirmation lost its durable dispatch binding")
+
+                        remaining = verified_remaining_deferred_intents(
+                            guided=guided,
+                            proposal=authority.proposal,
+                        )
+                        response_payload = {
+                            "action": "confirm_wiring",
+                            "proposal_id": str(authority.row.id),
+                            "draft_hash": authority.proposal.draft_hash,
+                        }
+                        prepared_response = prepare_guided_json_payload(
+                            payload_store,
+                            purpose="turn_response",
+                            payload=response_payload,
+                        )
+                        answered = _replace(
+                            guided.history[-1],
+                            response_hash=prepared_response.payload_id,
+                            summary="Guided pipeline wiring confirmed.",
+                        )
+                        from elspeth.web.composer.guided.planning import guided_candidate_state as confirmed_candidate_state
+
+                        candidate = confirmed_candidate_state(authority.proposal)
+                        completed_guided = _replace(
+                            guided,
+                            history=(*guided.history[:-1], answered),
+                            deferred_intents=remaining,
+                            active_proposal=None,
+                            active_edit_target=None,
+                            terminal=TerminalState(
+                                kind=TerminalKind.COMPLETED,
+                                reason=None,
+                                pipeline_yaml=generate_public_yaml(candidate),
+                            ),
+                        )
+                        accepted_state = _replace(prepared.result.updated_state, guided_session=completed_guided)
+                        emit_turn_answered(
+                            recorder,
+                            step=GuidedStep.STEP_4_WIRE,
+                            turn_type=TurnType.CONFIRM_WIRING,
+                            response_hash=prepared_response.payload_id,
+                            response_payload_id=prepared_response.payload_id,
+                            control_signal=None,
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                        from .._helpers import _state_data_from_composer_state
+
+                        (state_data, _validation), _ = await _await_with_deferred_cancellation(
+                            _state_data_from_composer_state(
+                                accepted_state,
+                                settings=request.app.state.settings,
+                                secret_service=request.app.state.scoped_secret_resolver,
+                                user_id=user.user_id,
+                                session_id=session_id,
+                                plugin_snapshot=plugin_snapshot,
+                                profile_registry=request.app.state.operator_profile_registry,
+                                catalog=request.app.state.catalog_service,
+                                runtime_preflight=prepared.result.runtime_preflight,
+                                preflight_exception_policy="raise",
+                                initial_version=state.version,
+                                telemetry_source="convergence",
+                                composer_meta={"guided_session": completed_guided.to_dict()},
+                            ),
+                            state=cancellation_state,
+                        )
+                        accepted, _ = await _await_with_deferred_cancellation(
+                            service.accept_guided_pipeline_proposal(
+                                GuidedPipelineProposalAcceptCommand(
+                                    fence=fence,
+                                    expected_current_state_id=state_record.id,
+                                    expected_current_state_version=state_record.version,
+                                    proposal_id=authority.row.id,
+                                    draft_hash=authority.proposal.draft_hash,
+                                    reviewed_facts=reviewed_facts,
+                                    state=state_data,
+                                    candidate_content_hash=prepared.candidate_content_hash,
+                                    executor_content_hash=prepared.executor_content_hash,
+                                    dispatch=recovery.binding,
+                                    actor="composer_route",
+                                    response=GuidedResponseDescriptor(
+                                        kind="guided_respond",
+                                        next_turn=None,
+                                        assistant_turn_seq=None,
+                                    ),
+                                    payloads=(prepared_response,),
+                                    audit_evidence=GuidedAuditEvidence(invocations=recorder.invocations),
+                                ),
+                                payload_store=payload_store,
+                            ),
+                            state=cancellation_state,
+                        )
+                        if cancellation_state.requested:
+                            cancellation = asyncio.CancelledError()
+                            cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_COMPLETED] = True
+                            raise cancellation
                         return _response_from_record(accepted.result_state)
                     else:
                         occurrence_was_prospective = not (guided.history and guided.history[-1].response_hash is None)
@@ -3190,11 +3656,13 @@ async def post_guided_respond(
                                             telemetry=NoopRedactionTelemetry(),
                                         ),
                                         catalog_plugin_ids=catalog_ids,
+                                        proposal_projection=projection,
                                         actor="composer_route",
                                         user_message_id=root_message.id if root_message is not None else None,
                                         user_message_content_hash=(
                                             _message_content_hash(root_message.content) if root_message is not None else None
                                         ),
+                                        originating_message=None,
                                         supersedes_proposal_id=None,
                                         response=stage_response,
                                         payloads=tuple(prepared_payloads),

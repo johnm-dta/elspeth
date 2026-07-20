@@ -831,7 +831,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
       },
     });
     const action: GuidedRespondAction = {
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -901,7 +901,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     await useSessionStore.getState().respondGuided({
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -941,7 +941,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     await useSessionStore.getState().respondGuided({
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -980,7 +980,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     const pending = useSessionStore.getState().respondGuided({
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -1038,7 +1038,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     await useSessionStore.getState().respondGuided({
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -1083,7 +1083,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
       },
     });
     const action: GuidedRespondAction = {
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: PROPOSAL_ID,
@@ -1098,7 +1098,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
       proposal_id: PROPOSAL_ID,
       draft_hash: PROPOSAL_HASH,
       retryable: true,
-      retry_action: { kind: "accept" },
+      retry_action: { kind: "review_wiring" },
     });
     await useSessionStore.getState().respondGuided(action);
 
@@ -1177,7 +1177,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     });
 
     await useSessionStore.getState().respondGuided({
-      chosen: ["accept"],
+      chosen: ["review_wiring"],
       edited_values: null,
       custom_inputs: null,
       proposal_id: "00000000-0000-4000-8000-000000000501",

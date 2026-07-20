@@ -118,7 +118,6 @@ class TestTurnResponse:
     def test_control_signal_values(self) -> None:
         assert {s.value for s in ControlSignal} == {
             "exit_to_freeform",
-            "request_advisor",
             "reject",
             "back",
             "passthrough",
@@ -508,48 +507,56 @@ class TestPayloadValidation:
         payload = {
             "proposal_id": "00000000-0000-4000-8000-000000000001",
             "draft_hash": "d" * 64,
-            "topology": {"sources": {}, "nodes": [], "outputs": []},
-            "edge_contracts": [],
+            "sources": [],
+            "nodes": [],
+            "outputs": [],
+            "connections": [],
             "semantic_contracts": [],
             "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
         }
         assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
     def test_confirm_wiring_accepts_queue_node_type_generically(self) -> None:
-        # _WireNodeTopo.node_type is a generic str transport field, not the
+        # _WireNodeReview.node_type is a generic str transport field, not the
         # closed composition vocabulary, so a queue node validates without any
         # queue-specific schema branch (elspeth-a5b86149d4 / elspeth-6421ffa028).
         payload = {
             "proposal_id": "00000000-0000-4000-8000-000000000001",
             "draft_hash": "d" * 64,
-            "topology": {
-                "sources": {},
-                "nodes": [
-                    {
-                        "id": "inbound",
-                        "node_type": "queue",
-                        "plugin": None,
-                        "input": "inbound",
-                        "on_success": None,
-                        "on_error": None,
-                        "routes": None,
-                        "fork_to": None,
-                        "branches": None,
-                    }
-                ],
-                "outputs": [],
-            },
-            "edge_contracts": [],
+            "sources": [],
+            "nodes": [
+                {
+                    "stable_id": "00000000-0000-4000-8000-000000000002",
+                    "label": "node-1",
+                    "node_type": "queue",
+                    "plugin": None,
+                    "behavior": {"kind": "queue"},
+                    "required_fields": [],
+                    "guaranteed_fields": [],
+                    "row_cardinality": {
+                        "input": "many_producers",
+                        "output": "zero_or_many",
+                        "expected_output_count": None,
+                    },
+                    "structured_output_fields": [],
+                }
+            ],
+            "outputs": [],
+            "connections": [],
             "semantic_contracts": [],
             "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
         }
         assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
     def test_confirm_wiring_payload_missing_key_rejected(self) -> None:
-        err = validate_payload(TurnType.CONFIRM_WIRING, {"topology": {}})
+        err = validate_payload(TurnType.CONFIRM_WIRING, {})
         assert err is not None
         assert "confirm_wiring" in err
-        assert "edge_contracts" in err
+        assert "connections" in err
         assert "semantic_contracts" in err
         assert "warnings" in err
 
@@ -558,10 +565,14 @@ class TestPayloadValidation:
         payload = {
             "proposal_id": "00000000-0000-4000-8000-000000000001",
             "draft_hash": "d" * 64,
-            "topology": {"sources": {}, "nodes": [], "outputs": []},
-            "edge_contracts": [],
+            "sources": [],
+            "nodes": [],
+            "outputs": [],
+            "connections": [],
             "semantic_contracts": [],
             "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
         }
         del payload[missing]
 

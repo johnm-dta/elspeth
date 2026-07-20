@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+import structlog
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
@@ -62,7 +63,8 @@ from elspeth.web.sessions.models import (
     sessions_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
-from elspeth.web.sessions.telemetry import _FakeCounter
+from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -2381,7 +2383,7 @@ class TestCopyBlobsForFork:
     async def _copy(cls, service: BlobServiceImpl, source_session_id, target_session_id):
         if type(source_session_id) is UUID and type(target_session_id) is UUID and source_session_id != target_session_id:
             plan = await cls._plan(service, source_session_id, target_session_id)
-            write_fence = cls._authorize_copy(service, source_session_id, target_session_id, plan)
+            write_fence = await cls._authorize_copy(service, source_session_id, target_session_id, plan)
         else:
             plan = ()
             write_fence = object()
@@ -2394,7 +2396,7 @@ class TestCopyBlobsForFork:
         )
 
     @staticmethod
-    def _authorize_copy(
+    async def _authorize_copy(
         service: BlobServiceImpl,
         source_session_id: UUID,
         target_session_id: UUID,
@@ -2403,7 +2405,7 @@ class TestCopyBlobsForFork:
         operation_id = f"test-fork-{target_session_id}"
         lease_token = f"test-lease-{target_session_id}"
         now = datetime.now(UTC)
-        with service._engine.begin() as conn:
+        with service._engine.connect() as conn:
             if conn.execute(select(sessions_table.c.id).where(sessions_table.c.id == str(target_session_id))).one_or_none() is None:
                 return BlobForkWriteFence(
                     source_session_id=source_session_id,
@@ -2412,13 +2414,44 @@ class TestCopyBlobsForFork:
                     lease_token=lease_token,
                     attempt=1,
                 )
-            conn.execute(sessions_table.update().where(sessions_table.c.id == str(target_session_id)).values(archived_at=now))
             operation = conn.execute(
                 select(guided_operations_table.c.operation_id).where(
                     guided_operations_table.c.session_id == str(source_session_id),
                     guided_operations_table.c.operation_id == operation_id,
                 )
             ).one_or_none()
+        if operation is None:
+            session_service = SessionServiceImpl(
+                service._engine,
+                telemetry=build_sessions_telemetry(),
+                log=structlog.get_logger("test.blob-fork-custody"),
+            )
+            await session_service.add_message(
+                target_session_id,
+                "audit",
+                json.dumps(
+                    {
+                        "schema": "session-fork-blob-plan.v1",
+                        "source_session_id": str(source_session_id),
+                        "child_session_id": str(target_session_id),
+                        "operation_id": operation_id,
+                        "source_blobs": [
+                            {
+                                "source_blob_id": str(entry.source_blob_id),
+                                "target_blob_id": str(entry.target_blob_id),
+                                "content_hash": entry.content_hash,
+                                "size_bytes": entry.size_bytes,
+                            }
+                            for entry in plan
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                writer_principal="session_fork",
+            )
+        with service._engine.begin() as conn:
+            conn.execute(sessions_table.update().where(sessions_table.c.id == str(target_session_id)).values(archived_at=now))
             if operation is None:
                 conn.execute(
                     guided_operations_table.insert().values(
@@ -2433,35 +2466,6 @@ class TestCopyBlobsForFork:
                         result_session_id=str(target_session_id),
                         created_at=now,
                         updated_at=now,
-                    )
-                )
-                conn.execute(
-                    chat_messages_table.insert().values(
-                        id=str(uuid4()),
-                        session_id=str(target_session_id),
-                        role="audit",
-                        content=json.dumps(
-                            {
-                                "schema": "session-fork-blob-plan.v1",
-                                "source_session_id": str(source_session_id),
-                                "child_session_id": str(target_session_id),
-                                "operation_id": operation_id,
-                                "source_blobs": [
-                                    {
-                                        "source_blob_id": str(entry.source_blob_id),
-                                        "target_blob_id": str(entry.target_blob_id),
-                                        "content_hash": entry.content_hash,
-                                        "size_bytes": entry.size_bytes,
-                                    }
-                                    for entry in plan
-                                ],
-                            },
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                        sequence_no=1,
-                        writer_principal="session_fork",
-                        created_at=now,
                     )
                 )
         return BlobForkWriteFence(
@@ -2624,7 +2628,7 @@ class TestCopyBlobsForFork:
                 session_id,
                 unrelated_target,
                 plan,
-                self._authorize_copy(blob_service, session_id, unrelated_target, plan),
+                await self._authorize_copy(blob_service, session_id, unrelated_target, plan),
                 checkpoint=self._checkpoint,
             )
 
@@ -2728,7 +2732,7 @@ class TestCopyBlobsForFork:
                 session_id,
                 target_session_id,
                 plan,
-                self._authorize_copy(blob_service, session_id, target_session_id, plan),
+                await self._authorize_copy(blob_service, session_id, target_session_id, plan),
                 checkpoint=_lost_fence,
             )
         assert source.id not in {blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)}
@@ -2748,7 +2752,7 @@ class TestCopyBlobsForFork:
             session_id,
             target_session_id,
             plan,
-            self._authorize_copy(blob_service, session_id, target_session_id, plan),
+            await self._authorize_copy(blob_service, session_id, target_session_id, plan),
             checkpoint=self._checkpoint,
         )
 

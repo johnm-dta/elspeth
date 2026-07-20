@@ -24,6 +24,7 @@ from ._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Query,
     Request,
     SendMessageRequest,
@@ -41,6 +42,7 @@ from ._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
@@ -556,6 +558,38 @@ def register_message_routes(router: APIRouter) -> None:
                         catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+                except PipelinePlannerError as exc:
+                    # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                    # PipelinePlannerError is a bare RuntimeError subclass, so it is
+                    # NOT caught by the generic ComposerServiceError arm below; without
+                    # this clause it escaped as an unhandled 500 with no "failed"
+                    # progress event and no closed failure-disposition record. The
+                    # guided-full route translates the same exception via
+                    # fail_guided_operation_with_audit; _handle_planner_failure is the
+                    # freeform mirror (persisting one durable, redacted disposition
+                    # row). The planner's LLM-call audit evidence is already durable
+                    # (llm_calls_durable), so _handle_planner_failure MUST NOT — and
+                    # does not — persist it again.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=str(user_msg.id),
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The composer could not build a pipeline for this request.",
+                            evidence=("The composer model did not return a usable pipeline plan.",),
+                            likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                            reason="provider_unavailable",
+                        ),
+                    )
+                    status_code, planner_response_body = await _handle_planner_failure(
+                        exc,
+                        service,
+                        session.id,
+                        compose_base_state_id,
+                    )
+                    raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
                 except ComposerServiceError as exc:
                     await _publish_progress(
                         progress_registry,

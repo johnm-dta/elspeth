@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as _replace
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 from uuid import UUID, uuid4
 from weakref import WeakValueDictionary
 
@@ -93,6 +93,7 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.pipeline_commit import PipelineDispatchAuditBinding
+from elspeth.web.composer.pipeline_planner import PipelinePlannerError
 from elspeth.web.composer.progress import (
     ComposerProgressRegistry,
     ComposerProgressSnapshot,
@@ -1813,6 +1814,112 @@ async def _failed_turn_response_body(
     }
 
 
+# Freeform planner-failure taxonomy. Kept in lockstep with the guided path's
+# ``PipelinePlannerError`` sub-mapping in
+# ``routes/composer/guided_plan.py::_guided_full_failure_code`` and the
+# ``_SAFE_FAILURES`` status table in ``routes/guided_operations.py`` so a given
+# ``PipelinePlannerError.code`` yields the same closed failure code and HTTP
+# status on both surfaces. The freeform surface has no ``guided_operations``
+# lease to terminalize, so ``_handle_planner_failure`` writes an equivalent
+# durable disposition audit row instead of calling
+# ``fail_guided_operation_with_audit``.
+# Byte-identical to the guided set — do NOT add codes here without adding them
+# to guided's ``_guided_full_failure_code`` in the same change, or the two
+# surfaces return different closed codes (and HTTP statuses) for the same
+# ``PipelinePlannerError.code``, which is exactly the divergence Task 0 exists to
+# prevent. ``COST_CAP_EXCEEDED`` and ``REQUEST_BYTES_EXHAUSTED`` are deliberately
+# absent (they fall through to ``operation_failed`` on both surfaces), matching
+# guided.
+_FREEFORM_PLANNER_INVALID_PROVIDER_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "COMPLETION_TOKENS_EXCEEDED",
+        "COMPOSITION_EXHAUSTED",
+        "COST_UNAVAILABLE",
+        "DISCOVERY_CYCLE",
+        "DISCOVERY_EXHAUSTED",
+        "DISCOVERY_ONLY",
+        "MALFORMED_RESPONSE",
+        "PROVIDER_CALLS_EXHAUSTED",
+        "REPAIR_EXHAUSTED",
+        "TOOL_CALLS_EXHAUSTED",
+        "VALIDATION_FAILED",
+    }
+)
+# ``failure_code -> (http_status, safe static detail)``. Mirrors the subset of
+# ``_SAFE_FAILURES`` the freeform planner can reach; the detail text is
+# provider-safe (no exception message, no provider content).
+_FREEFORM_PLANNER_FAILURE_HTTP: Final[dict[str, tuple[int, str]]] = {
+    "provider_timeout": (504, "The composer model timed out before producing a pipeline. Retry the request."),
+    "provider_unavailable": (503, "The composer model is unavailable. Retry the request."),
+    "invalid_provider_response": (502, "The composer model returned an unusable pipeline plan. Retry the request."),
+    "operation_failed": (500, "The composer could not build a pipeline for this request."),
+}
+
+
+def _freeform_planner_failure_code(exc: PipelinePlannerError) -> str:
+    """Map a ``PipelinePlannerError.code`` to a closed freeform failure code.
+
+    Byte-parity with the ``isinstance(exc, PipelinePlannerError)`` branch of the
+    guided ``_guided_full_failure_code``; kept as a separate function so the
+    guided path stays untouched.
+    """
+    if exc.code == "TIMEOUT":
+        return "provider_timeout"
+    if exc.code == "PROVIDER_ERROR":
+        return "provider_unavailable"
+    if exc.code in _FREEFORM_PLANNER_INVALID_PROVIDER_CODES:
+        return "invalid_provider_response"
+    return "operation_failed"
+
+
+async def _handle_planner_failure(
+    exc: PipelinePlannerError,
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    llm_composition_state_id: UUID | None,
+) -> tuple[int, dict[str, object]]:
+    """Translate a freeform ``PipelinePlannerError`` into a safe HTTP outcome.
+
+    Mirrors the guided path's ``fail_guided_operation_with_audit``
+    terminalization on the freeform surface, which has no guided-operation lease
+    to close: persists one durable, redacted terminal failure-disposition audit
+    row carrying the mapped closed failure code, then returns the
+    ``(status, body)`` the route raises. Shared by ``send_message`` and
+    ``recompose`` so the two freeform routes cannot drift on planner-failure UX.
+
+    The planner's LLM-call audit evidence is already durable — ``plan_pipeline``
+    stamps it onto the escaping exception via ``attach_llm_calls`` and
+    ``_plan_and_stage_empty_pipeline`` persists it before re-raise (which also
+    sets ``llm_calls_durable``) — so this MUST NOT re-persist it. The
+    disposition row is a distinct ``_kind`` and carries only the closed code, no
+    provider content, usage, or model metadata.
+    """
+    failure_code = _freeform_planner_failure_code(exc)
+    status_code, detail = _FREEFORM_PLANNER_FAILURE_HTTP[failure_code]
+    envelope: dict[str, object] = {
+        "_kind": "planner_failure_disposition",
+        "surface": "freeform",
+        "failure_code": failure_code,
+    }
+    # role="audit" keeps this out of the user-visible conversation channel
+    # (``_is_composer_audit_tool_message`` excludes every audit row) exactly as
+    # the per-LLM-call audit sidecars are; the distinct ``_kind`` keeps it out
+    # of the ``llm_call_audit`` opt-in view as well.
+    await service.add_message(
+        session_id,
+        "audit",
+        json.dumps(envelope),
+        tool_calls=[envelope],
+        composition_state_id=llm_composition_state_id,
+        writer_principal="compose_loop",
+    )
+    return status_code, {
+        "error_type": "composer_planner_failure",
+        "failure_code": failure_code,
+        "detail": detail,
+    }
+
+
 async def _handle_convergence_error(
     exc: ComposerConvergenceError,
     service: SessionServiceProtocol,
@@ -2536,6 +2643,7 @@ __all__ = [
     "MessageWithStateResponse",
     "OptOutSummaryResponse",
     "PipelineMetadata",
+    "PipelinePlannerError",
     "PluginConfigError",
     "PluginNotFoundError",
     "ProposalEventRecord",
@@ -2606,6 +2714,7 @@ __all__ = [
     "_get_composer_progress_registry",
     "_get_session_compose_lock_registry",
     "_handle_convergence_error",
+    "_handle_planner_failure",
     "_handle_plugin_crash",
     "_handle_runtime_preflight_failure",
     "_initial_composition_state_with_guided_session",

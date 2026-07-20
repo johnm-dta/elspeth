@@ -19,6 +19,7 @@ from .._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Request,
     SessionServiceProtocol,
     UserIdentity,
@@ -31,6 +32,7 @@ from .._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
@@ -373,6 +375,34 @@ async def recompose(
                     catalog=request.app.state.catalog_service,
                 )
                 raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+            except PipelinePlannerError as exc:
+                # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                # Mirror of the send_message handler — recompose is a retried
+                # freeform compose, so it must translate PipelinePlannerError
+                # identically or the two routes drift on failure UX. See the
+                # send_message clause for the full rationale; _handle_planner_failure
+                # writes the durable disposition row and MUST NOT re-persist the
+                # already-durable planner LLM-call audit evidence.
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not build a pipeline for this retry.",
+                        evidence=("The composer model did not return a usable pipeline plan.",),
+                        likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                        reason="provider_unavailable",
+                    ),
+                )
+                status_code, planner_response_body = await _handle_planner_failure(
+                    exc,
+                    service,
+                    session.id,
+                    pre_send_state_id,
+                )
+                raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
             except ComposerServiceError as exc:
                 await _publish_progress(
                     progress_registry,

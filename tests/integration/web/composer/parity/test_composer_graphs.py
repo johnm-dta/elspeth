@@ -270,6 +270,53 @@ def test_failure_policy_route_vs_discard_is_detected() -> None:
         assert_isomorphic(left, right)
 
 
+@pytest.mark.parametrize(
+    "node_index",
+    [
+        pytest.param(0, id="gate-on-error"),
+        pytest.param(1, id="coalesce-on-error"),
+    ],
+)
+def test_gate_and_coalesce_failure_policy_route_vs_discard_is_detected(node_index: int) -> None:
+    # A gate/coalesce whose on_error routes to a real sink is not the same graph
+    # as one that discards. validate() permits a non-None on_error on gate and
+    # coalesce (only queue forbids it), so the terminal-vs-routed distinction is
+    # a PRESERVE attribute for every node type — not just transform/aggregation.
+    #
+    # The ``errors`` output is present on BOTH sides so the *only* structural
+    # difference is the node's on_error target (routed to the errors sink vs
+    # discarded). That makes the test non-vacuous: a comparator that dropped
+    # gate/coalesce on_error (the pre-fix bug) would see identical graphs and
+    # this assertion would fail — the raise proves on_error is preserved, not
+    # merely that an output was removed.
+    left = _fork_state()
+    left["outputs"].append({"name": "errors", "plugin": "json", "options": {"path": "errors.json"}, "on_write_failure": "discard"})
+    left["nodes"][node_index]["on_error"] = "errors"
+    right = copy.deepcopy(left)
+    right["nodes"][node_index]["on_error"] = "discard"
+    with pytest.raises(IsomorphismError):
+        assert_isomorphic(left, right)
+
+
+def test_absent_and_none_on_error_are_equivalent() -> None:
+    """An absent on_error is the identical terminal policy as an explicit None.
+
+    The guided-staged stage protocol persists the full pydantic ``model_dump``
+    (``on_error`` explicit, ``None`` for a gate/coalesce), while ``set_pipeline``
+    persists authored-minimal options (``on_error`` omitted entirely). Both are
+    the same "no error routing" terminal, so now that on_error is compared for
+    every non-queue node it must normalize absent == None — otherwise the
+    guided-staged column would false-FAIL against the freeform/guided-full
+    columns on the structural gate/coalesce nodes.
+    """
+    left = _fork_state()  # gate + coalesce carry an explicit on_error: None
+    right = copy.deepcopy(left)
+    for node in right["nodes"]:
+        if node["node_type"] in {"gate", "coalesce"}:
+            del node["on_error"]  # authored-minimal omits the key
+    assert_isomorphic(left, right)
+
+
 def test_source_validation_failure_route_vs_discard_is_detected() -> None:
     left = _error_routing_state()
     right = copy.deepcopy(left)

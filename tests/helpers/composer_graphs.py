@@ -239,7 +239,17 @@ def _build_model(state: Mapping[str, Any]) -> _Model:
         links.append((atom, "node.input", conn_atom(str(node["input"]))))
         if node.get("on_success") is not None:
             links.append((atom, "node.on_success", conn_atom(str(node["on_success"]))))
-        if "on_error" in node and node_type in {"transform", "aggregation"}:
+        if node_type != "queue":
+            # Every non-queue node carries a failure policy: validate() permits a
+            # non-None on_error on gate/coalesce (route errors to a real sink) as
+            # well as transform/aggregation, and runtime routing honours it
+            # generically — dropping gate/coalesce on_error would violate the
+            # §8.1 PRESERVE list ("every failure policy"). Queue always forbids
+            # on_error (it is None there). Emit unconditionally and normalize
+            # through ``.get`` so an absent key (set_pipeline authored-minimal)
+            # and an explicit None (guided-staged full model_dump) both collapse
+            # to the same terminal ``discard``, exactly as ``_effective_options``
+            # absorbs the explicit-default-vs-absent asymmetry for options.
             links.append((atom, "node.on_error", failure_target(node.get("on_error"))))
         routes = node.get("routes")
         if isinstance(routes, Mapping):
@@ -395,7 +405,10 @@ def canonical_graph(state: CompositionState | Mapping[str, Any]) -> CanonicalGra
         }
         if node.get("on_success") is not None:
             entry["on_success"] = tok(str(node["on_success"]))
-        if "on_error" in node and node["node_type"] in {"transform", "aggregation"}:
+        if node["node_type"] != "queue":
+            # Preserve the failure policy for every non-queue node (see
+            # ``_build_model``): ``.get`` normalizes absent (authored-minimal) and
+            # explicit None (full model_dump) to the same ``discard`` terminal.
             entry["on_error"] = failure_tok(node.get("on_error"))
         if node.get("condition") is not None:
             entry["condition"] = node["condition"]

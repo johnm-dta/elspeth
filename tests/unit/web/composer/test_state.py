@@ -3247,6 +3247,7 @@ class TestSchemaContractValidation:
                 options={
                     "schema": {"mode": "observed"},
                     "mapping": {"text": "body"},
+                    "api_key": {"secret_ref": "CONSTRUCTION_PROBE_SECRET_SENTINEL"},
                 },
             )
         )
@@ -3271,6 +3272,7 @@ class TestSchemaContractValidation:
             "Authorization: Bearer sk-SUPER-SECRET-TOKEN-123",
             "postgres://admin:hunter2@db.internal:5432/prod",  # secret-scan: allow-this-line
             "/home/appuser/.ssh/id_rsa",
+            "CONSTRUCTION_PROBE_SECRET_SENTINEL",
         )
 
         class _LeakyManager:

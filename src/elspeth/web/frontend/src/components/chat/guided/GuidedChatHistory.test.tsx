@@ -51,6 +51,8 @@ const TURN_USER: ChatTurn = {
   seq: 0,
   step: "step_1_source",
   ts_iso: "2026-05-13T12:00:00+00:00",
+  assistant_message_kind: null,
+  synthetic_failure_reason: null,
 };
 
 const TURN_ASSISTANT: ChatTurn = {
@@ -59,6 +61,8 @@ const TURN_ASSISTANT: ChatTurn = {
   seq: 1,
   step: "step_1_source",
   ts_iso: "2026-05-13T12:00:00+00:00",
+  assistant_message_kind: "assistant",
+  synthetic_failure_reason: null,
 };
 
 const TWO_TURNS: ChatTurn[] = [TURN_USER, TURN_ASSISTANT];
@@ -260,6 +264,7 @@ const TURN_SYNTHETIC_FAILURE: ChatTurn = {
   step: "step_1_source",
   ts_iso: "2026-05-13T12:00:00+00:00",
   assistant_message_kind: "synthetic_failure",
+  synthetic_failure_reason: "unavailable",
 };
 
 describe("GuidedChatHistory synthetic-failure turns", () => {
@@ -291,6 +296,19 @@ describe("GuidedChatHistory synthetic-failure turns", () => {
       "I'm unavailable right now; you can still use the wizard controls.",
     );
     expect(bubble).toHaveTextContent("Error:");
+  });
+
+  it("renders a non-applying source result as a typed synthetic failure", () => {
+    const notApplied: ChatTurn = {
+      ...TURN_SYNTHETIC_FAILURE,
+      content: "I did not apply generated source content.",
+      synthetic_failure_reason: "not_applied",
+    };
+    const { container } = render(<GuidedChatHistory chatHistory={[notApplied]} />);
+
+    expect(container.querySelector(".bubble-error")).toHaveTextContent(
+      "I did not apply generated source content.",
+    );
   });
 
   it("omits the Retry button when no onRetrySyntheticFailure handler is supplied", () => {

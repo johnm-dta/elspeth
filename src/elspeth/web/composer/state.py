@@ -47,6 +47,7 @@ from elspeth.core.config import (
     _validate_node_name_chars,
 )
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
+from elspeth.web.composer._validation_probe import prepare_validation_probe_options
 from elspeth.web.composer.guided.state_machine import GuidedSession
 
 NodeType = Literal["transform", "gate", "aggregation", "coalesce", "queue"]
@@ -580,11 +581,10 @@ def _producer_declared_field_type(
 
     try:
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-        from elspeth.web.interpretation_state import strip_authoring_options
 
         transform = get_shared_plugin_manager().create_transform(
             producer_node.plugin,
-            strip_authoring_options(deep_thaw(producer_node.options)),
+            prepare_validation_probe_options(producer_node.options),
         )
     except Exception as exc:
         if _is_static_contract_probe_exception(exc):
@@ -1409,12 +1409,11 @@ def _check_schema_contracts(
         non_raising boundary free of raises guarded by nodes-derived data.
         """
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-        from elspeth.web.interpretation_state import strip_authoring_options
 
         try:
             return get_shared_plugin_manager().create_transform(
                 plugin,
-                strip_authoring_options(deep_thaw(options)),
+                prepare_validation_probe_options(options),
             )
         except Exception as exc:
             if not _is_config_probe_exception(exc):
@@ -1465,11 +1464,10 @@ def _check_schema_contracts(
 
         try:
             from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-            from elspeth.web.interpretation_state import strip_authoring_options
 
             transform = get_shared_plugin_manager().create_transform(
                 producer_node.plugin,
-                strip_authoring_options(deep_thaw(producer_node.options)),
+                prepare_validation_probe_options(producer_node.options),
             )
             is_pass_through_instance = transform.passes_through_input
             output_schema_config = transform._output_schema_config
@@ -1654,11 +1652,10 @@ def _check_schema_contracts(
 
         try:
             from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
-            from elspeth.web.interpretation_state import strip_authoring_options
 
             transform = get_shared_plugin_manager().create_transform(
                 producer_node.plugin,
-                strip_authoring_options(deep_thaw(producer_node.options)),
+                prepare_validation_probe_options(producer_node.options),
             )
         except Exception as exc:
             if not _is_config_probe_exception(exc):

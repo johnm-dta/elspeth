@@ -537,9 +537,16 @@ def _execute_upsert_node(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
-        provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=plugin)
-        if provider_policy_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+        # Operator-profiled nodes carry their private provider config (retry
+        # budget / provider binding) in the profile, injected only at lowering;
+        # ``_prevalidate_transform_for_context`` above already validated the
+        # LOWERED executable. Running the raw provider-config policy on the
+        # authored options would false-positive on the absent private retry
+        # budget (see the fuller rationale at set_pipeline in sessions.py).
+        if "profile" not in node_options:
+            provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=plugin)
+            if provider_policy_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
         provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir, session_id=context.session_id)
         if provider_path_error is not None:
@@ -1178,9 +1185,15 @@ def _execute_patch_node_options(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
-        provider_policy_error = _validate_transform_provider_config_policy(new_options, plugin=current.plugin)
-        if provider_policy_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+        # Operator-profiled nodes carry their private provider config (retry
+        # budget / provider binding) in the profile, injected only at lowering;
+        # the prevalidation above already validated the LOWERED executable. The
+        # raw provider-config policy would false-positive on the absent private
+        # retry budget (see set_pipeline in sessions.py for the full rationale).
+        if "profile" not in new_options:
+            provider_policy_error = _validate_transform_provider_config_policy(new_options, plugin=current.plugin)
+            if provider_policy_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
         # S2: confine nested provider_config persist_directory (RAG retrieval).
         # A merge-patch can introduce an escaping path just as upsert_node can.
@@ -1319,9 +1332,15 @@ def _prepare_transform_candidate(
     prevalidation_error = _prevalidate_transform_for_context(context, plugin, review_options)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
-    provider_policy_error = _validate_transform_provider_config_policy(options, plugin=plugin)
-    if provider_policy_error is not None:
-        return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+    # Operator-profiled nodes carry their private provider config (retry budget /
+    # provider binding) in the profile, injected only at lowering; the
+    # prevalidation above already validated the LOWERED executable. The raw
+    # provider-config policy would false-positive on the absent private retry
+    # budget (see set_pipeline in sessions.py for the full rationale).
+    if "profile" not in options:
+        provider_policy_error = _validate_transform_provider_config_policy(options, plugin=plugin)
+        if provider_policy_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
     provider_path_error = _validate_transform_provider_config_path(options, context.data_dir, session_id=context.session_id)
     if provider_path_error is not None:
         return _failure_result(state, f"Node '{node_id}': {provider_path_error}")

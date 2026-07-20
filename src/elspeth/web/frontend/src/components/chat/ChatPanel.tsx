@@ -516,8 +516,6 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
     "Describe the source you have — e.g. a CSV, a store query, or pages to scrape…",
   step_2_sink:
     "Describe the output you want — the shape and fields the pipeline should produce…",
-  step_2_5_recipe_match:
-    "Describe how this recipe should change, or accept it as proposed…",
   step_3_transforms:
     "Describe what each row should become, or how to fix the proposed transforms…",
   // Names the real next action instead of circularly pointing at a possibly
@@ -548,7 +546,7 @@ interface ChatPanelProps {
    * learner steps through the normal staged flow without typing — each phase
    * gets only its stage's intent. Supplied by TutorialGuidedShell (per-stage
    * worked-example prompts; source carries the resolved synthetic URLs). Steps
-   * with no entry (recipe / wire) are confirm-only. Absent for a normal session
+   * with no entry (wire) is confirm-only. Absent for a normal session
    * (the input behaves as the editable freeform-intent box).
    */
   lockedChatPrompt?: Partial<Record<GuidedStep, string>>;
@@ -603,6 +601,7 @@ export function ChatPanel({
   // returns below decide which surface to render based on these values.
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
+  const guidedProposalReview = useSessionStore((s) => s.guidedProposalReview);
   const respondGuided = useSessionStore((s) => s.respondGuided);
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const startGuided = useSessionStore((s) => s.startGuided);
@@ -629,20 +628,7 @@ export function ChatPanel({
     (guidedSession !== null &&
       (guidedSession.chat_history.length > 0 ||
         guidedSession.history.length > 0));
-  // C-4b: once a guided session ends for a reason OTHER than the user's own
-  // "Exit to freeform" (i.e. solver_exhausted or protocol_violation — both
-  // still carry terminal.kind === "exited_to_freeform"; TerminalReason is
-  // the only field that distinguishes them), POST /guided/reenter refuses
-  // it permanently (routes/composer/guided.py's reenter guard: only
-  // user_pressed_exit is reversible). Offering the ordinary "Switch to
-  // guided" flow there used to re-fetch the same terminal state and land
-  // back in freeform with no feedback — a silent no-op. Disable the button
-  // and say why instead of letting the click do nothing.
-  const guidedSwitchDisabledReason =
-    guidedSession?.terminal?.kind === "exited_to_freeform" &&
-    guidedSession.terminal.reason !== "user_pressed_exit"
-      ? "Guided ended for this session — start a new session to use guided."
-      : undefined;
+  const guidedSwitchDisabledReason = undefined;
   // D12 / P3.6: block guided advancement while any pending user_approved
   // interpretation card remains in the store. Hook is unconditional (called at
   // the component top, not inside the conditional guided return); the empty
@@ -675,7 +661,7 @@ export function ChatPanel({
   // Messages route through the same humaniser the validation summary uses —
   // an engineer-grade contract dump must not land verbatim in the blockers
   // panel either (same error-rendering discipline).
-  const wireInvalidChainIssues = useMemo<string[]>(() => {
+  const wireValidationIssues = useMemo<string[]>(() => {
     const raw = compositionState?.validation_errors ?? [];
     if (raw.length === 0) return raw;
     const phraseFor = makePhraseFor(compositionState);
@@ -1364,7 +1350,7 @@ export function ChatPanel({
   // Keyed on step_index AND turn type. Fires when the wizard advances to a new
   // step (step_index changes) OR when a same-step build replaces the turn with a
   // different type — e.g. a `/guided/chat` Send that resolves the source turns
-  // single_select → schema_form, or step_3's null → propose_chain. The latter
+  // single_select → schema_form, or a later server-authored stage transition. The latter
   // matters now the composer is docked at the BOTTOM for every session
   // (including the tutorial): the just-built decision lands ABOVE the box the
   // user just Sent from, so we scroll it into view + focus its first control
@@ -1495,7 +1481,7 @@ export function ChatPanel({
   }
 
   // STEP_3 begins with NO proposal: the per-stage transforms prompt drives the
-  // build via /guided/chat (cold-start intent=body.message), so there is no
+  // build via /guided/start (intent=the first ordinary message), so there is no
   // server turn yet. Render the guided surface — crucially the chat box — even
   // without a next turn so the operator can describe the transforms; otherwise
   // the panel falls through to the "Preparing…" flash and the build never starts.
@@ -1528,7 +1514,7 @@ export function ChatPanel({
     // Only swap the locked box for the static "Sent" line when there is actually
     // a forward affordance to confirm below — the turn widget OR a pending
     // interpretation review. If a Send-driven step was sent but produced neither
-    // (e.g. a transient chain-solve failure at step_3 returns next_turn=null),
+    // (e.g. a transient proposal-generation failure returns next_turn=null),
     // keep the box so the learner can retry; hiding it would strand them with no
     // widget and no exit (the tutorial suppresses ExitToFreeform / opt-out).
     const tutorialStepBuilt =
@@ -1542,9 +1528,10 @@ export function ChatPanel({
     // "press Send → confirm what it built" reading order is preserved by the
     // step-advance/type focus effect, which scrolls the just-built decision
     // (above) into view after a Send.
-    // It routes plain English through `chatGuided` (/guided/chat), which applies
-    // the phase config in place; the caption is keyed on the live step via
-    // GUIDED_CHAT_PLACEHOLDERS.
+    // It routes plain English through the store's `chatGuided` action. The
+    // first ordinary message uses /guided/start to establish the durable root;
+    // later messages use /guided/chat against an existing checkpoint. The
+    // caption is keyed on the live step via GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
         // The composer docks as a plain input strip under the conversation
@@ -1634,7 +1621,7 @@ export function ChatPanel({
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
             maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
             // Tutorial: the box is locked read-only and prefilled with the
-            // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
+            // CURRENT phase's per-stage prompt (wire has none → empty,
             // confirm-only). Kept controlled (value defined) across all phases
             // to avoid controlled↔uncontrolled flips. Normal session: undefined
             // value → editable freeform-intent box.
@@ -1716,12 +1703,13 @@ export function ChatPanel({
                   hasPendingGuidedInterpretations
                 }
                 isTutorial={isTutorial}
+                proposalReviewState={guidedProposalReview}
                 wirePendingAcknowledgements={
                   hasPendingGuidedInterpretations
                     ? wirePendingAcknowledgements
                     : undefined
                 }
-                wireInvalidChainIssues={wireInvalidChainIssues}
+                wireValidationIssues={wireValidationIssues}
               />
             )}
           </div>
@@ -2331,8 +2319,7 @@ type WorkflowStepId = GuidedStep | "ready";
 const GUIDED_STEP_PURPOSES: Record<GuidedStep, string> = {
   step_1_source: "Choose the input and confirm what ELSPETH can read.",
   step_2_sink: "Choose the output shape and the fields the pipeline should produce.",
-  step_2_5_recipe_match: "Review the suggested recipe before ELSPETH builds the transforms.",
-  step_3_transforms: "Review the transform chain that turns source data into the output.",
+  step_3_transforms: "Review the transform stages that turn source data into the output.",
   step_4_wire: "Review and confirm the wiring between your pipeline steps.",
 };
 
@@ -2342,9 +2329,6 @@ const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
 }> = [
   { id: "step_1_source", label: GUIDED_STEP_LABELS.step_1_source },
   { id: "step_2_sink", label: GUIDED_STEP_LABELS.step_2_sink },
-  // step_2_5_recipe_match is a vestigial, collapsed step (the recipe-offer
-  // deviation was removed; the sink commit hops straight to transforms). It is
-  // intentionally NOT shown in the stepper.
   { id: "step_3_transforms", label: GUIDED_STEP_LABELS.step_3_transforms },
   { id: "step_4_wire", label: GUIDED_STEP_LABELS.step_4_wire },
   // "ready" is a stepper-only pseudo-step, not a GuidedStep — its label

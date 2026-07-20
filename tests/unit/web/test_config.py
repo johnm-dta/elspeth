@@ -6,6 +6,7 @@ import re
 import sys
 import types
 import typing
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,34 @@ class TestWebSettingsValidation:
         )
 
         assert settings.composer_max_tool_calls_per_turn == 16
+
+    def test_pipeline_planner_budgets_are_explicit_and_validated(self) -> None:
+        base = {
+            "composer_max_composition_turns": 15,
+            "composer_max_discovery_turns": 10,
+            "composer_timeout_seconds": 85.0,
+            "composer_rate_limit_per_minute": 10,
+            "shareable_link_signing_key": b"\x00" * 32,
+        }
+
+        settings = WebSettings(**base)
+        assert settings.composer_planner_max_provider_calls > 0
+        assert settings.composer_planner_max_request_bytes > 0
+        assert settings.composer_planner_max_completion_tokens > 0
+        assert settings.composer_planner_max_cumulative_provider_cost == Decimal("5.00")
+        assert settings.composer_planner_repair_budget == 2
+
+        for field in (
+            "composer_planner_max_provider_calls",
+            "composer_planner_max_request_bytes",
+            "composer_planner_max_completion_tokens",
+        ):
+            with pytest.raises(ValidationError):
+                WebSettings(**base, **{field: 0})
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_planner_max_cumulative_provider_cost=Decimal("-0.01"))
+        with pytest.raises(ValidationError):
+            WebSettings(**base, composer_planner_repair_budget=-1)
 
     def test_composer_max_tool_calls_per_turn_zero_rejected(self) -> None:
         with pytest.raises(ValueError):

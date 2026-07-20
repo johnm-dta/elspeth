@@ -23,6 +23,7 @@ import {
   getComposeTimeoutMs,
   resetComposeTimeoutForTests,
 } from "@/config/composer";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // App renders many heavy children (Layout, ChatPanel, …).
@@ -499,6 +500,7 @@ describe("App banner roles", () => {
 function makeState(version: number): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

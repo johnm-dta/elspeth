@@ -2,10 +2,12 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposingIndicator, formatElapsed } from "./ComposingIndicator";
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],

@@ -344,6 +344,18 @@ class _LLMProfileResolver:
                 "secret_ref": profile.credential_ref,
                 "secret_scope": profile.credential_scope,
             }
+        # Web-authored multi-query LLM nodes cannot set the sequential retry
+        # budget themselves — ``pool_size`` and ``max_capacity_retry_seconds``
+        # are private profile options rejected by the node's public schema — yet
+        # the web execution-worker safety policy (``web_llm_retry_budget_policy_error``)
+        # requires a bounded budget whenever ``queries`` is present, or the
+        # lowered config's one-hour default would monopolise a worker. The
+        # operator-profile layer supplies the web-safe default so typed
+        # multi-query nodes stay both committable and run-safe.
+        if executable.get("queries") is not None and "pool_size" not in executable and "max_capacity_retry_seconds" not in executable:
+            from elspeth.web.provider_config_policy import WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS
+
+            executable["max_capacity_retry_seconds"] = WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS
         audit_safe = {"profile": alias, **safe_options}
         return LoweredPluginConfig(
             executable_options=MappingProxyType(executable),

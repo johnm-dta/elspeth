@@ -20,8 +20,8 @@ export type TurnType =
   | "single_select"
   | "multi_select_with_custom"
   | "schema_form"
-  | "propose_chain"
-  | "recipe_offer"
+  | "review_components"
+  | "propose_pipeline"
   | "confirm_wiring";
 
 /**
@@ -36,7 +36,6 @@ export type TurnType =
  */
 export type ControlSignal =
   | "exit_to_freeform"
-  | "request_advisor"
   | "reject"
   | "back"
   | "passthrough";
@@ -44,16 +43,12 @@ export type ControlSignal =
 export type GuidedStep =
   | "step_1_source"
   | "step_2_sink"
-  | "step_2_5_recipe_match"
   | "step_3_transforms"
   | "step_4_wire";
 
 export type TerminalKind = "completed" | "exited_to_freeform";
 
-export type TerminalReason =
-  | "user_pressed_exit"
-  | "protocol_violation"
-  | "solver_exhausted";
+export type TerminalReason = "user_pressed_exit";
 
 // ── Domain shapes ─────────────────────────────────────────────────────────────
 
@@ -68,12 +63,18 @@ export interface TurnRecord {
   emitter: "server" | "llm";
 }
 
-/** Wire: TerminalStateResponse (schemas.py:223-228). */
-export interface TerminalState {
-  kind: TerminalKind;
-  reason: TerminalReason | null;
-  pipeline_yaml: string | null;
-}
+/** Wire: TerminalStateResponse with its runtime cross-field invariant. */
+export type TerminalState =
+  | {
+      kind: "completed";
+      reason: null;
+      pipeline_yaml: string;
+    }
+  | {
+      kind: "exited_to_freeform";
+      reason: "user_pressed_exit";
+      pipeline_yaml: null;
+    };
 
 /**
  * Wire: ChatTurnResponse (schemas.py — Phase A slice 5).  Mirrors a single
@@ -88,15 +89,9 @@ export interface TerminalState {
  * failure could become the "Current decision" headline (guidedRationale.ts)
  * or render with the normal "ELSPETH said:" bubble treatment
  * (GuidedChatHistory.tsx). Only meaningful on `role: "assistant"` entries.
- * The backend always emits this key (ChatTurnResponse declares it required
- * with a `| null` domain — schemas.py), so on the wire the value is one of
- * "assistant", "synthetic_failure", or null; the key is never absent. null
- * is what a user turn, and any turn persisted before this field existed,
- * carries. Treat null (and, defensively, an absent key on a client-built
- * turn) as a normal assistant turn — this is documented legacy/user
- * behaviour, not a fabricated default. Detect a real failure with
- * `=== "synthetic_failure"`, never with an absence/`in` check (the wire
- * never omits the key, so an absence check would never fire).
+ * The backend always emits both closed discriminator keys. User turns carry
+ * null for both; real assistant turns carry `"assistant"` and a null reason;
+ * synthetic failures carry their kind and an allowlisted non-null reason.
  */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -104,7 +99,8 @@ export interface ChatTurn {
   seq: number;
   step: GuidedStep;
   ts_iso: string;
-  assistant_message_kind?: "assistant" | "synthetic_failure" | null;
+  assistant_message_kind: "assistant" | "synthetic_failure" | null;
+  synthetic_failure_reason: "quality_guard" | "unavailable" | "not_applied" | null;
 }
 
 /**
@@ -115,8 +111,6 @@ export interface ChatTurn {
 export interface WorkflowProfile {
   coaching: boolean;
   bookends: boolean;
-  recipe_match: boolean;
-  advisor_checkpoints: boolean;
 }
 
 /**
@@ -136,12 +130,22 @@ export interface GuidedSession {
   profile: WorkflowProfile | null;
 }
 
-/** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
-export interface TurnPayload {
-  type: TurnType;
+interface TurnPayloadEnvelope<TType extends TurnType, TPayload> {
+  type: TType;
   step_index: number;
-  payload: unknown;
+  turn_token: string;
+  payload: TPayload;
 }
+
+/** Closed wire union for TurnPayloadResponse. */
+export type TurnPayload =
+  | TurnPayloadEnvelope<"inspect_and_confirm", InspectAndConfirmPayload>
+  | TurnPayloadEnvelope<"single_select", SingleSelectPayload>
+  | TurnPayloadEnvelope<"multi_select_with_custom", MultiSelectWithCustomPayload>
+  | TurnPayloadEnvelope<"schema_form", SchemaFormPayload>
+  | TurnPayloadEnvelope<"review_components", ComponentReviewPayload>
+  | TurnPayloadEnvelope<"propose_pipeline", ProposePipelinePayload>
+  | TurnPayloadEnvelope<"confirm_wiring", WireStageData>;
 
 // ── Endpoint envelopes ───────────────────────────────────────────────────────
 
@@ -153,22 +157,167 @@ export interface GetGuidedResponse {
   composition_state: CompositionState | null;
 }
 
-/** Request body for POST /api/sessions/{id}/guided/respond (schemas.py:264-283). */
-export interface GuidedRespondRequest {
-  chosen: string[] | null;
-  edited_values: Record<string, unknown> | null;
-  custom_inputs: string[] | null;
-  accepted_step_index: number | null;
-  edit_step_index: number | null;
-  /** Typed as closed enum client-side; server validates and accepts str for graceful stale-client failure. */
-  control_signal: ControlSignal | null;
-  /**
-   * Optimistic-concurrency token: the client's expected current step. When
-   * present the server 409s on mismatch (the wizard advanced under the
-   * client). Optional — omit for non-wire turns that don't carry a step.
-   */
-  step_index?: GuidedStep | null;
+export type GuidedOperationFailureCode =
+  | "provider_unavailable"
+  | "provider_timeout"
+  | "invalid_provider_response"
+  | "stale_conflict"
+  | "integrity_error"
+  | "custody_error"
+  | "quota_exceeded"
+  | "operation_failed"
+  | "request_cancelled";
+
+export type GuidedStartOperationReconciliation =
+  | { status: "in_progress" }
+  | { status: "failed"; failure_code: GuidedOperationFailureCode }
+  | { status: "completed"; composition_state_id: string };
+
+export interface GuidedEditTarget {
+  kind: "source" | "node" | "edge" | "output";
+  stable_id: string;
 }
+
+interface UnboundProposalFields {
+  proposal_id: null;
+  draft_hash: null;
+  edit_target: null;
+}
+
+interface BoundProposalFields {
+  proposal_id: string;
+  draft_hash: string;
+}
+
+export type NonEmptyStringArray = [string, ...string[]];
+
+export type GuidedComponentKind = "source" | "output";
+
+export interface GuidedComponentTarget {
+  kind: GuidedComponentKind;
+  stable_id: string;
+}
+
+export type GuidedComponentAction =
+  | { action: "add"; component_kind: GuidedComponentKind }
+  | { action: "edit"; target: GuidedComponentTarget }
+  | { action: "remove"; target: GuidedComponentTarget }
+  | {
+      action: "reorder";
+      component_kind: GuidedComponentKind;
+      stable_ids: NonEmptyStringArray;
+    }
+  | { action: "finish"; component_kind: GuidedComponentKind };
+
+/** One exact legal response action before retry/turn identity is attached. */
+export type GuidedRespondAction =
+  | (UnboundProposalFields & {
+      chosen: NonEmptyStringArray;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: NonEmptyStringArray;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: NonEmptyStringArray;
+      edited_values: null;
+      custom_inputs: NonEmptyStringArray;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: Record<string, unknown>;
+      custom_inputs: null;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: Exclude<ControlSignal, "reject">;
+    })
+  | (BoundProposalFields & {
+      chosen: ["review_wiring"] | ["confirm_wiring"];
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: null;
+      control_signal: null;
+    })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: null;
+      control_signal: "reject";
+    })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: GuidedEditTarget;
+      control_signal: null;
+    })
+  | (BoundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      edit_target: GuidedEditTarget;
+      correction_feedback: string;
+      control_signal: null;
+    })
+  | (UnboundProposalFields & {
+      chosen: null;
+      edited_values: null;
+      custom_inputs: null;
+      control_signal: null;
+      component_action: GuidedComponentAction;
+    });
+
+/** Exact proposal control whose retry descriptor remains in local custody. */
+export type GuidedProposalRetryAction =
+  | { kind: "review_wiring" | "confirm_wiring" }
+  | { kind: "reject" }
+  | { kind: "revise"; edit_target: GuidedEditTarget };
+
+/**
+ * Local review lifecycle for one exact durable guided proposal projection.
+ * Every state remains bound to the proposal id and draft hash whose controls
+ * it describes; a reload never silently transfers an old action to a new
+ * proposal.
+ */
+export type GuidedProposalReviewState =
+  | {
+      status: "active" | "submitting" | "reloading" | "stale";
+      proposal_id: string;
+      draft_hash: string;
+    }
+  | {
+      status: "error";
+      proposal_id: string;
+      draft_hash: string;
+      message: string;
+      retryable: true;
+      retry_action: GuidedProposalRetryAction;
+    }
+  | {
+      status: "error";
+      proposal_id: string;
+      draft_hash: string;
+      message: string;
+      retryable: false;
+      retry_action: null;
+    };
+
+/** Exact request body for POST /api/sessions/{id}/guided/respond. */
+export type GuidedRespondRequest = GuidedRespondAction & {
+  operation_id: string;
+  turn_token: string | null;
+};
 
 /** Response for POST /api/sessions/{id}/guided/respond (schemas.py:286-296). */
 export interface GuidedRespondResponse {
@@ -198,22 +347,21 @@ export interface TutorialSampleResponse {
 /**
  * Request body for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatRequest).
  *
- * `step_index` is the wire form of the user's current step. The server
- * validates it against the live session.step and returns 409 on mismatch
- * (wizard advanced under the client). `message` is capped at 4096 chars
- * server-side; the frontend lets ChatInput's native maxLength enforce the
- * same limit before submit.
+ * The server derives the stage from the checkpoint occurrence identified by
+ * `turn_token`; the client cannot restate a positional step. `operation_id`
+ * remains stable across an ambiguous transport retry of this exact request.
  */
 export interface GuidedChatRequest {
+  operation_id: string;
+  turn_token: string;
   message: string;
-  step_index: GuidedStep;
 }
 
 /**
  * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
  *
- * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
- * unavailable" message on transient LLM failure. `assistant_message_kind`
+ * `assistant_message` is the bounded assistant reply or a synthetic failure
+ * message. `assistant_message_kind`
  * (C-2) is the top-level discriminator for THIS response's reply —
  * `"synthetic_failure"` covers both a scaffold-guard rejection and provider
  * unavailability; the same value is mirrored onto the tail entry of
@@ -221,20 +369,14 @@ export interface GuidedChatRequest {
  * what the UI actually renders from (GuidedChatHistory reads
  * `guidedSession.chat_history`, not this envelope field directly).
  *
- * Typed optional rather than required: the backend field is landing in the
- * same wave as this frontend change, and existing fixtures/tests construct
- * `GuidedChatResponse` literals without it. Absent ⇒ treat as `"assistant"`
- * — the same documented legacy convention as ChatTurn's field, not a
- * fabricated default (a POST response with the discriminator omitted has
- * no failure information to hide; the omission just predates the wave).
- *
- * Most chat is advisory and returns null for the turn/state fields. Step 1
- * source chat may resolve a complete inline source request; then these fields
- * mirror `/guided/respond` so the store can advance atomically.
+ * All four state fields are the server's authoritative post-operation view.
+ * Step 1/2 configuration suggestions may project a pure schema-8 transition;
+ * generated inline source bytes remain non-applying until blob custody can
+ * participate in the same atomic settlement.
  */
 export interface GuidedChatResponse {
   assistant_message: string;
-  assistant_message_kind?: "assistant" | "synthetic_failure";
+  assistant_message_kind: "assistant" | "synthetic_failure";
   guided_session: GuidedSession;
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;
@@ -270,9 +412,8 @@ export interface MultiSelectWithCustomPayload {
    * Server-emitted label for the "let source decide" escape button, or null.
    *
    * The frontend renders this as a first-class escape choice. Submitting it
-   * sends `chosen: []` and `custom_inputs: []`; the backend combines that with
-   * the persisted sink intent and records schema_mode="observed", meaning the
-   * source decides the pass-through field set.
+   * sends the standalone `passthrough` control signal; the backend combines
+   * that with the persisted sink intent and records schema_mode="observed".
    */
   escape_label: string | null;
 }
@@ -326,112 +467,221 @@ export interface KnobSchema {
   fields: KnobField[];
 }
 
-export interface RecipeContext {
-  recipe_name: string;
-  description: string;
-  alternatives: string[];
+export interface SchemaFormPayload {
+  mode: "plugin_options";
+  plugin: string;
+  knobs: KnobSchema;
+  prefilled: Record<string, unknown>;
 }
 
-export type SchemaFormPayload =
+export type ComponentReviewAction = GuidedComponentAction["action"];
+
+export interface ComponentReviewItem {
+  stable_id: string;
+  name: string;
+  plugin: string;
+  status: "reviewed";
+}
+
+export interface ComponentReviewPayload {
+  component_kind: GuidedComponentKind;
+  items: ComponentReviewItem[];
+  allowed_actions: ComponentReviewAction[];
+}
+
+/**
+ * Closed, non-executable projection of a durable pipeline proposal. There are
+ * no plugin options, paths, prompts, secret values, or model-authored text in
+ * this surface.
+ */
+export type ProposalBlockerCode =
+  | "pipeline_invalid"
+  | "policy_review_required"
+  | "plugin_unavailable"
+  | "interpretation_required";
+
+export type ProposalBlockerCategory =
+  | "validation"
+  | "policy"
+  | "availability"
+  | "interpretation";
+
+export interface ProposalBlocker {
+  code: ProposalBlockerCode;
+  category: ProposalBlockerCategory;
+  summary: string;
+  edit_target: GuidedEditTarget | null;
+}
+
+export interface ProposalPluginRef {
+  kind: "source" | "transform" | "sink";
+  id: string;
+}
+
+export type ProposalEndpoint = {
+  kind: "source" | "node" | "output";
+  stable_id: string;
+};
+
+export type ProposalTargetEndpoint = ProposalEndpoint | { kind: "discard" };
+
+export type ProposalFlow =
+  | { kind: "source_success"; branch: string | null }
+  | { kind: "source_validation_failure" }
+  | { kind: "node_success"; branch: string | null }
+  | { kind: "node_error" }
+  | { kind: "gate_route"; route: string; branch: string | null }
+  | { kind: "gate_fork"; routes: string[]; branch: string }
+  | { kind: "queue_continue"; branch: string | null }
+  | { kind: "coalesce_success"; branch: string | null }
+  | { kind: "output_write_failure" };
+
+export type ProposalNodeBehavior =
+  | { kind: "transform" }
   | {
-      mode: "plugin_options";
-      plugin: string;
-      knobs: KnobSchema;
-      prefilled: Record<string, unknown>;
+      kind: "gate";
+      route_aliases: string[];
+      fork_branches: Array<{ routes: string[]; branch: string }>;
     }
   | {
-      mode: "recipe_decision";
-      knobs: KnobSchema;
-      prefilled: Record<string, unknown>;
-      recipe_context: RecipeContext;
+      kind: "aggregation";
+      trigger_kinds: Array<"count" | "timeout" | "condition">;
+      /** Canonical decimal strings preserve Python integers beyond JS safe range. */
+      count: string | null;
+      timeout_seconds: number | null;
+      output_mode: "default" | "passthrough" | "transform";
+      /** Canonical signed decimal string; null mirrors an omitted runtime value. */
+      expected_output_count: string | null;
+    }
+  | { kind: "queue" }
+  | {
+      kind: "coalesce";
+      branch_aliases: string[];
+      policy: "require_all" | "quorum" | "best_effort" | "first";
+      merge: "union" | "nested" | "select";
     };
 
-/**
- * Wire: _ProposedStep (protocol.py:59-62). One step in a proposed chain.
- *
- * options is an arbitrary plugin options dict (Mapping[str, Any] on the wire);
- * typed as Record<string, unknown> -- callers must not assume any specific shape.
- */
-export interface ProposedStep {
-  plugin: string;
-  options: Record<string, unknown>;
+export interface ProposePipelinePayload {
+  proposal_id: string;
+  draft_hash: string;
+  summary: string;
   rationale: string;
-}
-
-/**
- * Wire: ProposeChainPayload (protocol.py:64-68).
- *
- * steps    -- ordered list of proposed transforms.
- * why      -- LLM's overall rationale for the proposal.
- * blockers -- obstacles identified by the LLM (may be empty).
- *
- * Submit shape (verified against routes.py:2030-2137):
- *   Accept all: { chosen: ["accept"], ... all other fields null }
- *   Reject / per-step Edit / Ask advisor: NOT wired in Phase 4.
- *
- * Tracker: filigree elspeth-2c08408170 (Step-3 backend handler completion).
- */
-export interface ProposeChainPayload {
-  steps: ProposedStep[];
-  why: string;
-  blockers: string[];
-}
-
-/**
- * Wire data for the step-4 wiring review: topology describes source/node/output
- * connection labels, while contracts overlay producer/consumer compatibility.
- * Source ids use `source` or `source:<name>` and output ids use
- * `output:<sink_name>`. Warnings and advisor/signoff fields are optional
- * advisory metadata emitted when the backend has something to report.
- */
-export interface WireStageData {
-  topology: {
-    sources: Record<
-      string,
-      {
-        id: string;
-        plugin: string;
-        on_success: string | null;
-        on_validation_failure: string;
-      }
-    >;
-    nodes: Array<{
-      id: string;
-      node_type: string;
-      plugin: string | null;
-      input: string | null;
-      on_success: string | null;
-      on_error: string | null;
-      routes: Record<string, string> | null;
-      fork_to: string[] | null;
-      branches: string[] | Record<string, string> | null;
+  component_counts: {
+    sources: number;
+    nodes: number;
+    edges: number;
+    outputs: number;
+  };
+  blockers: ProposalBlocker[];
+  graph: {
+    sources: Array<{
+      stable_id: string;
+      label: string;
+      plugin: ProposalPluginRef;
     }>;
-    outputs: Array<{
-      id: string;
-      sink_name: string;
-      plugin: string;
-      on_write_failure: string;
+    edges: Array<{
+      stable_id: string;
+      from_endpoint: ProposalEndpoint;
+      to_endpoint: ProposalTargetEndpoint;
+      flow: ProposalFlow;
     }>;
   };
-  edge_contracts: Array<{
-    from: string;
-    to: string;
-    producer_guarantees: string[];
-    consumer_requires: string[];
-    missing_fields: string[];
-    satisfied: boolean;
+  nodes: Array<{
+    stable_id: string;
+    label: string;
+    node_type: "transform" | "gate" | "aggregation" | "queue" | "coalesce";
+    plugin: ProposalPluginRef | null;
+    behavior: ProposalNodeBehavior;
+  }>;
+  outputs: Array<{
+    stable_id: string;
+    label: string;
+    plugin: ProposalPluginRef;
+  }>;
+  edit_targets: GuidedEditTarget[];
+}
+
+export interface WireRowCardinality {
+  input: "none" | "one" | "batch" | "branches" | "many_producers";
+  output: "one" | "zero_or_one" | "zero_or_many" | "one_per_item" | "one_per_branch_set" | "expected_count";
+  expected_output_count: string | null;
+}
+
+export interface WireStructuredOutputField {
+  query: string;
+  field: string;
+  type: string;
+  enum_values: string[];
+}
+
+export interface WireSchemaField {
+  name: string;
+  type: string;
+  required: boolean;
+  nullable: boolean;
+}
+
+export interface WireBusinessSchema {
+  mode: string;
+  fields: WireSchemaField[];
+  guaranteed_fields: string[];
+  required_fields: string[];
+}
+
+export interface WireEndpoint {
+  kind: "source" | "node" | "output";
+  stable_id: string;
+}
+
+/** Candidate-derived arbitrary-DAG review using proposal-stable identities. */
+export interface WireStageData {
+  proposal_id: string;
+  draft_hash: string;
+  sources: Array<{
+    stable_id: string;
+    label: string;
+    plugin: string;
+    on_validation_failure: string;
+    guaranteed_fields: string[];
+    row_cardinality: WireRowCardinality;
+  }>;
+  nodes: Array<{
+    stable_id: string;
+    label: string;
+    node_type: string;
+    plugin: string | null;
+    behavior: ProposalNodeBehavior;
+    required_fields: string[];
+    guaranteed_fields: string[];
+    row_cardinality: WireRowCardinality;
+    structured_output_fields: WireStructuredOutputField[];
+  }>;
+  outputs: Array<{
+    stable_id: string;
+    label: string;
+    plugin: string;
+    on_write_failure: string;
+    required_fields: string[];
+    business_schema: WireBusinessSchema;
+  }>;
+  connections: Array<{
+    stable_id: string;
+    from_endpoint: WireEndpoint;
+    to_endpoint: WireEndpoint | { kind: "discard" };
+    flow: ProposalFlow;
+    schema_contract: null | {
+      from: string;
+      to: string;
+      producer_guarantees: string[];
+      consumer_requires: string[];
+      missing_fields: string[];
+      satisfied: boolean;
+    };
   }>;
   semantic_contracts: Array<Record<string, unknown>>;
   warnings: Array<Record<string, unknown>>;
-  advisor_findings?: string;
-  signoff_outcome?: string;
-  /**
-   * Advisor sign-off passes left AFTER the pass that produced this turn. Present
-   * only on a RE-EMITTED wire turn (the two sites where the pass budget is in
-   * scope); ABSENT on the initial turn and the advisor-off tutorial, so the
-   * wire-stage cost copy gates on `passes_remaining !== undefined`.
-   */
-  passes_remaining?: number;
+  blockers: Array<Record<string, unknown>>;
+  can_confirm: boolean;
 }
 
 /**

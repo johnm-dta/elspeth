@@ -26,6 +26,58 @@ from elspeth.web.composer._required_paths_validator import (
 
 
 class TestCollectRequiredPathsSemantics:
+    def test_nullable_object_still_compiles_nested_required_paths(self) -> None:
+        schema = {
+            "type": ["object", "null"],
+            "properties": {
+                "source": {
+                    "type": ["object", "null"],
+                    "properties": {"plugin": {"type": "string"}},
+                    "required": ["plugin"],
+                }
+            },
+            "required": ["source"],
+        }
+        compiled = _collect_required_paths(schema)
+        paths = {entry.path: entry.optional_ancestor for entry in compiled}
+        assert paths == {("source",): (), ("source", "plugin"): ()}
+
+    def test_nullable_array_still_compiles_item_required_paths(self) -> None:
+        schema = {
+            "type": ["array", "null"],
+            "items": {
+                "type": ["object", "null"],
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        }
+        assert _collect_required_paths(schema) == (_CompiledRequiredPath(path=(_ARRAY_ITEM_SEGMENT, "id"), optional_ancestor=()),)
+
+    @pytest.mark.parametrize(
+        "raw_type",
+        [[], ["object", "object"], ["object", 3], {"object"}, "record"],
+    )
+    def test_malformed_schema_type_metadata_fails_loudly(self, raw_type: object) -> None:
+        with pytest.raises((TypeError, ValueError), match="schema type"):
+            _collect_required_paths({"type": raw_type})
+
+    def test_object_array_union_accumulates_both_traversal_shapes(self) -> None:
+        schema = {
+            "type": ["array", "object", "null"],
+            "properties": {"label": {"type": "string"}},
+            "required": ["label"],
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+            "additionalProperties": {"type": "string"},
+        }
+        assert _collect_required_paths(schema) == (
+            _CompiledRequiredPath(path=("label",), optional_ancestor=()),
+            _CompiledRequiredPath(path=(_ARRAY_ITEM_SEGMENT, "id"), optional_ancestor=()),
+        )
+
     def test_top_level_required_field_emits_unconditional_path(self) -> None:
         schema = {
             "type": "object",

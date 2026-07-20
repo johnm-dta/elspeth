@@ -697,65 +697,17 @@ class ExecutionServiceImpl:
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
                             )
 
-        if composition_state.nodes:
-            for node in composition_state.nodes:
-                if node.node_type != "transform":
-                    continue
-                provider_policy_error = web_rag_provider_config_policy_error(node.options)
-                if provider_policy_error is not None:
-                    raise PipelineValidationError(
-                        errors=(
-                            ValidationError(
-                                component_id=node.id,
-                                component_type="transform",
-                                message=provider_policy_error,
-                                suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
-                                error_code=None,
-                            ),
-                        ),
-                        readiness=ValidationReadiness(
-                            authoring_valid=False,
-                            execution_ready=False,
-                            completion_ready=False,
-                            blockers=[
-                                ValidationReadinessBlocker(
-                                    code="managed_identity_policy",
-                                    component_id=node.id,
-                                    component_type="transform",
-                                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
-                                )
-                            ],
-                        ),
-                    )
-                llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
-                if llm_retry_policy_error is not None:
-                    raise PipelineValidationError(
-                        errors=(
-                            ValidationError(
-                                component_id=node.id,
-                                component_type="transform",
-                                message=llm_retry_policy_error,
-                                suggestion=(
-                                    "Set max_capacity_retry_seconds to a small positive value "
-                                    "or configure pool_size > 1 for pooled retry handling."
-                                ),
-                                error_code=None,
-                            ),
-                        ),
-                        readiness=ValidationReadiness(
-                            authoring_valid=False,
-                            execution_ready=False,
-                            completion_ready=False,
-                            blockers=[
-                                ValidationReadinessBlocker(
-                                    code="llm_retry_budget_policy",
-                                    component_id=node.id,
-                                    component_type="transform",
-                                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
-                                )
-                            ],
-                        ),
-                    )
+        # The managed-identity + sequential-multi-query retry-budget policy gates
+        # were previously evaluated HERE, on the un-lowered ``composition_state``.
+        # That false-positived operator-profiled multi-query LLM nodes: an
+        # operator profile supplies the web-safe ``max_capacity_retry_seconds``
+        # (and RAG credential handling) only at LOWERING, so the persisted
+        # authored-minimal options legitimately omit the retry budget and would
+        # trip ``web_llm_retry_budget_policy_error`` before the profile resolved.
+        # Both gates now run below on ``policy_result.executable_state`` (the
+        # profile-lowered state), mirroring the authoritative ``validate_pipeline``
+        # checks (validation.py, after its ``state = policy_result.executable_state``
+        # rebind).
 
         # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
         # Previously execute() created a run and let an invalid pipeline fail OPAQUELY
@@ -796,6 +748,73 @@ class ExecutionServiceImpl:
         )
         if policy_result.findings:
             raise RuntimeError("Plugin policy validation diverged between execution preflight and runtime preparation.")
+
+        # Defence-in-depth managed-identity + sequential-multi-query retry-budget
+        # gates, evaluated on the PROFILE-LOWERED executable state so an operator
+        # profile's injected retry budget / credential handling is honoured (raw
+        # authored options omit them). ``validate_pipeline`` above already runs the
+        # identical checks on this same lowered state; this mirror keeps the
+        # execution service fail-closed even if that gate were bypassed (the
+        # tutorial path calls ``execute`` directly). Running them on the un-lowered
+        # ``composition_state`` false-positived operator-profiled multi-query nodes.
+        for node in policy_result.executable_state.nodes:
+            if node.node_type != "transform":
+                continue
+            provider_policy_error = web_rag_provider_config_policy_error(node.options)
+            if provider_policy_error is not None:
+                raise PipelineValidationError(
+                    errors=(
+                        ValidationError(
+                            component_id=node.id,
+                            component_type="transform",
+                            message=provider_policy_error,
+                            suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                            error_code=None,
+                        ),
+                    ),
+                    readiness=ValidationReadiness(
+                        authoring_valid=False,
+                        execution_ready=False,
+                        completion_ready=False,
+                        blockers=[
+                            ValidationReadinessBlocker(
+                                code="managed_identity_policy",
+                                component_id=node.id,
+                                component_type="transform",
+                                detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                            )
+                        ],
+                    ),
+                )
+            llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+            if llm_retry_policy_error is not None:
+                raise PipelineValidationError(
+                    errors=(
+                        ValidationError(
+                            component_id=node.id,
+                            component_type="transform",
+                            message=llm_retry_policy_error,
+                            suggestion=(
+                                "Set max_capacity_retry_seconds to a small positive value "
+                                "or configure pool_size > 1 for pooled retry handling."
+                            ),
+                            error_code=None,
+                        ),
+                    ),
+                    readiness=ValidationReadiness(
+                        authoring_valid=False,
+                        execution_ready=False,
+                        completion_ready=False,
+                        blockers=[
+                            ValidationReadinessBlocker(
+                                code="llm_retry_budget_policy",
+                                component_id=node.id,
+                                component_type="transform",
+                                detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                            )
+                        ],
+                    ),
+                )
 
         pipeline_yaml = self._yaml_generator.generate_yaml(composition_state)
         executable_pipeline_yaml = self._yaml_generator.generate_yaml(policy_result.executable_state)
@@ -1126,7 +1145,9 @@ class ExecutionServiceImpl:
             session = await self._session_service.get_session(run.session_id)
         except SessionNotFoundError as exc:
             raise RunSessionIntegrityError(run_id=run_id, session_id=str(run.session_id)) from exc
-        return session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
+        return (
+            session.archived_at is None and session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
+        )
 
     async def cancel(self, run_id: UUID) -> None:
         """Cancel a run via the shutdown Event.

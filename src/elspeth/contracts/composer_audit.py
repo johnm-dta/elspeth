@@ -25,7 +25,17 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
+
+
+class PipelineDispatchAuditPayload(TypedDict):
+    """Closed durable binding for one successful pipeline dispatch."""
+
+    tool_call_id: str
+    tool_name: str
+    status: str
+    arguments_hash: str
+    result_hash: str
 
 
 class ComposerToolStatus(StrEnum):

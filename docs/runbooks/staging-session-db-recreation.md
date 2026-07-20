@@ -2,12 +2,20 @@
 
 Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.1 (session epoch 28 and Landscape epoch 28)
+## Current Cutover: Composer parity (session epoch 35 and Landscape epoch 28)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
 freeform-primer preference, then to 28 so SQLite and PostgreSQL session stores
-carry the same application/store/epoch identity proof. The universal web
+carry the same application/store/epoch identity proof. Composer parity then
+advances the session store to epoch 29 for guided schema 8 and durable fenced
+guided operations, and to epoch 30 because the closed
+`guided_operations.failure_code` CHECK gains `quota_exceeded`. That final
+boundary makes a fork quota failure settle and replay as a stable HTTP 413.
+Later hard cuts add guided pipeline-proposal replay (31), exact failed-operation
+audit cohorts (32), guided-start negative admission (33), guided schema 10 (34),
+and exclusive guided-confirmation proposal admission (35). An epoch-34 database
+cannot enforce the current dispatch boundary and must be recreated. The universal web
 plugin-policy work also advances
 `SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
 table is optional per run but required in the schema: web runs receive one
@@ -21,9 +29,10 @@ per-member failsink-to-primary provenance advances it to epoch 28.
 
 Archive and recreate the session database, its sidecars, and every stale
 Landscape database under the service-stop procedure below. Every predecessor
-epoch is a recreate boundary, including SQLite epochs 23 through 26 and any
-stale PostgreSQL shape. PostgreSQL recreation is performed by the schema owner;
-the runtime role remains DML-only.
+session epoch is a recreate boundary, including epoch 34. Landscape epoch 28
+does not change for Composer parity; recreate a Landscape database only when
+its own sentinel is stale. Any stale PostgreSQL session shape is recreated by
+the schema owner; the runtime role remains DML-only.
 
 Validate-only startup and doctor must leave stale databases unchanged. Do not
 use `create_all`, `--init-schema`, an old migrator, or code rollback as an improvised repair
@@ -36,10 +45,11 @@ and semantics-only changes; archive/export decision and approver; destructive
 reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Older code is not compatible with
-the freshly recreated current databases. Rollback is therefore
-`no` unless a later approved record proves otherwise. Plans 10 and 12 must cite
-the session-epoch-28/Landscape-epoch-28 record when binding candidate and
-rollback decisions.
+the freshly recreated current databases. Rollback across this boundary is
+unsupported: keep the service drained, repair the epoch-35 release forward,
+recreate fresh state, and retry. Plans 10 and 12 must cite the
+session-epoch-35/Landscape-epoch-28 record when binding candidate and rollback
+decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
 for the historical epoch-21 to epoch-22 Landscape reset described below.
@@ -500,7 +510,17 @@ sudo systemctl status "$SERVICE" --no-pager --lines=20
 
 `initialize_session_schema()` recreates the file on service startup. If either health check fails, inspect `journalctl -u elspeth-web.service --no-pager -n 80` before retrying.
 
-After health checks pass, create a new session through the API or UI and confirm no `SessionSchemaError` appears in the service journal.
+After health checks pass, prove the recreated session store carries the current
+hard-cut sentinel before creating any session:
+
+```bash
+sqlite3 "$DB_PATH" 'PRAGMA user_version;'  # expect 35 (== SESSION_SCHEMA_EPOCH)
+```
+
+An epoch-34 result is not repairable in place: keep the service drained,
+recreate the session database with the current release, and rerun the probe.
+Then create a new session through the API or UI and confirm no
+`SessionSchemaError` appears in the service journal.
 
 #### 0.7.0 epoch + smoke verification
 
@@ -544,8 +564,8 @@ At the **end of the deploy window**, destroy or secure the archive directories c
 
 If the fresh current release fails, keep the service stopped, preserve the
 failed fresh stores and logs for diagnosis, fix the current release, then repeat
-the uninstall/recreate/reinstall procedure. Do not restore predecessor source or
-databases as the repair path.
+the uninstall/recreate/reinstall procedure. Do not restore predecessor source
+or databases as the repair path.
 
 ### Why DELETE Is Forbidden For Schema-Changing Phases
 

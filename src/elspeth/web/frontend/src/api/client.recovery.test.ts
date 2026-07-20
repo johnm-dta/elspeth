@@ -8,10 +8,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchRecoveryTranscript, parseResponse, sendMessage } from "./client";
 import type { ApiError, CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makePartialState(): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 7,
     sources: {},
     nodes: [],

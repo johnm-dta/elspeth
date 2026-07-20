@@ -143,8 +143,7 @@ test.describe("composer-guided — source/output live walk", () => {
         const blob = await uploadBlob(ctx, sessionId, BLOB_FILENAME, SAMPLE_CSV);
 
         // ── Navigate + enter guided mode ─────────────────────────────────────
-        // "Switch to guided" resolves to the live/empty profile
-        // (advisor_checkpoints=false) via GET /guided — the D13 opt-out path.
+        // "Switch to guided" resolves to the live/empty profile via GET /guided.
         const composer = new ComposerPage(page);
         await composer.goto(sessionId);
         await composer.waitForChatReady();
@@ -191,8 +190,8 @@ test.describe("composer-guided — source/output live walk", () => {
         await page.getByRole("button", { name: "Continue", exact: true }).click();
 
         // ── Step 2 required fields: MULTI_SELECT_WITH_CUSTOM ──────────────
-        // "category" is already selected by default — enough to satisfy
-        // _classify_predicate (recipe_match.py).
+        // "category" is already selected by default, so the required-field
+        // review can continue without adding a custom field.
         await expect(page.getByText("category")).toBeVisible();
         await page.getByRole("button", { name: "Continue", exact: true }).click();
 

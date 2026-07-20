@@ -1736,6 +1736,41 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                             "required_input_fields": ["content"],
                         },
                     ),
+                    PluginAssistanceExample(
+                        # Structured multi-query discovery: several typed queries per
+                        # row, each with named input_fields and typed output_fields.
+                        # Output columns are "{query_name}_{suffix}" plus the
+                        # automatic per-query usage/model fields; do not hand-add them.
+                        title="Ask several typed structured queries per row with the queries map",
+                        # WRONG: a single free-text response gives no typed columns
+                        # downstream transforms can consume by name.
+                        before={
+                            "prompt_template": "Assess this content: {{ row.content }}.",
+                            "response_field": "llm_response",
+                            "required_input_fields": ["content"],
+                        },
+                        # RIGHT: queries is a mapping keyed by query name (the value
+                        # omits name); each query binds template variables to row
+                        # columns via input_fields and declares typed output_fields
+                        # (suffix + type; enum types also carry values). The list form
+                        # is equivalent — an array whose entries each carry a name.
+                        after={
+                            "prompt_template": "Assess this content: {{ row.content }}.",
+                            "response_field": "llm_response",
+                            "required_input_fields": ["content"],
+                            "queries": {
+                                "clarity": {
+                                    "input_fields": {"content": "content"},
+                                    "response_format": "structured",
+                                    "output_fields": [
+                                        {"suffix": "score", "type": "integer"},
+                                        {"suffix": "band", "type": "enum", "values": ["low", "medium", "high"]},
+                                        {"suffix": "rationale", "type": "string"},
+                                    ],
+                                },
+                            },
+                        },
+                    ),
                 ),
                 composer_hints=(
                     "Call list_models before pinning 'model:' — deployments don't all ship the same providers.",

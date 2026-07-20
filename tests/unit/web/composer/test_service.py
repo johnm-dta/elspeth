@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, replace
@@ -19,18 +20,31 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_progress import ComposerProgressEvent
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
+from elspeth.core.canonical import canonical_json
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+from elspeth.web.composer.guided.prompts import load_step_planner_skill
+from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.pipeline_planner import PlannerOriginatingMessage
+from elspeth.web.composer.pipeline_proposal import PlannerSurface, PresentBase
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
     ComposerResult,
     ComposerRuntimePreflightError,
     ComposerServiceError,
+    PipelineCommitIntent,
     ToolArgumentError,
 )
+from elspeth.web.composer.recipes import recipe_catalog_content_hash
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
     ComposerAvailability,
@@ -39,6 +53,7 @@ from elspeth.web.composer.service import (
 )
 from elspeth.web.composer.state import (
     CompositionState,
+    EdgeSpec,
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
@@ -60,6 +75,7 @@ from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
+from elspeth.web.sessions.protocol import GuidedOperationFence
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -75,6 +91,189 @@ from tests.unit.web.composer._helpers import (
     _mock_catalog,
     _stub_advisor_end_gate_clean,  # noqa: F401  (autouse end-gate CLEAN stub)
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected_surface", "expected_profile"),
+    (
+        (EMPTY_PROFILE, PlannerSurface.GUIDED_STAGED, "ordinary"),
+        (TUTORIAL_PROFILE, PlannerSurface.TUTORIAL_PROFILE, "tutorial"),
+    ),
+)
+async def test_guided_service_routes_step3_through_the_planner_only_capability_prompt(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Any,
+    expected_surface: PlannerSurface,
+    expected_profile: str,
+) -> None:
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        profile=profile,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    captured: list[dict[str, Any]] = []
+    sentinel_plan = object()
+
+    async def capture_plan_pipeline(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return sentinel_plan
+
+    monkeypatch.setattr("elspeth.web.composer.service.plan_pipeline", capture_plan_pipeline)
+    current_state = _empty_state()
+    session_id = uuid4()
+    custody_fence = GuidedOperationFence(
+        session_id=session_id,
+        operation_id=str(uuid4()),
+        lease_token=uuid4().hex,
+        attempt=1,
+    )
+    result, _catalog_ids = await composer_service_with_real_sessions.plan_guided_pipeline(
+        intent="Build the reviewed pipeline.",
+        current_state=current_state,
+        guided=guided,
+        originating_message=PlannerOriginatingMessage(
+            session_id=str(session_id),
+            message_id=str(uuid4()),
+            content="Build the reviewed pipeline.",
+            user_id="test-user",
+        ),
+        base=PresentBase(state_id=uuid4(), composition_content_hash="0" * 64),
+        user_id="test-user",
+        supersedes_draft_hash=None,
+        recorder=BufferingRecorder(),
+        operation_fence=custody_fence,
+    )
+
+    assert result is sentinel_plan
+    assert len(captured) == 1
+    assert captured[0]["surface"] is expected_surface
+    assert captured[0]["profile"] == expected_profile
+    assert captured[0]["rendered_skill"] == load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS)
+    assert captured[0]["custody_config"].write_fence == BlobGuidedOperationWriteFence(
+        session_id=custody_fence.session_id,
+        operation_id=custody_fence.operation_id,
+        lease_token=custody_fence.lease_token,
+        attempt=custody_fence.attempt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_actual_step3_staged_and_tutorial_adapters_render_identical_provider_requests(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    sessions = cast(SessionServiceImpl | None, composer_service_with_real_sessions._sessions_service)
+    assert sessions is not None
+    actual_service = ComposerServiceImpl.for_trained_operator(
+        composer_service_with_real_sessions._catalog,
+        composer_service_with_real_sessions._settings,
+        sessions_service=sessions,
+        session_engine=sessions._engine,
+    )
+    session = await sessions.create_session("test-user", "Planner parity", "local")
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    ordinary = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        profile=EMPTY_PROFILE,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    manifests: list[Any] = []
+    requests: list[dict[str, Any]] = []
+    real_builder = planner_module.build_planner_capability_manifest  # type: ignore[attr-defined]
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        manifests.append(manifest)
+        return manifest
+
+    async def mutating_completion(**kwargs: Any) -> Any:
+        kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+        requests.append(kwargs)
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)  # type: ignore[attr-defined]
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+    for guided in (ordinary, replace(ordinary, profile=TUTORIAL_PROFILE)):
+        with pytest.raises(AuditIntegrityError, match="planner call inputs changed"):
+            await actual_service.plan_guided_pipeline(
+                intent="Build the reviewed pipeline.",
+                current_state=_empty_state(),
+                guided=guided,
+                originating_message=PlannerOriginatingMessage(
+                    session_id=str(session.id),
+                    message_id=None,
+                    content="Build the reviewed pipeline.",
+                    user_id="test-user",
+                ),
+                base=PresentBase(state_id=UUID("55555555-5555-4555-8555-555555555555"), composition_content_hash="0" * 64),
+                user_id="test-user",
+                supersedes_draft_hash=None,
+                recorder=BufferingRecorder(),
+                operation_fence=GuidedOperationFence(
+                    session_id=session.id,
+                    operation_id=str(uuid4()),
+                    lease_token=uuid4().hex,
+                    attempt=1,
+                ),
+            )
+
+    assert len(manifests) == len(requests) == 2
+    assert [manifest.surface for manifest in manifests] == [PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE]
+    assert [manifest.profile for manifest in manifests] == ["ordinary", "tutorial"]
+    assert manifests[0].rendered_prompt_hash == manifests[1].rendered_prompt_hash
+    assert manifests[0].effective_tool_hash == manifests[1].effective_tool_hash
+    assert requests[0]["messages"] == requests[1]["messages"]
+    assert requests[0]["tools"] == requests[1]["tools"]
 
 
 def _execute_tool(
@@ -425,77 +624,6 @@ class TestComposerTextOnlyResponse:
         assert "MissingRequiredPaths" in result.message
         assert "source.plugin" in result.message
 
-    @pytest.mark.asyncio
-    async def test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker(self, tmp_path: Path) -> None:
-        """A blob-side success is not a successful CompositionState mutation."""
-        catalog = _mock_catalog()
-        engine, session_id = _session_engine_with_session()
-        user_message_id = str(uuid4())
-        user_message_content = "Build a runnable pipeline from this text."
-        now = datetime.now(UTC)
-        with engine.begin() as conn:
-            conn.execute(
-                chat_messages_table.insert().values(
-                    id=user_message_id,
-                    session_id=session_id,
-                    role="user",
-                    content=user_message_content,
-                    raw_content=None,
-                    tool_calls=None,
-                    tool_call_id=None,
-                    sequence_no=1,
-                    writer_principal="route_user_message",
-                    created_at=now,
-                    composition_state_id=None,
-                    parent_assistant_id=None,
-                )
-            )
-        settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl.for_trained_operator(
-            catalog=catalog,
-            settings=settings,
-            sessions_service=_test_sessions_service(engine, tmp_path),
-            session_engine=engine,
-        )
-        state = _empty_state()
-        create_blob_turn = _make_llm_response(
-            tool_calls=[
-                {
-                    "id": "call_create_blob",
-                    "name": "create_blob",
-                    "arguments": {
-                        "filename": "seed.txt",
-                        "mime_type": "text/plain",
-                        "content": "hello",
-                    },
-                }
-            ],
-        )
-        final_prose = "I created the input blob, so the pipeline is ready."
-        text_response = _make_llm_response(content=final_prose)
-
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [create_blob_turn, text_response]
-            result = await service.compose(
-                user_message_content,
-                [],
-                state,
-                session_id=session_id,
-                user_message_id=user_message_id,
-            )
-
-        assert result.state.version == state.version
-        assert result.raw_assistant_content == final_prose
-        assert result.runtime_preflight is not None
-        assert result.runtime_preflight.is_valid is False
-        # New contract: model prose preserved + system suffix with blocker.
-        assert result.message.startswith(final_prose)
-        assert "[ELSPETH-SYSTEM]" in result.message
-        assert "still empty" in result.message
-        assert "create_blob succeeded without mutating CompositionState" in result.message
-        assert "state_exists=false" in result.runtime_preflight.checks[0].detail
-        assert mock_llm.call_count == 2
-
 
 class TestComposerSingleToolCall:
     @pytest.mark.asyncio
@@ -792,8 +920,7 @@ class TestComposerSingleToolCall:
         proposals = await sessions_service.list_composition_proposals(session_uuid)
         proposal_tools = sorted(p.tool_name for p in proposals)
         # create_blob is NOT intercepted — it executes immediately and the
-        # resulting blob is available to set_pipeline at proposal-creation
-        # time.
+        # set_pipeline is independently prevalidated before proposal creation.
         assert "create_blob" not in proposal_tools
         # set_pipeline IS still intercepted — it advances composition state
         # and represents the meaningful operator approval.
@@ -1077,8 +1204,8 @@ class TestComposerSingleToolCall:
         assert "checking available secret references" in progress_text.lower()
 
     @pytest.mark.asyncio
-    async def test_inline_complete_pipeline_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
-        """Fake-model replay for simple inline-data builds stays provider-bounded."""
+    async def test_inline_complete_pipeline_incremental_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
+        """Incremental inline full replacement retains the atomic tool shape."""
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
@@ -1097,7 +1224,19 @@ class TestComposerSingleToolCall:
             return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
 
         service._run_advisor_checkpoint = _clean_advisor_checkpoint  # type: ignore[method-assign]
-        state = _empty_state()
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="existing_rows",
+                options={"path": str(tmp_path / "existing.csv"), "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(name="Existing pipeline"),
+            version=1,
+        )
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
@@ -5115,6 +5254,18 @@ class TestComposerRuntimePreflightFinalGate:
             error.original_exc = RuntimeError("replacement")
 
 
+def test_pipeline_commit_intent_is_frozen_and_hash_bound() -> None:
+    proposal_id = uuid4()
+    intent = PipelineCommitIntent(proposal_id=proposal_id, draft_hash="a" * 64)
+
+    assert intent.proposal_id == proposal_id
+    assert intent.draft_hash == "a" * 64
+    with pytest.raises(AttributeError):
+        intent.draft_hash = "b" * 64  # type: ignore[misc]
+    with pytest.raises(ValueError, match="SHA-256"):
+        PipelineCommitIntent(proposal_id=proposal_id, draft_hash="not-a-hash")
+
+
 class TestEmptyStateFinalizePassthrough:
     """Tier 1.5 §7.6 followup — empty-state finalize-time passthrough.
 
@@ -5161,6 +5312,21 @@ class TestEmptyStateFinalizePassthrough:
                 name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard"
             )
         )
+        assert _state_is_structurally_empty(state) is False
+
+    def test_state_is_structurally_empty_false_with_edge(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state().with_edge(
+            EdgeSpec(
+                id="orphan-edge",
+                from_node="source",
+                to_node="out",
+                edge_type="on_success",
+                label=None,
+            )
+        )
+
         assert _state_is_structurally_empty(state) is False
 
     def test_compose_empty_state_message_appends_system_suffix(self) -> None:
@@ -7067,10 +7233,11 @@ class TestComposeLoopFreeformRecipeIntentRouting:
     @pytest.mark.asyncio
     async def test_fork_coalesce_truncate_intent_applies_recipe_before_llm(self, tmp_path: Path) -> None:
         engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
         service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(data_dir=tmp_path),
-            sessions_service=_test_sessions_service(engine, tmp_path),
+            sessions_service=sessions_service,
             session_engine=engine,
         )
         prompt = (
@@ -7105,12 +7272,48 @@ class TestComposeLoopFreeformRecipeIntentRouting:
             )
 
         assert mock_llm.call_count == 0
-        assert result.state.validate().is_valid is True
-        assert result.state.sources["source"] is not None
-        assert result.state.sources["source"].plugin == "csv"
-        assert result.state.sources["source"].options["blob_ref"]
-        assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
-        assert any(node.plugin == "truncate" for node in result.state.nodes)
-        assert result.state.outputs[0].name == "merged_rows"
-        assert result.state.outputs[0].options["path"] == "outputs/merged.jsonl"
-        assert "fork-coalesce-truncate-jsonl" in result.message
+        assert result.state == _empty_state()
+        assert result.llm_calls == ()
+        assert result.pipeline_commit_intent is not None
+
+        proposals = await sessions_service.list_composition_proposals(UUID(session_id))
+        assert len(proposals) == 1
+        proposal = proposals[0]
+        assert proposal.status == "pending"
+        assert proposal.id == result.pipeline_commit_intent.proposal_id
+        assert proposal.pipeline_metadata is not None
+        assert proposal.pipeline_metadata.draft_hash == result.pipeline_commit_intent.draft_hash
+        assert proposal.composer_model_identifier == "composer-server-recipe-router"
+        assert proposal.composer_model_version == "composer.server-recipe-router.v1"
+        assert proposal.composer_provider == "server"
+        recipe_contract = canonical_json(
+            {
+                "schema": "composer.server-recipe-router.v1",
+                "recipe": "fork-coalesce-truncate-jsonl",
+                "recipe_catalog_content_hash": recipe_catalog_content_hash(),
+            }
+        )
+        assert proposal.composer_skill_hash == hashlib.sha256(recipe_contract.encode()).hexdigest()
+
+        pipeline = proposal.arguments_json
+        source = cast(dict[str, Any], pipeline["source"])
+        assert source["plugin"] == "csv"
+        assert UUID(cast(str, source["blob_id"]))
+        assert proposal.pipeline_metadata.custody_result == "ready"
+        assert "inline_blob" not in source
+        assert {cast(dict[str, Any], node)["node_type"] for node in cast(list[Any], pipeline["nodes"])} >= {
+            "gate",
+            "coalesce",
+        }
+        assert any(cast(dict[str, Any], node).get("plugin") == "truncate" for node in cast(list[Any], pipeline["nodes"]))
+        output = cast(dict[str, Any], cast(list[Any], pipeline["outputs"])[0])
+        assert output["sink_name"] == "merged_rows"
+        assert cast(dict[str, Any], output["options"])["path"] == "outputs/merged.jsonl"
+        with engine.connect() as conn:
+            audit_messages = conn.execute(
+                select(chat_messages_table).where(
+                    chat_messages_table.c.session_id == session_id,
+                    chat_messages_table.c.role == "audit",
+                )
+            ).all()
+        assert audit_messages == []

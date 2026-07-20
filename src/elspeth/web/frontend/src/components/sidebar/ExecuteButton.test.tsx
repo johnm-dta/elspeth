@@ -15,6 +15,7 @@ import { resetStore } from "@/test/store-helpers";
 import type { CompositionState } from "@/types/index";
 import type { InterpretationEvent } from "@/types/interpretation";
 import type { AuditReadinessSnapshot } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makeInterpretationEvent(
   overrides: Partial<InterpretationEvent> = {},
@@ -52,6 +53,7 @@ function makeComposition(
 ): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],

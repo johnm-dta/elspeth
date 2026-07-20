@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable
-
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.tools import is_approval_required_blob_store_only_mutation_tool
@@ -9,6 +7,7 @@ from elspeth.web.composer.tools import is_approval_required_blob_store_only_muta
 from .._helpers import (
     _DATA_ERROR_KEY,
     UUID,
+    AcceptProposalRequest,
     Any,
     APIRouter,
     CompositionProposalRecord,
@@ -36,6 +35,11 @@ from .._helpers import (
     execute_tool,
     get_current_user,
     run_sync_in_worker,
+)
+from .pipeline_settlement import (
+    _await_with_deferred_cancellation,
+    _proposal_user_message_content,
+    settle_pipeline_proposal_under_compose_lock,
 )
 
 router = APIRouter()
@@ -75,29 +79,6 @@ def _inline_blob_content_for_proposal(
     return content if isinstance(content, str) else None
 
 
-async def _proposal_user_message_content(
-    service: SessionServiceProtocol,
-    proposal: CompositionProposalRecord,
-) -> str | None:
-    """Recover the immutable originating user-message body for accept replay."""
-    if proposal.user_message_id is None:
-        return None
-    messages = await service.get_messages(proposal.session_id, limit=None)
-    for message in messages:
-        if message.id != proposal.user_message_id:
-            continue
-        if message.role != "user":
-            raise HTTPException(
-                status_code=409,
-                detail="Stored proposal references a non-user originating message; ask ELSPETH to regenerate the proposal.",
-            )
-        return message.content
-    raise HTTPException(
-        status_code=409,
-        detail="Stored proposal references an originating message that could not be recovered; ask ELSPETH to regenerate the proposal.",
-    )
-
-
 def _missing_proposal_composer_context(
     proposal: CompositionProposalRecord,
     *,
@@ -130,25 +111,6 @@ def _ensure_inline_blob_proposal_context(
             f"({', '.join(missing)}). Ask ELSPETH to regenerate the proposal."
         ),
     )
-
-
-async def _await_with_deferred_cancellation[T](awaitable: Awaitable[T]) -> tuple[T, bool]:
-    """Await critical proposal work to completion while recording cancellation.
-
-    ``run_sync_in_worker`` deliberately leaves its worker running if the
-    request task is cancelled. Once an approved tool execution starts, the
-    route must keep the session lock until the side effect is paired with a
-    terminal proposal transition.
-    """
-    task = asyncio.ensure_future(awaitable)
-    cancelled = False
-    while True:
-        try:
-            return await asyncio.shield(task), cancelled
-        except asyncio.CancelledError:
-            cancelled = True
-            if task.done():
-                return task.result(), cancelled
 
 
 @router.get(
@@ -190,16 +152,34 @@ async def accept_composition_proposal(
     session_id: UUID,
     proposal_id: UUID,
     request: Request,
+    body: AcceptProposalRequest | None = None,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
 ) -> CompositionProposalResponse:
     session = await _verify_session_ownership(session_id, user, request)
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
     async with compose_lock:
         service: SessionServiceProtocol = request.app.state.session_service
-        proposals = await service.list_composition_proposals(session.id)
-        proposal = next((item for item in proposals if item.id == proposal_id), None)
-        if proposal is None:
-            raise HTTPException(status_code=404, detail="Proposal not found")
+        try:
+            proposal_authority = await service.get_authoritative_composition_proposal(
+                session_id=session.id,
+                proposal_id=proposal_id,
+                reviewed_facts=None,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Proposal not found") from None
+        proposal = proposal_authority.row
+        pipeline_authority = proposal_authority.pipeline
+        if pipeline_authority is not None:
+            if body is None or body.draft_hash is None:
+                raise HTTPException(status_code=422, detail="Canonical pipeline proposal acceptance requires draft_hash.")
+            route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                request=request,
+                user=user,
+                authority=pipeline_authority,
+                draft_hash=body.draft_hash,
+            )
+            return _composition_proposal_response(route_settlement.settlement.proposal)
+
         if proposal.status != "pending":
             raise HTTPException(
                 status_code=409,
@@ -460,13 +440,35 @@ async def reject_composition_proposal(
     async with compose_lock:
         service: SessionServiceProtocol = request.app.state.session_service
         try:
-            proposal = await service.reject_composition_proposal(
+            authority = await service.get_authoritative_composition_proposal(
                 session_id=session.id,
                 proposal_id=proposal_id,
-                actor=f"user:{user.user_id}",
+                reviewed_facts=None,
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="Proposal not found") from None
+        try:
+            if authority.pipeline is None:
+                proposal = await service.reject_composition_proposal(
+                    session_id=session.id,
+                    proposal_id=proposal_id,
+                    actor=f"user:{user.user_id}",
+                )
+            else:
+                if authority.pipeline.proposal.surface.value in {"guided_staged", "tutorial_profile"}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This pipeline proposal must be rejected through its guided workflow.",
+                    )
+                proposal = await service.reject_pipeline_composition_proposal(
+                    session_id=session.id,
+                    proposal_id=proposal_id,
+                    draft_hash=authority.pipeline.proposal.draft_hash,
+                    reviewed_facts=None,
+                    reason="operator_rejected",
+                    dispatch=None,
+                    actor=f"user:{user.user_id}",
+                )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         _ = body

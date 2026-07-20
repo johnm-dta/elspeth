@@ -32,6 +32,7 @@ import type {
   Session,
 } from "@/types/api";
 import type {
+  GuidedProposalReviewState,
   GuidedSession,
   SingleSelectPayload,
   TerminalState,
@@ -448,8 +449,118 @@ describe("ChatPanel mode discriminator", () => {
       ],
       allow_custom: false,
     };
-    return { type: "single_select", step_index: 0, payload };
+    return { type: "single_select", step_index: 0, turn_token: "a".repeat(64), payload };
   }
+
+  const proposalId = "00000000-0000-4000-8000-000000000701";
+  const proposalHash = "f".repeat(64);
+
+  function proposalTurn(): TurnPayload {
+    const sourceId = "00000000-0000-4000-8000-000000000702";
+    const outputId = "00000000-0000-4000-8000-000000000703";
+    return {
+      type: "propose_pipeline",
+      step_index: 2,
+      turn_token: "f".repeat(64),
+      payload: {
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        summary: "guided.proposal.summary.full_graph.v1",
+        rationale: "guided.proposal.rationale.review_required.v1",
+        component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+        blockers: [],
+        graph: {
+          sources: [{
+            stable_id: sourceId,
+            label: "orders-source",
+            plugin: { kind: "source", id: "csv" },
+          }],
+          edges: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000704",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "output", stable_id: outputId },
+              flow: { kind: "source_success", branch: null },
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000705",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "discard" },
+              flow: { kind: "source_validation_failure" },
+            },
+          ],
+        },
+        nodes: [],
+        outputs: [{
+          stable_id: outputId,
+          label: "orders-output",
+          plugin: { kind: "sink", id: "json" },
+        }],
+        edit_targets: [{ kind: "source", stable_id: sourceId }],
+      },
+    };
+  }
+
+  function proposalReview(
+    status: GuidedProposalReviewState["status"],
+  ): GuidedProposalReviewState {
+    if (status === "error") {
+      return {
+        status,
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        message: "The proposal response was not received. Retry the same action.",
+        retryable: true,
+        retry_action: { kind: "review_wiring" },
+      };
+    }
+    return { status, proposal_id: proposalId, draft_hash: proposalHash };
+  }
+
+  it.each([
+    ["active", null, false],
+    ["reloading", /reloading the authoritative proposal/i, true],
+    ["stale", /proposal is stale/i, true],
+    ["error", /response was not received/i, false],
+  ] as const)(
+    "renders the proposal review lifecycle state %s in the guided chat surface",
+    (status, statusMessage, acceptDisabled) => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+        guidedNextTurn: proposalTurn(),
+        guidedProposalReview: proposalReview(status),
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+      const review = screen.getByRole("button", { name: "Review wiring" });
+      if (acceptDisabled) expect(review).toBeDisabled();
+      else expect(review).toBeEnabled();
+      if (statusMessage !== null) expect(screen.getByText(statusMessage)).toBeVisible();
+    },
+  );
+
+  it("renders the same closed proposal as a passive tutorial review", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: proposalTurn(),
+      guidedProposalReview: proposalReview("active"),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+    expect(screen.getByText("orders-source · csv")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+  });
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {
     useSessionStore.setState({
@@ -566,7 +677,7 @@ describe("ChatPanel mode discriminator", () => {
 
   it("renders the chat box at step_3 with NO proposal (per-stage transforms entry, not a panel-less fall-through)", () => {
     // STEP_3 begins with no server turn: the per-stage transforms prompt drives
-    // the build via /guided/chat (cold-start). The guided surface — crucially the
+    // the build via /guided/start (durable-root cold start). The guided surface — crucially the
     // chat box — MUST render so the operator can describe the transforms; a
     // missing turn must NOT fall through to the freeform body / loading flash.
     useSessionStore.setState({
@@ -657,6 +768,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+      assistant_message_kind: null,
+      synthetic_failure_reason: null,
           },
         ],
       },
@@ -787,6 +900,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+            assistant_message_kind: "assistant",
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -965,6 +1080,7 @@ describe("ChatPanel mode discriminator", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 1,
+        turn_token: "b".repeat(64),
         payload: {
           question: "Which output plugin should we use?",
           options: [{ id: "json", label: "JSON", hint: null }],
@@ -1228,24 +1344,6 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
-  it("renders the per-step placeholder for STEP_2_5_RECIPE_MATCH", () => {
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      // The placeholder keys on guidedSession.step (not the turn type), so
-      // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
-      guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
-      guidedNextTurn: singleSelectTurn(),
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Describe how this recipe should change, or accept it as proposed…",
-    );
-  });
-
   it("renders the per-step placeholder for STEP_3_TRANSFORMS", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -1340,6 +1438,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1768,6 +1868,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1819,6 +1921,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -1843,6 +1947,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1893,6 +1999,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -1969,7 +2077,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(media900![0]).toContain("order: -1;");
   });
 
-  it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
+  it("delegates guided ChatInput sends to the retry-safe store action", async () => {
     const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -2138,14 +2246,15 @@ describe("ChatPanel mode discriminator", () => {
         history: [],
         terminal: null,
         chat_history: [
-          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t" },
+          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
           {
             role: "assistant",
             content: "I'm unavailable right now; you can still use the wizard controls.",
             seq: 2,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 2,
@@ -2232,7 +2341,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 0,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 0,
@@ -2311,6 +2421,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-07-03T00:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2498,9 +2610,9 @@ describe("ChatPanel mode discriminator", () => {
   });
 
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
-    // Regression: a transient chain-solve failure at step_3 appends a user turn
-    // but returns next_turn=null. The 'Sent' line must NOT replace the box, or
-    // the passive learner is stranded with no widget and no exit.
+    // Regression: a transient step-3 chat failure appends a user turn but
+    // returns next_turn=null. The 'Sent' line must NOT replace the box, or the
+    // passive learner is stranded with no widget and no exit.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2515,6 +2627,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_3_transforms",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2554,6 +2668,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2913,70 +3029,6 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeNull();
   });
 
-  // C-4b (composer first-principles review 2026-07-04): "Switch to guided"
-  // must not silently no-op on a permanently-terminal guided session.
-  it("disables 'Switch to guided' with an explanation when guided ended via solver_exhausted", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "solver_exhausted",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    const button = screen.getByRole("button", { name: "Switch to guided" });
-    expect(button).toBeDisabled();
-    expect(
-      screen.getByText(
-        "Guided ended for this session — start a new session to use guided.",
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("disables 'Switch to guided' with an explanation when guided ended via protocol_violation", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "protocol_violation",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByRole("button", { name: "Switch to guided" })).toBeDisabled();
-  });
-
   it("keeps 'Switch to guided' enabled (reenterable) when the terminal reason is user_pressed_exit", () => {
     // Reversible operator exit — POST /guided/reenter still honours it
     // (routes/composer/guided.py post_guided_reenter). Disabling here would
@@ -3286,7 +3338,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
       options,
       allow_custom: false,
     };
-    return { type: "single_select", step_index: stepIndex, payload };
+    return { type: "single_select", step_index: stepIndex, turn_token: "a".repeat(64), payload };
   }
 
   it("moves focus to the first button in chat-panel-guided-log when the turn first renders (step 0)", async () => {
@@ -3388,7 +3440,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
     // The composer now docks at the BOTTOM for every session (tutorial
     // included). A same-step `/guided/chat` Send replaces the turn with a
     // different TYPE without advancing the step (single_select → schema_form at
-    // step 1; null → propose_chain at step 3). The just-built decision lands
+    // step 1; null at a server-owned later stage). The just-built decision lands
     // ABOVE the box the user Sent from, so the focus effect must re-fire on the
     // type change and bring it into view — otherwise the passive learner is left
     // looking at the docked box with the decision off-screen above it. This is
@@ -3416,6 +3468,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
         guidedNextTurn: {
           type: "schema_form",
           step_index: 0,
+          turn_token: "b".repeat(64),
           payload: {
             mode: "plugin_options",
             plugin: "csv",
@@ -5076,6 +5129,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 0,
+        turn_token: "a".repeat(64),
         payload: {
           question: "Pick one",
           options: [{ id: "a", label: "A", hint: null }],

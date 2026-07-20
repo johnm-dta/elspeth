@@ -16,6 +16,13 @@ from pydantic import ValidationError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.transforms.llm.base import LLMConfig
+from elspeth.plugins.transforms.llm.multi_query import QueryDefinition
+
+
+def _mapping_defs(defs: dict[str, dict[str, Any]]) -> dict[str, QueryDefinition]:
+    """Build the typed mapping form of ``queries`` (value carries no ``name``)."""
+    return {name: QueryDefinition(**spec) for name, spec in defs.items()}
+
 
 # Shared observed schema for test convenience
 _OBSERVED_SCHEMA = SchemaConfig(mode="observed", fields=None)
@@ -1620,14 +1627,16 @@ class TestResolveQueries:
         from elspeth.plugins.transforms.llm.multi_query import resolve_queries
 
         result = resolve_queries(
-            {
-                "q1": {
-                    "input_fields": {"text": "text_col"},
-                },
-                "q2": {
-                    "input_fields": {"category": "cat_col"},
-                },
-            }
+            _mapping_defs(
+                {
+                    "q1": {
+                        "input_fields": {"text": "text_col"},
+                    },
+                    "q2": {
+                        "input_fields": {"category": "cat_col"},
+                    },
+                }
+            )
         )
         assert len(result) == 2
         names = {q.name for q in result}
@@ -1655,16 +1664,18 @@ class TestResolveQueries:
 
         with pytest.raises(ValueError, match="collision"):
             resolve_queries(
-                {
-                    "q1_extra": {
-                        "input_fields": {"text": "text_col"},
-                        "output_fields": [{"suffix": "score", "type": "integer"}],
-                    },
-                    "q1": {
-                        "input_fields": {"text": "text_col"},
-                        "output_fields": [{"suffix": "extra_score", "type": "integer"}],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "q1_extra": {
+                            "input_fields": {"text": "text_col"},
+                            "output_fields": [{"suffix": "score", "type": "integer"}],
+                        },
+                        "q1": {
+                            "input_fields": {"text": "text_col"},
+                            "output_fields": [{"suffix": "extra_score", "type": "integer"}],
+                        },
+                    }
+                )
             )
 
     def test_reserved_suffix_raises_error(self) -> None:
@@ -1673,12 +1684,14 @@ class TestResolveQueries:
 
         with pytest.raises(ValueError, match="reserved LLM suffix"):
             resolve_queries(
-                {
-                    "q1": {
-                        "input_fields": {"text": "text_col"},
-                        "output_fields": [{"suffix": "error", "type": "string"}],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "q1": {
+                            "input_fields": {"text": "text_col"},
+                            "output_fields": [{"suffix": "error", "type": "string"}],
+                        },
+                    }
+                )
             )
 
     def test_reserved_suffix_from_constants_raises_error(self) -> None:
@@ -1687,21 +1700,25 @@ class TestResolveQueries:
 
         with pytest.raises(ValueError, match="reserved LLM suffix"):
             resolve_queries(
-                {
-                    "q1": {
-                        "input_fields": {"text": "text_col"},
-                        "output_fields": [{"suffix": "usage", "type": "string"}],
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "q1": {
+                            "input_fields": {"text": "text_col"},
+                            "output_fields": [{"suffix": "usage", "type": "string"}],
+                        },
+                    }
+                )
             )
 
     def test_single_query_returns_one_element_list(self) -> None:
         from elspeth.plugins.transforms.llm.multi_query import resolve_queries
 
         result = resolve_queries(
-            {
-                "only_one": {"input_fields": {"text": "text_col"}},
-            }
+            _mapping_defs(
+                {
+                    "only_one": {"input_fields": {"text": "text_col"}},
+                }
+            )
         )
         assert len(result) == 1
 
@@ -1711,12 +1728,14 @@ class TestResolveQueries:
 
         with pytest.raises(ValueError, match="positional variables"):
             resolve_queries(
-                {
-                    "q1": {
-                        "input_fields": {"text": "text_col"},
-                        "template": "Evaluate {{ input_1 }} quality",
-                    },
-                }
+                _mapping_defs(
+                    {
+                        "q1": {
+                            "input_fields": {"text": "text_col"},
+                            "template": "Evaluate {{ input_1 }} quality",
+                        },
+                    }
+                )
             )
 
 
@@ -1785,3 +1804,95 @@ class TestMultiQueryInputFieldsValidation:
             required_input_fields=[],
         )
         assert config.required_input_fields == []
+
+
+class TestStructuredQueryProbeClassification:
+    """Ruling A: cross-query validation surfaces as the redacted-safe category.
+
+    Cross-query validation (duplicate names, reserved suffixes, output-key
+    collisions, list-form name presence) used to raise a bare ``ValueError``
+    from ``resolve_queries`` at ``LLMTransform.__init__`` time, which escaped as
+    a generic 500 because it was neither a ``PluginConfigError`` nor matched by
+    ``_is_config_probe_exception``. Relocating it into an ``LLMConfig``
+    ``model_validator`` means ``from_dict`` wraps the failure into
+    ``PluginConfigError`` — the §5.3 redacted-safe configuration-probe category.
+    """
+
+    def _base_config(self, **overrides: Any) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "provider": "azure",
+            "prompt_template": "Assess: {{ row.text }}",
+            "schema": {"mode": "observed"},
+            "required_input_fields": [],
+        }
+        config.update(overrides)
+        return config
+
+    def test_duplicate_query_names_from_dict_raise_plugin_config_error(self) -> None:
+        """A malformed structured-query draft lands in PluginConfigError via from_dict."""
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+
+        bad = self._base_config(
+            queries=[
+                {"name": "diagnosis", "input_fields": {"text": "col_a"}},
+                {"name": "diagnosis", "input_fields": {"text": "col_b"}},
+            ]
+        )
+        with pytest.raises(PluginConfigError, match="Duplicate query name"):
+            LLMConfig.from_dict(bad, plugin_name="llm")
+
+    def test_reserved_suffix_from_dict_raises_plugin_config_error(self) -> None:
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+
+        bad = self._base_config(
+            queries={
+                "q1": {
+                    "input_fields": {"text": "col_a"},
+                    "output_fields": [{"suffix": "usage", "type": "string"}],
+                },
+            }
+        )
+        with pytest.raises(PluginConfigError, match="reserved LLM suffix"):
+            LLMConfig.from_dict(bad, plugin_name="llm")
+
+    def test_list_entry_missing_name_from_dict_raises_plugin_config_error(self) -> None:
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+
+        bad = self._base_config(queries=[{"input_fields": {"text": "col_a"}}])
+        with pytest.raises(PluginConfigError, match="must include a 'name'"):
+            LLMConfig.from_dict(bad, plugin_name="llm")
+
+    def test_malformed_query_draft_is_classified_as_config_probe(self) -> None:
+        """The relocated failure is matched by the composer probe classifier."""
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.web.composer._semantic_validator import _is_config_probe_exception
+
+        bad = self._base_config(
+            queries=[
+                {"name": "diagnosis", "input_fields": {"text": "col_a"}},
+                {"name": "diagnosis", "input_fields": {"text": "col_b"}},
+            ]
+        )
+        try:
+            LLMConfig.from_dict(bad, plugin_name="llm")
+        except PluginConfigError as exc:
+            assert _is_config_probe_exception(exc) is True
+        else:  # pragma: no cover - the draft must fail
+            pytest.fail("malformed structured-query draft did not fail closed")
+
+    def test_valid_structured_queries_from_dict_succeeds(self) -> None:
+        """A well-formed structured-query draft still validates (vacuousness guard)."""
+        good = self._base_config(
+            queries={
+                "clarity": {
+                    "input_fields": {"text": "col_a"},
+                    "response_format": "structured",
+                    "output_fields": [
+                        {"suffix": "score", "type": "integer"},
+                        {"suffix": "rationale", "type": "string"},
+                    ],
+                },
+            }
+        )
+        config = LLMConfig.from_dict(good, plugin_name="llm")
+        assert config.queries is not None

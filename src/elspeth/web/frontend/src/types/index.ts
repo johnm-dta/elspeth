@@ -123,9 +123,12 @@ export interface NodeSpec {
   condition?: string | null;
   routes?: Record<string, string> | null;
   fork_to?: string[] | null;
-  branches?: string[] | null;
+  branches?: string[] | Record<string, string> | null;
   policy?: string | null;
   merge?: string | null;
+  trigger?: Record<string, unknown> | null;
+  output_mode?: "default" | "passthrough" | "transform" | null;
+  expected_output_count?: number | null;
 }
 
 /** An edge connecting two nodes in the DAG. */
@@ -142,6 +145,7 @@ export interface OutputSpec {
   name: string;
   plugin: string;
   options: Record<string, unknown>;
+  on_write_failure?: string;
 }
 
 /** Pipeline-level metadata attached to a composition. */
@@ -173,16 +177,21 @@ export interface ValidationEntryDTO {
 
 export interface CompositionState {
   id: string;
+  session_id: string;
   version: number;
   sources: Record<string, SourceSpec>;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
   outputs: OutputSpec[];
   metadata: PipelineMetadata;
-  validation_errors?: string[];
-  validation_warnings?: ValidationEntryDTO[];
-  validation_suggestions?: ValidationEntryDTO[];
-  plugin_policy_findings?: PluginPolicyFinding[];
+  is_valid: boolean;
+  validation_errors: string[] | null;
+  validation_warnings: ValidationEntryDTO[] | null;
+  validation_suggestions: ValidationEntryDTO[] | null;
+  derived_from_state_id: string | null;
+  created_at: string;
+  composer_meta: Record<string, unknown> | null;
+  plugin_policy_findings: PluginPolicyFinding[];
 }
 
 /** A version history entry for CompositionState. */
@@ -198,6 +207,17 @@ export interface CompositionStateVersion {
 export type ComposerTrustMode = "explicit_approve" | "auto_commit";
 export type ComposerDensityDefault = "high" | "medium" | "low";
 export type ProposalLifecycleStatus = "pending" | "committed" | "rejected";
+
+export interface PipelineProposalMetadata {
+  surface: "freeform" | "guided_full" | "guided_staged" | "tutorial_profile";
+  draft_hash: string;
+  base: Record<string, unknown>;
+  reviewed_anchor_hash: string;
+  repair_count: number;
+  skill_hash: string;
+  audit_payload_hash: string;
+  custody_result: "not_required" | "ready";
+}
 
 export interface ComposerPreferences {
   session_id: string;
@@ -220,6 +240,7 @@ export interface CompositionProposal {
   base_state_id: string | null;
   committed_state_id: string | null;
   audit_event_id: string | null;
+  pipeline_metadata?: PipelineProposalMetadata | null;
   created_at: string;
   updated_at: string;
 }

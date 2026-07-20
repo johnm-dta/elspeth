@@ -12,8 +12,6 @@ Exported:
     build_step_2_single_select_turn — single_select for sink plugin selection.
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
-    build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
-    build_step_3_schema_form_turn — schema_form for editing one proposed transform.
     build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
@@ -25,8 +23,9 @@ from __future__ import annotations
 
 import keyword
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from elspeth.contracts.schema import FieldDefinition
 from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
 from elspeth.web.composer.guided._display import plugin_display_label
@@ -36,22 +35,30 @@ from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
-    ProposeChainPayload,
     SchemaFormPayload,
     SingleSelectPayload,
     Turn,
     TurnType,
     WireStageData,
-    WireTopology,
     _Observed,
     _Option,
+    _WireBusinessSchema,
+    _WireConnectionReview,
+    _WireNodeReview,
+    _WireOutputReview,
+    _WireProjection,
+    _WireRowCardinality,
+    _WireSchemaField,
+    _WireSourceReview,
+    _WireStructuredOutputField,
 )
-from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
+from elspeth.web.composer.tools._common import _semantic_contracts_payload
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
-    from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
-    from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
+    from elspeth.web.composer.guided.protocol import ProposePipelinePayload
+    from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
+    from elspeth.web.composer.guided.state_machine import GuidedSession, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState, ValidationSummary
 
@@ -91,32 +98,20 @@ def build_step_1_inspect_and_confirm_turn_from_intent(
 ) -> Turn:
     """Build an ``inspect_and_confirm`` Turn from a persisted SourceIntent.
 
-    Called by GET /guided to rebuild the INSPECT_AND_CONFIRM turn on refresh
-    when ``guided.step_1_source_intent`` is set.  The intent carries the
-    plugin's observed_columns (the key data the widget needs), but not
-    the original blob-inspection warnings — those are not stored on
-    SourceIntent because they are observations about the blob, not about the
-    plugin choices.  The rebuild emits ``warnings=[]`` for this reason.
-    Clients that need the original warnings must resubmit the prior response;
-    the reconstructed turn is functionally equivalent for resuming the flow.
+    Schema-8 inspection-review intents retain the authoritative
+    ``SourceInspectionFacts`` used for the original turn. Reuse those facts so
+    columns and warnings rebuild byte-for-byte from persisted custody instead
+    of maintaining a second warning field on the intent.
 
     Args:
-        intent: The staged SourceIntent from GuidedSession.step_1_source_intent.
+        intent: A staged schema-8 SourceIntent in ``inspection_review`` phase.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
-    observed: _Observed = {
-        "columns": list(intent.observed_columns),
-        "samples": [],
-        "warnings": [],
-    }
-    payload: InspectAndConfirmPayload = {"observed": observed}
-    return Turn(
-        type=TurnType.INSPECT_AND_CONFIRM.value,
-        step_index=_step_index(GuidedStep.STEP_1_SOURCE),
-        payload=payload,
-    )
+    if intent.inspection_facts is None:
+        raise InvariantError("inspection-review source intent requires persisted inspection facts")
+    return _build_inspect_and_confirm_turn(intent.inspection_facts)
 
 
 def build_step_1_schema_form_turn(
@@ -299,6 +294,51 @@ def build_step_2_schema_form_turn(
     )
 
 
+def build_component_review_turn(
+    guided: GuidedSession,
+    component_kind: Literal["source", "output"],
+) -> Turn:
+    """Build the public plural-component controller from reviewed custody."""
+
+    expected_step = GuidedStep.STEP_1_SOURCE if component_kind == "source" else GuidedStep.STEP_2_SINK
+    if guided.step is not expected_step:
+        raise InvariantError(f"{component_kind} component review is not legal at {guided.step.value}")
+    reviewed: Mapping[str, SourceResolved | SinkOutputResolved]
+    if component_kind == "source":
+        order = guided.source_order
+        reviewed = guided.reviewed_sources
+        if guided.pending_source_intents:
+            raise InvariantError("source component review requires no pending source intents")
+    else:
+        order = guided.output_order
+        reviewed = guided.reviewed_outputs
+        if guided.pending_output_intents:
+            raise InvariantError("output component review requires no pending output intents")
+    if not reviewed or set(order) != set(reviewed):
+        raise InvariantError(f"{component_kind} component review requires a complete reviewed collection")
+    actions = ["add", "edit"]
+    if len(order) > 1:
+        actions.append("remove")
+    actions.extend(("reorder", "finish"))
+    return Turn(
+        type=TurnType.REVIEW_COMPONENTS.value,
+        step_index=_step_index(expected_step),
+        payload={
+            "component_kind": component_kind,
+            "items": [
+                {
+                    "stable_id": stable_id,
+                    "name": reviewed[stable_id].name,
+                    "plugin": reviewed[stable_id].plugin,
+                    "status": "reviewed",
+                }
+                for stable_id in order
+            ],
+            "allowed_actions": actions,
+        },
+    )
+
+
 def build_step_1_schema_form_turn_from_resolved(
     source: SourceResolved,
     catalog: CatalogServiceProtocol,
@@ -308,8 +348,8 @@ def build_step_1_schema_form_turn_from_resolved(
     Unlike :func:`build_step_1_schema_form_turn` (which seeds an empty
     ``prefilled``), this renders the committed ``source.options`` so the
     editable form shows what the LLM (or the manual path) built. Used by the
-    chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
-    set on a STEP_1 session.
+    chat-apply in-place re-render and by GET /guided when editing a reviewed
+    source.
     """
     from elspeth.contracts.freeze import deep_thaw
 
@@ -318,9 +358,9 @@ def build_step_1_schema_form_turn_from_resolved(
     # Mask a blob-backed source's absolute storage_path behind a stable
     # ``blob:<ref>`` sentinel so the deploy dir + OS username never reach the wire
     # (the un-gated egress that bypasses the blobs/schemas.py "storage_path is
-    # never exposed" doctrine). handle_step_1_source re-resolves the sentinel to
-    # the real path on commit. Gated on blob_ref so an operator-typed path knob is
-    # left untouched.
+    # never exposed" doctrine). The proposal custody boundary re-resolves the
+    # sentinel before commit. Gated on blob_ref so an operator-typed path knob
+    # is left untouched.
     blob_ref = source.options.get("blob_ref")
     if blob_ref is not None and isinstance(prefilled.get("path"), str):
         prefilled["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_ref}"
@@ -348,10 +388,9 @@ def build_step_2_schema_form_turn_from_resolved(
 ) -> Turn:
     """Build the STEP_2 ``schema_form`` populated from an APPLIED sink.
 
-    Renders the first output's committed ``options`` (MVP single-output
-    constraint, matching ``handle_step_2_sink``'s ``sink_name="main"`` loop).
-    Used by the chat-apply in-place re-render and by GET /guided when
-    ``step_2_result`` is set on a STEP_2 session.
+    Renders the first reviewed output's committed ``options``. Used by the
+    chat-apply in-place re-render and by GET /guided when editing a reviewed
+    output.
     """
     from elspeth.contracts.freeze import deep_thaw
 
@@ -363,6 +402,7 @@ def build_step_2_schema_form_turn_from_resolved(
     # deep-frozen ``mappingproxy`` options whose NESTED maps (e.g. ``schema``)
     # Pydantic rejects on serialisation. Mirror the step_1 builder's thaw.
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(output.options))}
+    prefilled["on_write_failure"] = output.on_write_failure
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": output.plugin,
@@ -392,17 +432,16 @@ def build_step_2_multi_select_turn(
     ``custom_inputs: []``. A bare empty ``chosen``/``custom_inputs`` pair
     *without* the signal is fail-closed rejected with a structured 400
     (``code: "guided_step2_no_fields_selected"``) — it is indistinguishable
-    on the wire from a stale/buggy client submitting nothing, so the
-    dispatcher (``_dispatch_guided_respond``'s STEP_2_SINK
-    MULTI_SELECT_WITH_CUSTOM branch, ``sessions/routes/_helpers.py``) refuses
-    to guess. Sending ``control_signal: "passthrough"`` together with a
+    on the wire from a stale/buggy client submitting nothing, so the current
+    STEP_2_SINK field-review transition refuses to guess. Sending
+    ``control_signal: "passthrough"`` together with a
     non-empty ``chosen``/``custom_inputs`` is likewise rejected (400,
     ``code: "guided_step2_passthrough_conflict"``) as a contradictory
     payload.
 
     Args:
         observed_columns: The columns observed from the source in Step 1.
-            Comes from ``GuidedSession.step_1_result.observed_columns``.
+            Comes from the reviewed source's observed columns.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
@@ -421,113 +460,38 @@ def build_step_2_multi_select_turn(
     )
 
 
-def build_step_3_propose_chain_turn(
-    proposal: ChainProposal,
-) -> Turn:
-    """Build a ``propose_chain`` Turn from a ChainProposal.
-
-    Emitted at Step 3 after ``solve_chain`` returns a complete chain proposal.
-
-    The ``blockers`` field is always ``[]`` for chain proposals emitted
-    server-side after a successful ``solve_chain`` call.  The LLM may use
-    ``blockers`` when it can only produce a partial chain; for the MVP we
-    do not surface that path — ``solve_chain`` either returns a complete
-    proposal or raises (so the dispatcher punts).
-
-    Args:
-        proposal: The chain proposal returned by ``solve_chain``.
-
-    Returns:
-        A ``Turn`` TypedDict ready for serialisation and hash.
-    """
-    from elspeth.contracts.freeze import deep_thaw
-    from elspeth.web.composer.guided.protocol import _ProposedStep
-
-    # Thaw the frozen ChainProposal step mappings into plain dicts so the
-    # payload is JSON-serialisable.  ``_ProposedStep`` is a TypedDict so
-    # mypy needs the explicit shape — the chain solver guarantees these
-    # keys (validate against the LLM tool schema at solve_chain time).
-    thawed_steps: list[_ProposedStep] = [
-        _ProposedStep(
-            plugin=str(s["plugin"]),
-            options=dict(deep_thaw(s["options"])),
-            rationale=str(s["rationale"]),
-        )
-        for s in proposal.steps
-    ]
-    payload: ProposeChainPayload = {
-        "steps": thawed_steps,
-        "why": proposal.why,
-        "blockers": [],
-    }
-    return Turn(
-        type=TurnType.PROPOSE_CHAIN.value,
-        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
-        payload=payload,
-    )
-
-
-def build_step_3_schema_form_turn(
-    *,
-    plugin: str,
-    options: Mapping[str, Any],
-    catalog: CatalogServiceProtocol,
-) -> Turn:
-    """Build a ``schema_form`` Turn for editing a proposed transform step."""
-    from elspeth.contracts.freeze import deep_thaw
-
-    schema_info = catalog.get_schema("transform", plugin)
-    # ``options`` may be a proposal step's frozen mapping (nested values are
-    # MappingProxyType) — deep_thaw before dict() so nested dicts survive
-    # pydantic JSON serialisation of TurnPayloadResponse. Mirrors the same
-    # thaw in build_step_3_propose_chain_turn above.
-    payload: SchemaFormPayload = {
-        "mode": "plugin_options",
-        "plugin": plugin,
-        "knobs": cast(KnobSchema, schema_info.knob_schema),
-        "prefilled": dict(deep_thaw(options)),
-    }
-    return Turn(
-        type=TurnType.SCHEMA_FORM.value,
-        step_index=_step_index(GuidedStep.STEP_3_TRANSFORMS),
-        payload=payload,
-    )
-
-
 def build_step_4_wire_turn(
     state: CompositionState,
     *,
+    proposal_projection: ProposePipelinePayload,
+    guided: GuidedSession,
     catalog: CatalogServiceProtocol | None = None,
     validation_state: CompositionState | None = None,
     validation_summary: ValidationSummary | None = None,
-    advisor_findings: str | None = None,
-    signoff_outcome: str | None = None,
-    passes_remaining: int | None = None,
 ) -> Turn:
-    """Build a ``confirm_wiring`` Turn from topology and validation reads.
-
-    ``passes_remaining`` is the advisor sign-off budget left AFTER the pass that
-    produced this turn. The emitter stays dumb — it folds the caller-computed
-    value only when not None (the re-emit sites supply it; the initial turn does
-    not, so its absence is what keeps the advisor-off tutorial cost-copy-free).
-    """
+    """Build one stable-ID wire review from an immutable proposal candidate."""
     del catalog  # Reserved for future catalog-backed presentation enrichment.
-    # The topology is always the public, persisted composition. Operator-profile
-    # bindings exist only in a lowered in-memory state supplied by the route;
-    # use that copy for executable contract probes without exposing it here.
     validation = validation_summary or (validation_state or state).validate()
+    executable_state = validation_state or state
+    projected = _build_wire_projection(
+        state,
+        executable_state=executable_state,
+        proposal_projection=proposal_projection,
+        guided=guided,
+        validation=validation,
+    )
     payload: WireStageData = {
-        "topology": _build_wire_topology(state),
-        "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+        "proposal_id": proposal_projection["proposal_id"],
+        "draft_hash": proposal_projection["draft_hash"],
+        "sources": projected["sources"],
+        "nodes": projected["nodes"],
+        "outputs": projected["outputs"],
+        "connections": projected["connections"],
         "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
         "warnings": [w.to_dict() for w in validation.warnings],
+        "blockers": [error.to_dict() for error in validation.errors],
+        "can_confirm": validation.is_valid,
     }
-    if advisor_findings is not None:
-        payload["advisor_findings"] = advisor_findings
-    if signoff_outcome is not None:
-        payload["signoff_outcome"] = signoff_outcome
-    if passes_remaining is not None:
-        payload["passes_remaining"] = passes_remaining
     return Turn(
         type=TurnType.CONFIRM_WIRING.value,
         step_index=_step_index(GuidedStep.STEP_4_WIRE),
@@ -535,42 +499,185 @@ def build_step_4_wire_turn(
     )
 
 
-def _build_wire_topology(state: CompositionState) -> WireTopology:
-    """Build the label topology used by the wire-stage renderer."""
-    full_state = _serialize_full_pipeline_state(state, requested_component="pipeline")
-    sources = {
-        source_name: {
-            "id": source_producer_id(source_name),
-            "plugin": source["plugin"],
-            "on_success": source["on_success"],
-            "on_validation_failure": source["on_validation_failure"],
-        }
-        for source_name, source in full_state["sources"].items()
+def _wire_schema(options: Mapping[str, Any]) -> _WireBusinessSchema:
+    """Project only the business schema, never adjacent path/secret options."""
+
+    raw = options.get("schema", options.get("schema_config", {}))
+    schema = raw if isinstance(raw, Mapping) else {}
+    fields: list[_WireSchemaField] = []
+    raw_fields = schema.get("fields")
+    if isinstance(raw_fields, Sequence) and not isinstance(raw_fields, str | bytes):
+        for field in raw_fields:
+            if not isinstance(field, str | Mapping):
+                continue
+            try:
+                parsed = FieldDefinition.parse(field)
+            except ValueError:
+                continue
+            fields.append(cast(_WireSchemaField, parsed.to_dict()))
+
+    def names(key: str) -> list[str]:
+        value = schema.get(key)
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+            return []
+        return [item for item in value if type(item) is str]
+
+    mode = schema.get("mode")
+    return {
+        "mode": mode if type(mode) is str else "observed",
+        "fields": fields,
+        "guaranteed_fields": names("guaranteed_fields"),
+        "required_fields": names("required_fields"),
     }
-    nodes = [
+
+
+def _structured_output_fields(options: Mapping[str, Any]) -> list[_WireStructuredOutputField]:
+    """Return typed LLM result fields without prompts, templates, or values."""
+
+    queries = options.get("queries")
+    if isinstance(queries, Mapping):
+        entries = [(name, value) for name, value in queries.items() if type(name) is str and isinstance(value, Mapping)]
+    elif isinstance(queries, Sequence) and not isinstance(queries, str | bytes):
+        entries = [(item["name"], item) for item in queries if isinstance(item, Mapping) and type(item.get("name")) is str]
+    else:
+        return []
+    projected: list[_WireStructuredOutputField] = []
+    for query_name, query in entries:
+        fields = query.get("output_fields")
+        if not isinstance(fields, Sequence) or isinstance(fields, str | bytes):
+            continue
+        for field in fields:
+            if not isinstance(field, Mapping) or type(field.get("suffix")) is not str or type(field.get("type")) is not str:
+                continue
+            values = field.get("values")
+            projected.append(
+                {
+                    "query": query_name,
+                    "field": f"{query_name}_{field['suffix']}",
+                    "type": field["type"],
+                    "enum_values": (
+                        [item for item in values if type(item) is str]
+                        if isinstance(values, Sequence) and not isinstance(values, str | bytes)
+                        else []
+                    ),
+                }
+            )
+    return projected
+
+
+def _node_cardinality(node: Any, executable_node: Any) -> _WireRowCardinality:
+    if node.node_type == "aggregation":
+        if node.expected_output_count is not None:
+            return {"input": "batch", "output": "expected_count", "expected_output_count": str(node.expected_output_count)}
+        return {"input": "batch", "output": "zero_or_many", "expected_output_count": None}
+    if node.node_type == "coalesce":
+        return {"input": "branches", "output": "one_per_branch_set", "expected_output_count": None}
+    if node.node_type == "queue":
+        return {"input": "many_producers", "output": "one_per_item", "expected_output_count": None}
+    if node.node_type == "gate":
+        return {"input": "one", "output": "one", "expected_output_count": None}
+    if executable_node.plugin is None:
+        raise InvariantError("wire projection transform lost its plugin")
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.composer._validation_probe import prepare_validation_probe_options
+
+    transform = get_shared_plugin_manager().create_transform(
+        executable_node.plugin,
+        prepare_validation_probe_options(executable_node.options),
+    )
+    output: Literal["one", "zero_or_one", "zero_or_many"]
+    if transform.creates_tokens:
+        output = "zero_or_many"
+    elif transform.can_drop_rows:
+        output = "zero_or_one"
+    else:
+        output = "one"
+    return {"input": "one", "output": output, "expected_output_count": None}
+
+
+def _build_wire_projection(
+    state: CompositionState,
+    *,
+    executable_state: CompositionState,
+    proposal_projection: ProposePipelinePayload,
+    guided: GuidedSession,
+    validation: ValidationSummary,
+) -> _WireProjection:
+    """Bind candidate semantics to the proposal's already-advertised IDs."""
+
+    public_sources = list(proposal_projection["graph"]["sources"])
+    public_nodes = list(proposal_projection["nodes"])
+    public_outputs = list(proposal_projection["outputs"])
+    if len(public_sources) != len(state.sources) or len(public_nodes) != len(state.nodes) or len(public_outputs) != len(state.outputs):
+        raise InvariantError("wire projection component counts differ from the proposal")
+    source_canonical = {public_sources[index]["stable_id"]: source_producer_id(name) for index, name in enumerate(state.sources)}
+    node_canonical = {public_nodes[index]["stable_id"]: node.id for index, node in enumerate(state.nodes)}
+    output_canonical = {public_outputs[index]["stable_id"]: f"output:{output.name}" for index, output in enumerate(state.outputs)}
+    canonical_by_stable = {**source_canonical, **node_canonical, **output_canonical}
+    contracts = {(item.from_id, item.to_id): item.to_dict() for item in validation.edge_contracts}
+
+    def fields_for(stable_id: str, *, produced: bool) -> list[str]:
+        canonical = canonical_by_stable[stable_id]
+        values: set[str] = set()
+        for (from_id, to_id), contract in contracts.items():
+            if produced and from_id == canonical:
+                values.update(contract["producer_guarantees"])
+            if not produced and to_id == canonical:
+                values.update(contract["consumer_requires"])
+        return sorted(values)
+
+    sources: list[_WireSourceReview] = [
         {
-            "id": node["id"],
-            "node_type": node["node_type"],
-            "plugin": node["plugin"],
-            "input": node["input"],
-            "on_success": node["on_success"],
-            "on_error": node["on_error"],
-            "routes": node["routes"],
-            "fork_to": node["fork_to"],
-            "branches": node["branches"],
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "plugin": source.plugin,
+            "on_validation_failure": source.on_validation_failure,
+            "guaranteed_fields": fields_for(public["stable_id"], produced=True),
+            "row_cardinality": {"input": "none", "output": "zero_or_many", "expected_output_count": None},
         }
-        for node in full_state["nodes"]
+        for public, source in zip(public_sources, state.sources.values(), strict=True)
     ]
-    outputs = [
+    executable_nodes = {node.id: node for node in executable_state.nodes}
+    nodes: list[_WireNodeReview] = [
         {
-            "id": f"output:{output['sink_name']}",
-            "sink_name": output["sink_name"],
-            "plugin": output["plugin"],
-            "on_write_failure": output["on_write_failure"],
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "node_type": node.node_type,
+            "plugin": node.plugin,
+            "behavior": public["behavior"],
+            "required_fields": fields_for(public["stable_id"], produced=False),
+            "guaranteed_fields": fields_for(public["stable_id"], produced=True),
+            "row_cardinality": _node_cardinality(node, executable_nodes[node.id]),
+            "structured_output_fields": _structured_output_fields(node.options) if node.plugin == "llm" else [],
         }
-        for output in full_state["outputs"]
+        for public, node in zip(public_nodes, state.nodes, strict=True)
     ]
-    return cast(WireTopology, {"sources": sources, "nodes": nodes, "outputs": outputs})
+    outputs: list[_WireOutputReview] = [
+        {
+            "stable_id": public["stable_id"],
+            "label": public["label"],
+            "plugin": output.plugin,
+            "on_write_failure": output.on_write_failure,
+            "required_fields": list(guided.reviewed_outputs[public["stable_id"]].required_fields),
+            "business_schema": _wire_schema(output.options),
+        }
+        for public, output in zip(public_outputs, state.outputs, strict=True)
+    ]
+    connections: list[_WireConnectionReview] = []
+    for edge in proposal_projection["graph"]["edges"]:
+        from_id = canonical_by_stable[edge["from_endpoint"]["stable_id"]]
+        destination = edge["to_endpoint"]
+        to_id = canonical_by_stable[destination["stable_id"]] if destination["kind"] != "discard" else None
+        connections.append(
+            {
+                "stable_id": edge["stable_id"],
+                "from_endpoint": edge["from_endpoint"],
+                "to_endpoint": destination,
+                "flow": edge["flow"],
+                "schema_contract": contracts.get((from_id, to_id)) if to_id is not None else None,
+            }
+        )
+    return {"sources": sources, "nodes": nodes, "outputs": outputs, "connections": connections}
 
 
 def _build_inspect_and_confirm_turn(
@@ -644,7 +751,6 @@ def _step_index(step: GuidedStep) -> int:
     _ORDER: tuple[GuidedStep, ...] = (
         GuidedStep.STEP_1_SOURCE,
         GuidedStep.STEP_2_SINK,
-        GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
         GuidedStep.STEP_4_WIRE,
     )

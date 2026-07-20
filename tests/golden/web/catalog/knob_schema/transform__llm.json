@@ -55,10 +55,108 @@
       {
         "default": null,
         "description": "Multi-query specs (None = single-query mode)",
-        "kind": "json-value",
+        "item_schema": {
+          "fields": [
+            {
+              "default": null,
+              "description": "Unique query identifier (used in output field prefixes). Omitted in mapping form, where the mapping key supplies it.",
+              "kind": "text",
+              "label": "name",
+              "name": "name",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "description": "Mapping of template variable name to row column name.",
+              "kind": "json-object",
+              "label": "input_fields",
+              "name": "input_fields",
+              "nullable": false,
+              "required": true
+            },
+            {
+              "default": "standard",
+              "description": "LLM response format mode (standard JSON object vs. enforced json_schema).",
+              "enum": [
+                "standard",
+                "structured"
+              ],
+              "kind": "enum",
+              "label": "response_format",
+              "name": "response_format",
+              "nullable": false,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Typed structured-output field definitions (None = unstructured response).",
+              "item_schema": {
+                "fields": [
+                  {
+                    "description": "Column suffix in output row",
+                    "kind": "text",
+                    "label": "Suffix",
+                    "name": "suffix",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "description": "Data type for schema enforcement",
+                    "enum": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "enum"
+                    ],
+                    "kind": "enum",
+                    "label": "Type",
+                    "name": "type",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "default": null,
+                    "description": "Allowed values (required for enum type)",
+                    "item_kind": "text",
+                    "kind": "string-list",
+                    "label": "Values",
+                    "name": "values",
+                    "nullable": true,
+                    "required": false
+                  }
+                ]
+              },
+              "kind": "json-array",
+              "label": "output_fields",
+              "name": "output_fields",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query Jinja2 template override (None = use the config-level prompt_template).",
+              "kind": "text",
+              "label": "template",
+              "name": "template",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query max_tokens override (None = use the config-level max_tokens).",
+              "kind": "number-int",
+              "label": "max_tokens",
+              "name": "max_tokens",
+              "nullable": true,
+              "required": false
+            }
+          ]
+        },
+        "kind": "json-array",
         "label": "Queries",
         "name": "queries",
-        "nullable": false,
+        "nullable": true,
         "required": false,
         "visible_when": {
           "equals": "azure",
@@ -362,10 +460,108 @@
       {
         "default": null,
         "description": "Multi-query specs (None = single-query mode)",
-        "kind": "json-value",
+        "item_schema": {
+          "fields": [
+            {
+              "default": null,
+              "description": "Unique query identifier (used in output field prefixes). Omitted in mapping form, where the mapping key supplies it.",
+              "kind": "text",
+              "label": "name",
+              "name": "name",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "description": "Mapping of template variable name to row column name.",
+              "kind": "json-object",
+              "label": "input_fields",
+              "name": "input_fields",
+              "nullable": false,
+              "required": true
+            },
+            {
+              "default": "standard",
+              "description": "LLM response format mode (standard JSON object vs. enforced json_schema).",
+              "enum": [
+                "standard",
+                "structured"
+              ],
+              "kind": "enum",
+              "label": "response_format",
+              "name": "response_format",
+              "nullable": false,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Typed structured-output field definitions (None = unstructured response).",
+              "item_schema": {
+                "fields": [
+                  {
+                    "description": "Column suffix in output row",
+                    "kind": "text",
+                    "label": "Suffix",
+                    "name": "suffix",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "description": "Data type for schema enforcement",
+                    "enum": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "enum"
+                    ],
+                    "kind": "enum",
+                    "label": "Type",
+                    "name": "type",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "default": null,
+                    "description": "Allowed values (required for enum type)",
+                    "item_kind": "text",
+                    "kind": "string-list",
+                    "label": "Values",
+                    "name": "values",
+                    "nullable": true,
+                    "required": false
+                  }
+                ]
+              },
+              "kind": "json-array",
+              "label": "output_fields",
+              "name": "output_fields",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query Jinja2 template override (None = use the config-level prompt_template).",
+              "kind": "text",
+              "label": "template",
+              "name": "template",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query max_tokens override (None = use the config-level max_tokens).",
+              "kind": "number-int",
+              "label": "max_tokens",
+              "name": "max_tokens",
+              "nullable": true,
+              "required": false
+            }
+          ]
+        },
+        "kind": "json-array",
         "label": "Queries",
         "name": "queries",
-        "nullable": false,
+        "nullable": true,
         "required": false,
         "visible_when": {
           "equals": "openrouter",
@@ -658,10 +854,108 @@
       {
         "default": null,
         "description": "Multi-query specs (None = single-query mode)",
-        "kind": "json-value",
+        "item_schema": {
+          "fields": [
+            {
+              "default": null,
+              "description": "Unique query identifier (used in output field prefixes). Omitted in mapping form, where the mapping key supplies it.",
+              "kind": "text",
+              "label": "name",
+              "name": "name",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "description": "Mapping of template variable name to row column name.",
+              "kind": "json-object",
+              "label": "input_fields",
+              "name": "input_fields",
+              "nullable": false,
+              "required": true
+            },
+            {
+              "default": "standard",
+              "description": "LLM response format mode (standard JSON object vs. enforced json_schema).",
+              "enum": [
+                "standard",
+                "structured"
+              ],
+              "kind": "enum",
+              "label": "response_format",
+              "name": "response_format",
+              "nullable": false,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Typed structured-output field definitions (None = unstructured response).",
+              "item_schema": {
+                "fields": [
+                  {
+                    "description": "Column suffix in output row",
+                    "kind": "text",
+                    "label": "Suffix",
+                    "name": "suffix",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "description": "Data type for schema enforcement",
+                    "enum": [
+                      "string",
+                      "integer",
+                      "number",
+                      "boolean",
+                      "enum"
+                    ],
+                    "kind": "enum",
+                    "label": "Type",
+                    "name": "type",
+                    "nullable": false,
+                    "required": true
+                  },
+                  {
+                    "default": null,
+                    "description": "Allowed values (required for enum type)",
+                    "item_kind": "text",
+                    "kind": "string-list",
+                    "label": "Values",
+                    "name": "values",
+                    "nullable": true,
+                    "required": false
+                  }
+                ]
+              },
+              "kind": "json-array",
+              "label": "output_fields",
+              "name": "output_fields",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query Jinja2 template override (None = use the config-level prompt_template).",
+              "kind": "text",
+              "label": "template",
+              "name": "template",
+              "nullable": true,
+              "required": false
+            },
+            {
+              "default": null,
+              "description": "Per-query max_tokens override (None = use the config-level max_tokens).",
+              "kind": "number-int",
+              "label": "max_tokens",
+              "name": "max_tokens",
+              "nullable": true,
+              "required": false
+            }
+          ]
+        },
+        "kind": "json-array",
         "label": "Queries",
         "name": "queries",
-        "nullable": false,
+        "nullable": true,
         "required": false,
         "visible_when": {
           "equals": "bedrock",

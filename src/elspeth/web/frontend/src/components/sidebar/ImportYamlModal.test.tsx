@@ -20,6 +20,7 @@ import { useExecutionStore } from "@/stores/executionStore";
 import * as api from "@/api/client";
 import type { BlobMetadata } from "@/types/api";
 import type { CompositionState } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 vi.mock("yaml", async (importOriginal) => {
   const actual = await importOriginal<typeof import("yaml")>();
@@ -39,6 +40,7 @@ vi.mock("@/api/client", () => ({
 function nonEmptyState(): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: { source: { plugin: "csv", options: {} } },
     nodes: [],
@@ -51,6 +53,7 @@ function nonEmptyState(): CompositionState {
 function emptyState(): CompositionState {
   return {
     id: "state-0",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],

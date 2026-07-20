@@ -519,7 +519,7 @@ async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Reque
     except ValueError:
         raise HTTPException(status_code=404, detail="Run not found") from None
 
-    if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
+    if session.archived_at is not None or session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 

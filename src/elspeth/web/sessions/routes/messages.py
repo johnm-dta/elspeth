@@ -24,6 +24,7 @@ from ._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Query,
     Request,
     SendMessageRequest,
@@ -41,6 +42,7 @@ from ._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
@@ -70,7 +72,9 @@ from ._helpers import (
     maybe_auto_title_session,
     merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
+from .composer.pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
 
 def _requests_audit_grade_messages_view(
@@ -554,6 +558,38 @@ def register_message_routes(router: APIRouter) -> None:
                         catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+                except PipelinePlannerError as exc:
+                    # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                    # PipelinePlannerError is a bare RuntimeError subclass, so it is
+                    # NOT caught by the generic ComposerServiceError arm below; without
+                    # this clause it escaped as an unhandled 500 with no "failed"
+                    # progress event and no closed failure-disposition record. The
+                    # guided-full route translates the same exception via
+                    # fail_guided_operation_with_audit; _handle_planner_failure is the
+                    # freeform mirror (persisting one durable, redacted disposition
+                    # row). The planner's LLM-call audit evidence is already durable
+                    # (llm_calls_durable), so _handle_planner_failure MUST NOT — and
+                    # does not — persist it again.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=str(user_msg.id),
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The composer could not build a pipeline for this request.",
+                            evidence=("The composer model did not return a usable pipeline plan.",),
+                            likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                            reason="provider_unavailable",
+                        ),
+                    )
+                    status_code, planner_response_body = await _handle_planner_failure(
+                        exc,
+                        service,
+                        session.id,
+                        compose_base_state_id,
+                    )
+                    raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
                 except ComposerServiceError as exc:
                     await _publish_progress(
                         progress_registry,
@@ -629,7 +665,26 @@ def register_message_routes(router: APIRouter) -> None:
 
                 state_response: CompositionStateResponse | None = None
                 post_compose_state_id: UUID | None = compose_base_state_id
-                if result.state.version != state.version:
+                if result.pipeline_commit_intent is not None:
+                    authority = await service.get_authoritative_pipeline_proposal(
+                        session_id=session.id,
+                        proposal_id=result.pipeline_commit_intent.proposal_id,
+                        reviewed_facts={},
+                    )
+                    route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                        request=request,
+                        user=user,
+                        authority=authority,
+                        draft_hash=result.pipeline_commit_intent.draft_hash,
+                        composer_meta=_post_compose_meta,
+                        telemetry_source="compose",
+                    )
+                    state_response = _state_response(
+                        route_settlement.settlement.state,
+                        live_validation=route_settlement.validation,
+                    )
+                    post_compose_state_id = route_settlement.settlement.state.id
+                elif result.state.version != state.version:
                     await _publish_progress(
                         progress_registry,
                         session_id=str(session.id),
@@ -730,7 +785,11 @@ def register_message_routes(router: APIRouter) -> None:
                         outputs=_transition_state_d["outputs"],
                         metadata_=_transition_state_d["metadata"],
                         is_valid=False,
-                        validation_errors=None,
+                        validation_errors=validation_errors_for_composer_surface(
+                            composer_meta=_post_compose_meta,
+                            is_valid=False,
+                            validation_errors=None,
+                        ),
                         composer_meta=_post_compose_meta,
                     )
                     _transition_record = await service.save_composition_state(
@@ -810,7 +869,7 @@ def register_message_routes(router: APIRouter) -> None:
                 return response
             except InvariantError as exc:
                 # Same B1-sanitization rationale as the /guided/respond
-                # step_advance and dispatch handlers: server-invariant
+                # transition and settlement handlers: server-invariant
                 # violations route through a static 500 detail and a
                 # structured slog event so on-call dashboards can filter on
                 # ``guided.invariant_violated``.  Without this handler an

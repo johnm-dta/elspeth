@@ -410,6 +410,9 @@ def build_llm_call_record(
     response: Any | None = None,
     error_class: str | None = None,
     error_message: str | None = None,
+    max_completion_tokens_requested: int | None = None,
+    planner_policy_hash: str | None = None,
+    planner_call_ordinal: int | None = None,
 ) -> ComposerLLMCall:
     usage = token_usage_from_response(response)
     provider_cost, provider_cost_source = _provider_cost_from_response(response)
@@ -441,15 +444,25 @@ def build_llm_call_record(
         error_message=_safe_llm_error_message(error_message),
         temperature=temperature,
         seed=seed,
+        max_completion_tokens_requested=max_completion_tokens_requested,
+        planner_policy_hash=planner_policy_hash,
+        planner_call_ordinal=planner_call_ordinal,
     )
 
 
-def attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) -> None:
-    """Attach buffered LLM calls to exception objects that otherwise lack carriers."""
+def attach_llm_calls(
+    exc: BaseException,
+    recorder: BufferingRecorder | None,
+    *,
+    start_index: int = 0,
+) -> None:
+    """Attach only this operation's buffered LLM calls to an exception."""
     if recorder is None:
         return
+    if type(start_index) is not int or start_index < 0:
+        raise ValueError("start_index must be a non-negative exact integer")
     exc_with_calls = cast(Any, exc)
-    exc_with_calls.llm_calls = recorder.llm_calls
+    exc_with_calls.llm_calls = recorder.llm_calls[start_index:]
 
 
 # ---------------------------------------------------------------------------

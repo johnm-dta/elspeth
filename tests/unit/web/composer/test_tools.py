@@ -3024,6 +3024,7 @@ class TestDiscoveryTools:
         assert result.success is False
         assert result.data["error_code"] == "credential_unavailable"
         assert "azure_prompt_shield" not in result.data["error"]
+        assert "composer_hints" not in result.data
 
     def test_get_plugin_assistance_rejects_snapshot_unavailable_plugin(self) -> None:
         catalog = _mock_catalog()
@@ -3044,6 +3045,7 @@ class TestDiscoveryTools:
         assert result.success is False
         assert result.data["error_code"] == "credential_unavailable"
         assert "azure_prompt_shield" not in result.data["error"]
+        assert "composer_hints" not in result.data
 
     def test_get_expression_grammar_is_static(self) -> None:
         grammar = get_expression_grammar()
@@ -4554,21 +4556,27 @@ class TestBlobTools:
         assert "nonexistent" in result.data["note"]
         assert "discard" in result.data["note"]
 
-    def test_create_blob_cleans_file_on_db_failure(self, tmp_path: Path) -> None:
-        """DB failure during create_blob must delete the orphaned storage file."""
+    def test_create_blob_cleans_file_on_interrupted_atomic_write(self, tmp_path: Path) -> None:
+        """A failed create_blob publication must delete its orphaned storage file."""
         from unittest.mock import patch
+
+        from elspeth.web.blobs import service as blob_service
 
         state = _empty_state()
         catalog = _mock_catalog()
         data_dir = str(tmp_path)
+        original_write = blob_service._atomic_write_blob
 
-        # Patch _check_blob_quota to raise inside the DB transaction
+        def _write_then_fail(path: Path, content: bytes) -> None:
+            original_write(path, content)
+            raise RuntimeError("simulated interruption after file publication")
+
         with (
             patch(
-                "elspeth.web.composer.tools.blobs._check_blob_quota",
-                side_effect=RuntimeError("simulated DB failure"),
+                "elspeth.web.blobs.service._atomic_write_blob",
+                side_effect=_write_then_fail,
             ),
-            pytest.raises(RuntimeError, match="simulated DB failure"),
+            pytest.raises(RuntimeError, match="simulated interruption after file publication"),
         ):
             execute_tool(
                 "create_blob",
@@ -4584,7 +4592,7 @@ class TestBlobTools:
         # Storage file must have been cleaned up
         blob_dir = tmp_path / "blobs" / self.session_id
         remaining = list(blob_dir.glob("*")) if blob_dir.exists() else []
-        assert remaining == [], f"Orphaned files after DB failure: {remaining}"
+        assert remaining == [], f"Orphaned files after interrupted publication: {remaining}"
 
     def test_update_blob_restores_old_content_on_db_failure(self, tmp_path: Path) -> None:
         """DB failure during update_blob must restore the original file content."""
@@ -11993,8 +12001,8 @@ class TestUpdateBlobActiveRunGuard:
             composer_model_identifier="openai/gpt-5-mini",
             composer_model_version="gpt-5-mini-2026-05-01",
             composer_provider="openai",
-            composer_skill_hash="sha256:composer-skill",
-            tool_arguments_hash="sha256:update-arguments",
+            composer_skill_hash="a" * 64,
+            tool_arguments_hash="b" * 64,
         )
 
         assert result.success is True
@@ -12007,8 +12015,8 @@ class TestUpdateBlobActiveRunGuard:
         assert row.creating_model_identifier == "openai/gpt-5-mini"
         assert row.creating_model_version == "gpt-5-mini-2026-05-01"
         assert row.creating_provider == "openai"
-        assert row.creating_composer_skill_hash == "sha256:composer-skill"
-        assert row.creating_arguments_hash == "sha256:update-arguments"
+        assert row.creating_composer_skill_hash == "a" * 64
+        assert row.creating_arguments_hash == "b" * 64
 
     def test_update_rejected_when_pending_run_linked(self) -> None:
         self._insert_run_and_link("pending")

@@ -138,6 +138,9 @@ def test_llm_call_audit_envelope_omits_provider_reasoning_artifacts() -> None:
         thinking_blocks=[{"type": "thinking", "thinking": "hidden provider thought"}],
         provider_cost=0.0037,
         provider_cost_source="response_usage.cost",
+        max_completion_tokens_requested=800,
+        planner_policy_hash="a" * 64,
+        planner_call_ordinal=2,
     )
 
     env = llm_call_audit_envelope(call)
@@ -149,6 +152,9 @@ def test_llm_call_audit_envelope_omits_provider_reasoning_artifacts() -> None:
     assert payload["declared_tool_names"] == ["set_source", "splice_transform"]
     assert payload["reasoning_tokens"] == 5
     assert payload["provider_cost"] == 0.0037
+    assert payload["max_completion_tokens_requested"] == 800
+    assert payload["planner_policy_hash"] == "a" * 64
+    assert payload["planner_call_ordinal"] == 2
     assert "reasoning_content" not in payload
     assert "reasoning_details" not in payload
     assert "thinking_blocks" not in payload

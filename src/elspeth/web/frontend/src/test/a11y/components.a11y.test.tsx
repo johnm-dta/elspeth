@@ -58,6 +58,7 @@ const AUDITED_COMPONENTS = [
   "ModeSwitchButton",
   "PipelineGloss",
   "PipelineValidationSummary",
+  "ProposePipelineTurn",
   // 2026-07-02 UX-review regression net (elspeth-adf5e679e7): the tutorial
   // surface, the acknowledgement cards it leans on, the auth surface, and
   // the chrome/run components the review epic touched. Added centrally by
@@ -119,6 +120,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "PipelineValidationSummary",
   "PluginCard",
   "ProgressView",
+  "ProposePipelineTurn",
   "ReadinessRowDetail",
   "RecoveryPanel",
   "RunsHistoryDrawer",
@@ -243,6 +245,12 @@ vi.mock("@dagrejs/dagre", () => ({
         node() {
           return { x: 0, y: 0 };
         }
+        // ReadOnlyPipelineGraph (ProposePipelineTurn's DAG canvas) reads
+        // graph.graph().width/height to size the viewBox — the GraphView stub
+        // above never calls it, so the shared mock must still answer it.
+        graph() {
+          return { width: 480, height: 200 };
+        }
       },
     },
     layout() {},
@@ -283,6 +291,7 @@ import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
 import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
 import { PipelineGloss } from "@/components/chat/guided/PipelineGloss";
 import { PipelineValidationSummary } from "@/components/chat/guided/PipelineValidationSummary";
+import { ProposePipelineTurn } from "@/components/chat/guided/ProposePipelineTurn";
 import { AcknowledgementCard } from "@/components/chat/AcknowledgementCard";
 import { AcknowledgementStack } from "@/components/chat/AcknowledgementStack";
 import { ChatInput } from "@/components/chat/ChatInput";
@@ -322,12 +331,15 @@ import type {
 } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
 import type {
+  GuidedProposalReviewState,
   GuidedSession,
+  ProposePipelinePayload,
   SchemaFormPayload,
   TurnPayload,
   WireStageData,
 } from "@/types/guided";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -386,6 +398,7 @@ beforeEach(() => {
 function makeFullCompositionState(): CompositionState {
   return {
     id: "state-a11y",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {
       pages: {
@@ -466,58 +479,12 @@ describe("UserMenu", () => {
 
 describe("WireStageTurn", () => {
   const wireBase: WireStageData = {
-    topology: {
-      sources: {
-        source: {
-          id: "source",
-          plugin: "inline_blob",
-          on_success: "chain_in",
-          on_validation_failure: "discard",
-        },
-      },
-      nodes: [
-        {
-          id: "scrape",
-          node_type: "transform",
-          plugin: "web_scrape",
-          input: "chain_in",
-          on_success: "scraped",
-          on_error: "scrape_error",
-          routes: null,
-          fork_to: null,
-          branches: null,
-        },
-        {
-          id: "mapper",
-          node_type: "transform",
-          plugin: "field_mapper",
-          input: "scraped",
-          on_success: "jsonl_out",
-          on_error: null,
-          routes: null,
-          fork_to: null,
-          branches: null,
-        },
-      ],
-      outputs: [
-        {
-          id: "output:jsonl_out",
-          sink_name: "jsonl_out",
-          plugin: "json",
-          on_write_failure: "discard",
-        },
-      ],
-    },
-    edge_contracts: [
-      {
-        from: "scrape",
-        to: "mapper",
-        producer_guarantees: ["body"],
-        consumer_requires: ["body"],
-        missing_fields: [],
-        satisfied: true,
-      },
-    ],
+    proposal_id: "00000000-0000-4000-8000-000000000001",
+    draft_hash: "d".repeat(64),
+    sources: [{ stable_id: "00000000-0000-4000-8000-000000000010", label: "source-1", plugin: "inline_blob", on_validation_failure: "discard", guaranteed_fields: ["body"], row_cardinality: { input: "none", output: "zero_or_many", expected_output_count: null } }],
+    nodes: [],
+    outputs: [{ stable_id: "00000000-0000-4000-8000-000000000020", label: "output-1", plugin: "json", on_write_failure: "discard", required_fields: ["body"], business_schema: { mode: "observed", fields: [], guaranteed_fields: [], required_fields: ["body"] } }],
+    connections: [{ stable_id: "00000000-0000-4000-8000-000000000030", from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000010" }, to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000020" }, flow: { kind: "source_success", branch: null }, schema_contract: null }],
     semantic_contracts: [],
     warnings: [
       {
@@ -525,6 +492,8 @@ describe("WireStageTurn", () => {
         message: "Prompt shield advisory: source text was reviewed.",
       },
     ],
+    blockers: [],
+    can_confirm: true,
   };
 
   // Initial confirm turn (no outcome): the bare "Confirm wiring" action area.
@@ -535,38 +504,12 @@ describe("WireStageTurn", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  // Revise: findings block + the cost-disclosing Ask-advisor button + Exit.
-  it("has no axe violations (revise: findings + Ask advisor + Exit)", async () => {
+  it("has no axe violations with the freeform exit available", async () => {
     const { container } = render(
       <WireStageTurn
-        data={{
-          ...wireBase,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: tighten the source allowlist.",
-          passes_remaining: 2,
-        }}
+        data={wireBase}
         onConfirm={() => {}}
         confirmDisabled={false}
-        onAskAdvisor={() => {}}
-        onExitToFreeform={() => {}}
-      />,
-    );
-    expect(await axe(container)).toHaveNoViolations();
-  });
-
-  // Escape: the complete-without-sign-off button (only emitted here) + Exit.
-  it("has no axe violations (escape_unavailable: complete-without-signoff + Exit)", async () => {
-    const { container } = render(
-      <WireStageTurn
-        data={{
-          ...wireBase,
-          signoff_outcome: "escape_unavailable",
-          advisor_findings: "Advisor unreachable.",
-          passes_remaining: 0,
-        }}
-        onConfirm={() => {}}
-        confirmDisabled={false}
-        onCompleteWithoutSignoff={() => {}}
         onExitToFreeform={() => {}}
       />,
     );
@@ -925,6 +868,199 @@ describe("PipelineValidationSummary", () => {
   });
 });
 
+// --- Guided proposal review surface ------------------------------------------
+//
+// ProposePipelineTurn is the whole-DAG review turn the guided/freeform parity
+// work lands on: a read-only graph, the components/routes summary, blockers,
+// and the accept/reject/revise controls (Plan 05 Task 5). It carries a
+// live-region status/alert whose focus moves on stale/error transitions and a
+// tutorial read-only variant. Audit every branch of that surface — the plain
+// active controls, the blocker-gated revise-required state, the stale and
+// error live regions (asserting the focus placement the useEffect performs),
+// and the passive tutorial render.
+
+describe("ProposePipelineTurn", () => {
+  const PROPOSAL_ID = "00000000-0000-4000-8000-0000000004a1";
+  const DRAFT_HASH = "d".repeat(64);
+  const SOURCE_ID = "00000000-0000-4000-8000-0000000004a2";
+  const NODE_ID = "00000000-0000-4000-8000-0000000004a3";
+  const OUTPUT_ID = "00000000-0000-4000-8000-0000000004a4";
+  const edge = (n: number): string => `00000000-0000-4000-8000-${String(4000 + n).padStart(12, "0")}`;
+
+  function proposalPayload(
+    overrides: Partial<ProposePipelinePayload> = {},
+  ): ProposePipelinePayload {
+    return {
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+      summary: "guided.proposal.summary.a11y.v1",
+      rationale: "guided.proposal.rationale.a11y.v1",
+      component_counts: { sources: 1, nodes: 1, edges: 5, outputs: 1 },
+      blockers: [],
+      graph: {
+        sources: [
+          { stable_id: SOURCE_ID, label: "pages", plugin: { kind: "source", id: "csv" } },
+        ],
+        edges: [
+          {
+            stable_id: edge(1),
+            from_endpoint: { kind: "source", stable_id: SOURCE_ID },
+            to_endpoint: { kind: "node", stable_id: NODE_ID },
+            flow: { kind: "source_success", branch: null },
+          },
+          {
+            stable_id: edge(2),
+            from_endpoint: { kind: "source", stable_id: SOURCE_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "source_validation_failure" },
+          },
+          {
+            stable_id: edge(3),
+            from_endpoint: { kind: "node", stable_id: NODE_ID },
+            to_endpoint: { kind: "output", stable_id: OUTPUT_ID },
+            flow: { kind: "node_success", branch: null },
+          },
+          {
+            stable_id: edge(4),
+            from_endpoint: { kind: "node", stable_id: NODE_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "node_error" },
+          },
+          {
+            stable_id: edge(5),
+            from_endpoint: { kind: "output", stable_id: OUTPUT_ID },
+            to_endpoint: { kind: "discard" },
+            flow: { kind: "output_write_failure" },
+          },
+        ],
+      },
+      nodes: [
+        {
+          stable_id: NODE_ID,
+          label: "summarise",
+          node_type: "transform",
+          plugin: { kind: "transform", id: "llm" },
+          behavior: { kind: "transform" },
+        },
+      ],
+      outputs: [
+        { stable_id: OUTPUT_ID, label: "results", plugin: { kind: "sink", id: "json" } },
+      ],
+      edit_targets: [
+        { kind: "node", stable_id: NODE_ID },
+        { kind: "source", stable_id: SOURCE_ID },
+        { kind: "output", stable_id: OUTPUT_ID },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("has no axe violations in the default active review state", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Non-vacuous: the labelled graph, the accessible heading, and the enabled
+    // primary control must all be real.
+    screen.getByRole("img", { name: /pipeline proposal graph/i });
+    screen.getByRole("heading", { name: "Review pipeline proposal" });
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the blocker-gated revise-required state", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn
+        payload={proposalPayload({
+          blockers: [
+            {
+              code: "policy_review_required",
+              category: "policy",
+              summary: "guided.proposal.blocker.policy_review_required.v1",
+              edit_target: { kind: "node", stable_id: NODE_ID },
+            },
+          ],
+        })}
+        reviewState={reviewState}
+        onSubmit={() => {}}
+      />,
+    );
+    // Non-vacuous: the blocker list gates wiring review while the revise
+    // affordance stays reachable.
+    screen.getByText("A policy review is required before this pipeline can advance.");
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Revise summarise/ })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the stale live-region state (focus moves to status)", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "stale",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Live-region behavior + focus placement: the stale transition surfaces a
+    // role=status announcement that receives focus, and locks the controls.
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/stale/i);
+    expect(status).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the retryable error state (focus moves to alert)", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "error",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+      message: "The response was not received. Retry the same action.",
+      retryable: true,
+      retry_action: { kind: "revise", edit_target: { kind: "node", stable_id: NODE_ID } },
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} />,
+    );
+    // Live-region behavior + focus placement: the error transition surfaces a
+    // role=alert that receives focus; only the retained revise action stays
+    // enabled.
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/response was not received/i);
+    expect(alert).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Revise summarise/ })).toBeEnabled();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the passive tutorial render", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} isTutorial />,
+    );
+    // Non-vacuous: the worked-example note renders and the decision controls
+    // are withheld.
+    screen.getByText(/This worked example is read-only/i);
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
 // --- Tutorial surface (elspeth-adf5e679e7) -----------------------------------
 //
 // The tutorial is the surface being promoted to flagship; until this pass it
@@ -962,7 +1098,10 @@ describe("TutorialGuidedShell", () => {
       new Promise<never>(() => {}),
     );
     const { container } = render(
-      <TutorialGuidedShell sessionId="sess-a11y" onCompleted={() => {}} />,
+      <TutorialGuidedShell
+        sessionId="00000000-0000-4000-8000-000000000999"
+        onCompleted={() => {}}
+      />,
     );
     screen.getByText(/Preparing the tutorial's sample pages/);
     expect(await axe(container)).toHaveNoViolations();
@@ -1001,6 +1140,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 1,
           step: "step_1_source",
           ts_iso: "2026-07-03T00:00:00Z",
+          assistant_message_kind: null,
+          synthetic_failure_reason: null,
         },
         {
           role: "assistant",
@@ -1008,6 +1149,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "2026-07-03T00:00:01Z",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
         {
           role: "user",
@@ -1015,6 +1158,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 3,
           step: "step_2_sink",
           ts_iso: "2026-07-03T00:00:02Z",
+          assistant_message_kind: null,
+          synthetic_failure_reason: null,
         },
         {
           role: "assistant",
@@ -1022,6 +1167,8 @@ describe("ChatPanelTutorialWorkspace", () => {
           seq: 4,
           step: "step_2_sink",
           ts_iso: "2026-07-03T00:00:03Z",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
       chat_turn_seq: 4,
@@ -1040,7 +1187,7 @@ describe("ChatPanelTutorialWorkspace", () => {
       },
       prefilled: { path: "results.jsonl" },
     };
-    return { type: "schema_form", step_index: 1, payload };
+    return { type: "schema_form", step_index: 1, turn_token: "a".repeat(64), payload };
   }
 
   it("has no axe violations on the two-column tutorial workspace", async () => {

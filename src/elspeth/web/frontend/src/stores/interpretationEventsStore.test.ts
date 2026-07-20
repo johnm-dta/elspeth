@@ -15,6 +15,7 @@ import type {
   InterpretationResolveResponse,
 } from "@/types/interpretation";
 import type { CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // Module-level mock — the store imports `* as api from "@/api/client"` and
 // we replace the four methods with vi.fn()s the tests configure per-case.
@@ -62,6 +63,7 @@ function makePendingEvent(overrides: Partial<InterpretationEvent> = {}): Interpr
 function makeCompositionState(version = 2): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],

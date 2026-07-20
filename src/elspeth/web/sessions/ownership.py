@@ -46,5 +46,5 @@ async def verify_session_ownership(
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="Session not found") from None
 
-    if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
+    if session.archived_at is not None or session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
         raise HTTPException(status_code=404, detail="Session not found")

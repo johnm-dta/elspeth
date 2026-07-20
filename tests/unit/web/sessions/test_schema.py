@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import QueuePool
 
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH, blobs_table, metadata, sessions_table
+from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
     _stamp_schema_sentinels,
@@ -111,6 +111,14 @@ def test_postgres_schema_emits_native_audit_trigger_ddl() -> None:
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operations_terminal_immutable",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
     ):
         assert f"CREATE TRIGGER {trigger_name}" in ddl
     assert not any("SELECT RAISE" in statement for statement in emitted)
@@ -260,8 +268,8 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
-    """A valid full-schema DB stamped at the prior epoch fail-closes at boot.
+def test_initialize_session_schema_rejects_epoch_34_database() -> None:
+    """An epoch-34 DB without exclusive proposal admission fails at boot.
 
     Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
     Because the SQL shape and cross-dialect identity row remain current, the
@@ -270,9 +278,55 @@ def test_initialize_session_schema_rejects_prior_epoch_database() -> None:
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH - 1}"))
-    with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
+        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 34 WHERE store_kind = 'session'"))
+        conn.execute(text("PRAGMA user_version = 34"))
+    assert probe_current_schema(eng) is False
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 34 does not match SESSION_SCHEMA_EPOCH=35.*Delete the session DB file and restart",
+    ):
         initialize_session_schema(eng)
+
+
+def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with_recreate_guidance(tmp_path) -> None:
+    """The epoch-30 operation CHECKs cannot be opened by epoch-33 code."""
+    db_path = tmp_path / "epoch-30-without-guided-plan.db"
+    engine = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(engine)
+    with engine.begin() as connection:
+        guided_operations_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'guided_plan'" in guided_operations_sql
+        epoch_30_sql = guided_operations_sql.replace("'guided_plan'", "'guided_convert'")
+        assert epoch_30_sql != guided_operations_sql
+        assert "'guided_plan'" not in epoch_30_sql
+        connection.execute(text("PRAGMA writable_schema = ON"))
+        connection.execute(
+            text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = 'guided_operations'"),
+            {"sql": epoch_30_sql},
+        )
+        connection.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 30 WHERE store_kind = 'session'"))
+        connection.execute(text("PRAGMA user_version = 30"))
+        schema_version = connection.execute(text("PRAGMA schema_version")).scalar_one()
+        connection.execute(text(f"PRAGMA schema_version = {schema_version + 1}"))
+        connection.execute(text("PRAGMA writable_schema = OFF"))
+    engine.dispose()
+
+    stale_engine = create_session_engine(f"sqlite:///{db_path}")
+    with stale_engine.connect() as connection:
+        assert connection.execute(text("PRAGMA user_version")).scalar_one() == 30
+        stored_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'guided_plan'" not in stored_sql
+
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=35.*"
+        r"Delete the session DB file and restart",
+    ):
+        initialize_session_schema(stale_engine)
 
 
 @pytest.mark.parametrize("renamed_column", ["singleton_id", "application_id", "store_kind", "schema_epoch"])

@@ -6,9 +6,10 @@ from typing import TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.secrets import collect_credential_field_violations
-from elspeth.web.blobs.protocol import BlobNotFoundError
+from elspeth.web.blobs.protocol import BlobNotFoundError, BlobServiceProtocol
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginKind
 from elspeth.web.composer.state import CompositionState, SourceSpec
@@ -22,6 +23,13 @@ from elspeth.web.interpretation_state import parse_interpretation_requirements
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
+from elspeth.web.sessions.protocol import GuidedCompositionStateResult, GuidedOperationSettlementConflictError
+from elspeth.web.sessions.routes.guided_operations import (
+    GuidedOperationLease,
+    guided_response_hash,
+    raise_guided_operation_failure,
+    reserve_or_replay_guided_operation,
+)
 
 from .._helpers import (
     UTC,
@@ -488,25 +496,59 @@ async def revert_state(
     service = request.app.state.session_service
     catalog, _snapshot = _request_plugin_policy_context(request, user)
 
-    try:
-        new_state = await service.set_active_state(
-            session.id,
-            body.state_id,
-        )
-    except ValueError:
-        raise HTTPException(
-            status_code=404,
-            detail="State not found",
-        ) from None
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    # Resolve the user-supplied target only after entering the same compose
+    # exclusion domain as accept/compose. The state is immutable, so releasing
+    # this lock before joining an already-active operation cannot invalidate
+    # the target; the service repeats ownership validation in the write tx.
+    async with compose_lock:
+        try:
+            target_state = await service.get_state(body.state_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="State not found") from None
+        if target_state.session_id != session.id:
+            raise HTTPException(status_code=404, detail="State not found")
+        expected_current = await service.get_current_state(session.id)
+        if expected_current is None:
+            raise AuditIntegrityError("State revert session unexpectedly has no current checkpoint")
 
-    # Look up the original version number for the system message
-    original_state = await service.get_state(body.state_id)
-    await service.add_message(
-        session.id,
-        role="system",
-        content=f"Pipeline reverted to version {original_state.version}.",
-        writer_principal="route_system_message",
+    async def _replay(result: object) -> CompositionStateResponse:
+        if type(result) is not GuidedCompositionStateResult:
+            raise AuditIntegrityError("State revert replay has a non-state result locator")
+        replay_state = await service.get_state_in_session(result.state_id, session.id)
+        return _state_response(replay_state, policy_catalog=catalog)
+
+    reserved = await reserve_or_replay_guided_operation(
+        service=service,
+        session_id=session.id,
+        kind="state_revert",
+        request=body,
+        replay=_replay,
     )
+    if reserved is None:  # pragma: no cover - reserve_if_absent defaults true
+        raise AuditIntegrityError("State revert operation was not reserved")
+    if not isinstance(reserved, GuidedOperationLease):
+        return reserved
+
+    async with compose_lock:
+        try:
+            new_state = await service.revert_state_for_guided_operation(
+                reserved.fence,
+                state_id=body.state_id,
+                expected_current_state_id=expected_current.id,
+                expected_current_state_version=expected_current.version,
+                actor="composer_route",
+                response_hash_factory=lambda record: guided_response_hash(_state_response(record, policy_catalog=catalog)),
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="State not found") from None
+        except GuidedOperationSettlementConflictError:
+            failure = await service.fail_guided_operation(
+                reserved.fence,
+                failure_code="stale_conflict",
+                actor="composer_route",
+            )
+            raise_guided_operation_failure(failure)
 
     return _state_response(new_state, policy_catalog=catalog)
 
@@ -754,12 +796,12 @@ async def seed_state_for_e2e(
 
 def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     """Reconstitute the ``blob_ref`` stripped from a guided blob-backed source's
-    committed options, using the GuidedSession snapshot's ``step_1_result`` as
-    the authoritative signal (elspeth-b5ee205720).
+    committed options, using schema-8 GuidedSession ``reviewed_sources`` as the
+    authoritative signal (elspeth-b5ee205720).
 
     The manual set_source commit strips ``blob_ref`` from guided sources (it
     cannot prove ``path == storage_path``); it survives only in the persisted
-    snapshot. Both export egress channels — the public-YAML storage-path omission
+    reviewed source snapshot. Both export egress channels — the public-YAML storage-path omission
     (``_strip_web_metadata(..., omit_blob_bound_source_paths=True)``) and the
     ``source_blob_ids`` sidecar — key off ``source.options["blob_ref"]``, so
     without this a guided blob source leaks its absolute storage path AND emits no
@@ -768,11 +810,9 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     freeform blob-bound ones. Mirrors the snapshot cross-reference in
     ``redact_guided_snapshot_storage_paths``; never mutates ``state``.
 
-    Sources are matched to the snapshot by storage-path-string equality (the same
-    approach as the reference redactor). A second, distinct source carrying the
-    identical absolute path string would also be treated as blob-backed — a
-    narrow, pre-existing edge shared with that redactor; equal paths do mean "the
-    same underlying file", and guided sessions commit a single source today.
+    Sources are matched to their reviewed snapshot by stable persisted source name
+    and storage-path-string equality, so plural sources cannot borrow one another's
+    binding even when they reference the same underlying file.
     """
     return reattach_guided_blob_refs_for_public_export(state)
 
@@ -823,6 +863,52 @@ async def _require_yaml_export_preflight(
         )
 
 
+async def _verified_yaml_export_blob_ids(
+    state: CompositionState,
+    *,
+    request: Request,
+    session_id: UUID,
+) -> dict[str, str]:
+    """Verify every public-export blob sidecar entry against live custody."""
+    source_blob_ids: dict[str, str] = {}
+    parsed_blob_ids: list[tuple[SourceSpec, UUID]] = []
+    for source_name, source in state.sources.items():
+        if "blob_ref" not in source.options:
+            continue
+        blob_ref = source.options["blob_ref"]
+        if type(blob_ref) is not str:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID")
+        try:
+            blob_id = UUID(blob_ref)
+        except ValueError as exc:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID") from exc
+        if str(blob_id) != blob_ref:
+            raise AuditIntegrityError("YAML export source blob_ref must be a canonical UUID")
+        source_blob_ids[source_name] = blob_ref
+        parsed_blob_ids.append((source, blob_id))
+
+    if not parsed_blob_ids:
+        return source_blob_ids
+    blob_service: BlobServiceProtocol | None = getattr(request.app.state, "blob_service", None)
+    if blob_service is None:
+        raise AuditIntegrityError("YAML export blob custody verification is unavailable")
+    for source, blob_id in parsed_blob_ids:
+        try:
+            blob = await blob_service.get_blob(blob_id)
+        except BlobNotFoundError:
+            raise AuditIntegrityError("YAML export blob custody verification failed") from None
+        source_paths = {value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := source.options.get(key)) is str}
+        if (
+            getattr(blob, "id", None) != blob_id
+            or getattr(blob, "session_id", None) != session_id
+            or getattr(blob, "status", None) != "ready"
+            or type(storage_path := getattr(blob, "storage_path", None)) is not str
+            or storage_path not in source_paths
+        ):
+            raise AuditIntegrityError("YAML export blob custody verification failed")
+    return source_blob_ids
+
+
 @router.get("/{session_id}/state/yaml")
 async def get_state_yaml(
     session_id: UUID,
@@ -866,6 +952,11 @@ async def get_state_yaml(
     # reach plugin instantiation. Preflight ran on the raw `state`; export uses
     # the reattached copy.
     export_state = _reattach_guided_blob_refs(state)
+    source_blob_ids = await _verified_yaml_export_blob_ids(
+        export_state,
+        request=request,
+        session_id=session.id,
+    )
     yaml_str = generate_public_yaml(export_state)
 
     # Phase 6A B3 — sessions-DB audit event for YAML export.
@@ -907,9 +998,6 @@ async def get_state_yaml(
     )
 
     response: StateYamlResponse = {"yaml": yaml_str}
-    source_blob_ids = {
-        source_name: str(source.options["blob_ref"]) for source_name, source in export_state.sources.items() if "blob_ref" in source.options
-    }
     if source_blob_ids:
         response["source_blob_ids"] = source_blob_ids
     return response

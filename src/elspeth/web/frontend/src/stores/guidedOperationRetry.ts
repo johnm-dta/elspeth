@@ -1,0 +1,319 @@
+export type GuidedRetryKind =
+  | "guided_start"
+  | "guided_respond"
+  | "guided_chat"
+  | "guided_convert"
+  | "guided_reenter"
+  | "guided_plan"
+  | "state_revert"
+  | "session_fork";
+
+interface GuidedRetryDescriptor {
+  kind: GuidedRetryKind;
+  sessionId: string;
+  requestFingerprint: string;
+  operationId: string;
+  createdAt: number;
+}
+
+export interface GuidedRetryHandle {
+  kind: GuidedRetryKind;
+  sessionId: string;
+  requestFingerprint: string;
+  operationId: string;
+}
+
+export type GuidedRetryAcquisition =
+  | { status: "acquired"; handle: GuidedRetryHandle }
+  | { status: "conflict"; existing: GuidedRetryHandle };
+
+export const GUIDED_RETRY_STORAGE_KEY = "elspeth_guided_operation_retries_v2";
+const STORAGE_SCHEMA = "guided-operation-retries.v2";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SESSION_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const MAX_DESCRIPTOR_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_DESCRIPTORS = 16;
+const MAX_STORAGE_BYTES = 8192;
+
+let fallbackDescriptors: GuidedRetryDescriptor[] = [];
+let fallbackAuthoritative = false;
+
+function sessionStorageOrNull(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isDescriptor(value: unknown): value is GuidedRetryDescriptor {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record.kind === "guided_start" ||
+      record.kind === "guided_respond" ||
+      record.kind === "guided_chat" ||
+      record.kind === "guided_convert" ||
+      record.kind === "guided_reenter" ||
+      record.kind === "guided_plan" ||
+      record.kind === "state_revert" ||
+      record.kind === "session_fork") &&
+    typeof record.sessionId === "string" &&
+    SESSION_UUID_PATTERN.test(record.sessionId) &&
+    typeof record.requestFingerprint === "string" &&
+    SHA256_PATTERN.test(record.requestFingerprint) &&
+    typeof record.operationId === "string" &&
+    UUID_PATTERN.test(record.operationId) &&
+    typeof record.createdAt === "number" &&
+    Number.isFinite(record.createdAt) &&
+    record.createdAt >= 0
+  );
+}
+
+function encodedEnvelope(descriptors: GuidedRetryDescriptor[]): string {
+  return JSON.stringify({ schema: STORAGE_SCHEMA, descriptors });
+}
+
+function encodedBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function boundedDescriptors(
+  descriptors: readonly GuidedRetryDescriptor[],
+  now = Date.now(),
+): GuidedRetryDescriptor[] {
+  const live = descriptors
+    .filter(
+      (descriptor) =>
+        descriptor.createdAt <= now && now - descriptor.createdAt <= MAX_DESCRIPTOR_AGE_MS,
+    )
+    .slice(-MAX_DESCRIPTORS);
+
+  while (live.length > 0 && encodedBytes(encodedEnvelope(live)) > MAX_STORAGE_BYTES) {
+    live.shift();
+  }
+  return live;
+}
+
+function readDescriptors(): GuidedRetryDescriptor[] {
+  const storage = sessionStorageOrNull();
+  if (fallbackAuthoritative || storage === null) {
+    fallbackDescriptors = boundedDescriptors(fallbackDescriptors);
+    return [...fallbackDescriptors];
+  }
+  let encoded: string | null;
+  try {
+    encoded = storage.getItem(GUIDED_RETRY_STORAGE_KEY);
+  } catch {
+    fallbackAuthoritative = true;
+    fallbackDescriptors = boundedDescriptors(fallbackDescriptors);
+    return [...fallbackDescriptors];
+  }
+  if (encoded === null) {
+    fallbackDescriptors = boundedDescriptors(fallbackDescriptors);
+    return [...fallbackDescriptors];
+  }
+  try {
+    if (encodedBytes(encoded) > MAX_STORAGE_BYTES) throw new Error("oversized retry envelope");
+    const parsed = JSON.parse(encoded) as unknown;
+    if (typeof parsed !== "object" || parsed === null) throw new Error("invalid retry envelope");
+    const envelope = parsed as Record<string, unknown>;
+    if (envelope.schema !== STORAGE_SCHEMA || !Array.isArray(envelope.descriptors)) {
+      throw new Error("invalid retry envelope");
+    }
+    if (!envelope.descriptors.every(isDescriptor)) throw new Error("invalid retry descriptor");
+    const descriptors = boundedDescriptors(envelope.descriptors);
+    fallbackDescriptors = [...descriptors];
+    if (descriptors.length !== envelope.descriptors.length) writeDescriptors(descriptors);
+    return descriptors;
+  } catch {
+    fallbackDescriptors = [];
+    try {
+      storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
+      fallbackAuthoritative = false;
+    } catch {
+      fallbackAuthoritative = true;
+    }
+    return [];
+  }
+}
+
+function writeDescriptors(descriptors: GuidedRetryDescriptor[]): void {
+  const bounded = boundedDescriptors(descriptors);
+  fallbackDescriptors = [...bounded];
+  const storage = sessionStorageOrNull();
+  if (storage === null) {
+    fallbackAuthoritative = true;
+    return;
+  }
+  if (bounded.length === 0) {
+    // The tombstone and physical deletion are independent durable-clearance
+    // paths. Always attempt both: a quota-blocked write must not prevent a
+    // permitted remove, and a blocked remove is safe when the tombstone was
+    // stored. Only when both browser operations fail can this live tab's
+    // bounded memory remain authoritative; a reload then has no durable
+    // browser-storage path with which to distinguish the stale generation.
+    let tombstoneStored = false;
+    try {
+      storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope([]));
+      tombstoneStored = true;
+    } catch {
+      // Physical deletion below may still durably clear the stale envelope.
+    }
+    let physicallyRemoved = false;
+    try {
+      storage.removeItem(GUIDED_RETRY_STORAGE_KEY);
+      physicallyRemoved = true;
+    } catch {
+      // The tombstone above may already be the durable empty generation.
+    }
+    fallbackAuthoritative = !tombstoneStored && !physicallyRemoved;
+    return;
+  }
+  try {
+    storage.setItem(GUIDED_RETRY_STORAGE_KEY, encodedEnvelope(bounded));
+    fallbackAuthoritative = false;
+  } catch {
+    // A disabled or full sessionStorage leaves its previous envelope stale.
+    // Keep the bounded in-memory generation authoritative until a later write
+    // successfully synchronises storage with it.
+    fallbackAuthoritative = true;
+  }
+}
+
+function requestFingerprint(value: string): string {
+  // This fingerprint is a storage key, not an authenticity boundary. Four
+  // domain-separated FNV-1a lanes avoid retaining raw request identifiers;
+  // the backend's canonical request hash remains the collision-safe authority
+  // and rejects any accidental operation-id reuse with different semantics.
+  const bytes = new TextEncoder().encode(value);
+  const mask = (1n << 64n) - 1n;
+  const lanes: string[] = [];
+  for (let domain = 0; domain < 4; domain += 1) {
+    let hash = 0xcbf29ce484222325n ^ BigInt(domain);
+    for (const byte of bytes) {
+      hash ^= BigInt(byte);
+      hash = (hash * 0x100000001b3n) & mask;
+    }
+    lanes.push(hash.toString(16).padStart(16, "0"));
+  }
+  return lanes.join("");
+}
+
+function canonicalIdentity(value: unknown): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("guided retry identity numbers must be finite");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalIdentity);
+  if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error("guided retry identity objects must be plain records");
+    }
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, item]) => [key, canonicalIdentity(item)]),
+    );
+  }
+  throw new Error("guided retry identity must be JSON-compatible");
+}
+
+export function acquireGuidedRetry(
+  kind: GuidedRetryKind,
+  sessionId: string,
+  requestIdentity: readonly unknown[],
+): GuidedRetryAcquisition {
+  if (!SESSION_UUID_PATTERN.test(sessionId)) {
+    throw new Error("guided retry sessionId must be a canonical UUID");
+  }
+  const fingerprint = requestFingerprint(
+    JSON.stringify(canonicalIdentity({ schema: "guided-operation-request-fingerprint.v2", kind, requestIdentity })),
+  );
+  const descriptors = readDescriptors();
+  const scoped = descriptors.filter(
+    (descriptor) =>
+      descriptor.kind === kind &&
+      descriptor.sessionId === sessionId,
+  );
+  const existing = scoped.find(
+    (descriptor) => descriptor.requestFingerprint === fingerprint,
+  );
+  if (existing !== undefined) {
+    return { status: "acquired", handle: { ...existing } };
+  }
+  if (scoped.length > 0) {
+    return { status: "conflict", existing: { ...scoped[0] } };
+  }
+
+  const descriptor: GuidedRetryDescriptor = {
+    kind,
+    sessionId,
+    requestFingerprint: fingerprint,
+    operationId: crypto.randomUUID(),
+    createdAt: Date.now(),
+  };
+  writeDescriptors([
+    ...descriptors,
+    descriptor,
+  ]);
+  return { status: "acquired", handle: { ...descriptor } };
+}
+
+export function clearGuidedRetry(handle: GuidedRetryHandle): void {
+  writeDescriptors(
+    readDescriptors().filter(
+      (descriptor) =>
+        !(
+          descriptor.kind === handle.kind &&
+          descriptor.sessionId === handle.sessionId &&
+          descriptor.requestFingerprint === handle.requestFingerprint &&
+          descriptor.operationId === handle.operationId
+        ),
+    ),
+  );
+}
+
+export function findGuidedRetry(
+  kind: GuidedRetryKind,
+  sessionId: string,
+): GuidedRetryHandle | null {
+  const descriptor = readDescriptors().find(
+    (candidate) => candidate.kind === kind && candidate.sessionId === sessionId,
+  );
+  return descriptor === undefined ? null : { ...descriptor };
+}
+
+export function clearGuidedRetriesForSession(
+  kind: GuidedRetryKind,
+  sessionId: string,
+): void {
+  writeDescriptors(
+    readDescriptors().filter(
+      (descriptor) =>
+        descriptor.kind !== kind || descriptor.sessionId !== sessionId,
+    ),
+  );
+}
+
+export function clearAllGuidedRetries(): void {
+  writeDescriptors([]);
+}
+
+export function isAmbiguousGuidedRetryFailure(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const record = error as { error_type?: unknown; name?: unknown; status?: unknown };
+  if (record.name === "AbortError" || record.name === "TimeoutError") return true;
+  if (record.error_type === "guided_operation_terminal_failure") return false;
+  return typeof record.status === "number" && record.status >= 500 && record.status <= 599;
+}

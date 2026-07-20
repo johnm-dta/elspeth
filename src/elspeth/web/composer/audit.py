@@ -44,7 +44,7 @@ import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -79,6 +79,7 @@ __all__ = [
     "finish_plugin_crash",
     "finish_success",
     "llm_call_audit_envelope",
+    "rebind_dispatch_arguments",
 ]
 
 
@@ -298,6 +299,9 @@ _LLM_CALL_PUBLIC_AUDIT_FIELDS: Final[tuple[str, ...]] = (
     "seed",
     "provider_cost",
     "provider_cost_source",
+    "max_completion_tokens_requested",
+    "planner_policy_hash",
+    "planner_call_ordinal",
 )
 
 
@@ -457,6 +461,23 @@ def begin_dispatch_or_arg_error(
             ),
             exc,
         )
+
+
+def rebind_dispatch_arguments(
+    audit: DispatchAudit,
+    arguments: Mapping[str, Any],
+) -> DispatchAudit:
+    """Bind an open dispatch envelope to final custody-safe arguments.
+
+    Timing, actor, tool identity, and version snapshot remain those captured
+    before validation.  Only the authority-bearing argument canonicalization
+    changes, before custody I/O or any durable proposal write occurs.
+    """
+    return replace(
+        audit,
+        arguments_canonical=canonical_json(arguments),
+        arguments_hash=stable_hash(arguments),
+    )
 
 
 def finish_success(

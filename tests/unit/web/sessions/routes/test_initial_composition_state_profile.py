@@ -18,4 +18,3 @@ def test_threads_tutorial_profile() -> None:
     state = _initial_composition_state_with_guided_session(profile=TUTORIAL_PROFILE)
     assert state.guided_session is not None
     assert state.guided_session.profile == TUTORIAL_PROFILE
-    assert state.guided_session.advisor_checkpoint_passes_used == 0

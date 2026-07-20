@@ -24,10 +24,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, TypedDict, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
@@ -58,6 +58,7 @@ from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
     NodeSpec,
+    NodeType,
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
@@ -318,15 +319,15 @@ def _options_with_ascii_safe_scrape_headers(
     if not isinstance(http, Mapping):
         return options
     folded_http: dict[str, Any] | None = None
-    for field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
-        value = http.get(field)
+    for header_field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
+        value = http.get(header_field)
         if not isinstance(value, str):
             continue
         folded = value.translate(_TYPOGRAPHIC_TRANSLATION)
         if folded != value:
             if folded_http is None:
                 folded_http = dict(http)
-            folded_http[field] = folded
+            folded_http[header_field] = folded
     if folded_http is None:
         return options
     new_options = dict(options)
@@ -660,6 +661,7 @@ class ToolResult:
     runtime_preflight: ValidationResult | None = None
     post_call_hints: tuple[str, ...] = ()
     plugin_schemas: Mapping[str, Mapping[str, Any]] | None = None
+    _validation_snapshot_hash: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         freeze_fields(self, "affected_nodes", "post_call_hints")
@@ -1893,6 +1895,41 @@ RuntimePreflight = Callable[[CompositionState], ValidationResult]
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewedSourceAuthority:
+    """Session-bound private authority for reusing already-reviewed sources.
+
+    This object is deliberately not a serialisable planner or event payload.
+    Only the guided settlement path constructs it, and the candidate boundary
+    accepts it only for the same session and an exact reviewed source record.
+    """
+
+    session_id: str
+    reviewed_anchor_hash: str
+    reviewed_sources: Mapping[str, Any]
+    verified_blob_paths: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if type(self.session_id) is not str or not self.session_id:
+            raise TypeError("ReviewedSourceAuthority.session_id must be a non-empty exact str")
+        if type(self.reviewed_anchor_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", self.reviewed_anchor_hash):
+            raise TypeError("ReviewedSourceAuthority.reviewed_anchor_hash must be a SHA-256 hash")
+        if not isinstance(self.reviewed_sources, Mapping):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources must be a mapping")
+        if any(type(stable_id) is not str or not stable_id for stable_id in self.reviewed_sources):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources keys must be non-empty exact strings")
+        if any(not isinstance(source, Mapping) for source in self.reviewed_sources.values()):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources values must be mappings")
+        if not isinstance(self.verified_blob_paths, Mapping):
+            raise TypeError("ReviewedSourceAuthority.verified_blob_paths must be a mapping")
+        if any(
+            type(locator) is not str or not locator.startswith("blob:") or type(storage_path) is not str or not storage_path
+            for locator, storage_path in self.verified_blob_paths.items()
+        ):
+            raise TypeError("ReviewedSourceAuthority.verified_blob_paths is malformed")
+        freeze_fields(self, "reviewed_sources", "verified_blob_paths")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolContext:
     """Immutable per-call context threaded through every ``execute_tool``
     dispatch.
@@ -1954,6 +1991,9 @@ class ToolContext:
             for the request.
         tool_arguments_hash: Canonical audited hash of the tool-call
             arguments that produced an LLM-authored blob.
+        reviewed_source_authority: Private session-bound reviewed source
+            authority. Generic/manual callers leave this unset and therefore
+            remain subject to the normal fail-closed custody checks.
     """
 
     catalog: PolicyCatalogView
@@ -1975,6 +2015,7 @@ class ToolContext:
     composer_provider: str | None = None
     composer_skill_hash: str | None = None
     tool_arguments_hash: str | None = None
+    reviewed_source_authority: ReviewedSourceAuthority | None = None
 
 
 ToolHandler = Callable[
@@ -1987,12 +2028,19 @@ def normalize_tool_result_validation(
     result: ToolResult,
     catalog: PolicyCatalogView,
 ) -> ToolResult:
-    """Replace a tool's raw validation with the shared profile-aware result.
+    """Normalize a result through the request-scoped profile authority once.
 
     Handlers remain small state-transition functions and may construct their
-    provisional envelope with ``CompositionState.validate()``. This final
-    dispatch-boundary normalization is the sole outward authority.
+    provisional envelope with ``CompositionState.validate()``. Candidate
+    builders may call this authority before dispatch so they can make an
+    honest accept/reject decision. The outward dispatch boundary calls it
+    again to verify the result, but reuses validation already produced for
+    the same immutable plugin-availability snapshot. A different snapshot
+    always revalidates.
     """
+    snapshot_hash = catalog.snapshot.snapshot_hash
+    if result._validation_snapshot_hash == snapshot_hash:
+        return result
     shared = catalog.validate_composition_state(result.updated_state).validation
     rejections = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
     if rejections:
@@ -2001,16 +2049,37 @@ def normalize_tool_result_validation(
             is_valid=False,
             errors=(*rejections, *shared.errors),
         )
-    return replace(result, validation=shared)
+    return replace(result, validation=shared, _validation_snapshot_hash=snapshot_hash)
 
 
-def _serialize_authoring_options(options: Mapping[str, Any]) -> dict[str, Any]:
+class _SetPipelineNodePayload(TypedDict):
+    """Exact node shape reconstructed for a set_pipeline request."""
+
+    id: str
+    node_type: NodeType
+    plugin: str | None
+    input: str
+    on_success: str | None
+    on_error: str | None
+    options: dict[str, JsonValue]
+    condition: str | None
+    routes: dict[str, str] | None
+    fork_to: list[str] | None
+    branches: list[str] | dict[str, str] | None
+    policy: str | None
+    merge: str | None
+    trigger: dict[str, JsonValue] | None
+    output_mode: str | None
+    expected_output_count: int | None
+
+
+def _serialize_authoring_options(options: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Strip resolver-owned review evidence while retaining pending shells."""
-    return cast(dict[str, Any], deep_thaw(serialize_authoring_review_options(options)))
+    return cast(dict[str, JsonValue], deep_thaw(serialize_authoring_review_options(options)))
 
 
-def _serialize_set_pipeline_node(node: NodeSpec) -> dict[str, Any]:
-    payload = _serialize_node(node)
+def _serialize_set_pipeline_node(node: NodeSpec) -> _SetPipelineNodePayload:
+    payload = cast(_SetPipelineNodePayload, _serialize_node(node))
     payload["options"] = _serialize_authoring_options(node.options)
     return payload
 

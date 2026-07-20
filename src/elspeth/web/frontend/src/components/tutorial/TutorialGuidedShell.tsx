@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
+  getGuided,
   getTutorialSample,
   respondGuided,
-  startGuidedSession,
 } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import {
-  EXIT_TO_FREEFORM_REQUEST,
+  EXIT_TO_FREEFORM_ACTION,
   useSessionStore,
 } from "@/stores/sessionStore";
+import {
+  acquireGuidedRetry,
+  clearGuidedRetry,
+  clearGuidedRetriesForSession,
+} from "@/stores/guidedOperationRetry";
 import type { GuidedStep } from "@/types/guided";
 import {
   TUTORIAL_SINK_PROMPT,
@@ -24,7 +28,7 @@ import {
  * URLs in its constant — the LLM cannot guess the runtime-served addresses, so
  * the resolved synthetic URLs (fetched per-session from the 8a GET surface) are
  * appended to the source prompt only (the sink/transforms phases don't need
- * them). Recipe and Wire are confirm-only (no chat prompt).
+ * them). Wire is confirm-only (no chat prompt).
  */
 function buildLockedPrompts(
   sampleUrls: string[],
@@ -51,7 +55,7 @@ interface TutorialGuidedShellProps {
   onExited?: (sessionId: string) => void;
   /**
    * The persisted resume session no longer exists server-side (404 from the
-   * start chain). Without this the shell dead-ends on a "Session not found"
+   * startup sequence). Without this the shell dead-ends on a "Session not found"
    * error with NO forward affordance — the tutorial suppresses skip/exit, so
    * the learner is stranded on an empty page. The parent resets to a fresh
    * Welcome and clears the stale resume fields.
@@ -66,7 +70,7 @@ interface TutorialGuidedShellProps {
   exitRequestedRef?: MutableRefObject<boolean>;
 }
 
-/** The start chain 404s when the persisted resume session was swept/archived. */
+/** Startup 404s when the persisted resume session was swept or archived. */
 function isSessionMissingError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -95,7 +99,7 @@ export function TutorialGuidedShell({
   exitRequestedRef,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
-  const startGuided = useSessionStore((s) => s.startGuided);
+  const seedGuided = useSessionStore((s) => s.seedGuided);
   const resetForTutorialSession = useSessionStore(
     (s) => s.resetForTutorialSession,
   );
@@ -130,7 +134,7 @@ export function TutorialGuidedShell({
       setStarting(true);
       setError(null);
       // Bind the store's activeSessionId to this tutorial session BEFORE
-      // startGuided. startGuided (sessionStore.ts) DISCARDS its fetched guided
+      // seedGuided. seedGuided (sessionStore.ts) DISCARDS its fetched guided
       // payload unless get().activeSessionId === the requested id, and ChatPanel
       // renders the empty-session surface (chat-panel--empty) whenever
       // activeSessionId is null. resetForTutorialSession clears the same
@@ -144,14 +148,17 @@ export function TutorialGuidedShell({
           return false;
         }
         try {
-          await exitStartedGuidedSession(sessionId);
+          const exit = await exitStartedGuidedSession(sessionId);
+          if (exit.status !== "complete") {
+            setError(exit.message);
+          }
         } catch (err) {
           console.error("[tutorial] startup exit-to-freeform failed:", err);
         }
         return true;
       };
       try {
-        await startGuidedSession(sessionId, "tutorial");
+        await seedGuided(sessionId, "tutorial");
         if (await exitIfRequested()) {
           return;
         }
@@ -169,22 +176,6 @@ export function TutorialGuidedShell({
         // plugin default `allowed_hosts="public_only"`. The client must never
         // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
-        await startGuided(sessionId);
-        if (await exitIfRequested()) {
-          return;
-        }
-        // Rehydrate the interpretation-event projection for THIS session.
-        // Every other route into a session goes through selectSession, which
-        // does this (Phase 5b Task 3) — the tutorial bridge bypasses it, so
-        // without this a mid-Build reload resumed with pendingBySession
-        // EMPTY: no acknowledgement cards rendered, the wire-stage Confirm
-        // was not blocked, and the run then failed server-side with
-        // UnresolvedInterpretationPlaceholderError (the backend run gate is
-        // the final guard; the ack-before-advance UX gate lives client-side).
-        // Awaited, not fire-and-forget: a resume can land DIRECTLY on the
-        // wire stage, where the gate must be up before the first paint of an
-        // enabled Confirm.
-        await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
         if (isSessionMissingError(err) && onSessionMissing !== undefined) {
           onSessionMissing(sessionId);
@@ -197,7 +188,7 @@ export function TutorialGuidedShell({
     })();
   }, [
     sessionId,
-    startGuided,
+    seedGuided,
     resetForTutorialSession,
     onSessionMissing,
     exitRequestedRef,
@@ -205,8 +196,8 @@ export function TutorialGuidedShell({
 
   // Hand off when guided reaches a terminal — but ONLY on a terminal this
   // mount OBSERVED transition to. The back-nav GET path remounts this shell
-  // against the PERSISTED terminal guided session (startGuided clears
-  // guidedSession to null, then sets it to the terminal payload), so the
+  // against the PERSISTED terminal guided session (the startup reset clears
+  // guidedSession to null, then seedGuided sets the terminal payload), so the
   // shell mounts onto a terminal without ever seeing a live wizard. Firing
   // there bounces the user straight back to run (completed) or re-PATCHes
   // the opt-out on every remount (exited). Gate on sawActiveRef: a terminal
@@ -306,17 +297,61 @@ function formatError(err: unknown): string {
   return "The guided tutorial could not be started.";
 }
 
-async function exitStartedGuidedSession(sessionId: string): Promise<void> {
+type TutorialExitResult =
+  | { status: "complete" }
+  | { status: "conflict"; message: string }
+  | { status: "refresh_required"; message: string };
+
+const TUTORIAL_EXIT_REFRESH_MESSAGE =
+  "The tutorial exit was accepted, but this view could not refresh. Refresh the page to continue.";
+
+async function applyTutorialExitWithResync(
+  sessionId: string,
+  response: Awaited<ReturnType<typeof getGuided>>,
+): Promise<boolean> {
+  try {
+    if (await useSessionStore.getState().applyGuidedResponse(sessionId, response)) {
+      return true;
+    }
+  } catch {
+    // The decoded response settled operation custody; recover from GET below.
+  }
+  try {
+    const authoritative = await getGuided(sessionId);
+    return await useSessionStore
+      .getState()
+      .applyGuidedResponse(sessionId, authoritative);
+  } catch {
+    return false;
+  }
+}
+
+async function exitStartedGuidedSession(sessionId: string): Promise<TutorialExitResult> {
   const current = useSessionStore.getState();
   if (
     current.activeSessionId === sessionId &&
     current.guidedSession?.terminal?.kind === "exited_to_freeform"
   ) {
-    return;
+    clearGuidedRetriesForSession("guided_respond", sessionId);
+    return { status: "complete" };
   }
   if (current.activeSessionId === sessionId && current.guidedSession !== null) {
-    await current.exitToFreeform();
-    return;
+    const outcome = await current.exitToFreeform();
+    if (outcome.status === "applied") {
+      return { status: "complete" };
+    }
+    switch (outcome.reason) {
+      case "custody_conflict":
+        return { status: "conflict", message: outcome.message };
+      case "no_active_session":
+      case "no_current_turn":
+      case "pending":
+      case "stale":
+      case "unsettled":
+      case "rejected":
+      case "refresh_required":
+        return { status: "refresh_required", message: outcome.message };
+    }
   }
   // Not yet an active-with-loaded-guidedSession session (activeSessionId
   // may not even be bound to this session yet, or the store hasn't fetched
@@ -327,6 +362,48 @@ async function exitStartedGuidedSession(sessionId: string): Promise<void> {
   // applyGuidedResponse in sessionStore.ts), so the interpretation-event
   // refresh and turn_not_emitted self-heal bookkeeping stay in lockstep with
   // the store instead of forking into a separately-maintained copy.
-  const response = await respondGuided(sessionId, EXIT_TO_FREEFORM_REQUEST);
-  await useSessionStore.getState().applyGuidedResponse(sessionId, response);
+  const guided = await getGuided(sessionId);
+  if (guided.terminal?.kind === "exited_to_freeform") {
+    clearGuidedRetriesForSession("guided_respond", sessionId);
+    try {
+      if (await useSessionStore.getState().applyGuidedResponse(sessionId, guided)) {
+        return { status: "complete" };
+      }
+    } catch {
+      // The authoritative terminal remains settled; surface refresh guidance.
+    }
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
+  }
+  const turnToken = guided.terminal === null ? guided.next_turn?.turn_token : null;
+  if (guided.terminal === null && turnToken === undefined) {
+    throw new Error("Cannot exit guided tutorial without a current turn token");
+  }
+  const acquisition = acquireGuidedRetry("guided_respond", sessionId, [
+    turnToken ?? "terminal",
+    EXIT_TO_FREEFORM_ACTION,
+  ]);
+  if (acquisition.status === "conflict") {
+    return {
+      status: "conflict",
+      message:
+        "A previous guided response is unsettled. Retry the same action before exiting the tutorial.",
+    };
+  }
+  const retry = acquisition.handle;
+  const response = await respondGuided(sessionId, {
+    ...EXIT_TO_FREEFORM_ACTION,
+    operation_id: retry.operationId,
+    turn_token: turnToken ?? null,
+  });
+  clearGuidedRetry(retry);
+  if (!(await applyTutorialExitWithResync(sessionId, response))) {
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
+  }
+  return { status: "complete" };
 }

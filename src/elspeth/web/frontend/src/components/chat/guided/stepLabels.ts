@@ -5,8 +5,7 @@
 // summary (GuidedHistory), and ChatPanel's workflow stepper. Deliberately a
 // LEAF module — it imports ONLY types/guided — so every consumer (including
 // sibling widgets in this directory) can import it with no cycle possible.
-// It replaces three hand-mirrored STEP_LABELS copies that had drifted
-// ("Sink" vs "Output", "Recipe" vs "Recipe match").
+// It replaces three hand-mirrored STEP_LABELS copies that had drifted.
 //
 // CLOSED LIST — must cover every GuidedStep member. The keys are wire names
 // (protocol.py GuidedStep) and never change here; the labels are display-only
@@ -22,7 +21,6 @@ import type { GuidedStep } from "@/types/guided";
 export const GUIDED_STEP_LABELS: Record<GuidedStep, string> = {
   step_1_source: "Source",
   step_2_sink: "Output",
-  step_2_5_recipe_match: "Recipe match",
   step_3_transforms: "Transforms",
   step_4_wire: "Wire",
 };

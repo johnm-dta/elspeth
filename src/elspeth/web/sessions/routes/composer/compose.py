@@ -19,6 +19,7 @@ from .._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Request,
     SessionServiceProtocol,
     UserIdentity,
@@ -31,6 +32,7 @@ from .._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
@@ -59,7 +61,9 @@ from .._helpers import (
     get_rate_limiter,
     merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
+from .pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
 router = APIRouter()
 
@@ -371,6 +375,34 @@ async def recompose(
                     catalog=request.app.state.catalog_service,
                 )
                 raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+            except PipelinePlannerError as exc:
+                # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                # Mirror of the send_message handler — recompose is a retried
+                # freeform compose, so it must translate PipelinePlannerError
+                # identically or the two routes drift on failure UX. See the
+                # send_message clause for the full rationale; _handle_planner_failure
+                # writes the durable disposition row and MUST NOT re-persist the
+                # already-durable planner LLM-call audit evidence.
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not build a pipeline for this retry.",
+                        evidence=("The composer model did not return a usable pipeline plan.",),
+                        likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                        reason="provider_unavailable",
+                    ),
+                )
+                status_code, planner_response_body = await _handle_planner_failure(
+                    exc,
+                    service,
+                    session.id,
+                    pre_send_state_id,
+                )
+                raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
             except ComposerServiceError as exc:
                 await _publish_progress(
                     progress_registry,
@@ -428,7 +460,26 @@ async def recompose(
             # block for the full rationale on the structural fix.
             state_response: CompositionStateResponse | None = None
             post_compose_state_id: UUID | None = pre_send_state_id
-            if result.state.version != state.version:
+            if result.pipeline_commit_intent is not None:
+                authority = await service.get_authoritative_pipeline_proposal(
+                    session_id=session.id,
+                    proposal_id=result.pipeline_commit_intent.proposal_id,
+                    reviewed_facts={},
+                )
+                route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                    request=request,
+                    user=user,
+                    authority=authority,
+                    draft_hash=result.pipeline_commit_intent.draft_hash,
+                    composer_meta=_post_compose_meta,
+                    telemetry_source="recompose",
+                )
+                state_response = _state_response(
+                    route_settlement.settlement.state,
+                    live_validation=route_settlement.validation,
+                )
+                post_compose_state_id = route_settlement.settlement.state.id
+            elif result.state.version != state.version:
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
@@ -525,7 +576,11 @@ async def recompose(
                     outputs=_transition_state_d["outputs"],
                     metadata_=_transition_state_d["metadata"],
                     is_valid=False,
-                    validation_errors=None,
+                    validation_errors=validation_errors_for_composer_surface(
+                        composer_meta=_post_compose_meta,
+                        is_valid=False,
+                        validation_errors=None,
+                    ),
                     composer_meta=_post_compose_meta,
                 )
                 _transition_record = await service.save_composition_state(

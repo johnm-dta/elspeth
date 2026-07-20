@@ -1,12 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
-import type { GuidedRespondRequest, KnobField, SchemaFormPayload } from "@/types/guided";
+import type { GuidedRespondAction, KnobField, SchemaFormPayload } from "@/types/guided";
 import { TUTORIAL_VALIDATION_FAILURE_CAVEAT } from "@/components/tutorial/copy";
 import { CodeBlock } from "../CodeBlock";
-import { RecipeContextHeader } from "./RecipeContextHeader";
 
 interface SchemaFormTurnProps {
   payload: SchemaFormPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /**
    * Tutorial mode: surfaces the worked-example teaching copy for prefilled
@@ -71,63 +70,33 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
 
   function handleContinue() {
     if (!canSubmit()) return;
-    const submitted: Record<string, unknown> =
-      payload.mode === "recipe_decision" ? { ...payload.prefilled } : {};
+    const submitted: Record<string, unknown> = {};
     for (const field of visibleFields()) {
       submitted[field.name] = submittedValue(field, values[field.name]);
     }
 
-    if (payload.mode === "plugin_options") {
-      onSubmit({
-        chosen: null,
-        edited_values: {
-          plugin: payload.plugin,
-          options: submitted,
-          observed_columns: [],
-          sample_rows: [],
-        },
-        custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
-        control_signal: null,
-      });
-      return;
-    }
-
     onSubmit({
-      chosen: ["accept"],
+      chosen: null,
       edited_values: {
-        recipe_name: payload.recipe_context.recipe_name,
-        slots: submitted,
+        plugin: payload.plugin,
+        options: submitted,
+        observed_columns: [],
+        sample_rows: [],
       },
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: null,
-    });
-  }
-
-  function handleBuildManually() {
-    onSubmit({
-      chosen: ["build_manually"],
-      edited_values: null,
-      custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }
 
   const showValidationFailureTeaching =
     isTutorial &&
-    payload.mode === "plugin_options" &&
     payload.knobs.fields.some((field) => field.name === "on_validation_failure");
 
   return (
     <div className="guided-turn guided-schema-form">
-      {payload.mode === "recipe_decision" && (
-        <RecipeContextHeader context={payload.recipe_context} />
-      )}
       {view === "summary" ? (
         // Empty-row treatment (elspeth-eba8820005): an optional field with no
         // value carries no decision — elide the row rather than rendering a
@@ -226,18 +195,8 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           onClick={handleContinue}
           disabled={disabled || !canSubmit()}
         >
-          {payload.mode === "recipe_decision" ? "Apply recipe" : "Continue"}
+          Continue
         </button>
-        {payload.mode === "recipe_decision" && payload.recipe_context.alternatives.includes("build_manually") && (
-          <button
-            type="button"
-            className="guided-turn-secondary"
-            onClick={handleBuildManually}
-            disabled={disabled}
-          >
-            Build manually
-          </button>
-        )}
       </div>
     </div>
   );

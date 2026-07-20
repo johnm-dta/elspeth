@@ -143,6 +143,15 @@ def test_tools_all_entries_resolve() -> None:
     assert not missing, f"__all__ declares names that are not attributes of the module: {missing}"
 
 
+def test_tool_result_finalizer_is_intentional_facade_surface() -> None:
+    """The batch orchestrator consumes canonical result finalization via the facade."""
+
+    from elspeth.web.composer import tools
+
+    assert callable(tools.finalize_tool_result)
+    assert "finalize_tool_result" in tools.__all__
+
+
 def test_tools_all_is_unique() -> None:
     """``__all__`` must contain no duplicates.
 

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ToolCallCard } from "./ToolCallCard";
 import type { CompositionProposal, CompositionState, ToolCall } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 const toolCall: ToolCall = {
   id: "call-1",
@@ -143,6 +144,7 @@ describe("ToolCallCard", () => {
 describe("ToolCallCard proposal change surface (elspeth-10f76f9250)", () => {
   const currentState: CompositionState = {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 2,
     sources: {},
     nodes: [

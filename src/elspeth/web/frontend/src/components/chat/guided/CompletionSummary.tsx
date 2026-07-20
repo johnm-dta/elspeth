@@ -2,13 +2,11 @@
 //
 // Guided-mode terminal widget for the "completed" outcome (Task 7.10).
 // Conventions inherited from ExitToFreeformButton (Task 7.8) and
-// ProposeChainTurn (Task 7.6).
+// Current guided completion projection.
 //
 //   - Props: { terminal: TerminalState } -- read-only consumer of the terminal.
-//   - Renders only when terminal.kind === "completed" AND pipeline_yaml !== null.
-//     Returns null otherwise.  No defensive ?? "" coercion: an absent yaml is
-//     evidence (absence), not an invitation to render empty syntax-highlighted
-//     content.
+//   - Renders only when terminal.kind === "completed". The TerminalState
+//     discriminator guarantees completed terminals carry pipeline YAML.
 //   - Task-oriented actions expose the three next moves users expect after the
 //     wizard completes: open freeform editing, review generated YAML, or run
 //     validation.
@@ -38,8 +36,7 @@ interface CompletionSummaryProps {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function CompletionSummary({ terminal, isTutorial }: CompletionSummaryProps) {
-  // Guard: only render in the completed+yaml-present state.
-  if (terminal.kind !== "completed" || terminal.pipeline_yaml === null) {
+  if (terminal.kind !== "completed") {
     return null;
   }
 

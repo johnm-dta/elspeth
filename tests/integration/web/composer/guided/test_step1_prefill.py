@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -24,13 +26,16 @@ def _seed_csv_blob(client: TestClient, session_id: str) -> str:
     return resp.json()["id"]
 
 
-def _single_select_response(plugin: str) -> dict[str, object]:
+def _single_select_response(plugin: str, turn_token: str) -> dict[str, object]:
     return {
+        "operation_id": str(uuid4()),
+        "turn_token": turn_token,
         "chosen": [plugin],
         "edited_values": None,
         "custom_inputs": None,
-        "accepted_step_index": None,
-        "edit_step_index": None,
+        "proposal_id": None,
+        "draft_hash": None,
+        "edit_target": None,
         "control_signal": None,
     }
 
@@ -42,9 +47,10 @@ def _get_guided(client: TestClient, session_id: str) -> dict:
 
 
 def _select_source(client: TestClient, session_id: str, plugin: str) -> dict:
+    current = _get_guided(client, session_id)
     resp = client.post(
         f"/api/sessions/{session_id}/guided/respond",
-        json=_single_select_response(plugin),
+        json=_single_select_response(plugin, current["next_turn"]["turn_token"]),
     )
     assert resp.status_code == 200, resp.json()
     return resp.json()

@@ -13,8 +13,6 @@ describe("standalone staging tutorial driver contract", () => {
   it("drives the staged guided flow instead of the retired Build it turn", () => {
     expect(STAGED_GUIDED_PHASES).toEqual(["Source", "Output", "Transforms"]);
     expect(GUIDED_STAGE_PRIMARY_ACTION_NAMES).toEqual([
-      "Accept all steps",
-      "Apply recipe",
       "Confirm wiring",
       "Continue",
       "Let source decide (pass all fields through)",

@@ -1,0 +1,7 @@
+I've uploaded two_llm_colour.csv; use it as the input. Build a runnable pipeline that sends every colour row through two independent LLMs in parallel and then merges both completed assessments back into one flat hybrid row.
+
+The blue-assessment LLM must require color_name and hex. It must estimate the perceptible amount of blue and expose three typed output fields: blue_amount as an integer from 0 to 100, blue_confidence as a number from 0 to 1, and blue_reason as one concise sentence. Define 0 as no perceptible blue, 50 as a substantial but balanced blue component, and 100 as overwhelmingly blue.
+
+The red-assessment LLM must independently require color_name and hex. It must estimate the perceptible amount of red and expose red_amount as an integer from 0 to 100, red_confidence as a number from 0 to 1, and red_reason as one concise sentence. Define 0 as no perceptible red, 50 as a substantial but balanced red component, and 100 as overwhelmingly red.
+
+Wait for both LLM branches for each original row, then produce one flat row containing exactly color_name, hex, blue_amount, blue_confidence, blue_reason, red_amount, red_confidence, and red_reason. Remove raw LLM responses, token usage, model metadata, branch bookkeeping, and all other intermediate fields from the successful output. Write the ten successful hybrid rows as one JSON array of objects and route failures to a separate JSON output. Use deterministic sampling where supported and an economical configured model. Make the pipeline runnable now.

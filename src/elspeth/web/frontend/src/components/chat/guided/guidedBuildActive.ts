@@ -25,7 +25,7 @@ import type { GuidedSession, TurnPayload } from "@/types/guided";
  *     there post-completion);
  *   - a non-terminal session is active when the server has posed a turn, OR
  *     at step_3_transforms with no turn yet (the per-stage transforms prompt
- *     drives a cold start through /guided/chat — the composer must render so
+ *     drives a cold start through /guided/start — the composer must render so
  *     the operator can describe the transforms);
  *   - any other turn-less non-terminal state is a transient (e.g. the gap
  *     during startGuided) and falls through to the freeform surface, rail

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts.freeze import deep_freeze, deep_thaw
+from elspeth.contracts.freeze import FrozenJsonArray, deep_freeze, deep_thaw
 
 # =============================================================================
 # deep_freeze
@@ -116,6 +116,22 @@ class TestDeepFreeze:
         already = (1, 2, 3)
         result = deep_freeze(already)
         assert result is already
+
+    def test_frozen_json_array_preserves_marker_while_detaching_nested_mapping_proxy(self) -> None:
+        backing = {"value": "before"}
+        already = FrozenJsonArray((MappingProxyType(backing),))
+
+        result = deep_freeze(already)
+        backing["value"] = "after"
+
+        assert type(result) is FrozenJsonArray
+        assert result is not already
+        assert result[0]["value"] == "before"
+
+    def test_scalar_only_frozen_json_array_preserves_identity(self) -> None:
+        already = FrozenJsonArray((1, "two", None))
+
+        assert deep_freeze(already) is already
 
     def test_frozenset_returned_as_is(self) -> None:
         already = frozenset({1, 2, 3})

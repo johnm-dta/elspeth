@@ -1463,7 +1463,7 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
   "previous_package_version": "0.7.0",
   "schema_facts": {
-    "candidate": {"session_epoch": 28, "landscape_epoch": 29, "run_web_plugin_policy_present": true},
+    "candidate": {"session_epoch": 35, "landscape_epoch": 29, "run_web_plugin_policy_present": true},
     "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
     "structural_changes": "landscape_epoch_23_to_29_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_per_member_failsink_provenance_output_contract_hash_run_scoped_validation_errors_and_token_ancestry_batch_expansion_claim_and_sidecar_journal_outbox",
     "semantics_only_changes": "none",
@@ -1491,7 +1491,7 @@ Scenario A uses the same field set with `scenario_id: "A"`; empty strings for
 
 The controller binds the record to the manifest, image digest, exact task
 and doctor definitions, candidate and previous package/image identities,
-session epoch 28, Landscape epoch 28 and `run_web_plugin_policy` presence,
+session epoch 35, Landscape epoch 28 and `run_web_plugin_policy` presence,
 change/reset facts, decision, two distinct approvals, and expiry. It
 stores only a sanitized receipt and document hash. Reopen and revalidate the
 raw record before init-capable doctor, ordinary doctor, candidate deploy, and
@@ -2946,9 +2946,9 @@ fi
 
 The compatibility receipt plus `candidate-after-rollback-refusal` evidence is
 the refusal/forward-recovery record. If the candidate is unhealthy, keep traffic
-drained and repair forward with epoch-28-compatible code, or restore the matched
-epoch-23 database archive before deploying the previous image. Never roll old
-code over the migrated schema.
+drained and repair forward with epoch-30 session/epoch-28 Landscape code.
+Predecessor database restoration and code downgrade are not supported repair
+paths. Never roll old code over the recreated schema.
 
 For first/first-recovery, remove traffic before compute, verify the listener's
 fixed 503 action, then scale to zero:

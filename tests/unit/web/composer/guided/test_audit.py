@@ -3,7 +3,7 @@
 Audit-tier (Tier 1) per CLAUDE.md. Coercion forbidden — every field is
 either present or the function raises.
 
-Per Errata C4: the four event types are recorded as ComposerToolInvocation
+Per Errata C4: the guided event types are recorded as ComposerToolInvocation
 records with a tool_name discriminator, NOT via GuidedAuditEvent.
 """
 
@@ -18,12 +18,27 @@ import pytest
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
+    emit_intent_cancelled,
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import TerminalReason
+from elspeth.web.composer.guided.state_machine import DeferredStageIntent, TerminalReason
+
+
+def _cancelled_intent() -> DeferredStageIntent:
+    return DeferredStageIntent.create(
+        intent_id="00000000-0000-4000-8000-000000000801",
+        receiving_stage="source",
+        target_stage="topology",
+        catalog_kind=None,
+        catalog_name=None,
+        redacted_summary="Future topology instruction.",
+        originating_message_id="00000000-0000-4000-8000-000000000802",
+        message_content_hash="a" * 64,
+        constraints=(),
+    )
 
 
 class _FakeRecorder:
@@ -146,97 +161,57 @@ class TestEmitStepAdvanced:
 
 
 class TestEmitDroppedToFreeform:
-    def test_records_drop_reason(self) -> None:
-        rec = _FakeRecorder()
-        emit_dropped_to_freeform(
-            rec,
-            prev=GuidedStep.STEP_3_TRANSFORMS,
-            drop_reason=TerminalReason.SOLVER_EXHAUSTED,
-            # Realistic shape: ValidationSummary -> {"is_valid", "errors":[ValidationEntry.to_dict()]}.
-            validation_result={
-                "is_valid": False,
-                "errors": [{"component": "source", "message": "schema mismatch", "severity": "high"}],
-            },
-            composition_version=5,
-            actor="test-actor",
-        )
-        assert len(rec.invocations) == 1
-        inv = rec.invocations[0]
-        assert inv.tool_name == "guided_dropped_to_freeform"
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        assert decoded["drop_reason"] == "solver_exhausted"
-        assert decoded["prev_step"] == "step_3_transforms"
-        # Structured outcome retained; free-form ``message`` stripped by allowlist.
-        assert decoded["validation_result"] == {
-            "is_valid": False,
-            "errors": [{"component": "source", "severity": "high"}],
-        }
-        assert inv.result_canonical is None
-
-    def test_redacts_validation_error_message_egress(self) -> None:
-        """Free-form validator ``message`` text MUST NOT reach the audit record.
-
-        The guided-event channel is structurally exempt from the redaction
-        MANIFEST (the persistence projection at sessions/routes/_helpers.py
-        fail-opens for non-MANIFEST tool_names), so this synthetic event must
-        be safe by construction. ``ValidationEntry.message`` echoes filesystem
-        paths and raw plugin/pydantic exception text (see _common.py path / exc
-        messages); only the structured outcome (``is_valid`` + per-error
-        ``component`` / ``severity``) is safe to persist.
-        """
-        rec = _FakeRecorder()
-        emit_dropped_to_freeform(
-            rec,
-            prev=GuidedStep.STEP_3_TRANSFORMS,
-            drop_reason=TerminalReason.SOLVER_EXHAUSTED,
-            validation_result={
-                "is_valid": False,
-                "errors": [
-                    {
-                        "component": "source",
-                        "message": "Path violation (S2): '/etc/secrets/db.pem' is outside the data dir",
-                        "severity": "high",
-                    },
-                    {
-                        "component": "node:enrich",
-                        "message": "Invalid options for transform 'llm': api_key=sk-LEAKED-7f3a unauthorized",
-                        "severity": "high",
-                    },
-                ],
-            },
-            composition_version=5,
-            actor="test-actor",
-        )
-        inv = rec.invocations[0]
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        # Structured outcome survives; component attribution + severity kept.
-        assert decoded["validation_result"] == {
-            "is_valid": False,
-            "errors": [
-                {"component": "source", "severity": "high"},
-                {"component": "node:enrich", "severity": "high"},
-            ],
-        }
-        # The whole canonical record (hashed into the Tier-1 audit trail) is
-        # free of the sensitive free-form text.
-        blob = inv.arguments_canonical
-        for leaked in ("/etc/secrets/db.pem", "sk-LEAKED-7f3a", "Path violation", "Invalid options"):
-            assert leaked not in blob, leaked
-
-    def test_user_pressed_exit_has_no_validation_result(self) -> None:
+    def test_records_user_exit_without_validation_payload(self) -> None:
         rec = _FakeRecorder()
         emit_dropped_to_freeform(
             rec,
             prev=GuidedStep.STEP_2_SINK,
             drop_reason=TerminalReason.USER_PRESSED_EXIT,
-            validation_result=None,
             composition_version=1,
             actor="test-actor",
         )
+
         inv = rec.invocations[0]
-        decoded: dict[str, Any] = json.loads(inv.arguments_canonical)
-        # validation_result must be absent (None means "never sent"), not present-as-null
-        assert "validation_result" not in decoded
+        assert inv.tool_name == "guided_dropped_to_freeform"
+        assert json.loads(inv.arguments_canonical) == {
+            "drop_reason": "user_pressed_exit",
+            "prev_step": "step_2_sink",
+        }
+
+
+class TestEmitIntentCancelled:
+    def test_records_only_stable_structural_identity(self) -> None:
+        rec = _FakeRecorder()
+
+        emit_intent_cancelled(
+            rec,
+            intent=_cancelled_intent(),
+            composition_version=4,
+            actor="test-actor",
+        )
+
+        inv = rec.invocations[0]
+        assert inv.tool_name == "guided_intent_cancelled"
+        assert json.loads(inv.arguments_canonical) == {
+            "intent_id": "00000000-0000-4000-8000-000000000801",
+            "receiving_stage": "source",
+            "target_stage": "topology",
+        }
+        assert "summary" not in inv.arguments_canonical
+        assert "message" not in inv.arguments_canonical
+
+    def test_rejects_untyped_identity_before_recording(self) -> None:
+        rec = _FakeRecorder()
+
+        with pytest.raises(TypeError, match="exact DeferredStageIntent"):
+            emit_intent_cancelled(
+                rec,
+                intent=object(),  # type: ignore[arg-type]
+                composition_version=4,
+                actor="test-actor",
+            )
+
+        assert rec.invocations == []
 
 
 class TestArgumentsHashInvariant:

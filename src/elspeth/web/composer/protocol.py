@@ -6,15 +6,23 @@ pipeline composition.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+from uuid import UUID
 
 if TYPE_CHECKING:
+    from elspeth.web.catalog.policy_view import PolicyCatalogView
     from elspeth.web.composer.audit import BufferingRecorder
-    from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.composer.guided.state_machine import GuidedSession, TerminalState
+    from elspeth.web.composer.pipeline_planner import PipelinePlanResult, PlannerOriginatingMessage
+    from elspeth.web.composer.pipeline_proposal import PresentBase
     from elspeth.web.composer.service import AdvisorCheckpointVerdict
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+    from elspeth.web.sessions.protocol import GuidedOperationFence
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
@@ -22,6 +30,22 @@ from elspeth.contracts.composer_progress import ComposerProgressReason, Composer
 from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
+
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class PipelineCommitIntent:
+    """Authority pointer for route-owned canonical pipeline settlement."""
+
+    proposal_id: UUID
+    draft_hash: str
+
+    def __post_init__(self) -> None:
+        if type(self.proposal_id) is not UUID:
+            raise TypeError("proposal_id must be an exact UUID")
+        if type(self.draft_hash) is not str or _SHA256_HEX.fullmatch(self.draft_hash) is None:
+            raise ValueError("draft_hash must be a lowercase SHA-256 hash")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +128,7 @@ class ComposerResult:
     state: CompositionState
     runtime_preflight: ValidationResult | None = None
     raw_assistant_content: str | None = None
+    pipeline_commit_intent: PipelineCommitIntent | None = None
     # Per-tool-call audit trail produced during this compose() invocation.
     # Populated by ComposerServiceImpl._compose_loop via a BufferingRecorder.
     # The route handler persists each entry as a role=tool chat message row.
@@ -669,6 +694,21 @@ class ComposerSettings(Protocol):
     def composer_timeout_seconds(self) -> float: ...
 
     @property
+    def composer_planner_max_provider_calls(self) -> int: ...
+
+    @property
+    def composer_planner_max_request_bytes(self) -> int: ...
+
+    @property
+    def composer_planner_max_completion_tokens(self) -> int: ...
+
+    @property
+    def composer_planner_max_cumulative_provider_cost(self) -> Decimal: ...
+
+    @property
+    def composer_planner_repair_budget(self) -> int: ...
+
+    @property
     def composer_runtime_preflight_timeout_seconds(self) -> float: ...
 
     @property
@@ -759,6 +799,39 @@ class ComposerService(Protocol):
         Raises:
             ComposerConvergenceError: If the loop exceeds max_turns.
         """
+
+    async def plan_guided_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        guided: GuidedSession,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        user_id: str | None,
+        supersedes_draft_hash: str | None,
+        recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Run the shared planner once with split private/provider-safe facts."""
+        ...
+
+    async def plan_guided_full_pipeline(
+        self,
+        *,
+        intent: str,
+        current_state: CompositionState,
+        originating_message: PlannerOriginatingMessage,
+        base: PresentBase,
+        policy_catalog: PolicyCatalogView,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+        recorder: BufferingRecorder,
+        operation_fence: GuidedOperationFence,
+        progress: ComposerProgressSink | None = None,
+    ) -> tuple[PipelinePlanResult, Mapping[str, frozenset[str]]]:
+        """Plan one ordinary guided-full proposal through the shared planner."""
+        ...
 
     async def surface_pending_interpretation_reviews(
         self,

@@ -34,6 +34,7 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools._common import (
+    ReviewedSourceAuthority,
     RuntimePreflight,
     ToolContext,
     ToolHandler,
@@ -66,6 +67,7 @@ from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 __all__ = [
     "_inject_prior_validation",
+    "execute_discovery_tool_with_context",
     "execute_tool",
     "get_discovery_tool_definitions",
     "get_tool_definitions",
@@ -501,6 +503,21 @@ def _augment_with_plugin_schemas(
     return replace(result, plugin_schemas=schemas)
 
 
+def finalize_tool_result(
+    result: ToolResult,
+    *,
+    tool_name: str,
+    catalog: PolicyCatalogView,
+    context: ToolContext,
+    prior_validation: ValidationSummary,
+) -> ToolResult:
+    """Apply canonical prior-validation, repair-schema, and profile enrichment."""
+    if tool_name in _ALL_MUTATION_TOOL_NAMES:
+        result = _inject_prior_validation(result, prior_validation)
+    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    return normalize_tool_result_validation(result, catalog)
+
+
 def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -524,6 +541,7 @@ def execute_tool(
     composer_provider: str | None = None,
     composer_skill_hash: str | None = None,
     tool_arguments_hash: str | None = None,
+    reviewed_source_authority: ReviewedSourceAuthority | None = None,
     raise_schema_argument_errors: bool = False,
 ) -> ToolResult:
     """Execute a composition tool by name.
@@ -645,22 +663,64 @@ def execute_tool(
         composer_provider=composer_provider,
         composer_skill_hash=composer_skill_hash,
         tool_arguments_hash=tool_arguments_hash,
+        reviewed_source_authority=reviewed_source_authority,
     )
 
-    if tool_name in _ALL_MUTATION_TOOL_NAMES:
-        prior = current_validation
-        result = handler(arguments, state, context)
-        result = _inject_prior_validation(result, prior)
-    else:
-        result = handler(arguments, state, context)
+    result = handler(arguments, state, context)
 
-    # Failure-response augmentation: when an option-shape mutation rejects,
-    # embed the get_plugin_schema payloads for every plugin named in the
-    # validation errors so the LLM avoids a follow-up discovery round-trip.
-    # No-op for non-augmentation-eligible tools or successful results
-    # (gated inside ``_augment_with_plugin_schemas``).
-    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
-    return normalize_tool_result_validation(result, catalog)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=catalog,
+        context=context,
+        prior_validation=current_validation,
+    )
+
+
+def execute_discovery_tool_with_context(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Execute one declared read-only tool through a frozen request context.
+
+    This is the narrow execution seam for planners that advertise core, blob,
+    and secret discovery together.  Unlike :func:`execute_tool`, callers
+    cannot accidentally reach a mutation registry and the request-scoped
+    catalog/snapshot/context object is not reconstructed between calls.
+    """
+    if context.catalog.snapshot is not context.plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+    discovery_handlers: dict[str, ToolHandler] = {
+        **_DISCOVERY_TOOLS,
+        **_BLOB_DISCOVERY_TOOLS,
+        **_SECRET_DISCOVERY_TOOLS,
+    }
+    handler = discovery_handlers.get(tool_name)
+    if handler is None:
+        raise ToolArgumentError(
+            argument="tool_name",
+            expected="a declared read-only discovery tool",
+            actual_type="mutation_or_unknown",
+            code="DISCOVERY_ONLY",
+        )
+    argument_error = _validate_tool_arguments(tool_name, arguments, state, raise_on_error=True)
+    assert argument_error is None
+    if _requires_secret_context(tool_name) and (context.secret_service is None or context.user_id is None):
+        return normalize_tool_result_validation(
+            _failure_result(state, "Secret tools require secret service context."),
+            context.catalog,
+        )
+    prior_validation = context.current_validation or context.catalog.validate_composition_state(state).validation
+    result = handler(dict(arguments), state, context)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=context.catalog,
+        context=context,
+        prior_validation=prior_validation,
+    )
 
 
 # ---------------------------------------------------------------------------

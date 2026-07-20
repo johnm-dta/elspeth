@@ -18,9 +18,14 @@ import type {
   GuidedSession,
   TurnPayload,
   TerminalState,
+  GuidedRespondAction,
+  GuidedProposalReviewState,
+  GuidedProposalRetryAction,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  GuidedStartOperationReconciliation,
 } from "@/types/guided";
+import type { GuidedRetryHandle } from "./guidedOperationRetry";
 import * as api from "@/api/client";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
@@ -30,9 +35,121 @@ import { useBlobStore } from "./blobStore";
 import { useExecutionStore } from "./executionStore";
 import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { usePreferencesStore } from "./preferencesStore";
+import {
+  acquireGuidedRetry,
+  clearAllGuidedRetries,
+  clearGuidedRetry,
+  clearGuidedRetriesForSession,
+  findGuidedRetry,
+  isAmbiguousGuidedRetryFailure,
+} from "./guidedOperationRetry";
+
+export type GuidedRespondOutcome =
+  | { status: "applied" }
+  | {
+      status: "not_applied";
+      reason:
+        | "no_active_session"
+        | "no_current_turn"
+        | "pending"
+        | "custody_conflict"
+        | "stale"
+        | "unsettled"
+        | "rejected"
+        | "refresh_required";
+      message: string;
+    };
 
 function getExecutionStore() {
   return useExecutionStore.getState();
+}
+
+type SettledGuidedResyncResult = "published" | "stale" | "failed";
+
+type GuidedStartReconciliationResult =
+  | "cleared"
+  | "completed"
+  | "in_progress"
+  | "unknown"
+  | "stale";
+
+async function reconcileGuidedStartRetry(
+  retry: GuidedRetryHandle,
+  publicationGeneration: number,
+): Promise<GuidedStartReconciliationResult> {
+  const reconciliationController = new AbortController();
+  let reconciliation: GuidedStartOperationReconciliation;
+  try {
+    reconciliation = await api.reconcileGuidedStartOperation(
+      retry.sessionId,
+      retry.operationId,
+      reconciliationController.signal,
+    );
+  } catch {
+    return "unknown";
+  }
+  if (typeof reconciliation !== "object" || reconciliation === null) {
+    return "unknown";
+  }
+
+  if (reconciliation.status === "failed") {
+    clearGuidedRetry(retry);
+    return "cleared";
+  }
+  if (reconciliation.status === "in_progress") {
+    return "in_progress";
+  }
+  if (!guidedPublicationIsCurrent(retry.sessionId, publicationGeneration)) {
+    return "stale";
+  }
+
+  try {
+    const refreshController = new AbortController();
+    const authoritative = await api.getGuided(
+      retry.sessionId,
+      refreshController.signal,
+    );
+    if (
+      authoritative.composition_state === null ||
+      authoritative.composition_state.id !== reconciliation.composition_state_id
+    ) {
+      return "unknown";
+    }
+    if (!guidedPublicationIsCurrent(retry.sessionId, publicationGeneration)) {
+      return "stale";
+    }
+    const applied = await useSessionStore.getState().applyGuidedResponse(
+      retry.sessionId,
+      authoritative,
+      publicationGeneration,
+    );
+    if (!applied) return "stale";
+    clearGuidedRetry(retry);
+    return "completed";
+  } catch {
+    return guidedPublicationIsCurrent(retry.sessionId, publicationGeneration)
+      ? "unknown"
+      : "stale";
+  }
+}
+
+async function resyncSettledGuidedResponse(
+  sessionId: string,
+  activeSessionId: () => string | null,
+  publish: (response: GuidedRespondResponse) => Promise<boolean>,
+): Promise<SettledGuidedResyncResult> {
+  if (activeSessionId() !== sessionId) {
+    return "stale";
+  }
+  try {
+    const authoritative = await api.getGuided(sessionId);
+    if (activeSessionId() !== sessionId) {
+      return "stale";
+    }
+    return await publish(authoritative) ? "published" : "stale";
+  } catch {
+    return activeSessionId() === sessionId ? "failed" : "stale";
+  }
 }
 
 const COMPOSER_PROGRESS_POLL_INTERVAL_MS = 1500;
@@ -48,6 +165,28 @@ const COMPOSE_TIMEOUT_MESSAGE =
   "ELSPETH took too long to compose a response. Try a smaller request or split it into multiple steps.";
 const COMPOSE_CANCELLED_MESSAGE =
   "Composition stopped. You can revise your request and send it again.";
+const GUIDED_START_CLEARED_MESSAGE =
+  "Guided setup stopped or timed out before staging. You can revise your request and send it again.";
+const GUIDED_START_IN_PROGRESS_MESSAGE =
+  "Guided setup is still running. Wait for it to settle, then reload to recover the result.";
+const GUIDED_START_UNKNOWN_MESSAGE =
+  "Could not confirm whether guided setup settled. Reload to retry recovery before sending another request.";
+const GUIDED_RETRY_CONFLICT_STATE = {
+  error:
+    "A previous operation is unsettled. Retry the same action before choosing another.",
+  errorDetails: null,
+  guidedSelfHealNotice: null,
+} as const;
+const GUIDED_NO_ACTIVE_SESSION_MESSAGE =
+  "No active session is available for this guided response.";
+const GUIDED_NO_CURRENT_TURN_MESSAGE =
+  "There is no current guided turn to answer.";
+const GUIDED_RESPONSE_PENDING_MESSAGE =
+  "A guided response is already pending.";
+const GUIDED_RESPONSE_STALE_MESSAGE =
+  "The active session changed before the guided response could be applied.";
+const GUIDED_RESPONSE_REFRESH_REQUIRED_MESSAGE =
+  "The server accepted the response, but this view could not refresh. Refresh or re-enter the session before continuing.";
 
 function isAbortError(err: unknown): boolean {
   // DOMException ('AbortError'/'TimeoutError') is not always an Error
@@ -90,6 +229,32 @@ function isHttpConflict(err: unknown): boolean {
   return (err as { status?: unknown }).status === 409;
 }
 
+function proposalReviewForTurn(
+  turn: TurnPayload | null,
+): GuidedProposalReviewState | null {
+  if (turn?.type !== "propose_pipeline") return null;
+  return {
+    status: "active",
+    proposal_id: turn.payload.proposal_id,
+    draft_hash: turn.payload.draft_hash,
+  };
+}
+
+function proposalRetryActionForBody(
+  body: GuidedRespondAction,
+): GuidedProposalRetryAction | null {
+  if (body.proposal_id === null) return null;
+  if (body.chosen !== null) {
+    return { kind: body.chosen[0] === "confirm_wiring" ? "confirm_wiring" : "review_wiring" };
+  }
+  if (body.control_signal === "reject") return { kind: "reject" };
+  if ("correction_feedback" in body) return null;
+  if (body.edit_target !== null) {
+    return { kind: "revise", edit_target: body.edit_target };
+  }
+  return null;
+}
+
 let composerProgressPollTimer: ReturnType<typeof setInterval> | null = null;
 let composerProgressPollSessionId: string | null = null;
 // True once THIS poll session (the span between startComposerProgressPolling
@@ -109,6 +274,22 @@ let composerProgressPollSeenNonTerminal = false;
 // loop) from stopping the pollers a newer same-session turn now owns.
 let composerProgressPollGeneration = 0;
 let inflightMessagesPollGeneration = 0;
+let guidedPublicationGeneration = 0;
+
+function advanceGuidedPublicationGeneration(): number {
+  guidedPublicationGeneration += 1;
+  return guidedPublicationGeneration;
+}
+
+function guidedPublicationIsCurrent(
+  sessionId: string,
+  generation: number,
+): boolean {
+  return (
+    guidedPublicationGeneration === generation &&
+    useSessionStore.getState().activeSessionId === sessionId
+  );
+}
 const TERMINAL_COMPOSER_PROGRESS_PHASES = new Set<ComposerProgressPhase>([
   "complete",
   "failed",
@@ -394,7 +575,8 @@ async function resyncAfterAbortedGuidedTurn(
     }
     return {
       guidedSession: resynced.guided_session,
-      guidedNextTurn: resynced.next_turn ?? s.guidedNextTurn,
+      guidedNextTurn: resynced.next_turn,
+      guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
       guidedTerminal: resynced.terminal ?? s.guidedTerminal,
       compositionState: resynced.composition_state ?? s.compositionState,
     };
@@ -440,14 +622,15 @@ const MAX_TURN_NOT_EMITTED_SELF_HEALS = 1;
  * active session (see applyGuidedResponse) and so must call the raw
  * api.respondGuided directly with the same body.
  */
-export const EXIT_TO_FREEFORM_REQUEST = Object.freeze({
+export const EXIT_TO_FREEFORM_ACTION = Object.freeze({
   chosen: null,
   edited_values: null,
   custom_inputs: null,
-  accepted_step_index: null,
-  edit_step_index: null,
+  proposal_id: null,
+  draft_hash: null,
+  edit_target: null,
   control_signal: "exit_to_freeform",
-} satisfies GuidedRespondRequest);
+} satisfies GuidedRespondAction);
 
 // Resetting guided-mode state landed in five places: initialState plus
 // the four navigation actions that switch session context (createSession,
@@ -463,6 +646,7 @@ function clearedGuidedState(): Pick<
   | "guidedSession"
   | "guidedNextTurn"
   | "guidedTerminal"
+  | "guidedProposalReview"
   | "guidedChatPending"
   | "guidedResponsePending"
   | "guidedSelfHealNotice"
@@ -471,6 +655,7 @@ function clearedGuidedState(): Pick<
     guidedSession: null,
     guidedNextTurn: null,
     guidedTerminal: null,
+    guidedProposalReview: null,
     guidedChatPending: false,
     guidedResponsePending: false,
     guidedSelfHealNotice: null,
@@ -491,11 +676,13 @@ function clearedGuidedState(): Pick<
 // session has no guided_session attached (a plain freeform session) — see
 // get_guided's single 400 raise in routes/composer/guided.py — so any
 // caught error here is treated as "this session is freeform-only", not
-// surfaced as a selectSession failure. A non-400 failure (network blip) is
-// swallowed the same way: restoring guided state is a nice-to-have on load,
-// not load-bearing for the freeform surface that always renders regardless.
+// surfaced as a selectSession failure. Select-session callers tolerate a
+// non-400 failure because guided restoration is not load-bearing there;
+// mutation callers can request propagation so a multi-request action retains
+// its operation custody until every authoritative read has succeeded.
 async function fetchGuidedStateForSelect(
   sessionId: string,
+  unexpectedFailure: "tolerate" | "throw" = "tolerate",
 ): Promise<GetGuidedResponse | null> {
   try {
     const response = await api.getGuided(sessionId);
@@ -523,6 +710,9 @@ async function fetchGuidedStateForSelect(
     // is at least diagnosable rather than silently indistinguishable.
     const status = (err as ApiError | undefined)?.status;
     if (status !== 400) {
+      if (unexpectedFailure === "throw") {
+        throw err;
+      }
       console.warn(
         `[sessionStore] guided-state probe for session ${sessionId} failed (status ${status ?? "unknown"}); ` +
           "falling back to freeform. If this session was mid-guided-build, its state was not restored.",
@@ -530,6 +720,22 @@ async function fetchGuidedStateForSelect(
     }
     return null;
   }
+}
+
+function mergeAuthoritativeForkChild(
+  current: Session[],
+  authoritative: Session[],
+  childSessionId: string,
+): Session[] {
+  const child = authoritative.find((session) => session.id === childSessionId);
+  if (child === undefined) {
+    throw new Error("Fork result was absent from the authoritative session list");
+  }
+  // Preserve every intervening unrelated list mutation. A fetch started before
+  // a rename, create, or archive is authoritative only for the exact committed
+  // locator child. Put that fresh child first to preserve the backend's
+  // updated_at DESC contract without admitting stale values for other rows.
+  return [child, ...current.filter((session) => session.id !== childSessionId)];
 }
 
 function clearedRecoveryState(): Pick<
@@ -713,6 +919,8 @@ interface SessionState {
   guidedSession: GuidedSession | null;
   guidedNextTurn: TurnPayload | null;
   guidedTerminal: TerminalState | null;
+  /** Exact proposal/hash-bound lifecycle for the current proposal controls. */
+  guidedProposalReview: GuidedProposalReviewState | null;
   // Per-step chat (Phase A slice 5).  The history itself lives on
   // `guidedSession.chat_history` (server-authoritative); only the in-flight
   // pending flag is local state.  Slice 4 carried an in-memory
@@ -736,7 +944,11 @@ interface SessionState {
   guidedSelfHealNotice: string | null;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
-  respondGuided: (body: GuidedRespondRequest) => Promise<void>;
+  seedGuided: (
+    sessionId: string,
+    profileKind: "tutorial",
+  ) => Promise<void>;
+  respondGuided: (body: GuidedRespondAction) => Promise<GuidedRespondOutcome>;
   /**
    * Apply a GuidedRespondResponse to the store: atomically replace the 4 wire
    * fields, await the B1/D12 interpretation-event refresh, and clear the C-3
@@ -752,7 +964,8 @@ interface SessionState {
   applyGuidedResponse: (
     sessionId: string,
     response: GuidedRespondResponse,
-  ) => Promise<void>;
+    expectedPublicationGeneration?: number,
+  ) => Promise<boolean>;
   reenterGuided: () => Promise<void>;
   // Convert a freeform session into guided mode (POST /guided/convert). Unlike
   // startGuided's GET, this works for a session that has done freeform work
@@ -772,7 +985,7 @@ interface SessionState {
   // `signal` aborts the underlying fetch (Stop button / client timeout) — the
   // guided mirror of sendMessage's AbortController plumbing (useComposer).
   chatGuided: (message: string, signal?: AbortSignal) => Promise<void>;
-  exitToFreeform: () => Promise<void>;
+  exitToFreeform: () => Promise<GuidedRespondOutcome>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
   reset: () => void;
@@ -872,6 +1085,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    advanceGuidedPublicationGeneration();
     set((state) => ({
       sessions: [session, ...state.sessions],
       activeSessionId: session.id,
@@ -925,6 +1139,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         if (wasActive) {
           clearComposerProgressPollTimer();
           clearInflightMessagesPollTimer();
+          advanceGuidedPublicationGeneration();
         }
         return {
           sessions,
@@ -986,6 +1201,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     getExecutionStore().clearValidation();
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    const selectionGeneration = advanceGuidedPublicationGeneration();
 
     set({
       activeSessionId: id,
@@ -1022,7 +1238,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // The user may switch sessions while these requests are in flight.
       // Drop stale payloads so an older selection cannot overwrite the
       // newly active session's messages or composition state.
-      if (get().activeSessionId !== id) {
+      if (!guidedPublicationIsCurrent(id, selectionGeneration)) {
         return;
       }
       set({
@@ -1051,9 +1267,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               guidedSession: guided.guided_session,
               guidedNextTurn: guided.next_turn,
               guidedTerminal: guided.terminal,
+              guidedProposalReview: proposalReviewForTurn(guided.next_turn),
             }
           : {}),
       });
+
+      const guidedStartRetry = findGuidedRetry("guided_start", id);
+      if (guidedStartRetry !== null) {
+        const reconciliation = await reconcileGuidedStartRetry(
+          guidedStartRetry,
+          selectionGeneration,
+        );
+        if (!guidedPublicationIsCurrent(id, selectionGeneration)) return;
+        if (reconciliation === "in_progress") {
+          set({ error: GUIDED_START_IN_PROGRESS_MESSAGE, errorDetails: null });
+        } else if (reconciliation === "unknown") {
+          set({ error: GUIDED_START_UNKNOWN_MESSAGE, errorDetails: null });
+        }
+      }
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
@@ -1068,7 +1299,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // cover the session-load and session-change behaviours.
       void useInterpretationEventsStore.getState().refreshAll(id);
     } catch (err) {
-      if ((err as ApiError).status === 404 && get().activeSessionId === id) {
+      if (
+        (err as ApiError).status === 404 &&
+        guidedPublicationIsCurrent(id, selectionGeneration)
+      ) {
+        advanceGuidedPublicationGeneration();
         set({
           activeSessionId: null,
           messages: [],
@@ -1088,7 +1323,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         });
         return;
       }
-      if (get().activeSessionId === id) {
+      if (guidedPublicationIsCurrent(id, selectionGeneration)) {
         // The fetch settled (failed) — the composition state is as known as
         // it will get without a retry. Marking loaded lets deferred
         // consumers (the #/{id}/yaml gate) resolve to "no content" instead
@@ -1102,6 +1337,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   resetForTutorialSession(sessionId: string) {
+    advanceGuidedPublicationGeneration();
     set({
       activeSessionId: sessionId,
       messages: [],
@@ -1125,6 +1361,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (get().activeSessionId !== sessionId) {
       return;
     }
+    advanceGuidedPublicationGeneration();
     set({
       activeSessionId: null,
       messages: [],
@@ -1354,6 +1591,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const proposal = await api.acceptCompositionProposal(
         activeSessionId,
         proposalId,
+        get().compositionProposals.find((item) => item.id === proposalId)
+          ?.pipeline_metadata?.draft_hash ?? null,
       );
       const [compositionState, proposals] = await Promise.all([
         api.fetchCompositionState(activeSessionId),
@@ -1762,50 +2001,118 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    const acquisition = acquireGuidedRetry("session_fork", activeSessionId, [
+      messageId,
+      newContent,
+    ]);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return;
+    }
+    const retry = acquisition.handle;
+    let responseReceived = false;
+    let childPublished = false;
     set({ isComposing: true, error: null });
     try {
       const result = await api.forkFromMessage(
         activeSessionId,
+        retry.operationId,
         messageId,
         newContent,
       );
-      // Clear validation for the new session
-      getExecutionStore().clearValidation();
+      responseReceived = true;
 
+      // The POST returns only a durable locator. Publish that exact child into
+      // the global list first, using a minimal merge that preserves concurrent
+      // list mutations. Hydrate into locals while the parent remains active;
+      // switch atomically only after every load-bearing child read succeeds.
+      const authoritativeSessions = await api.fetchSessions();
       set((state) => ({
-        sessions: [result.session, ...state.sessions],
-        activeSessionId: result.session.id,
-        messages: result.messages,
-        compositionState: result.composition_state,
-        compositionStateLoaded: true,
-        compositionProposals: [],
-        composerPreferences: null,
-        staleProposalIds: [],
-        proposalActionPendingIds: [],
-        composerProgress: null,
-        stateVersions: [],
-        isComposing: false,
-        selectedNodeId: null, // Clear selection for forked session
-        // Clear guided state synchronously — the fork is a new session context;
-        // the parent's guidedSession must not bleed into the fork's UI before
-        // startGuided resolves.  Mirrors selectSession.
-        ...clearedGuidedState(),
-        ...clearedRecoveryState(),
+        sessions: mergeAuthoritativeForkChild(
+          state.sessions,
+          authoritativeSessions,
+          result.session_id,
+        ),
+        sessionsLoaded: true,
       }));
+      childPublished = get().sessions.some((session) => session.id === result.session_id);
+      if (!childPublished) {
+        throw new Error("Fork result was not published to the session list");
+      }
+      if (get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
+        return;
+      }
 
-      // Fire-and-forget: refresh blob list for the NEW forked session
-      useBlobStore.getState().loadBlobs(result.session.id);
-
-      // Default-freeform: forked sessions surface freeform (same contract as
-      // selectSession / createSession).  Forks are a new conversation context;
-      // the user activates guided explicitly via the "Switch to guided"
-      // button in ChatPanel if they want the wizard surface back.
-    } catch {
-      set({
-        isComposing: false,
-        composerProgress: null,
-        error: "Failed to fork conversation. Please try again.",
+      const [messages, compositionState, compositionProposals, composerPreferences, guided] =
+        await Promise.all([
+          api.fetchMessages(result.session_id),
+          api.fetchCompositionState(result.session_id),
+          api.fetchCompositionProposals(result.session_id),
+          api.fetchComposerPreferences(result.session_id),
+          fetchGuidedStateForSelect(result.session_id, "throw"),
+        ]);
+      if (!get().sessions.some((session) => session.id === result.session_id)) {
+        throw new Error("Published fork result disappeared during hydration");
+      }
+      let activatedChild = false;
+      set((state) => {
+        if (state.activeSessionId !== activeSessionId) {
+          return {};
+        }
+        activatedChild = true;
+        advanceGuidedPublicationGeneration();
+        getExecutionStore().clearValidation();
+        return {
+          activeSessionId: result.session_id,
+          messages,
+          compositionState,
+          compositionStateLoaded: true,
+          compositionProposals: compositionProposals ?? [],
+          composerPreferences: composerPreferences ?? null,
+          staleProposalIds: [],
+          proposalActionPendingIds: [],
+          composerProgress: null,
+          stateVersions: [],
+          isComposing: false,
+          error: null,
+          selectedNodeId: null,
+          ...clearedGuidedState(),
+          ...(guided !== null
+            ? {
+                guidedSession: guided.guided_session,
+                guidedNextTurn: guided.next_turn,
+                guidedTerminal: guided.terminal,
+                guidedProposalReview: proposalReviewForTurn(guided.next_turn),
+              }
+            : {}),
+          ...clearedRecoveryState(),
+        };
       });
+      clearGuidedRetry(retry);
+      if (!activatedChild) {
+        return;
+      }
+      useBlobStore.getState().loadBlobs(result.session_id);
+      void useInterpretationEventsStore.getState().refreshAll(result.session_id);
+    } catch (err) {
+      if (childPublished && get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
+      }
+      if (
+        !responseReceived &&
+        !api.isForkCommittedResponseError(err) &&
+        !isAmbiguousGuidedRetryFailure(err)
+      ) {
+        clearGuidedRetry(retry);
+      }
+      if (get().activeSessionId === activeSessionId) {
+        set({
+          isComposing: false,
+          composerProgress: null,
+          error: "Failed to fork conversation. Please try again.",
+        });
+      }
     }
   },
 
@@ -1873,22 +2180,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // stale response is silently dropped rather than overwriting the newly
     // active session's guided state.
     const requestedSessionId = sessionId;
+    const publicationGeneration = advanceGuidedPublicationGeneration();
     try {
       const response = await api.getGuided(sessionId);
       // Stale-fetch guard (Codex #3): drop the response if the active session
       // changed while the request was in flight.
-      if (get().activeSessionId !== requestedSessionId) {
+      if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
         return;
+      }
+      if (response.composition_state !== null) {
+        clearGuidedRetriesForSession("guided_start", requestedSessionId);
       }
       // Atomically replace all 4 wire fields — server is authoritative (spec §7.3)
       set({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
       });
     } catch (err) {
-      if (get().activeSessionId !== requestedSessionId) {
+      if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
         return;
       }
       // Error path: set error string, leave existing guided state alone.
@@ -1906,14 +2218,70 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
+  async seedGuided(sessionId: string, profileKind: "tutorial") {
+    const requestedSessionId = sessionId;
+    const publicationGeneration = advanceGuidedPublicationGeneration();
+    const acquisition = acquireGuidedRetry("guided_start", sessionId, [profileKind]);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return;
+    }
+    const retry = acquisition.handle;
+    let responseReceived = false;
+    try {
+      const response = await api.startGuidedSession(
+        sessionId,
+        { profile: profileKind, operationId: retry.operationId },
+      );
+      responseReceived = true;
+      if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+        clearGuidedRetry(retry);
+        return;
+      }
+      await get().applyGuidedResponse(
+        requestedSessionId,
+        response,
+        publicationGeneration,
+      );
+      clearGuidedRetry(retry);
+    } catch (err) {
+      // Once POST returned, any failure is in local response application or
+      // interpretation refresh. Keep the same id so retry exact-replays the
+      // already committed start instead of creating a second operation.
+      if (
+        !responseReceived &&
+        !(err instanceof api.GuidedResponseReceiptError) &&
+        !isAmbiguousGuidedRetryFailure(err)
+      ) {
+        clearGuidedRetry(retry);
+      }
+      if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+        return;
+      }
+      const apiErr = err as ApiError;
+      set({
+        error:
+          apiErr.detail ?? "Failed to start guided session. Please try again.",
+      });
+      throw err;
+    }
+  },
+
   async convertToGuided(sessionId: string) {
     // Capture the session identity before the await (stale-fetch guard,
     // mirroring startGuided). If the user switches sessions while the POST is in
     // flight, the response is dropped rather than overwriting the newly active
     // session's guided state.
     const requestedSessionId = sessionId;
+    const acquisition = acquireGuidedRetry("guided_convert", sessionId, []);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return;
+    }
+    const retry = acquisition.handle;
     try {
-      const response = await api.convertToGuided(sessionId);
+      const response = await api.convertToGuided(sessionId, retry.operationId);
+      clearGuidedRetry(retry);
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -1922,10 +2290,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
         error: null,
       });
     } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -1940,36 +2312,165 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  async respondGuided(body: GuidedRespondRequest) {
-    const { activeSessionId } = get();
-    // Offensive guard — caller must not invoke this without an active session.
-    // Per CLAUDE.md: "Proactively detect invalid states and throw meaningful
-    // exceptions." Using ?. to silently skip would mask a programmer error.
+  async respondGuided(body: GuidedRespondAction) {
+    const {
+      activeSessionId,
+      guidedNextTurn,
+      guidedTerminal,
+      guidedResponsePending,
+    } = get();
     if (activeSessionId === null) {
-      throw new Error("respondGuided called without active session");
+      return {
+        status: "not_applied",
+        reason: "no_active_session",
+        message: GUIDED_NO_ACTIVE_SESSION_MESSAGE,
+      };
+    }
+    // The first caller owns the exact in-flight attempt. This synchronous gate
+    // prevents rapid clicks or distinct widgets from starting a second HTTP
+    // request before the authoritative response settles. A transport-uncertain
+    // retry happens only after the catch clears pending, at which point the
+    // retained descriptor reuses the original operation id and request body.
+    if (guidedResponsePending) {
+      return {
+        status: "not_applied",
+        reason: "pending",
+        message: GUIDED_RESPONSE_PENDING_MESSAGE,
+      };
     }
     // Capture the session identity before the await (Codex #4 stale-fetch guard).
     // Mirrors the active-session guard in loadComposerProgress.
     const requestedSessionId = activeSessionId;
+    const requestedTurnToken = guidedTerminal === null ? guidedNextTurn?.turn_token : null;
+    if (guidedTerminal === null && requestedTurnToken === undefined) {
+      return {
+        status: "not_applied",
+        reason: "no_current_turn",
+        message: GUIDED_NO_CURRENT_TURN_MESSAGE,
+      };
+    }
+    const acquisition = acquireGuidedRetry("guided_respond", requestedSessionId, [
+      requestedTurnToken ?? "terminal",
+      body,
+    ]);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return {
+        status: "not_applied",
+        reason: "custody_conflict",
+        message: GUIDED_RETRY_CONFLICT_STATE.error,
+      };
+    }
+    const retry = acquisition.handle;
+    const publicationGeneration = advanceGuidedPublicationGeneration();
+    const request: GuidedRespondRequest = {
+      ...body,
+      operation_id: retry.operationId,
+      turn_token: requestedTurnToken ?? null,
+    };
+    const proposalBinding = body.proposal_id === null
+      ? null
+      : {
+          proposal_id: body.proposal_id,
+          draft_hash: body.draft_hash,
+        };
+    const proposalRetryAction = proposalRetryActionForBody(body);
     // Clear any stale self-heal notice at the start of the next attempt, per
     // its documented lifecycle (the resync notice describes the PREVIOUS
     // desync, not this one).
-    set({ guidedResponsePending: true, guidedSelfHealNotice: null });
+    set({
+      guidedResponsePending: true,
+      guidedSelfHealNotice: null,
+      ...(proposalBinding === null
+        ? {}
+        : {
+            guidedProposalReview: {
+              status: "submitting",
+              ...proposalBinding,
+            },
+          }),
+    });
+    let responseReceived = false;
     try {
-      const response = await api.respondGuided(activeSessionId, body);
+      const response = await api.respondGuided(activeSessionId, request);
+      responseReceived = true;
+      clearGuidedRetry(retry);
       // Stale-fetch guard (Codex #4): drop the response if the active session
       // changed while the request was in flight.
-      if (get().activeSessionId !== requestedSessionId) {
-        return;
+      if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+        return {
+          status: "not_applied",
+          reason: "stale",
+          message: GUIDED_RESPONSE_STALE_MESSAGE,
+        };
       }
       // Apply the response (atomic 4-field replace + B1/D12 interpretation
       // refresh + C-3 self-heal bookkeeping) via the shared helper — see
       // applyGuidedResponse below, also used by TutorialGuidedShell's
       // not-yet-active exit path.
-      await get().applyGuidedResponse(requestedSessionId, response);
+      const applied = await get().applyGuidedResponse(
+        requestedSessionId,
+        response,
+        publicationGeneration,
+      );
+      if (!applied) {
+        return {
+          status: "not_applied",
+          reason: "stale",
+          message: GUIDED_RESPONSE_STALE_MESSAGE,
+        };
+      }
+      return { status: "applied" };
     } catch (err) {
+      if (responseReceived) {
+        const resync = await resyncSettledGuidedResponse(
+          requestedSessionId,
+          () => get().activeSessionId,
+          (authoritative) =>
+            get().applyGuidedResponse(
+              requestedSessionId,
+              authoritative,
+              publicationGeneration,
+            ),
+        );
+        if (resync === "published") {
+          return { status: "applied" };
+        }
+        if (resync === "stale") {
+          return {
+            status: "not_applied",
+            reason: "stale",
+            message: GUIDED_RESPONSE_STALE_MESSAGE,
+          };
+        }
+        if (resync === "failed") {
+          set({
+            guidedNextTurn: null,
+            guidedProposalReview: null,
+            guidedResponsePending: false,
+            error: GUIDED_RESPONSE_REFRESH_REQUIRED_MESSAGE,
+            errorDetails: null,
+            guidedSelfHealNotice: null,
+          });
+        }
+        return {
+          status: "not_applied",
+          reason: "refresh_required",
+          message: GUIDED_RESPONSE_REFRESH_REQUIRED_MESSAGE,
+        };
+      }
+      const isAmbiguousFailure =
+        err instanceof api.GuidedResponseReceiptError ||
+        isAmbiguousGuidedRetryFailure(err);
+      if (!isAmbiguousFailure) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
-        return;
+        return {
+          status: "not_applied",
+          reason: "stale",
+          message: GUIDED_RESPONSE_STALE_MESSAGE,
+        };
       }
       const apiErr = err as ApiError;
 
@@ -1998,20 +2499,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           try {
             const resynced = await api.getGuided(requestedSessionId);
             if (get().activeSessionId !== requestedSessionId) {
-              return;
+              return {
+                status: "not_applied",
+                reason: "stale",
+                message: GUIDED_RESPONSE_STALE_MESSAGE,
+              };
             }
+            const selfHealMessage =
+              "The wizard had fallen out of sync with the server. We've refreshed to the current step — please try again.";
             set({
               guidedSession: resynced.guided_session,
               guidedNextTurn: resynced.next_turn,
               guidedTerminal: resynced.terminal,
+              guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
               compositionState: resynced.composition_state,
               guidedResponsePending: false,
               error: null,
               errorDetails: null,
-              guidedSelfHealNotice:
-                "The wizard had fallen out of sync with the server. We've refreshed to the current step — please try again.",
+              guidedSelfHealNotice: selfHealMessage,
             });
-            return;
+            return {
+              status: "not_applied",
+              reason: "rejected",
+              message: selfHealMessage,
+            };
           } catch {
             // The resync fetch itself failed — fall through to the plain
             // error path below rather than pretending the self-heal
@@ -2020,13 +2531,131 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             // session switch mid-resync would stomp the newly selected
             // session's UI with this (now-background) session's error.
             if (get().activeSessionId !== requestedSessionId) {
-              return;
+              return {
+                status: "not_applied",
+                reason: "stale",
+                message: GUIDED_RESPONSE_STALE_MESSAGE,
+              };
             }
           }
         } else {
           // Budget exhausted: stop self-healing silently and fall through to
           // the plain error state below (no infinite loop).
           turnNotEmittedSelfHealCounts.delete(requestedSessionId);
+        }
+      }
+
+      // A proposal-authority conflict means the bound proposal changed before
+      // settlement (or the server now requires a binding). Discard operation
+      // custody and replace the actionable projection from GET; never replay
+      // the rejected body against whatever proposal is current now. Other
+      // 409s are actionable failures, not resync signals — notably a
+      // wire_confirm_rejected response must retain its structured validation
+      // details even when an authoritative GET would succeed.
+      const isProposalAuthorityConflict =
+        isHttpConflict(err) &&
+        (body.proposal_id !== null ||
+          apiErr.detail ===
+            "the active guided proposal requires proposal_id and draft_hash" ||
+          apiErr.detail ===
+            "proposal_id and draft_hash do not identify the active guided proposal");
+      if (isProposalAuthorityConflict) {
+        clearGuidedRetry(retry);
+        if (proposalBinding !== null) {
+          set({
+            guidedProposalReview: {
+              status: "reloading",
+              ...proposalBinding,
+            },
+          });
+        }
+        try {
+          const resynced = await api.getGuided(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return {
+              status: "not_applied",
+              reason: "stale",
+              message: GUIDED_RESPONSE_STALE_MESSAGE,
+            };
+          }
+          await useInterpretationEventsStore
+            .getState()
+            .refreshAll(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return {
+              status: "not_applied",
+              reason: "stale",
+              message: GUIDED_RESPONSE_STALE_MESSAGE,
+            };
+          }
+          const authoritativeReview = proposalReviewForTurn(resynced.next_turn);
+          const sameProposal =
+            proposalBinding !== null &&
+            authoritativeReview !== null &&
+            authoritativeReview.proposal_id === proposalBinding.proposal_id &&
+            authoritativeReview.draft_hash === proposalBinding.draft_hash;
+          set({
+            guidedSession: resynced.guided_session,
+            guidedNextTurn: resynced.next_turn,
+            guidedTerminal: resynced.terminal,
+            guidedProposalReview:
+              proposalBinding === null
+                ? authoritativeReview
+                : authoritativeReview !== null && !sameProposal
+                  ? authoritativeReview
+                  : { status: "stale", ...proposalBinding },
+            compositionState: resynced.composition_state,
+            error:
+              apiErr.detail ??
+              "The guided proposal changed. Review the refreshed step and try again.",
+            errorDetails: null,
+            guidedResponsePending: false,
+            guidedSelfHealNotice: null,
+          });
+          return {
+            status: "not_applied",
+            reason: "rejected",
+            message:
+              apiErr.detail ??
+              "The guided proposal changed. Review the refreshed step and try again.",
+          };
+        } catch {
+          if (get().activeSessionId !== requestedSessionId) {
+            return {
+              status: "not_applied",
+              reason: "stale",
+              message: GUIDED_RESPONSE_STALE_MESSAGE,
+            };
+          }
+          // Preserve the original conflict as the actionable failure when the
+          // authoritative reload is itself unavailable.
+          if (proposalBinding !== null) {
+            set({
+              guidedProposalReview: {
+                status: "error",
+                ...proposalBinding,
+                message:
+                  "The proposal changed, but its authoritative replacement could not be loaded. Refresh the session before taking another action.",
+                retryable: false,
+                retry_action: null,
+              },
+            });
+          }
+          set({
+            error:
+              apiErr.detail ??
+              "The guided proposal changed, but its authoritative replacement could not be loaded.",
+            errorDetails: null,
+            guidedResponsePending: false,
+            guidedSelfHealNotice: null,
+          });
+          return {
+            status: "not_applied",
+            reason: "rejected",
+            message:
+              apiErr.detail ??
+              "The guided proposal changed, but its authoritative replacement could not be loaded.",
+          };
         }
       }
 
@@ -2050,49 +2679,84 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             : message;
         })
         .filter((line) => line !== "");
+      const retainsRetryCustody = isAmbiguousFailure;
+      const proposalErrorReview: GuidedProposalReviewState | null =
+        proposalBinding === null
+          ? null
+          : retainsRetryCustody && proposalRetryAction !== null
+            ? {
+                status: "error",
+                ...proposalBinding,
+                message:
+                  apiErr.detail ??
+                  "The proposal response was not received. Retry the same action.",
+                retryable: true,
+                retry_action: proposalRetryAction,
+              }
+            : {
+                status: "error",
+                ...proposalBinding,
+                message:
+                  apiErr.detail ??
+                  "The proposal response failed. Refresh the session before taking another action.",
+                retryable: false,
+                retry_action: null,
+              };
+      const responseErrorMessage =
+        apiErr.detail ?? "Failed to submit guided response. Please try again.";
       set({
-        error:
-          apiErr.detail ?? "Failed to submit guided response. Please try again.",
+        error: responseErrorMessage,
         errorDetails: rejectionDetails.length > 0 ? rejectionDetails : null,
         guidedResponsePending: false,
         guidedSelfHealNotice: null,
+        ...(proposalErrorReview === null
+          ? {}
+          : {
+              guidedProposalReview: proposalErrorReview,
+            }),
       });
+      return {
+        status: "not_applied",
+        reason: retainsRetryCustody ? "unsettled" : "rejected",
+        message: responseErrorMessage,
+      };
     }
   },
 
-  async applyGuidedResponse(sessionId: string, response: GuidedRespondResponse) {
+  async applyGuidedResponse(
+    sessionId: string,
+    response: GuidedRespondResponse,
+    expectedPublicationGeneration = guidedPublicationGeneration,
+  ) {
     // Mirrors respondGuided's own stale-fetch guard: a response that arrives
     // for a session that is no longer active must not clobber whatever the
     // user has since switched to.
-    if (get().activeSessionId !== sessionId) {
-      return;
+    if (!guidedPublicationIsCurrent(sessionId, expectedPublicationGeneration)) {
+      return false;
     }
-    // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
+    // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
+    // in interpretationEventsStore before the new turn is published. If this
+    // refresh fails, the old token and retry custody stay aligned so the exact
+    // action remains replayable.
+    await refreshInterpretationEventsForSession(sessionId);
+    if (!guidedPublicationIsCurrent(sessionId, expectedPublicationGeneration)) {
+      return false;
+    }
+    // Publish the four authoritative fields atomically only after the
+    // interpretation projection is ready.
+    turnNotEmittedSelfHealCounts.delete(sessionId);
     set({
       guidedSession: response.guided_session,
       guidedNextTurn: response.next_turn,
       guidedTerminal: response.terminal,
+      guidedProposalReview: proposalReviewForTurn(response.next_turn),
       compositionState: response.composition_state,
-    });
-    // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
-    // in interpretationEventsStore before guidedResponsePending clears, else
-    // the submit button can briefly re-enable before the card-block arrives.
-    // Keep guidedResponsePending true across this await so the guided turn
-    // stays disabled until the pending-card projection has refreshed.
-    await refreshInterpretationEventsForSession(sessionId);
-    if (get().activeSessionId !== sessionId) {
-      return;
-    }
-    // A successful respond clears any earlier rejection surfaced near the
-    // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
-    // reenterGuided's error:null on success.
-    turnNotEmittedSelfHealCounts.delete(sessionId);
-    set({
       guidedResponsePending: false,
       error: null,
       errorDetails: null,
       guidedSelfHealNotice: null,
     });
+    return true;
   },
 
   async reenterGuided() {
@@ -2101,8 +2765,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       throw new Error("reenterGuided called without active session");
     }
     const requestedSessionId = activeSessionId;
+    const acquisition = acquireGuidedRetry("guided_reenter", activeSessionId, []);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return;
+    }
+    const retry = acquisition.handle;
     try {
-      const response = await api.reenterGuided(activeSessionId);
+      const response = await api.reenterGuided(activeSessionId, retry.operationId);
+      clearGuidedRetry(retry);
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2110,10 +2781,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: response.guided_session,
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
         compositionState: response.composition_state,
         error: null,
       });
-    } catch {
+    } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -2136,14 +2811,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     //                                        whole point of this action
     //                                        (elspeth-e2c3dba6b5)
     //   * already-guided, non-terminal    => returned unchanged (idempotent)
-    //   * completed / solver-exhausted /
-    //     protocol-violation terminals    => returned unchanged, so the
-    //                                        discriminator at ChatPanel still
-    //                                        routes completed → CompletionSummary
-    //                                        and others → freeform. These are NOT
-    //                                        re-entrable by design (reenter's
-    //                                        closed-list policy), which is why
-    //                                        they take convert, not reenter.
+    //   * completed terminal              => returned unchanged, so ChatPanel
+    //                                        continues to render the completion
+    //                                        summary. It is not re-entrable.
     const { activeSessionId, guidedSession } = get();
     if (activeSessionId === null) {
       throw new Error("enterGuided called without active session");
@@ -2156,7 +2826,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   async chatGuided(message: string, signal?: AbortSignal) {
-    const { activeSessionId, guidedSession } = get();
+    const { activeSessionId, guidedSession, guidedNextTurn, compositionState } = get();
     // Offensive guards: caller must not invoke without an active session
     // or before guidedSession is loaded.  Per CLAUDE.md "proactively detect
     // invalid states and throw meaningful exceptions" — silent ?. would
@@ -2167,11 +2837,151 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (guidedSession === null) {
       throw new Error("chatGuided called before guidedSession loaded");
     }
+    if (compositionState === null) {
+      const requestedSessionId = activeSessionId;
+      const publicationGeneration = advanceGuidedPublicationGeneration();
+      const existingRetry = findGuidedRetry("guided_start", requestedSessionId);
+      if (existingRetry !== null) {
+        set({ guidedChatPending: true, guidedSelfHealNotice: null });
+        const reconciliation = await reconcileGuidedStartRetry(
+          existingRetry,
+          publicationGeneration,
+        );
+        if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+          return;
+        }
+        if (reconciliation === "completed") {
+          set({ guidedChatPending: false });
+          return;
+        }
+        if (reconciliation === "in_progress" || reconciliation === "unknown") {
+          set({
+            guidedChatPending: false,
+            error:
+              reconciliation === "in_progress"
+                ? GUIDED_START_IN_PROGRESS_MESSAGE
+                : GUIDED_START_UNKNOWN_MESSAGE,
+            errorDetails: null,
+          });
+          return;
+        }
+        if (reconciliation === "stale") return;
+      }
+      const acquisition = acquireGuidedRetry("guided_start", requestedSessionId, [
+        "live",
+        message,
+      ]);
+      if (acquisition.status === "conflict") {
+        set({ ...GUIDED_RETRY_CONFLICT_STATE, guidedChatPending: false });
+        return;
+      }
+      const retry = acquisition.handle;
+      set({ guidedChatPending: true, guidedSelfHealNotice: null });
+      let responseReceived = false;
+      try {
+        const response = await api.startGuidedSession(
+          requestedSessionId,
+          { profile: "live", intent: message, operationId: retry.operationId },
+          signal,
+        );
+        responseReceived = true;
+        if (response.composition_state === null) {
+          throw new api.GuidedResponseReceiptError(
+            new Error("Guided start returned without a durable checkpoint"),
+          );
+        }
+        if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+          clearGuidedRetry(retry);
+          return;
+        }
+        const applied = await get().applyGuidedResponse(
+          requestedSessionId,
+          response,
+          publicationGeneration,
+        );
+        clearGuidedRetry(retry);
+        if (!applied) return;
+        set({ guidedChatPending: false });
+      } catch (err) {
+        const composeAborted = isComposeAbort(err);
+        const retainsRetryCustody =
+          responseReceived ||
+          err instanceof api.GuidedResponseReceiptError ||
+          isAmbiguousGuidedRetryFailure(err) ||
+          composeAborted;
+        if (!retainsRetryCustody) {
+          clearGuidedRetry(retry);
+        }
+        if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+          if (responseReceived) {
+            clearGuidedRetry(retry);
+          }
+          return;
+        }
+        if (retainsRetryCustody) {
+          const reconciliation = await reconcileGuidedStartRetry(
+            retry,
+            publicationGeneration,
+          );
+          if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+            return;
+          }
+          if (reconciliation === "completed") {
+            set({ guidedChatPending: false });
+            return;
+          }
+          if (reconciliation === "cleared") {
+            set({
+              error: GUIDED_START_CLEARED_MESSAGE,
+              errorDetails: null,
+              guidedChatPending: false,
+            });
+            return;
+          }
+          if (reconciliation === "in_progress" || reconciliation === "unknown") {
+            set({
+              error:
+                reconciliation === "in_progress"
+                  ? GUIDED_START_IN_PROGRESS_MESSAGE
+                  : GUIDED_START_UNKNOWN_MESSAGE,
+              errorDetails: null,
+              guidedChatPending: false,
+            });
+            return;
+          }
+          if (reconciliation === "stale") return;
+        }
+        const apiErr = err as ApiError;
+        set({
+          error: composeAborted
+            ? GUIDED_START_CLEARED_MESSAGE
+            : apiErr.detail ?? "Failed to start guided session. Please try again.",
+          errorDetails: null,
+          guidedChatPending: false,
+        });
+      }
+      return;
+    }
+    if (guidedNextTurn === null) {
+      throw new Error("chatGuided called without a current unanswered turn");
+    }
     // Capture session + step identity before the await (stale-fetch guard
     // mirroring respondGuided / startGuided).  If the user switches
     // session or the wizard advances mid-flight, the response is dropped.
     const requestedSessionId = activeSessionId;
-    const requestedStep = guidedSession.step;
+    const requestedTurnToken = guidedNextTurn.turn_token;
+    const acquisition = acquireGuidedRetry("guided_chat", requestedSessionId, [
+      requestedTurnToken,
+      message,
+    ]);
+    if (acquisition.status === "conflict") {
+      set({
+        ...GUIDED_RETRY_CONFLICT_STATE,
+        guidedChatPending: false,
+      });
+      return;
+    }
+    const retry = acquisition.handle;
 
     // Slice 5: chat history is server-authoritative — no optimistic local
     // append.  The route handler appends both user + assistant turns to
@@ -2198,25 +3008,57 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const response = await api.chatGuided(
         activeSessionId,
         {
+          operation_id: retry.operationId,
+          turn_token: requestedTurnToken,
           message,
-          step_index: requestedStep,
         },
         signal,
       );
+      clearGuidedRetry(retry);
       // Stale-fetch guard: drop the response if session changed mid-flight.
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
       set({
         guidedSession: response.guided_session,
-        guidedNextTurn: response.next_turn ?? get().guidedNextTurn,
-        guidedTerminal: response.terminal ?? get().guidedTerminal,
-        compositionState: response.composition_state ?? get().compositionState,
+        guidedNextTurn: response.next_turn,
+        guidedTerminal: response.terminal,
+        guidedProposalReview: proposalReviewForTurn(response.next_turn),
+        compositionState: response.composition_state,
         guidedChatPending: false,
       });
     } catch (err) {
+      const ambiguous = isAmbiguousGuidedRetryFailure(err);
+      if (!ambiguous) {
+        clearGuidedRetry(retry);
+      }
       if (get().activeSessionId !== requestedSessionId) {
         return;
+      }
+      const apiErr = err as ApiError;
+      if (isHttpConflict(err)) {
+        try {
+          const resynced = await api.getGuided(requestedSessionId);
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          set({
+            guidedSession: resynced.guided_session,
+            guidedNextTurn: resynced.next_turn,
+            guidedTerminal: resynced.terminal,
+            guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
+            compositionState: resynced.composition_state,
+            error: apiErr.detail ?? "The guided turn changed. Review the refreshed step and try again.",
+            guidedChatPending: false,
+          });
+          return;
+        } catch {
+          if (get().activeSessionId !== requestedSessionId) {
+            return;
+          }
+          // Preserve the original conflict as the actionable failure when the
+          // best-effort authoritative reload is itself unavailable.
+        }
       }
       // Cancellation / client-timeout path (elspeth-fb4464cdf0): the guided
       // ChatInput's Stop button (or the COMPOSE_TIMEOUT_MS guard) aborted the
@@ -2250,7 +3092,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // the cause. Backend details are egress-safe by construction (Tier-3
       // row data is never placed in an HTTP detail — see guided.py); a bare
       // network failure with no structured body falls back to the generic line.
-      const apiErr = err as ApiError;
       set({
         error: apiErr.detail ?? "Failed to send chat message. Please try again.",
         guidedChatPending: false,
@@ -2272,7 +3113,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async exitToFreeform() {
     // Sugar over respondGuided — sets control_signal and nulls all choice fields.
     // All state mutation is handled by respondGuided (via applyGuidedResponse).
-    await get().respondGuided(EXIT_TO_FREEFORM_REQUEST);
+    return get().respondGuided(EXIT_TO_FREEFORM_ACTION);
   },
 
   async loadStateVersions() {
@@ -2292,6 +3133,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async revertToVersion(stateId: string) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
+    const acquisition = acquireGuidedRetry("state_revert", activeSessionId, [stateId]);
+    if (acquisition.status === "conflict") {
+      set(GUIDED_RETRY_CONFLICT_STATE);
+      return;
+    }
+    const retry = acquisition.handle;
 
     try {
       // R4-H3: Clear validation BEFORE updating compositionState
@@ -2301,6 +3148,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const compositionState = await api.revertToVersion(
         activeSessionId,
         stateId,
+        retry.operationId,
       );
       // Re-derive the guided surface from the reverted version. A revert can
       // cross the guided/freeform boundary — most visibly the recoverability
@@ -2313,10 +3161,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // GET /guided (non-mutating; 400 => freeform-only) and set the wire
       // fields to what the reverted version actually is, mirroring
       // selectSession's discriminator.
-      const guided = await fetchGuidedStateForSelect(activeSessionId);
+      const guided = await fetchGuidedStateForSelect(activeSessionId, "throw");
       // Stale-guard: drop the result if the active session changed while the
       // revert + probe were in flight (mirrors startGuided/selectSession).
       if (get().activeSessionId !== activeSessionId) {
+        clearGuidedRetry(retry);
         return;
       }
       // Clear selection — the reverted version may not contain the selected node
@@ -2326,8 +3175,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedSession: guided?.guided_session ?? null,
         guidedNextTurn: guided?.next_turn ?? null,
         guidedTerminal: guided?.terminal ?? null,
+        guidedProposalReview: proposalReviewForTurn(guided?.next_turn ?? null),
       });
-    } catch {
+      clearGuidedRetry(retry);
+    } catch (err) {
+      if (!isAmbiguousGuidedRetryFailure(err)) {
+        clearGuidedRetry(retry);
+      }
       set({ error: "Failed to revert to version. Please try again." });
     }
   },
@@ -2398,6 +3252,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    clearAllGuidedRetries();
+    advanceGuidedPublicationGeneration();
     // composeTimeoutReady resets to false via initialState; App.checkHealth
     // re-latches it on re-authentication. The module ceiling (composeTimeoutMs)
     // is a backend property that harmlessly persists — it is only read while

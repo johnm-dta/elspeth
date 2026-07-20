@@ -40,20 +40,29 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
 - Guided still persists `ChainProposal`, emits `PROPOSE_CHAIN`, asks a
   transform-only solver for `steps`, and materializes fixed `chain_in` / `main`
   wiring in `handle_step_3_chain_accept()`.
-- Current schema constants are `GUIDED_SESSION_SCHEMA_VERSION = 7`,
-  `SESSION_SCHEMA_EPOCH = 28`, and `SQLITE_SCHEMA_EPOCH = 28`. The guided
-  replacement therefore uses guided schema 8 and session epoch 29. It does not
-  change the landscape epoch.
+- Current schema constants are `GUIDED_SESSION_SCHEMA_VERSION = 8`,
+  `SESSION_SCHEMA_EPOCH = 30`, and `SQLITE_SCHEMA_EPOCH = 28`. Epoch 29
+  introduced the guided schema-8/durable-operation replacement; epoch 30 adds
+  the closed `quota_exceeded` failure code required for stable HTTP 413 fork
+  replay. The replacement does not change the landscape epoch.
 - The repository has live and tutorial workflow profiles; it has no deployed
   `guided_full` endpoint. The endpoint is implementation work, not an assumed
   existing surface.
+- The design's section 5.3 validation-probe prerequisite is already landed in
+  `a718a39ff`. Preserve its exact detached-option order:
+  `deep_thaw` → `strip_authoring_options` →
+  `redact_secret_refs_for_validation`. Expected draft/config failures remain
+  redacted contract-probe warnings/abstentions; unexpected framework failures
+  still propagate. The remaining discovery prerequisite is the typed public
+  multi-query LLM configuration in Plan 05.
 
 ## Decisions that replace the retired plans
 
 1. Extend the existing proposal row and lifecycle; do not add a parallel
    proposal table, receipt sidecar, sink-effect operation-parent ledger, or
-   plan manifest. The epoch-29 guided-operation table is limited to durable
-   HTTP retry identity for the two new guided POST surfaces.
+   plan manifest. The guided-operation table introduced at epoch 29 is limited to durable
+   HTTP retry identity and lease fencing for guided mutations: start, respond,
+   chat, convert, re-enter, revert, and fork.
 2. Land a freeform validate-before-review slice first, without changing a
    persisted schema. This proves the candidate seam against production behavior
    before guided state depends on it.
@@ -74,10 +83,11 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
 7. Tutorial remains a teaching profile over the ordinary staged planner. It may
    constrain the lesson and visible controls, not the canonical schema,
    discovery set, or commit path.
-8. Coalesce runtime recovery, empty-output evidence, public typed LLM query
-   configuration, branch signing, and release packaging are outside this
-   feature unless implementation demonstrates that one is necessary for a
-   parity acceptance case.
+8. Typed public LLM multi-query configuration is a prerequisite for meaningful
+   structured-output parity and lands before the final corpus. Coalesce runtime
+   recovery, empty-output evidence, branch signing, and release packaging remain
+   outside this feature unless implementation demonstrates that one is necessary
+   for a parity acceptance case.
 
 ## Dependency order
 
@@ -88,14 +98,15 @@ React/TypeScript, Vitest, Playwright, pytest, Hypothesis, LiteLLM.
    adds custody-safe `PipelineProposal`, one planner, and one commit adapter over
    the existing proposal service and acceptance route.
 3. [Plan 03 — Guided schema and protocol replacement](2026-07-17-composer-capability-parity-plan-03-guided-replacement.md)
-   performs the schema-8/session-29 cutover and deletes the transform-only
+   performs the schema-8/session-30 cutover and deletes the transform-only
    protocol atomically.
 4. [Plan 04 — Guided authoring and shared capability](2026-07-17-composer-capability-parity-plan-04-guided-authoring.md)
    adds plural reviewed facts, stage deferral/back-edit, guided-full, staged and
    tutorial controllers, and one shared capability prompt core.
 5. [Plan 05 — Parity proof and staging acceptance](2026-07-17-composer-capability-parity-plan-05-verification-acceptance.md)
-   builds the real-path corpus, generated-DAG checks, frontend coverage, store
-   recreation proof, and the two-LLM colour acceptance.
+   first types public multi-query LLM discovery, then builds the real-path
+   corpus, generated-DAG checks, frontend coverage, store recreation proof, and
+   the two-LLM colour acceptance.
 
 Each plan ends in a working, tested integration boundary. Development commits
 may land between boundaries, but staging continues to expose only the current
@@ -116,10 +127,15 @@ architecture until all five plans pass.
   or candidate/commit content mismatch fails closed before publication.
 - Proposal bases are explicit: absence means no persisted state exists, while a
   present base binds both state id and content hash. Neither form is a wildcard.
-- The two new guided POST operations use durable client operation ids. Ordinary
-  guided creation enters through `POST /guided/start`; every post-provider
-  custody/proposal/result write is fenced by the current lease token and
-  attempt so a late worker cannot settle after takeover.
+- Every guided mutation carries a stable client operation id through its real
+  request DTO, route, frontend API, and store action: start, respond, chat,
+  convert, re-enter, revert, and fork. Ordinary guided creation enters through
+  `POST /guided/start`; every post-provider custody/proposal/result write is
+  fenced by the current lease token and attempt so a late worker cannot settle
+  after takeover.
+- Catalog discovery exposes typed LLM multi-query objects and their complete
+  output/pass-through/collision contract; mapping and list authoring forms
+  remain accepted and normalize to the same runtime query specs.
 - Proposal and audit APIs expose only the redacted projection. Private replay
   arguments contain no raw inline bytes or resolved credentials.
 - Repair feedback uses the existing allowlisted structured validation shape;
@@ -167,6 +183,8 @@ The controlling issue can close only when:
 - generated valid DAGs are accepted equivalently across those three surfaces;
 - tutorial proves schema, discovery, planner, and commit identity while its
   fixed lesson journey remains green;
+- public catalog schema and shared assistance expose the typed structured LLM
+  query contract used by the parity fixtures;
 - stale guided/session data fails with the documented recreate instruction;
 - the two-LLM colour graph is independently derived in all three ordinary
   surfaces, runs successfully, produces the exact business fields and output

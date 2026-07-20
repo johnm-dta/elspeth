@@ -50,6 +50,7 @@ async def test_solve_step_chat_omits_sampling_when_none(monkeypatch: pytest.Monk
         user_message="hi",
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
     )
 
     assert out == "reply"
@@ -71,12 +72,15 @@ async def test_step_1_source_resolution_sends_configured_sampling(monkeypatch: p
         model="gpt-4o",
         user_message="how should I configure csv?",
         plugin_hint="csv",
+        current_source=None,
+        available_source_plugins=("csv",),
         temperature=0.0,
         seed=42,
+        timeout_seconds=30.0,
     )
 
-    assert result.resolution is None
-    assert result.prose_reply == "advice"
+    assert type(result) is chat_solver.GuidedChatProseOutcome
+    assert result.assistant_message == "advice"
     assert captured["temperature"] == 0.0
     assert captured["seed"] == 42
 
@@ -98,6 +102,7 @@ async def test_solve_step_chat_marks_system_message_for_anthropic(monkeypatch: p
         user_message="hi",
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
     )
 
     assert captured["messages"][0]["role"] == "system"
@@ -125,6 +130,7 @@ async def test_solve_step_chat_no_marker_for_non_anthropic(monkeypatch: pytest.M
         user_message="hi",
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
     )
 
     assert "cache_control" not in captured["messages"][0]
@@ -149,8 +155,11 @@ async def test_step_1_source_splits_skill_head_and_marks_for_anthropic(monkeypat
         model="openrouter/anthropic/claude-sonnet-4-6",
         user_message="make a csv of urls",
         plugin_hint="csv",
+        current_source=None,
+        available_source_plugins=("csv",),
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
     )
 
     msgs = captured["messages"]
@@ -187,8 +196,11 @@ async def test_step_1_source_no_marker_for_non_anthropic(monkeypatch: pytest.Mon
         model="openrouter/openai/gpt-5.5",
         user_message="make a csv of urls",
         plugin_hint="csv",
+        current_source=None,
+        available_source_plugins=("csv",),
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
     )
 
     msgs = captured["messages"]
@@ -220,6 +232,7 @@ async def test_solve_step_chat_audit_hash_matches_marked_wire_messages(monkeypat
         user_message="hi",
         temperature=None,
         seed=None,
+        timeout_seconds=30.0,
         recorder=recorder,
     )
 

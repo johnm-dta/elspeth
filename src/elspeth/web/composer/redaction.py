@@ -23,9 +23,16 @@ from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from elspeth.contracts.blobs import AllowedMimeType
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.web.composer.guided_blob_refs import (
+    GUIDED_REVIEWED_BLOB_PATH_KEYS,
+    validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_ref,
+    validate_guided_reviewed_blob_source_mapping,
+)
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
@@ -1131,7 +1138,7 @@ class CreateBlobArgumentsModel(BaseModel):
     """
 
     filename: str
-    mime_type: str
+    mime_type: AllowedMimeType
     content: Annotated[str, Sensitive(summarizer=_summarize_inline_blob_content)]
     description: str | None = None
 
@@ -1202,7 +1209,7 @@ class _InlineBlobModel(BaseModel):
     """
 
     filename: str
-    mime_type: str
+    mime_type: AllowedMimeType
     # max_length=262_144 (256 KiB) is the inline-blob payload cap (Phase
     # Inline-blob content policy. The composer is intended for prose-sized inline data
     # — a single CSV with up to a few thousand rows — not for binary
@@ -1218,7 +1225,24 @@ class _InlineBlobModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class _SetPipelineSourceModel(BaseModel):
+class _SetPipelineNamedSourceModel(BaseModel):
+    """Typed fields shared by every named ``set_pipeline.sources`` root.
+
+    Named sources deliberately exclude ``blob_id`` and ``inline_blob``:
+    those custody-bearing fields are supported only by the legacy singular
+    ``source`` branch. Keeping a distinct runtime model makes that semantic
+    boundary visible to the advertised-schema compatibility guard.
+    """
+
+    plugin: str
+    on_success: str
+    options: _LlmJsonObject = Field(default_factory=dict)
+    on_validation_failure: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SetPipelineSourceModel(_SetPipelineNamedSourceModel):
     """Nested model for ``set_pipeline.source``.
 
     Mirrors the JSON schema's ``source`` sub-object declared at
@@ -1268,14 +1292,8 @@ class _SetPipelineSourceModel(BaseModel):
     ``apply_pipeline_recipe`` empty-``recipe_name`` handling.
     """
 
-    plugin: str
-    on_success: str
     blob_id: str | None = None
-    options: _LlmJsonObject = Field(default_factory=dict)
-    on_validation_failure: str | None = None
     inline_blob: _InlineBlobModel | None = None
-
-    model_config = ConfigDict(extra="forbid")
 
 
 class _NodeTriggerModel(BaseModel):
@@ -1545,7 +1563,7 @@ class SetPipelineArgumentsModel(BaseModel):
     """
 
     source: _SetPipelineSourceModel | None = None
-    sources: dict[str, _SetPipelineSourceModel] | None = None
+    sources: dict[str, _SetPipelineNamedSourceModel] | None = None
     nodes: list[_PipelineNodeModel]
     edges: list[_PipelineEdgeModel]
     outputs: list[_PipelineOutputModel]
@@ -3415,36 +3433,12 @@ def redact_guided_snapshot_storage_paths(
     sources: Mapping[str, Any] | None,
     composer_meta: Mapping[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Redact blob storage paths missed by :func:`redact_source_storage_path` for
-    guided-mode sources, using the persisted GuidedSession snapshot's ``blob_ref``
-    as a no-DB-lookup signal.
+    """Redact schema-8 reviewed source paths using each source's blob binding.
 
-    Why this exists: :func:`redact_source_storage_path` keys off ``blob_ref`` in a
-    source's options. The guided flow commits blob-backed sources through the
-    manual ``set_source`` path (``guided/steps.py``), which REJECTS/strips
-    ``blob_ref`` because it cannot prove ``path == storage_path``. So the committed
-    source carries the absolute ``storage_path`` with NO ``blob_ref`` and slips
-    past the source-keyed redaction. The co-located GuidedSession snapshot
-    persisted in ``composer_meta`` (``guided_session.step_1_result``) DID retain
-    ``blob_ref`` (the by-storage_path enrichment in ``guided/steps.py``), so a
-    ``blob_ref`` there is an authoritative, DB-lookup-free signal that the source
-    is blob-backed.
-
-    Closes the two HTTP-response (``_state_response``) egress channels of the same
-    storage_path that the source-keyed redaction misses for guided sources:
-      1. ``composition_state.composer_meta.guided_session.step_1_result.options.path``
-         — the snapshot itself (serialized unredacted), and
-      2. ``composition_state.sources.<name>.options.path`` — the committed source,
-         matched to the snapshot's blob-backed path so operator-typed (non-blob)
-         sources are left untouched.
-
-    Both ``"path"`` and ``"file"`` are treated as storage-path carriers (mirrors
-    :func:`redact_source_storage_path`). Returns shallow-redacted copies of
-    ``(sources, composer_meta)``; inputs are never mutated. When there is no
-    blob-backed guided snapshot (freeform state, operator-typed path, or no source
-    yet), the inputs are returned unchanged. Once ``guided_session`` or a
-    ``step_1_result`` snapshot is present, malformed nested state is Tier-1 drift
-    and fails loudly instead of degrading to freeform redaction.
+    Guided commits can omit ``blob_ref`` from the executable source while retaining
+    it in ``guided_session.reviewed_sources``. Each reviewed snapshot is matched to
+    the committed source by its persisted name and exact storage-path value. Both
+    copies are redacted without mutating the persisted input dictionaries.
     """
     sources_out = dict(sources) if sources is not None else None
     meta_out = dict(composer_meta) if composer_meta is not None else None
@@ -3454,71 +3448,170 @@ def redact_guided_snapshot_storage_paths(
     guided = composer_meta["guided_session"]
     if type(guided) is not dict:
         raise ValueError("redact_guided_snapshot_storage_paths: composer_meta.guided_session must be a dict")
-    snapshot = guided["step_1_result"]
-    if snapshot is None:
-        return sources_out, meta_out
-    if type(snapshot) is not dict:
-        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result must be a dict or None")
-    snap_options = snapshot["options"]
-    # Only a blob_ref on the snapshot marks the source as blob-backed; without it
-    # the source path is operator-typed and must NOT be redacted.
-    if type(snap_options) is not dict:
-        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.step_1_result.options must be a dict")
-    if "blob_ref" not in snap_options:
-        return sources_out, meta_out
+    reviewed_sources = guided["reviewed_sources"]
+    if type(reviewed_sources) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.reviewed_sources must be a dict")
+    pending_sources = guided["pending_source_intents"]
+    if type(pending_sources) is not dict:
+        raise ValueError("redact_guided_snapshot_storage_paths: guided_session.pending_source_intents must be a dict")
 
-    blob_backed_paths: set[str] = set()
-    for key in ("path", "file"):
-        if key not in snap_options:
+    reviewed_out: dict[str, Any] = {}
+    pending_out: dict[str, Any] = {}
+    rebuilt_sources = dict(sources) if sources is not None else None
+    reviewed_bindings: list[tuple[str, frozenset[str]]] = []
+    sentinel_bindings: dict[str, dict[str, str]] = {}
+    reviewed_names: set[str] = set()
+    private_path_projections: dict[str, str] = {}
+    changed = False
+    for stable_id, snapshot in reviewed_sources.items():
+        if type(stable_id) is not str or type(snapshot) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: reviewed_sources entries must be string-keyed dicts")
+        name = snapshot["name"]
+        if type(name) is not str or not name:
+            raise ValueError("redact_guided_snapshot_storage_paths: reviewed_sources.name must be a non-empty str")
+        if name in reviewed_names:
+            raise AuditIntegrityError("guided reviewed source names must be unique")
+        reviewed_names.add(name)
+        snap_options = snapshot["options"]
+        if type(snap_options) is not dict:
+            raise ValueError(f"redact_guided_snapshot_storage_paths: guided_session.reviewed_sources[{stable_id!r}].options must be a dict")
+        sentinels: dict[str, str] = {}
+        for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
+            candidate = snap_options.get(key)
+            if type(candidate) is str and candidate.startswith("blob:"):
+                sentinels[key] = candidate
+        if sentinels:
+            sentinel_ids = {validate_guided_reviewed_blob_ref(sentinel.removeprefix("blob:")) for sentinel in sentinels.values()}
+            if len(sentinel_ids) != 1 or (
+                "blob_ref" in snap_options and validate_guided_reviewed_blob_ref(snap_options["blob_ref"]) not in sentinel_ids
+            ):
+                raise AuditIntegrityError("guided reviewed blob sentinel and blob_ref differ")
+            sentinel_bindings[name] = sentinels
+            reviewed_out[stable_id] = snapshot
             continue
-        value = snap_options[key]
-        if type(value) is str:
-            blob_backed_paths.add(value)
+        if "blob_ref" not in snap_options:
+            reviewed_out[stable_id] = snapshot
+            continue
 
-    # Channel 1 (the snapshot itself): shallow-copy the composer_meta chain down to
-    # the snapshot options and mask its storage-path carriers.
-    snap_options_redacted = dict(snap_options)
-    for key in ("path", "file"):
-        if key in snap_options_redacted:
-            snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
-    snapshot_redacted = dict(snapshot)
-    snapshot_redacted["options"] = snap_options_redacted
-    guided_redacted = dict(guided)
-    guided_redacted["step_1_result"] = snapshot_redacted
-    meta_out = dict(composer_meta)
-    meta_out["guided_session"] = guided_redacted
+        _blob_ref, blob_paths = validate_guided_reviewed_blob_binding(snap_options)
+        snap_options_redacted = dict(snap_options)
+        for key in GUIDED_REVIEWED_BLOB_PATH_KEYS:
+            if key in snap_options_redacted:
+                snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+        snapshot_redacted = dict(snapshot)
+        snapshot_redacted["options"] = snap_options_redacted
+        reviewed_out[stable_id] = snapshot_redacted
+        changed = True
+        reviewed_bindings.append((name, blob_paths))
 
-    # Channel 2: mask the committed source(s) whose storage-path carrier matches a
-    # blob-backed path. A source already redacted by redact_source_storage_path
-    # carries REDACTED_BLOB_SOURCE_PATH (not the real path), so it simply won't
-    # match — no double processing.
-    if sources is not None and blob_backed_paths:
-        rebuilt: dict[str, Any] = {}
-        for name, source in sources.items():
-            if type(source) is not dict:
+    if rebuilt_sources is not None and reviewed_bindings:
+        live_source_options: dict[str, dict[str, Any]] = {}
+        for live_name, live_source in rebuilt_sources.items():
+            if type(live_source) is not dict:
                 raise ValueError("redact_guided_snapshot_storage_paths: source entries must be dicts when guided blob redaction is active")
-            if "options" not in source:
-                rebuilt[name] = source
+            if "options" not in live_source:
+                live_source_options[live_name] = {}
                 continue
-            options = source["options"]
-            if type(options) is not dict:
+            live_options = live_source["options"]
+            if type(live_options) is not dict:
                 raise ValueError("redact_guided_snapshot_storage_paths: source.options must be a dict when guided blob redaction is active")
-            source_uses_blob_path = False
+            live_source_options[live_name] = live_options
+        validate_guided_reviewed_blob_source_mapping(reviewed_bindings, live_source_options)
+
+        all_reviewed_paths = frozenset(path for _name, paths in reviewed_bindings for path in paths)
+        for live_name, live_source in tuple(rebuilt_sources.items()):
+            live_options = live_source_options[live_name]
+            live_reviewed_paths = {
+                value for key in ("path", "file") if type(value := live_options.get(key)) is str and value in all_reviewed_paths
+            }
+            if not live_reviewed_paths:
+                continue
+            candidates = [
+                paths for reviewed_name, paths in reviewed_bindings if reviewed_name == live_name and live_reviewed_paths <= paths
+            ]
+            if len(candidates) != 1:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
+            options_redacted = dict(live_options)
             for key in ("path", "file"):
-                if key in options and options[key] in blob_backed_paths:
-                    source_uses_blob_path = True
-                    break
-            if source_uses_blob_path:
-                options_redacted = dict(options)
-                for key in ("path", "file"):
-                    if key in options_redacted and options_redacted[key] in blob_backed_paths:
-                        options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
-                source_redacted = dict(source)
-                source_redacted["options"] = options_redacted
-                rebuilt[name] = source_redacted
-            else:
-                rebuilt[name] = source
-        sources_out = rebuilt
+                if type(value := live_options.get(key)) is str and value in live_reviewed_paths:
+                    private_path_projections[value] = REDACTED_BLOB_SOURCE_PATH
+                    options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+            source_redacted = dict(live_source)
+            source_redacted["options"] = options_redacted
+            rebuilt_sources[live_name] = source_redacted
+
+    if rebuilt_sources and sentinel_bindings:
+        missing_names = set(sentinel_bindings) - set(rebuilt_sources)
+        if missing_names:
+            raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+        for source_name, sentinels in sentinel_bindings.items():
+            live_source = rebuilt_sources.get(source_name)
+            if type(live_source) is not dict or type(live_source.get("options")) is not dict:
+                raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+            live_options = live_source["options"]
+            redacted_options = dict(live_options)
+            for key, sentinel in sentinels.items():
+                private_path = live_options.get(key)
+                if type(private_path) is not str:
+                    raise AuditIntegrityError("guided blob sentinel source mapping is inconsistent")
+                existing_projection = private_path_projections.get(private_path)
+                if existing_projection is not None and existing_projection != sentinel:
+                    raise AuditIntegrityError("guided blob sentinel path projection is ambiguous")
+                private_path_projections[private_path] = sentinel
+                redacted_options[key] = sentinel
+            redacted_source = dict(live_source)
+            redacted_source["options"] = redacted_options
+            rebuilt_sources[source_name] = redacted_source
+            changed = True
+
+    for stable_id, intent in pending_sources.items():
+        if type(stable_id) is not str or type(intent) is not dict:
+            raise ValueError("redact_guided_snapshot_storage_paths: pending_source_intents entries must be string-keyed dicts")
+        intent_options = intent["options"]
+        if intent_options is None:
+            pending_out[stable_id] = intent
+            continue
+        if type(intent_options) is not dict:
+            raise ValueError(
+                f"redact_guided_snapshot_storage_paths: guided_session.pending_source_intents[{stable_id!r}].options must be a dict or None"
+            )
+        if "blob_ref" not in intent_options:
+            pending_out[stable_id] = intent
+            continue
+        options_redacted = dict(intent_options)
+        for key in ("path", "file"):
+            if key in options_redacted:
+                options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+        intent_redacted = dict(intent)
+        intent_redacted["options"] = options_redacted
+        pending_out[stable_id] = intent_redacted
+        changed = True
+
+    if changed:
+        guided_redacted = dict(guided)
+        guided_redacted["reviewed_sources"] = reviewed_out
+        guided_redacted["pending_source_intents"] = pending_out
+        meta_out = dict(composer_meta)
+        meta_out["guided_session"] = guided_redacted
+        sources_out = rebuilt_sources
+
+    if private_path_projections and meta_out is not None and "implicit_decisions" in meta_out:
+        report = meta_out["implicit_decisions"]
+        if type(report) is not dict or type(report.get("entries")) is not list:
+            raise AuditIntegrityError("guided implicit-decision projection is malformed")
+        redacted_entries: list[dict[str, Any]] = []
+        for entry in report["entries"]:
+            if type(entry) is not dict:
+                raise AuditIntegrityError("guided implicit-decision entry is malformed")
+            redacted_entry = dict(entry)
+            if entry.get("path") in {"source.path", "source.file"} and type(entry.get("value")) is str:
+                projected = private_path_projections.get(entry["value"])
+                if projected is not None:
+                    redacted_entry["value"] = projected
+            redacted_entries.append(redacted_entry)
+        redacted_report = dict(report)
+        redacted_report["entries"] = redacted_entries
+        meta_out["implicit_decisions"] = redacted_report
 
     return sources_out, meta_out
 

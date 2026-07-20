@@ -85,6 +85,8 @@ def make_wire_ready_session_and_state(
             history=(),
             profile=profile,
             step_1_result=SourceResolved(
+                name="source",
+                on_validation_failure="discard",
                 plugin="csv",
                 options={"path": "in.csv"},
                 observed_columns=("id", "text"),
@@ -93,6 +95,8 @@ def make_wire_ready_session_and_state(
             step_2_result=SinkResolved(
                 outputs=(
                     SinkOutputResolved(
+                        name="main",
+                        on_write_failure="discard",
                         plugin="csv",
                         options={"path": "out.csv"},
                         required_fields=(),
@@ -105,7 +109,7 @@ def make_wire_ready_session_and_state(
     wire_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,
         turn_type=TurnType.CONFIRM_WIRING,
-        payload_hash="wire-payload-hash",
+        payload_hash="a" * 64,
         response_hash=None,
         emitter="server",
     )

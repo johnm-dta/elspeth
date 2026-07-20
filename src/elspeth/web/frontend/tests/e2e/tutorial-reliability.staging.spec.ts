@@ -112,8 +112,8 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
 // request; then these fields mirror /guided/respond"). We seed FIXED_PROMPT into
 // that chat once at step_1_source, then run a robust turn-pump: each pass
 // resolves surfaced per-stage interpretation cards, then advances by the enabled
-// stage primary ("Apply recipe", "Confirm wiring" — the D12 wire gate that frees
-// once cards are resolved — or "Continue" for chain-accept). Exits once the run
+// stage primary ("Confirm wiring" — the D12 wire gate that frees once cards are
+// resolved — or "Continue" for schema forms). Exits once the run
 // turn mounts or the deadline trips. A driver that drove the source via a
 // plugin+schema_form instead would test a deterministic path and defeat the
 // harness's purpose (grading the real LLM-backed scenario, dims a/b/c/d).
@@ -129,7 +129,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // nothing and never picks from a widget: on each LLM-driven phase they press
   // Send on the prelocked worked-example prompt, and the orchestrator LLM builds
   // THAT phase via the apply-capable /guided/chat drivers (resolve_source →
-  // resolve_sink → propose_chain), each extracting its part of the one prompt.
+  // resolve_sink → proposal), each extracting its part of the one prompt.
   // We therefore drive each phase by Send (once per phase) and advance through
   // the structured result via the stage primaries. Wait for the locked prompt to
   // populate (synthetic URLs are fetched + appended async).
@@ -140,12 +140,6 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // gate (D12): it stays disabled until the stage's interpretation cards are
   // resolved, which resolveVisibleReviews handles each pass.
   const primaries = [
-    // Transforms chain proposal (ProposeChainTurn): the passive learner's only
-    // action is "Accept all steps" (Reject / Ask advisor / Edit are !isTutorial).
-    // Accepting applies the chain; the per-step interpretation cards then surface
-    // in the acknowledge stack and resolveVisibleReviews clears them.
-    page.getByRole("button", { name: "Accept all steps", exact: true }),
-    page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
@@ -223,7 +217,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     }
 
     // 2. No primary yet — drive the CURRENT LLM phase with the locked prompt. A
-    //    confirm primary (Continue/Apply recipe) appears once the result renders.
+    //    confirm primary appears once the result renders.
     const phase = await currentPhase();
     const canSend = await stepChatSend.isEnabled().catch(() => false);
     if (canSend && phase !== null && drivenPhases.has(phase) && phase !== lastDrivenPhase) {

@@ -15,17 +15,20 @@ practice. It also adds the supported AWS ECS deployment profile for running
 the web service on Fargate with Aurora PostgreSQL, EFS, S3, Bedrock, Cognito,
 CloudWatch, and X-Ray integrations.
 
-The 0.7.1 candidate advances `SESSION_SCHEMA_EPOCH` from 26 to 28 for the
-account-wide freeform-introduction preference and the shared SQLite/PostgreSQL
-schema-identity proof. It advances the Landscape audit schema from
+The 0.7.1 candidate advances `SESSION_SCHEMA_EPOCH` from 26 to 30: the
+account-wide freeform-introduction preference (27), shared SQLite/PostgreSQL
+schema-identity proof (28), guided schema 8 with durable operation fencing
+(29), and the closed `quota_exceeded` terminal failure code used for stable
+HTTP 413 fork replay (30). It advances the Landscape audit schema from
 `SQLITE_SCHEMA_EPOCH` 22 to 28: web plugin-policy evidence (23), run-scoped
 token ownership (24), artifact idempotency (25), durable sink effects (26),
 durable coalesce receipts (27), and per-member failsink-to-primary provenance
 (28). ELSPETH is pre-1.0, so predecessor session and Landscape stores are not
 migrated in place: archive or export required evidence, stop and uninstall the
-old service, recreate both databases, then reinstall this version. Rollback
-requires restoring the matching pre-upgrade database archives with the old
-image; old code must never open the recreated epoch-28 stores.
+old service, recreate stale databases, then reinstall this version. Database
+restore and code downgrade are not supported repair paths across this cutover;
+keep service drained and repair the current release forward. Old code must
+never open recreated epoch-30 session or epoch-28 Landscape stores.
 
 ### Added
 

@@ -24,8 +24,6 @@ class TestBuildModeTransitionSystemPrompt:
         "reason",
         [
             "user_pressed_exit",
-            "protocol_violation",
-            "solver_exhausted",
             "completed_pipeline",
         ],
     )
@@ -73,7 +71,7 @@ class TestBuildModeTransitionSystemPrompt:
     def test_transition_header_literal(self) -> None:
         """Transition header matches spec §8.2 exactly."""
         result = build_mode_transition_system_prompt(
-            terminal_reason="solver_exhausted",
+            terminal_reason="user_pressed_exit",
             freeform_skill=_SENTINEL_FREEFORM,
         )
 

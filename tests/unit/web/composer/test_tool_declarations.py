@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
 from elspeth.web.composer.tools._dispatch import get_tool_definitions
 from elspeth.web.composer.tools.blobs import (
     _CREATE_BLOB_DECLARATION,
@@ -65,14 +66,7 @@ _EXPECTED_CREATE_BLOB_DEFINITION: dict[str, object] = {
             },
             "mime_type": {
                 "type": "string",
-                "enum": [
-                    "text/plain",
-                    "application/json",
-                    "text/csv",
-                    "application/x-jsonlines",
-                    "application/jsonl",
-                    "text/jsonl",
-                ],
+                "enum": sorted(ALLOWED_MIME_TYPES),
                 "description": "MIME type of the content.",
             },
             "content": {
@@ -157,10 +151,10 @@ _EXPECTED_APPLY_PIPELINE_RECIPE_DEFINITION: dict[str, object] = {
 
 
 class TestCreateBlobMigration:
-    """The migration must be byte-identity-preserving for create_blob."""
+    """The declaration stays pinned except for its shared MIME authority."""
 
     def test_get_tool_definitions_emits_expected_create_blob_definition(self) -> None:
-        """The LLM-facing schema for create_blob is exactly the pre-migration shape."""
+        """The LLM-facing schema derives MIME values from the shared contract."""
         definitions = get_tool_definitions()
         create_blob = next(d for d in definitions if d["name"] == "create_blob")
         assert create_blob == _EXPECTED_CREATE_BLOB_DEFINITION

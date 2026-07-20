@@ -99,6 +99,7 @@ from elspeth.web.composer.redaction import (
     _PipelineNodeModel,
     _PipelineOutputModel,
     _RepairToolCallShadowModel,
+    _SetPipelineNamedSourceModel,
     _SetPipelineSourceModel,
     _SpliceTransformNodeModel,
 )
@@ -197,6 +198,16 @@ def _set_pipeline_source_strategy() -> st.SearchStrategy[_SetPipelineSourceModel
     )
 
 
+def _set_pipeline_named_source_strategy() -> st.SearchStrategy[_SetPipelineNamedSourceModel]:
+    return st.builds(
+        _SetPipelineNamedSourceModel,
+        plugin=st.text(),
+        on_success=st.text(),
+        options=_OPTIONS_STRATEGY,
+        on_validation_failure=st.one_of(st.none(), st.text()),
+    )
+
+
 def _pipeline_node_strategy() -> st.SearchStrategy[_PipelineNodeModel]:
     return st.builds(
         _PipelineNodeModel,
@@ -276,6 +287,7 @@ def _repair_tool_call_strategy() -> st.SearchStrategy[_RepairToolCallShadowModel
 
 st.register_type_strategy(SetSourceFromBlobArgumentsModel, _set_source_from_blob_strategy())
 st.register_type_strategy(_SetPipelineSourceModel, _set_pipeline_source_strategy())
+st.register_type_strategy(_SetPipelineNamedSourceModel, _set_pipeline_named_source_strategy())
 st.register_type_strategy(_PipelineNodeModel, _pipeline_node_strategy())
 st.register_type_strategy(_PipelineOutputModel, _pipeline_output_strategy())
 st.register_type_strategy(_SpliceTransformNodeModel, _splice_transform_node_strategy())
@@ -292,6 +304,7 @@ st.register_type_strategy(_RepairToolCallShadowModel, _repair_tool_call_strategy
 _OVERRIDE_REGISTERED_MODELS: tuple[type[BaseModel], ...] = (
     SetSourceFromBlobArgumentsModel,
     _SetPipelineSourceModel,
+    _SetPipelineNamedSourceModel,
     _PipelineNodeModel,
     _PipelineOutputModel,
     _SpliceTransformNodeModel,
@@ -757,11 +770,17 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
     which create_blob does not).
 
     The corrected behaviour: create_blob executes immediately (blob is
-    written to the session store, a fresh UUID is allocated); only
-    set_pipeline becomes a pending proposal awaiting operator approval.
+    written to the session store, a fresh UUID is allocated); the independently
+    valid set_pipeline becomes a pending proposal awaiting operator approval.
     """
 
-    output_path = tmp_path / "outputs" / "review.json"
+    input_path = tmp_path / "blobs" / "agency_urls.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text(
+        "url\nhttps://www.example.gov\nhttps://www.example2.gov\n",
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "outputs" / "review.csv"
 
     return _FakeComposeLLM(
         (
@@ -782,11 +801,10 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
                         "name": "set_pipeline",
                         "arguments": {
                             "source": {
-                                "plugin": "text",
+                                "plugin": "csv",
                                 "on_success": "url_rows",
                                 "options": {
-                                    "column": "url",
-                                    "path": "/tmp/agency_urls.txt",
+                                    "path": str(input_path),
                                     "schema": {"mode": "observed"},
                                 },
                                 "on_validation_failure": "discard",
@@ -814,7 +832,7 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
                             "outputs": [
                                 {
                                     "sink_name": "main",
-                                    "plugin": "json",
+                                    "plugin": "csv",
                                     "options": {
                                         "path": str(output_path),
                                         "schema": {"mode": "observed"},

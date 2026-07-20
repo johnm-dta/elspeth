@@ -48,6 +48,12 @@ scratch/
 /evals/*
 !/evals/__init__.py
 !/evals/lib/
+# Composer capability-parity corpus (Plan 05 Task 2): tracked fixtures + README.
+# Re-include the directory first, then its contents (mirrors !/evals/lib/), and
+# keep these negations BEFORE the generic __pycache__/*.py[cod]/*.db rules below
+# so junk under the corpus stays ignored.
+!/evals/composer-parity/
+!/evals/composer-parity/**
 
 # Generated bug analysis docs (can be regenerated)
 docs/bugs/generated/

@@ -31,7 +31,12 @@ from typing import Any
 
 import yaml
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.composer.guided_blob_refs import (
+    validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_source_mapping,
+)
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
@@ -266,36 +271,54 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
 def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> CompositionState:
     """Reconstitute guided blob refs before public YAML generation.
 
-    Guided mode can commit a source with only the storage ``path`` while the
-    authoritative ``blob_ref`` survives in the guided Step 1 snapshot. Public
-    YAML stripping keys off ``blob_ref``, so reattach it to a working copy when
-    the committed source path exactly matches the snapshot path.
+    Guided mode can commit sources with only their storage ``path`` while each
+    authoritative ``blob_ref`` survives in schema-8 ``reviewed_sources``.
+    Public YAML stripping keys off ``blob_ref``, so reattach each binding to a
+    working copy when both the persisted source name and storage path match.
     """
     guided = state.guided_session
-    if guided is None or guided.step_1_result is None:
-        return state
-    snapshot_options = guided.step_1_result.options
-    blob_ref = snapshot_options.get("blob_ref")
-    if not blob_ref:
+    if guided is None or not guided.reviewed_sources:
         return state
 
-    blob_backed_paths: set[str] = set()
-    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-        value = snapshot_options.get(key)
-        if isinstance(value, str):
-            blob_backed_paths.add(value)
-    if not blob_backed_paths:
-        return state
+    reviewed_bindings: list[tuple[str, frozenset[str], str]] = []
+    for snapshot in guided.reviewed_sources.values():
+        source_name = snapshot.name
+        snapshot_options = snapshot.options
+        if "blob_ref" not in snapshot_options:
+            continue
+        blob_ref, blob_backed_paths = validate_guided_reviewed_blob_binding(snapshot_options)
+        reviewed_bindings.append((source_name, blob_backed_paths, blob_ref))
 
-    reattached = {}
+    if not reviewed_bindings:
+        return state
+    validate_guided_reviewed_blob_source_mapping(
+        [(name, paths) for name, paths, _blob_ref in reviewed_bindings],
+        {name: source.options for name, source in state.sources.items()},
+    )
+    all_reviewed_paths = frozenset(path for _name, paths, _blob_ref in reviewed_bindings for path in paths)
+    reattached = dict(state.sources)
     changed = False
     for source_name, source in state.sources.items():
+        live_reviewed_paths = {
+            value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := source.options.get(key)) is str and value in all_reviewed_paths
+        }
+        if not live_reviewed_paths:
+            continue
+        candidates = [
+            (paths, blob_ref)
+            for reviewed_name, paths, blob_ref in reviewed_bindings
+            if reviewed_name == source_name and live_reviewed_paths <= paths
+        ]
+        if len(candidates) != 1:
+            raise AuditIntegrityError("guided blob source mapping is inconsistent")
+        _reviewed_paths, blob_ref = candidates[0]
         options = source.options
-        if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
-            reattached[source_name] = source
+        if "blob_ref" in options:
+            if options["blob_ref"] != blob_ref:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
             continue
         merged = dict(options)
-        merged["blob_ref"] = str(blob_ref)
+        merged["blob_ref"] = blob_ref
         reattached[source_name] = replace(source, options=merged)
         changed = True
 

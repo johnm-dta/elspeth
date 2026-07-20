@@ -34,10 +34,12 @@ def _catalog() -> CatalogService:
 
 def test_source_prefill_carries_applied_options() -> None:
     source = SourceResolved(
+        name="source",
         plugin="csv",
         options={"path": "/data/x.csv", "schema": {"mode": "observed"}},
         observed_columns=("a", "b"),
         sample_rows=({"a": "1", "b": "2"},),
+        on_validation_failure="discard",
     )
     turn = build_step_1_schema_form_turn_from_resolved(source, _catalog())
     assert turn["type"] == "schema_form"
@@ -52,6 +54,7 @@ def test_source_prefill_carries_on_validation_failure() -> None:
     and the disabled Continue can enable. A non-default sentinel proves it is the
     resolved value (not a coincidental 'discard')."""
     source = SourceResolved(
+        name="source",
         plugin="csv",
         options={"path": "/data/x.csv", "schema": {"mode": "observed"}},
         observed_columns=("a", "b"),
@@ -80,6 +83,7 @@ def test_source_resolved_round_trips_on_validation_failure() -> None:
     """to_dict/from_dict preserves the field; a record missing it is malformed
     and crashes (Tier-1 strict rehydrate — no compat default)."""
     source = SourceResolved(
+        name="source",
         plugin="json",
         options={"schema": {"mode": "observed"}},
         observed_columns=("url",),
@@ -99,10 +103,12 @@ def test_sink_prefill_carries_applied_options() -> None:
     sink = SinkResolved(
         outputs=(
             SinkOutputResolved(
+                name="main",
                 plugin="json",
                 options={"path": "/out/y.jsonl", "collision_policy": "auto_increment"},
                 required_fields=(),
                 schema_mode="observed",
+                on_write_failure="discard",
             ),
         )
     )
@@ -112,17 +118,3 @@ def test_sink_prefill_carries_applied_options() -> None:
     assert turn["payload"]["plugin"] == "json"
     assert turn["payload"]["prefilled"]["path"] == "/out/y.jsonl"
     assert turn["payload"]["prefilled"]["collision_policy"] == "auto_increment"
-
-
-def test_resolve_blob_ref_path_raises_on_unresolvable_blob_ref() -> None:
-    """A blob:<ref> sentinel path with no session engine to resolve it must crash, not commit."""
-    from elspeth.web.composer.guided.steps import _resolve_blob_ref_path
-
-    resolved = SourceResolved(
-        plugin="csv",
-        options={"path": "blob:deadbeef-0000-0000-0000-000000000000"},
-        observed_columns=(),
-        sample_rows=(),
-    )
-    with pytest.raises(InvariantError, match="blob:<ref>"):
-        _resolve_blob_ref_path(resolved, session_engine=None, session_id=None)

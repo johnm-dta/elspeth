@@ -15,8 +15,8 @@ reachable via GET /state/versions + POST /state/revert — the same
 recoverability contract as YAML import — so nothing is lost.
 
 Branch behaviour:
-  * no persisted state (empty session)         -> lazy fresh wizard, NON-persisting
-                                                  (identical to GET /guided's lazy path)
+  * no persisted state (empty session)         -> persist a fresh schema-8 wizard
+                                                  with an immutable replay locator
   * guided_session already present             -> idempotent: return it UNCHANGED,
                                                   including any terminal
   * persisted state, guided_session is None    -> THE CONVERSION: reseed a fresh
@@ -27,14 +27,19 @@ Branch behaviour:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
-from uuid import UUID
+import json
+from dataclasses import replace
+from unittest.mock import patch
+from uuid import UUID, uuid4
 
-from tests.integration.web.composer.guided.test_step_3_e2e import (
-    _confirm_wiring,
-    _drive_to_step_3_propose_chain,
-    _fake_llm_response_for_passthrough,
-)
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalState
+from elspeth.web.sessions.guided_operations import guided_operation_request_hash
+from elspeth.web.sessions.guided_replay import load_guided_json_payload
+from elspeth.web.sessions.protocol import CompositionStateData, GuidedOperationCompleted, GuidedOperationSettlementConflictError
+from elspeth.web.sessions.schemas import ConvertGuidedRequest
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -47,19 +52,55 @@ def _create_session(client: TestClient, *, profile: str | None = None) -> str:
     assert resp.status_code == 201, resp.json()
     session_id = resp.json()["id"]
     if profile is not None:
-        start = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+        start = client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={"profile": profile, "operation_id": str(uuid4())},
+        )
         assert start.status_code == 200, start.json()
     return session_id
 
 
-def _convert_raw(client: TestClient, session_id: str) -> object:
-    return client.post(f"/api/sessions/{session_id}/guided/convert")
+def _convert_raw(client: TestClient, session_id: str, *, operation_id: str | None = None) -> object:
+    return client.post(
+        f"/api/sessions/{session_id}/guided/convert",
+        json={"operation_id": operation_id or str(uuid4())},
+    )
 
 
 def _convert(client: TestClient, session_id: str) -> dict:
     resp = _convert_raw(client, session_id)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _convert_outcome(client: TestClient, session_id: str, operation_id: str) -> GuidedOperationCompleted:
+    request = ConvertGuidedRequest(operation_id=operation_id)
+    request_hash = guided_operation_request_hash(
+        session_id=UUID(session_id),
+        kind="guided_convert",
+        request=request,
+    )
+    outcome = asyncio.run(
+        client.app.state.session_service.get_guided_operation(
+            session_id=UUID(session_id),
+            operation_id=operation_id,
+            kind="guided_convert",
+            request_hash=request_hash,
+        )
+    )
+    assert isinstance(outcome, GuidedOperationCompleted)
+    return outcome
+
+
+def _guided_turn_emitted_args(client: TestClient, session_id: str) -> list[dict]:
+    messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+    events: list[dict] = []
+    for message in messages:
+        for tool_call in message.tool_calls or ():
+            invocation = tool_call.get("invocation", {})
+            if invocation.get("tool_name") == "guided_turn_emitted":
+                events.append(json.loads(invocation["arguments_canonical"]))
+    return events
 
 
 def _seed_freeform_state_with_work(client: TestClient, session_id: str) -> None:
@@ -69,8 +110,6 @@ def _seed_freeform_state_with_work(client: TestClient, session_id: str) -> None:
     400 — the exact precondition of the bug. A committed source stands in for
     "the operator did freeform composition work worth preserving".
     """
-    from elspeth.web.sessions.protocol import CompositionStateData
-
     service = client.app.state.session_service
     freeform_state = CompositionStateData(
         sources={
@@ -113,10 +152,17 @@ class TestConvertFreeformWithWork:
         gs = body["guided_session"]
         assert gs is not None
         assert gs["step"] == "step_1_source"
-        assert gs["history"] == []
+        assert len(gs["history"]) == 1
+        assert gs["history"][0]["response_hash"] is None
         assert gs["terminal"] is None
         assert body["terminal"] is None
         assert body["next_turn"] is not None
+        loaded_turn = load_guided_json_payload(
+            client.app.state.payload_store,
+            payload_id=gs["history"][0]["payload_hash"],
+            purpose="turn",
+        )
+        assert deep_thaw(loaded_turn.payload) == body["next_turn"]["payload"]
         # The fresh wizard replaced the freeform graph: the new version carries
         # no source.
         state = body["composition_state"]
@@ -150,7 +196,7 @@ class TestConvertFreeformWithWork:
         # Revert to the pre-conversion freeform version.
         revert = client.post(
             f"/api/sessions/{session_id}/state/revert",
-            json={"state_id": freeform_version["id"]},
+            json={"operation_id": str(uuid4()), "state_id": freeform_version["id"]},
         )
         assert revert.status_code == 200, revert.json()
         restored = revert.json()
@@ -181,6 +227,47 @@ class TestConvertFreeformWithWork:
             f"expected a system breadcrumb naming the recoverable version; got {[m.content for m in system_msgs]}"
         )
 
+    def test_same_operation_replays_exactly_without_duplicate_state_or_message(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        _seed_freeform_state_with_work(client, session_id)
+        operation_id = str(uuid4())
+
+        first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == 200, first.json()
+        assert replay.status_code == 200, replay.json()
+        assert replay.json() == first.json()
+        versions = asyncio.run(client.app.state.session_service.get_state_versions(UUID(session_id)))
+        assert [version.version for version in versions] == [1, 2]
+        messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id)))
+        assert len([message for message in messages if message.role == "system"]) == 1
+        emissions = _guided_turn_emitted_args(client, session_id)
+        assert len(emissions) == 1
+        assert emissions[0]["payload_hash"] == first.json()["guided_session"]["history"][-1]["payload_hash"]
+        assert emissions[0]["payload_payload_id"] == emissions[0]["payload_hash"]
+        outcome = _convert_outcome(client, session_id, operation_id)
+        assert str(outcome.result.state_id) == first.json()["composition_state"]["id"]
+
+    def test_audit_insert_failure_rolls_back_conversion_state_and_breadcrumb(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        _seed_freeform_state_with_work(client, session_id)
+        service = client.app.state.session_service
+
+        with patch.object(
+            service,
+            "_insert_prepared_guided_audit_rows_on_connection",
+            side_effect=RuntimeError("injected audit insert failure"),
+        ):
+            response = _convert_raw(client, session_id)
+
+        assert response.status_code == 500
+        versions = asyncio.run(service.get_state_versions(UUID(session_id)))
+        assert [version.version for version in versions] == [1]
+        assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == []
+
 
 # ---------------------------------------------------------------------------
 # Branch 2 — idempotency + terminal fidelity
@@ -189,37 +276,14 @@ class TestConvertFreeformWithWork:
 
 class TestConvertIdempotent:
     def test_convert_on_active_guided_returns_it_unchanged(self, composer_test_client: TestClient) -> None:
-        """Convert on a session already mid-wizard is a no-op return, NOT a reseed.
-
-        Advancing to Step 2 first proves branch 2 returns the EXISTING session
-        (step preserved) rather than clobbering it back to a fresh Step-1 seed.
-        """
+        """Convert on an existing schema-8 checkpoint settles against that state."""
         client = composer_test_client
         session_id = _create_session(client, profile="tutorial")
-
-        from tests.integration.web.composer.guided.test_step_3_e2e import _seed_blob
-
-        _blob_id, storage_path = _seed_blob(client, session_id)
-        client.get(f"/api/sessions/{session_id}/guided")
-        # Answer Step 1 (choose csv) then submit the schema form -> reach Step 2.
-        client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
-        advanced = client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "edited_values": {
-                    "plugin": "csv",
-                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                    "observed_columns": ["text", "note"],
-                    "sample_rows": [{"text": "Hello world", "note": "greeting"}],
-                }
-            },
-        )
-        assert advanced.status_code == 200, advanced.json()
-        step_before = advanced.json()["guided_session"]["step"]
-        assert step_before == "step_2_sink"
+        before = client.get(f"/api/sessions/{session_id}/guided")
+        assert before.status_code == 200, before.json()
 
         body = _convert(client, session_id)
-        assert body["guided_session"]["step"] == step_before
+        assert body == before.json()
         # Branch 2 must REBUILD and return the live turn for a non-terminal step,
         # exactly like GET /guided (elspeth-e2c3dba6b5 review P2). A double-click
         # / cross-tab race lands the second "Switch to guided" here; if it returns
@@ -238,17 +302,34 @@ class TestConvertIdempotent:
         """
         client = composer_test_client
         session_id = _create_session(client, profile="tutorial")
+        service = client.app.state.session_service
+        current = asyncio.run(service.get_current_state(UUID(session_id)))
+        assert current is not None
+        from elspeth.web.sessions.routes._helpers import _state_from_record
 
-        with patch(
-            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
-            new_callable=AsyncMock,
-            return_value=_fake_llm_response_for_passthrough(),
-        ):
-            _drive_to_step_3_propose_chain(client, session_id)
-            client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["accept"]})
-
-        done = _confirm_wiring(client, session_id)
-        assert done["terminal"]["kind"] == "completed"
+        state = _state_from_record(current)
+        assert state.guided_session is not None
+        terminal_guided = replace(
+            state.guided_session,
+            terminal=TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="pipeline: {}\n"),
+        )
+        state_data = state.to_dict()
+        asyncio.run(
+            service.save_composition_state(
+                UUID(session_id),
+                CompositionStateData(
+                    sources=state_data["sources"],
+                    nodes=state_data["nodes"],
+                    edges=state_data["edges"],
+                    outputs=state_data["outputs"],
+                    metadata_=state_data["metadata"],
+                    is_valid=current.is_valid,
+                    validation_errors=current.validation_errors,
+                    composer_meta={"guided_session": terminal_guided.to_dict()},
+                ),
+                provenance="session_seed",
+            )
+        )
 
         body = _convert(client, session_id)
         assert body["terminal"] is not None
@@ -261,22 +342,142 @@ class TestConvertIdempotent:
 
 
 # ---------------------------------------------------------------------------
-# Branch 1 — empty session lazy, non-persisting
+# Branch 1 — empty session persisted for immutable replay
 # ---------------------------------------------------------------------------
 
 
 class TestConvertEmptySession:
-    def test_convert_on_empty_session_is_lazy_and_non_persisting(self, composer_test_client: TestClient) -> None:
-        """A brand-new session with no persisted state takes GET /guided's lazy
-        path: a fresh in-memory wizard, composition_state=None, no version
-        written (an empty graph must not start the version history)."""
+    def test_convert_on_empty_session_persists_retry_located_seed(self, composer_test_client: TestClient) -> None:
+        """A brand-new session persists the schema-8 seed needed for replay."""
         client = composer_test_client
         session_id = _create_session(client)
+        operation_id = str(uuid4())
 
-        body = _convert(client, session_id)
+        first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == 200, first.json()
+        assert replay.status_code == 200, replay.json()
+        assert replay.json() == first.json()
+        body = first.json()
         assert body["guided_session"]["step"] == "step_1_source"
-        assert body["composition_state"] is None
+        assert body["composition_state"] is not None
 
         versions = client.get(f"/api/sessions/{session_id}/state/versions")
         assert versions.status_code == 200, versions.json()
+        assert len(versions.json()) == 1
+        outcome = _convert_outcome(client, session_id, operation_id)
+        assert str(outcome.result.state_id) == body["composition_state"]["id"]
+
+    def test_convert_requires_operation_id_before_persisting(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+
+        response = client.post(f"/api/sessions/{session_id}/guided/convert", json={})
+
+        assert response.status_code == 422
+        versions = client.get(f"/api/sessions/{session_id}/state/versions")
         assert versions.json() == []
+
+    def test_replay_uses_durable_turn_after_live_catalog_drift(self, composer_test_client: TestClient) -> None:
+        """Completed conversion replay never rebuilds from mutable policy state."""
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+        first = _convert_raw(client, session_id, operation_id=operation_id)
+        assert first.status_code == 200, first.json()
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            side_effect=AssertionError("completed replay must not consult the live catalog"),
+        ):
+            replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert replay.status_code == 200, replay.json()
+        assert replay.json() == first.json()
+        assert replay.json()["next_turn"]["turn_token"] == first.json()["next_turn"]["turn_token"]
+
+    def test_deterministic_response_failure_is_settled_and_replayed(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+
+        with patch(
+            "elspeth.web.sessions.routes.composer.guided._build_get_guided_turn",
+            side_effect=InvariantError("tier-3 diagnostic must not escape"),
+        ):
+            first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == 500
+        assert replay.status_code == 500
+        assert (
+            first.json()
+            == replay.json()
+            == {
+                "detail": {
+                    "error_type": "guided_operation_terminal_failure",
+                    "failure_code": "operation_failed",
+                    "detail": "The operation failed.",
+                }
+            }
+        )
+        assert "tier-3 diagnostic" not in first.text
+
+    def test_audit_integrity_failure_is_settled_without_swallowing_diagnostic(
+        self,
+        composer_test_client: TestClient,
+    ) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+        service = client.app.state.session_service
+
+        from structlog.testing import capture_logs
+
+        with (
+            capture_logs() as cap_logs,
+            patch.object(
+                service,
+                "save_state_for_guided_operation",
+                side_effect=AuditIntegrityError("diagnostic retained for audit"),
+            ),
+        ):
+            first = _convert_raw(client, session_id, operation_id=operation_id)
+
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+        assert first.status_code == replay.status_code == 500
+        assert (
+            first.json()
+            == replay.json()
+            == {
+                "detail": {
+                    "error_type": "guided_operation_terminal_failure",
+                    "failure_code": "integrity_error",
+                    "detail": "The operation failed an integrity check.",
+                }
+            }
+        )
+        events = [entry for entry in cap_logs if entry.get("event") == "guided.operation_terminal_failure"]
+        assert len(events) == 1
+        assert events[0]["exc_class"] == "AuditIntegrityError"
+        assert events[0]["site"] == "post_guided_convert"
+        assert events[0]["frames"]
+        assert "diagnostic retained for audit" not in repr(events[0])
+
+    def test_expected_head_conflict_is_terminal_409_and_exactly_replayed(self, composer_test_client: TestClient) -> None:
+        client = composer_test_client
+        session_id = _create_session(client)
+        operation_id = str(uuid4())
+        service = client.app.state.session_service
+
+        with patch.object(
+            service,
+            "save_state_for_guided_operation",
+            side_effect=GuidedOperationSettlementConflictError(),
+        ):
+            first = _convert_raw(client, session_id, operation_id=operation_id)
+        replay = _convert_raw(client, session_id, operation_id=operation_id)
+
+        assert first.status_code == replay.status_code == 409
+        assert first.json() == replay.json()
+        assert first.json()["detail"]["failure_code"] == "stale_conflict"

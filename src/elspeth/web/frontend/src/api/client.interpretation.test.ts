@@ -22,6 +22,7 @@ import type {
   OptOutSummaryResponse,
 } from "@/types/interpretation";
 import type { CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,7 @@ function makePendingEvent(overrides: Partial<InterpretationEvent> = {}): Interpr
 function makeCompositionState(): CompositionState {
   return {
     id: "state-2",
+    ...compositionStateAuthorityFields,
     version: 2,
     sources: {},
     nodes: [],

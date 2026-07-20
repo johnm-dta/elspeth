@@ -46,8 +46,15 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  GuidedStartOperationReconciliation,
   TutorialSampleResponse,
 } from "@/types/guided";
+import {
+  decodeGetGuidedResponse,
+  decodeGuidedChatResponse,
+  decodeGuidedRespondResponse,
+  decodeGuidedStartOperationReconciliation,
+} from "./guidedDecoder";
 import type {
   InterpretationEvent,
   InterpretationOptOutResponse,
@@ -150,6 +157,48 @@ function optionalResponseHeader(response: Response, name: string): string | unde
  */
 interface ParseResponseOptions {
   logoutOnUnauthorized?: boolean;
+}
+
+export class ForkCommittedResponseError extends Error {
+  readonly committedSuccessResponse = true;
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ForkCommittedResponseError";
+    this.cause = cause;
+  }
+}
+
+export function isForkCommittedResponseError(error: unknown): error is ForkCommittedResponseError {
+  return error instanceof ForkCommittedResponseError;
+}
+
+export class GuidedResponseReceiptError extends Error {
+  readonly received = true;
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The guided response was received but could not be read.");
+    this.name = "GuidedResponseReceiptError";
+    this.cause = cause;
+  }
+}
+
+const CANONICAL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function decodeForkSessionLocator(value: unknown): { session_id: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("fork locator must be an exact object");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || !Object.prototype.hasOwnProperty.call(record, "session_id")) {
+    throw new Error("fork locator must contain exactly session_id");
+  }
+  if (typeof record.session_id !== "string" || !CANONICAL_SESSION_UUID.test(record.session_id)) {
+    throw new Error("fork locator session_id must be a canonical UUID");
+  }
+  return { session_id: record.session_id };
 }
 
 export async function parseResponse<T>(
@@ -643,12 +692,14 @@ export async function fetchCompositionProposals(
 export async function acceptCompositionProposal(
   sessionId: string,
   proposalId: string,
+  draftHash: string | null,
 ): Promise<CompositionProposal> {
   const response = await fetch(
     `/api/sessions/${sessionId}/proposals/${proposalId}/accept`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
+      ...(draftHash === null ? {} : { body: JSON.stringify({ draft_hash: draftHash }) }),
     },
   );
   return parseResponse<CompositionProposal>(response);
@@ -728,7 +779,7 @@ export async function getGuided(
     headers: authHeaders(),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -764,16 +815,49 @@ export async function getTutorialSample(
  * Idempotent (D16): a second call for a session that already has a persisted
  * guided session returns the existing session unchanged.
  */
+type GuidedStartCommand =
+  | { profile: "live"; intent: string; operationId: string }
+  | { profile: "tutorial"; operationId: string };
+
 export async function startGuidedSession(
   sessionId: string,
-  profileKind: "live" | "tutorial",
+  command: GuidedStartCommand,
+  signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ profile: profileKind }),
+    body: JSON.stringify({
+      profile: command.profile,
+      ...(command.profile === "live" ? { intent: command.intent } : {}),
+      operation_id: command.operationId,
+    }),
+    signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGetGuidedResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
+}
+
+export async function reconcileGuidedStartOperation(
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<GuidedStartOperationReconciliation> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/start/${operationId}/reconcile`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return decodeGuidedStartOperationReconciliation(await parseResponse<unknown>(response));
 }
 
 /**
@@ -795,7 +879,14 @@ export async function respondGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedRespondResponse>(response);
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGuidedRespondResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
 }
 
 /**
@@ -806,14 +897,16 @@ export async function respondGuided(
  */
 export async function reenterGuided(
   sessionId: string,
+  operationId: string,
   signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/reenter`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -830,30 +923,29 @@ export async function reenterGuided(
  */
 export async function convertToGuided(
   sessionId: string,
+  operationId: string,
   signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/convert`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
  * Post a free-text chat message scoped to the user's current wizard step.
  *
- * Most chat is advisory: the server invokes the per-step chat solver with
- * the step-scoped skill briefing and returns the LLM's reply. Step 1 source
- * chat can also resolve a complete inline source request and return updated
- * `next_turn` / `composition_state` fields. Server-side: see
- * _guided_step_chat.solve_step_chat_with_auto_drop; on transient LLM failure
- * the server returns 200 with a synthetic "I'm unavailable" message rather
- * than failing the request.
+ * The server runs bounded Step 1/2 provider work, projects supported results
+ * through the schema-8 transition authority, and returns the authoritative
+ * post-settlement session, turn, terminal, and composition state. Generated
+ * inline source bytes are reported as a typed non-applying failure until blob
+ * custody can join the same atomic settlement.
  *
- * The `step_index` carried in the body lets the server detect that the
- * wizard has advanced under the client (returns 409) so a stale chat
- * does not arrive at the wrong step's skill briefing.
+ * The required turn token binds the request to the server-held current
+ * unanswered occurrence; stale tokens return 409 before provider work.
  */
 export async function chatGuided(
   sessionId: string,
@@ -866,32 +958,33 @@ export async function chatGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedChatResponse>(response);
+  return decodeGuidedChatResponse(await parseResponse<unknown>(response));
 }
 
 /** Fork a session from a specific user message. */
 export async function forkFromMessage(
   sessionId: string,
+  operationId: string,
   fromMessageId: string,
   newMessageContent: string,
-): Promise<{
-  session: Session;
-  messages: ChatMessage[];
-  composition_state: CompositionState | null;
-}> {
+): Promise<{ session_id: string }> {
   const response = await fetch(`/api/sessions/${sessionId}/fork`, {
     method: "POST",
     headers: authHeaders("application/json"),
     body: JSON.stringify({
+      operation_id: operationId,
       from_message_id: fromMessageId,
       new_message_content: newMessageContent,
     }),
   });
-  return parseResponse<{
-    session: Session;
-    messages: ChatMessage[];
-    composition_state: CompositionState | null;
-  }>(response);
+  if (!response.ok) {
+    return parseResponse<{ session_id: string }>(response);
+  }
+  try {
+    return decodeForkSessionLocator(await response.json());
+  } catch (cause) {
+    throw new ForkCommittedResponseError("Fork succeeded but its result locator could not be decoded", cause);
+  }
 }
 
 // ── Composition State ───────────────────────────────────────────────────────
@@ -927,13 +1020,14 @@ export async function fetchStateVersions(
 export async function revertToVersion(
   sessionId: string,
   stateId: string,
+  operationId: string,
 ): Promise<CompositionState> {
   const response = await fetch(
     `/api/sessions/${sessionId}/state/revert`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
-      body: JSON.stringify({ state_id: stateId }),
+      body: JSON.stringify({ operation_id: operationId, state_id: stateId }),
     },
   );
   return parseResponse<CompositionState>(response);

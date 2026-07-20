@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from decimal import Decimal
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal
@@ -152,6 +153,15 @@ class WebSettings(BaseModel):
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
     composer_timeout_seconds: float = Field(..., gt=0)
+    # Canonical full-pipeline planner budgets. These are independent of the
+    # ordinary incremental compose loop because the planner accounts for exact
+    # request bytes, physical provider attempts, requested completion tokens,
+    # and post-call provider cost.
+    composer_planner_max_provider_calls: int = Field(default=75, strict=True, ge=1)
+    composer_planner_max_request_bytes: int = Field(default=2 * 1024 * 1024, strict=True, ge=1)
+    composer_planner_max_completion_tokens: int = Field(default=16_384, strict=True, ge=1)
+    composer_planner_max_cumulative_provider_cost: Decimal = Field(default=Decimal("5.00"), ge=0)
+    composer_planner_repair_budget: int = Field(default=2, strict=True, ge=0)
     composer_transport_idle_ceiling_seconds: float = Field(
         default=_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS,
         gt=0,

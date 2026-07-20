@@ -326,8 +326,8 @@ class TestCreateBlobComposerSourceProvenance:
                 composer_model_identifier="openai/gpt-5-mini",
                 composer_model_version="gpt-5-mini-2026-05-01",
                 composer_provider="openai",
-                composer_skill_hash="sha256:composer-skill",
-                tool_arguments_hash="sha256:tool-arguments",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
             ),
         )
 
@@ -340,8 +340,8 @@ class TestCreateBlobComposerSourceProvenance:
         assert row.creating_model_identifier == "openai/gpt-5-mini"
         assert row.creating_model_version == "gpt-5-mini-2026-05-01"
         assert row.creating_provider == "openai"
-        assert row.creating_composer_skill_hash == "sha256:composer-skill"
-        assert row.creating_arguments_hash == "sha256:tool-arguments"
+        assert row.creating_composer_skill_hash == "a" * 64
+        assert row.creating_arguments_hash == "b" * 64
 
     @pytest.mark.parametrize(
         "blank_field",
@@ -366,8 +366,8 @@ class TestCreateBlobComposerSourceProvenance:
             "composer_model_identifier": "openai/gpt-5-mini",
             "composer_model_version": "gpt-5-mini-2026-05-01",
             "composer_provider": "openai",
-            "composer_skill_hash": "sha256:composer-skill",
-            "tool_arguments_hash": "sha256:tool-arguments",
+            "composer_skill_hash": "a" * 64,
+            "tool_arguments_hash": "b" * 64,
         }
         context_kwargs[blank_field] = blank_value
 
@@ -416,8 +416,8 @@ class TestCreateBlobComposerSourceProvenance:
                 composer_model_identifier="openai/gpt-5-mini",
                 composer_model_version="gpt-5-mini-2026-05-01",
                 composer_provider="openai",
-                composer_skill_hash="sha256:composer-skill",
-                tool_arguments_hash="sha256:tool-arguments",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
             ),
         )
 

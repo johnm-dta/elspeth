@@ -1,0 +1,59 @@
+{
+  "class": "error_routing",
+  "intent": "Build a pipeline that reads records from CSV. Rows that fail source validation must go to a rejected output. Rows that pass through the coercion transform but fail coercion must go to a separate errors output, while successfully coerced rows go to the clean output. Every failure path must terminate at a real sink.",
+  "canonical_arguments": {
+    "source": {
+      "plugin": "csv",
+      "on_success": "rows",
+      "options": {"path": "records.csv", "schema": {"mode": "observed"}},
+      "on_validation_failure": "rejected"
+    },
+    "nodes": [
+      {
+        "id": "coerce_amount",
+        "node_type": "transform",
+        "plugin": "type_coerce",
+        "input": "rows",
+        "on_success": "clean",
+        "on_error": "errors",
+        "options": {"schema": {"mode": "observed"}, "conversions": [{"field": "amount", "to": "int"}]}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "clean",
+        "plugin": "json",
+        "options": {"path": "outputs/clean.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      },
+      {
+        "sink_name": "errors",
+        "plugin": "json",
+        "options": {"path": "outputs/errors.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      },
+      {
+        "sink_name": "rejected",
+        "plugin": "json",
+        "options": {"path": "outputs/rejected.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "error-routing", "description": "Source-validation failures and transform errors route to explicit sinks."}
+  },
+  "semantic_expectations": {
+    "source": {"plugin": "csv", "on_success": "rows", "on_validation_failure": "rejected"},
+    "nodes": [
+      {"id": "coerce_amount", "node_type": "transform", "plugin": "type_coerce", "input": "rows", "on_success": "clean", "on_error": "errors"}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "clean", "plugin": "json"}, {"sink_name": "errors", "plugin": "json"}, {"sink_name": "rejected", "plugin": "json"}],
+    "topology": "source(on_validation_failure->rejected) -> coerce_amount(on_error->errors, on_success->clean) -> {clean, errors, rejected}(sinks)"
+  },
+  "runtime_assertions": [
+    "Source rows that fail validation are routed to the 'rejected' sink, not dropped silently.",
+    "Rows that fail coercion in the transform are routed to the 'errors' sink via on_error.",
+    "Successfully coerced rows reach the 'clean' sink; every failure path terminates at a declared sink."
+  ]
+}

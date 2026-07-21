@@ -2237,3 +2237,52 @@ async def test_untruncated_malformed_response_stays_fatal(
 
     assert excinfo.value.code == "MALFORMED_RESPONSE"
     assert len(completion.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_argument_error_is_recoverable_not_fatal(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A discovery tool call with a bad enum arg (the model guessing
+    plugin_type='node') must feed back a failure tool result the planner can
+    repair from, NOT crash the whole request as a non-planner 500 (live:
+    session bf109c43 — get_plugin_schema plugin_type='node' → ToolArgumentError
+    → HTTP 500, no disposition)."""
+    completion = _ScriptedCompletion(
+        _response(("get_plugin_schema", {"plugin_type": "node", "name": "coalesce"})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert len(completion.requests) == 2
+    # The bad-arg call fed back a failure tool message the model saw next turn.
+    tool_messages = [m for m in completion.requests[1]["messages"] if m["role"] == "tool"]
+    assert len(tool_messages) == 1
+    payload = json.loads(tool_messages[0]["content"])
+    assert payload["success"] is False
+    # The invocation is still audited as an argument error.
+    assert recorder.invocations[0].status.value == "arg_error"
+
+
+@pytest.mark.asyncio
+async def test_discovery_argument_error_alongside_valid_call_both_feed_back(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A bad-enum call in a parallel batch must not abort its siblings."""
+    completion = _ScriptedCompletion(
+        _response(("get_plugin_schema", {"plugin_type": "node", "name": "coalesce"}), ("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    tool_messages = [m for m in completion.requests[1]["messages"] if m["role"] == "tool"]
+    assert len(tool_messages) == 2
+    assert {inv.tool_name for inv in recorder.invocations} == {"get_plugin_schema", "list_sources"}

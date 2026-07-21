@@ -1494,16 +1494,33 @@ async def _plan_pipeline_inner(
                     raise AuditIntegrityError("read-only planner discovery changed composition state")
                 return _AuditedDiscoveryResult(result)
 
-            audited = await dispatch_with_audit(
-                recorder=recorder,
-                audit=dispatch,
-                do_dispatch=execute_discovery,
-                version_after_provider=lambda carrier: carrier.result.updated_state.version,
-                arg_error_payload_factory=lambda exc: {
-                    "error_class": "ToolArgumentError",
-                    "error_code": exc.code or "argument_error",
-                },
-            )
+            try:
+                audited = await dispatch_with_audit(
+                    recorder=recorder,
+                    audit=dispatch,
+                    do_dispatch=execute_discovery,
+                    version_after_provider=lambda carrier: carrier.result.updated_state.version,
+                    arg_error_payload_factory=lambda exc: {
+                        "error_class": "ToolArgumentError",
+                        "error_code": exc.code or "argument_error",
+                    },
+                )
+            except ToolArgumentError as exc:
+                # A malformed discovery argument (e.g. the model guessing
+                # plugin_type='node') is recoverable, exactly as the terminal
+                # ARG_ERROR path is: dispatch_with_audit already recorded the
+                # ARG_ERROR audit before re-raising, so feed the allowlisted
+                # projection back as this call's tool result and let the model
+                # repair next turn. Raising here would crash the whole request
+                # as a non-PipelinePlannerError 500 with no disposition.
+                feedback = _allowlisted_argument_feedback(exc)
+                return call, ToolResult(
+                    success=False,
+                    updated_state=current_state,
+                    validation=current_state.validate(),
+                    affected_nodes=(),
+                    data=dict(feedback),
+                )
             result = cast(_AuditedDiscoveryResult, audited.result).result
             return call, result
 

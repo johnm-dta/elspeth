@@ -99,13 +99,46 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       await page.getByRole("button", { name: "Send message" }).click();
 
       // ── UX contract while the planner works ──────────────────────────────
-      // The composer must never surface a raw failure banner for this
-      // in-space request; the run affordance enabling is the success signal.
+      // Race the committed-proposal success signal against any compose failure
+      // surface so a failed compose fails the test in seconds, not after the
+      // full 11-minute success timeout. Either a specific error banner or the
+      // Send affordance re-enabling (compose returned without a proposal) ends
+      // the wait early.
+      const successMsg = page.getByText(/prepared and validated the requested pipeline/i).first();
+      const failureBanner = page
+        .getByText(/unusable pipeline plan|composer_planner_failure|could not build|timed out|unavailable|run failed/i)
+        .first();
+      await expect
+        .poll(
+          async () => {
+            if (await successMsg.isVisible().catch(() => false)) return "success";
+            if (await failureBanner.isVisible().catch(() => false)) return "failure";
+            return "pending";
+          },
+          { timeout: 11 * 60_000, intervals: [2_000] },
+        )
+        .not.toBe("pending");
+      await expect(failureBanner, "compose surfaced a failure banner").toHaveCount(0);
+      await expect(successMsg).toBeVisible();
+
+      // ── Resolve surfaced interpretation reviews ──────────────────────────
+      // Settlement surfaces one pending review event per authored LLM prompt
+      // (and any other review sites). The run gate fails closed until every
+      // event resolves — accept each as drafted via the same endpoint the UI
+      // review card drives.
+      const pendingResp = await ctx.get(`/api/sessions/${sessionId}/interpretations?status=pending`);
+      const pending = (await pendingResp.json()) as { events: { event_id?: string; id?: string }[] };
+      for (const event of pending.events) {
+        const eventId = event.event_id ?? event.id;
+        const resolveResp = await ctx.post(
+          `/api/sessions/${sessionId}/interpretations/${eventId}/resolve`,
+          { data: { choice: "accepted_as_drafted" } },
+        );
+        expect(resolveResp.ok(), `resolve ${eventId} failed: ${await resolveResp.text()}`).toBe(true);
+      }
+
       const runButton = page.getByRole("button", { name: "Run pipeline" }).first();
-      await expect(runButton).toBeEnabled({ timeout: 11 * 60_000 });
-      await expect(
-        page.getByText(/unusable pipeline plan|composer_planner_failure/i).first(),
-      ).toHaveCount(0);
+      await expect(runButton).toBeEnabled({ timeout: 60_000 });
 
       await runButton.click();
       const runDialog = page.getByRole("alertdialog", { name: "Run pipeline?" });

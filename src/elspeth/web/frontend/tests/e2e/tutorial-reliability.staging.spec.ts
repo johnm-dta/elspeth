@@ -146,6 +146,11 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     // chat-resolved inline source is materialized into a session blob and
     // inspected — confirming the observed columns is the designed answer.
     page.getByRole("button", { name: "Looks right", exact: true }),
+    // Component review turns: once the chat-resolved source/output lands as a
+    // reviewed component, the stage ends on its review turn — finishing it is
+    // the designed advance (mirrors composer-guided-live).
+    page.getByRole("button", { name: "Finish sources", exact: true }),
+    page.getByRole("button", { name: "Finish outputs", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
     // built is observed-mode (pass-all-through), and the real output fields come
     // from the downstream transforms — so the correct, designed answer here is

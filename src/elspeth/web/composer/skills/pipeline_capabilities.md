@@ -61,7 +61,9 @@ are the routing contract: a producer's `on_success`, `on_error`, `routes`, or
   producers entering shared processing. Multiple named sources retain their
   independent schemas and identities.
 - [capability-node:coalesce] A `coalesce` rejoins declared `branches` under its
-  `policy`/`merge` semantics and publishes a named `on_success` connection.
+  `policy`/`merge` semantics and publishes its merged rows under its own node
+  id — a downstream consumer sets `input` to the coalesce id. Its optional
+  `on_success` may only name a sink (never another node's input).
 
 Use `fork_to` for genuine fan-out and named branches for independent paths.
 Preserve multiple sources, multiple outputs, gates, queues, aggregations,

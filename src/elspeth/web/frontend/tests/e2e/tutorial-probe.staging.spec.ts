@@ -118,6 +118,11 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
     // chat-resolved inline source is materialized into a session blob and
     // inspected — confirming the observed columns is the designed answer.
     page.getByRole("button", { name: "Looks right", exact: true }),
+    // Component review turns: once the chat-resolved source/output lands as a
+    // reviewed component, the stage ends on its review turn — finishing it is
+    // the designed advance (mirrors composer-guided-live).
+    page.getByRole("button", { name: "Finish sources", exact: true }),
+    page.getByRole("button", { name: "Finish outputs", exact: true }),
     // Output required-fields turn: the LLM-built sink is observed-mode, so the
     // designed answer is the escape, not ticking the source's column.
     page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),

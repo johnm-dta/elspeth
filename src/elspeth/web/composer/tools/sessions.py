@@ -1194,9 +1194,13 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "on_success": {
                             "type": ["string", "null"],
                             "description": (
-                                "Connection-name string this node PUBLISHES (transform/aggregation/"
-                                "coalesce). Some downstream input/sink_name MUST equal this. Omit "
-                                "for gates (routing is via condition+routes)."
+                                "Connection-name string this node PUBLISHES (transform/aggregation). "
+                                "Some downstream input/sink_name MUST equal this. Omit for gates "
+                                "(routing is via condition+routes). COALESCE EXCEPTION: a coalesce "
+                                "publishes its merged rows under its own node id — a downstream "
+                                "consumer sets input='<coalesce id>' — and its on_success, when set, "
+                                "may ONLY name a sink; pointing a coalesce on_success at another "
+                                "node's input is rejected."
                             ),
                             "examples": ["fetched_text", "scored_rows", "lines_out"],
                         },

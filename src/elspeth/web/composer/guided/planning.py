@@ -574,7 +574,8 @@ def bind_guided_reviewed_components(
         connection_names = (
             {node.get("input") for node in topology_nodes if isinstance(node, dict)} if isinstance(topology_nodes, list) else set()
         )
-        known_targets = set(expected_output_names) | node_ids | connection_names
+        # "discard" is the legal drop-route sentinel, not a reference.
+        known_targets = set(expected_output_names) | node_ids | connection_names | {"discard"}
 
         def _resolve_dangling(member: dict[str, Any], key: str) -> None:
             value = member.get(key)

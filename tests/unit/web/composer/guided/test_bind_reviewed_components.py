@@ -138,3 +138,39 @@ def test_bind_resolves_dangling_sink_reference_to_single_reviewed_output() -> No
     bound = bind_guided_reviewed_components(pipeline, _guided())
 
     assert bound["sources"]["source"]["on_success"] == "output"
+
+
+def test_bind_keeps_discard_routing_untouched() -> None:
+    # "discard" is a legal routing destination, not a dangling reference —
+    # the single-output inference must never rewrite it (caught by the
+    # parity isomorphism matrix: on_error 'discard' became the output name).
+    pipeline = {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "options": {},
+                "on_success": "clean",
+                "on_validation_failure": "discard",
+            }
+        },
+        "nodes": [
+            {
+                "id": "clean",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "options": {},
+                "input": "clean",
+                "on_success": "output",
+                "on_error": "discard",
+            }
+        ],
+        "edges": [],
+        "outputs": [
+            {"sink_name": "output", "plugin": "json", "options": {}, "on_write_failure": "discard"},
+        ],
+    }
+
+    bound = bind_guided_reviewed_components(pipeline, _guided())
+
+    assert bound["nodes"][0]["on_error"] == "discard"
+    assert bound["nodes"][0]["on_success"] == "output"

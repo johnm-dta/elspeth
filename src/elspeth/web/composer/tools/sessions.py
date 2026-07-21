@@ -668,10 +668,29 @@ def build_set_pipeline_candidate(
     # narrow the value. A pre-isinstance on ``args`` itself is
     # redundant (the type system already proves it is a Mapping).
     raw_outputs = args.get("outputs")
+    # Root bare relative sink paths in the managed outputs pool exactly as
+    # the guided sink form does (canonical_sink_local_paths, elspeth-859e2702dd
+    # L3): "write it to colours.json" is the natural authoring form, and the
+    # raw value would otherwise park an unrepairable S2 rejection. '..'
+    # segments are rejected outright; absolutes pass through to the S2
+    # allowlist below. The canonical dict feeds validation AND the stored
+    # OutputSpec so one runnable value flows everywhere.
+    from elspeth.web.composer.guided.stage_transitions import canonical_sink_local_paths
+
+    canonical_out_options: dict[int, dict[str, Any]] = {}
+    for index, output in enumerate(validated.outputs):
+        try:
+            canonical_out_options[index] = dict(canonical_sink_local_paths(output.options))
+        except ValueError as exc:
+            return _failure_result(
+                state,
+                f"Output '{output.sink_name}': {exc}",
+                error_code="plugin_options_invalid",
+            )
     for index, output in enumerate(validated.outputs):
         out_name = output.sink_name
         out_plugin = output.plugin
-        out_options = output.options
+        out_options = canonical_out_options[index]
         endpoint_policy_error = web_aws_s3_endpoint_url_policy_error(out_plugin, out_options)
         if endpoint_policy_error is not None:
             return _failure_result(state, endpoint_policy_error)
@@ -795,12 +814,12 @@ def build_set_pipeline_candidate(
         )
 
     output_specs = []
-    for o in validated.outputs:
+    for output_index, o in enumerate(validated.outputs):
         output_specs.append(
             OutputSpec(
                 name=o.sink_name,
                 plugin=o.plugin,
-                options=o.options,
+                options=canonical_out_options[output_index],
                 on_write_failure=o.on_write_failure if o.on_write_failure is not None else "discard",
             )
         )

@@ -1764,3 +1764,35 @@ def test_profile_lowered_llm_multi_query_candidate_is_acceptable(tmp_path: Path)
     rejection = None if candidate.acceptable else (candidate.result.data or {}).get("error")
     assert candidate.acceptable is True, f"canonical A/B shape rejected: {rejection}"
     assert candidate.result.success is True
+
+
+def test_bare_relative_sink_path_canonicalizes_to_outputs_pool(tmp_path: Path) -> None:
+    """A bare relative sink path — the natural authoring form ("write it to
+    colours.json") — must canonicalize to outputs/<path> exactly as the guided
+    sink form does (elspeth-859e2702dd L3), instead of parking an unrepairable
+    S2 rejection: live sessions a5a5f599 (3 sonnet repairs + the opus hatch,
+    all rejected on the identical bare filename)."""
+    args = _ab_multi_query_args(tmp_path)
+    args["outputs"][0]["options"]["path"] = "colour_ab.json"
+    (tmp_path / "outputs").mkdir(exist_ok=True)
+    context = _operator_profile_view(tmp_path)
+    state = _empty_state()
+
+    candidate = build_set_pipeline_candidate(args, state, context)
+
+    rejection = None if candidate.acceptable else (candidate.result.data or {}).get("error")
+    assert candidate.acceptable is True, f"bare relative sink path rejected: {rejection}"
+    committed = candidate.result.updated_state.outputs[0].options["path"]
+    assert committed == "outputs/colour_ab.json"
+
+
+def test_parent_traversal_sink_path_still_rejected(tmp_path: Path) -> None:
+    args = _ab_multi_query_args(tmp_path)
+    args["outputs"][0]["options"]["path"] = "../escape.json"
+    (tmp_path / "outputs").mkdir(exist_ok=True)
+    context = _operator_profile_view(tmp_path)
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), context)
+
+    assert candidate.acceptable is False
+    assert ".." in ((candidate.result.data or {}).get("error") or "")

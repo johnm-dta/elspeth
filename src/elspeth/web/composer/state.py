@@ -2588,6 +2588,29 @@ class CompositionState:
                             "coalesce_missing_policy",
                         )
                     )
+                # Mirror the engine's closed vocabularies (core/config.py
+                # CoalesceSettings) at composition time: a committed value
+                # outside them passes composer validation but fails engine
+                # pre-run validation — valid-but-not-runnable.
+                elif node.policy not in ("require_all", "quorum", "best_effort", "first"):
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Coalesce '{node.id}' policy {node.policy!r} is not a valid policy. "
+                            "Valid values: require_all, quorum, best_effort, first.",
+                            "high",
+                            "coalesce_policy_invalid",
+                        )
+                    )
+                if node.merge is not None and node.merge not in ("union", "nested", "select"):
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Coalesce '{node.id}' merge {node.merge!r} is not a valid merge mode. Valid values: union, nested, select.",
+                            "high",
+                            "coalesce_merge_invalid",
+                        )
+                    )
             elif node.node_type == "aggregation":
                 if not node.plugin:
                     errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'plugin'.", "high"))

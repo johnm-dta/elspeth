@@ -443,6 +443,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
     (
+        r"coalesce_policy_invalid|coalesce_merge_invalid",
+        "Coalesce policy and merge use the engine's closed vocabularies.",
+        "Set policy to one of: require_all, quorum, best_effort, first — and merge to one of: union, nested, select. For an A/B rejoin that combines branch fields into one row: policy='require_all', merge='union'.",
+    ),
+    (
         r"pipeline_decision_unregistered",
         "A pipeline_decision interpretation review may only use one of the registered decision kinds — novel decision terms can never be reviewed or resolved.",
         "Remove the pipeline_decision entry from the node's interpretation_requirements (record the rationale in metadata.description instead), or use an llm_prompt_template review for prompt-shaped decisions. Registered kinds: drop_raw_html_fields, web_scrape_http_identity, prompt_injection_shield_recommendation.",

@@ -6020,6 +6020,14 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
         nodes=(
             _node(id="t_bad", on_success=None, on_error=None),
             _node(id="c_bad", node_type="coalesce", plugin=None),
+            _node(
+                id="c_vocab",
+                node_type="coalesce",
+                plugin=None,
+                branches={"a": "a", "b": "b"},
+                policy="require_all_branches",
+                merge="union_fields",
+            ),
             _node(id="g_bad", node_type="gate", plugin=None),
             _node(id="g_half", node_type="gate", plugin=None, condition="True", routes={"true": "out"}),
             _node(id="t_dangling", on_success="nowhere", on_error="missing_sink"),
@@ -6061,5 +6069,7 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
         ("node:t_dangling", "transform_on_success_dangling"),
         ("node:t_dangling", "transform_on_error_unknown_sink"),
         ("node:t_novel_decision", "pipeline_decision_unregistered"),
+        ("node:c_vocab", "coalesce_policy_invalid"),
+        ("node:c_vocab", "coalesce_merge_invalid"),
     ):
         assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"

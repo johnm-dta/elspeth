@@ -5984,3 +5984,58 @@ class TestCompositionStateQueue:
         result = state.validate()
         assert not result.is_valid
         assert any("Duplicate producer" in e.message for e in result.errors)
+
+
+def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
+    """Node-shape validation entries must carry closed error codes.
+
+    The planner repair loop strips validation messages from candidate
+    feedback (leak-safety), so ``error_code`` is the only actionable repair
+    signal — and ``explain_validation_error`` can only explain what has a
+    code. Live regression: fork/coalesce A/B proposals were repaired blind
+    against entries whose error_code was None.
+    """
+
+    def _node(**overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": "n",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "rows",
+            "on_success": "out",
+            "on_error": "discard",
+            "options": {},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="rows", options={}, on_validation_failure="discard"),
+        nodes=(
+            _node(id="t_bad", on_success=None, on_error=None),
+            _node(id="c_bad", node_type="coalesce", plugin=None),
+            _node(id="g_bad", node_type="gate", plugin=None),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = state.validate()
+    codes = {(entry.component, entry.error_code) for entry in result.errors}
+    for expected in (
+        ("node:t_bad", "transform_missing_on_success"),
+        ("node:t_bad", "transform_missing_on_error"),
+        ("node:c_bad", "coalesce_missing_branches"),
+        ("node:c_bad", "coalesce_missing_policy"),
+        ("node:g_bad", "gate_missing_condition"),
+        ("node:g_bad", "gate_missing_routes"),
+    ):
+        assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"

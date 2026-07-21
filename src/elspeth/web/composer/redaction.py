@@ -46,6 +46,13 @@ _REDACTED_OPTION_VALUE = "<redacted-option-value>"
 # (closes W6 / spec §8.1 RSK-03 weak echo).
 REDACTED_UNKNOWN_RESPONSE_KEY = "<redacted-unknown-response-key>"
 
+# The closed ToolResult dispatch envelope: engine-produced framing present on
+# every serialized tool result.  Implicitly known (never sentinel'd) for
+# declarative manifest entries unless a policy explicitly declares one
+# sensitive; tool payload lives under other keys (``data`` etc.) which remain
+# policy-declared and fail-closed.
+_TOOL_RESULT_ENVELOPE_KEYS: frozenset[str] = frozenset({"success", "validation", "version"})
+
 # Fixed sentinel for arguments that appear in the input but are not declared in
 # a manifest entry's optional known_argument_keys allowlist. Unknown key names
 # are removed too; they are LLM-controlled text and may themselves carry
@@ -2475,13 +2482,16 @@ class _ValidationEntryShadowModel(BaseModel):
 
     Mirrors a serialized validation message: ``component`` / ``message`` /
     ``severity`` are all plain strings (``severity`` serializes from the
-    ``Severity`` literal alias to its string value). None carries operator
-    payload — these are composer-authored diagnostics about pipeline shape.
+    ``Severity`` literal alias to its string value); ``error_code`` is the
+    closed machine-readable discriminant, emitted only when set. None
+    carries operator payload — these are composer-authored diagnostics
+    about pipeline shape.
     """
 
     component: str
     message: str
     severity: str
+    error_code: str | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -3331,9 +3341,15 @@ def redact_tool_call_response(
             # (argument_summarizers covers only argument keys).  Substitute
             # the no-summarizer sentinel.
             redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
-        elif key in policy.known_response_keys:
+        elif key in policy.known_response_keys or key in _TOOL_RESULT_ENVELOPE_KEYS:
             # Known, non-sensitive: preserve the declared ToolResult envelope
-            # while scrubbing nested repair-tool-call arguments.
+            # while scrubbing nested repair-tool-call arguments.  The closed
+            # dispatch-envelope keys are implicitly known for every
+            # declarative entry — they are engine-produced framing (bool
+            # success, structural validation summary, int state version),
+            # never tool payload, and sentinel-ing them leaves audit rows
+            # blind to every tool outcome.  ``data`` and all other keys stay
+            # policy-declared / fail-closed.
             redacted[key] = _redact_declarative_known_response_value(value, path=(key,))
         else:
             # Unknown key: fail-closed sentinel + telemetry counter (W6).

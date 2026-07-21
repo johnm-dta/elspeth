@@ -799,3 +799,70 @@ def test_response_walker_emits_manifest_dispatch_for_declarative_entry(
     redact_tool_call_response(tool, {"status": "ok"}, telemetry=tel)
 
     assert tel.manifest_dispatch_calls == [{"tool_name": tool, "shape": "declarative"}]
+
+
+# ---------------------------------------------------------------------------
+# ToolResult envelope keys are implicitly known for declarative entries
+# ---------------------------------------------------------------------------
+
+
+def test_tool_result_envelope_keys_are_implicitly_known_for_declarative_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """{success, validation, version} — the closed, engine-produced ToolResult
+    dispatch envelope — must survive declarative redaction even when the policy
+    does not declare them, so audit rows retain the dispatch outcome. Live
+    forensics regression: every planner discovery invocation row read
+    '<redacted-unknown-response-key>' for all three, leaving the audit trail
+    blind to tool outcomes. ``data`` and any other undeclared key stay
+    fail-closed.
+    """
+    tool = "t_envelope"
+    entry = _declarative_entry(known_response_keys=("summary",))
+    _patch_manifest(monkeypatch, tool, entry)
+
+    tel = NoopRedactionTelemetry()
+    validation = {
+        "is_valid": False,
+        "errors": [{"component": "node", "message": "bad option", "severity": "high", "error_code": "x"}],
+    }
+    response = {
+        "success": False,
+        "validation": validation,
+        "version": 3,
+        "summary": "s",
+        "data": {"content": "SECRET-CONTENT"},
+    }
+    result = redact_tool_call_response(tool, response, telemetry=tel)
+
+    assert result["success"] is False
+    assert result["validation"] == validation
+    assert result["version"] == 3
+    assert result["summary"] == "s"
+    assert result["data"] == REDACTED_UNKNOWN_RESPONSE_KEY
+    assert "SECRET-CONTENT" not in str(result)
+    assert len(tel.unknown_response_key_calls) == 1
+
+
+def test_declared_sensitive_envelope_key_still_wins_over_implicit_knowledge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy that declares an envelope key sensitive keeps its sentinel —
+    the implicit envelope allowlist never overrides an explicit sensitivity
+    declaration."""
+    from elspeth.web.composer.redaction import REDACTED_SENSITIVE_NO_SUMMARIZER
+
+    tool = "t_envelope_sensitive"
+    entry = _declarative_entry(
+        sensitive_response_keys=("validation",),
+        known_response_keys=("validation",),
+    )
+    _patch_manifest(monkeypatch, tool, entry)
+
+    tel = NoopRedactionTelemetry()
+    response = {"success": True, "validation": {"is_valid": True}, "version": 1}
+    result = redact_tool_call_response(tool, response, telemetry=tel)
+
+    assert result["validation"] == REDACTED_SENSITIVE_NO_SUMMARIZER
+    assert result["success"] is True
+    assert result["version"] == 1

@@ -399,6 +399,49 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "A downstream node requires fields that its upstream producer does not guarantee.",
         "Call preview_pipeline to inspect edge_contracts, then update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
     ),
+    # ── Closed structural node-shape codes ──────────────────────────────────
+    # The planner repair feedback strips validation messages; these codes are
+    # the only signal it carries, so each must be explainable here.
+    (
+        r"unknown[ _]node_type",
+        "The node_type is not one of the composer's node kinds: aggregation, coalesce, gate, queue, transform. There is no 'fork' node_type.",
+        "Forking is expressed with a GATE node: set routes={'true': 'fork', 'false': 'fork'} and fork_to=['branch_a', 'branch_b']; each branch node reads one branch name as its input, and branches rejoin at a COALESCE node (branches + policy + merge). For running SEVERAL LLM assessments per row, prefer ONE llm transform with a `queries` map instead — each query has its own template and output_fields merged onto the same row, no fork/coalesce needed.",
+    ),
+    (
+        r"coalesce_on_success_must_be_sink|Coalesce on_success must point to a sink",
+        "A coalesce node's on_success may only name a sink; merged rows otherwise flow to whichever node reads the coalesce id as its input.",
+        "Either set the coalesce on_success to a sink name from outputs[], or leave on_success null and give the downstream node input='<coalesce node id>'.",
+    ),
+    (
+        r"coalesce_missing_policy|Coalesce '(.+)' is missing required field 'policy'",
+        "A coalesce node must declare how it settles branches.",
+        "Set policy='require_all' (wait for every branch) and merge='union' (combine branch fields into one row); branches maps each branch name to its incoming connection, e.g. branches={'branch_a': 'branch_a', 'branch_b': 'branch_b'}.",
+    ),
+    (
+        r"coalesce_missing_branches|Coalesce '(.+)' is missing required field 'branches'",
+        "A coalesce node must name the branch connections it rejoins.",
+        "Set branches to a mapping of branch name -> incoming connection name, e.g. branches={'branch_a': 'branch_a', 'branch_b': 'branch_b'}, plus policy='require_all' and merge='union'.",
+    ),
+    (
+        r"transform_missing_on_success|Transform '(.+)' is missing required field 'on_success'",
+        "Every transform must route its successful rows somewhere.",
+        "Set the transform's on_success to the next connection or sink name; use on_error='discard' unless failed rows need a quarantine sink.",
+    ),
+    (
+        r"transform_missing_on_error|Transform '(.+)' is missing required field 'on_error'",
+        "Every transform must declare where failed rows go.",
+        "Set the transform's on_error — 'discard' is the simplest safe choice, or route to a quarantine sink name.",
+    ),
+    (
+        r"gate_missing_condition|Gate '(.+)' is missing required field 'condition'",
+        "A gate node needs a boolean row expression to route on.",
+        "Set condition to a row expression (call get_expression_grammar for syntax); a pure fan-out gate uses condition='True'.",
+    ),
+    (
+        r"gate_missing_routes|Gate '(.+)' is missing required field 'routes'",
+        "A gate node needs a routes mapping for its condition outcomes.",
+        "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
+    ),
 )
 
 

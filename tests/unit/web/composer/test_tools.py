@@ -13885,3 +13885,60 @@ class TestQueueBoundaryFieldEvidenceAbstains:
             and "does not declare the field type" in entry.message
             for entry in result.warnings
         )
+
+
+class TestExplainStructuralNodeShapeCodes:
+    """The closed structural error codes must be explainable — they are the
+    only repair signal the planner feedback carries (messages are stripped),
+    so explain_validation_error(code) is how the model learns the mechanics."""
+
+    def test_explains_unknown_node_type_teaches_fork_vocabulary(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "unknown_node_type"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        fix = result.data["suggested_fix"]
+        assert "fork_to" in fix
+        assert "coalesce" in fix
+        assert "queries" in fix
+
+    def test_explains_coalesce_on_success_must_be_sink(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "coalesce_on_success_must_be_sink"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        assert "sink" in result.data["suggested_fix"]
+
+    def test_explains_coalesce_missing_policy(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "coalesce_missing_policy"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        assert "require_all" in result.data["suggested_fix"]
+
+    def test_explains_transform_missing_on_success(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "transform_missing_on_success"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        assert "on_success" in result.data["suggested_fix"]

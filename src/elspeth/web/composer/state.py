@@ -800,6 +800,7 @@ def _validate_runtime_route_destinations(
                         f"Coalesce '{node.id}' has on_success='{node.on_success}'. "
                         "Coalesce on_success must point to a sink when configured.",
                         "high",
+                        "coalesce_on_success_must_be_sink",
                     )
                 )
             elif node.on_success not in output_names:
@@ -808,6 +809,7 @@ def _validate_runtime_route_destinations(
                         f"node:{node.id}",
                         f"Coalesce '{node.id}' on_success references unknown sink '{node.on_success}'.",
                         "high",
+                        "coalesce_on_success_unknown_sink",
                     )
                 )
 
@@ -2443,6 +2445,7 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Node '{node.id}' has unknown node_type '{node.node_type}'. Expected one of: {expected}.",
                         "high",
+                        "unknown_node_type",
                     )
                 )
                 continue
@@ -2462,7 +2465,11 @@ class CompositionState:
 
             if node.node_type == "gate":
                 if node.condition is None:
-                    errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'condition'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}", f"Gate '{node.id}' is missing required field 'condition'.", "high", "gate_missing_condition"
+                        )
+                    )
                 else:
                     # Validate expression content — defense-in-depth catches
                     # malformed conditions from any entry path (including
@@ -2478,27 +2485,75 @@ class CompositionState:
                         if parity_error is not None:
                             errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {parity_error}", "high"))
                 if node.routes is None:
-                    errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high"))
+                    errors.append(
+                        _err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high", "gate_missing_routes")
+                    )
             elif node.node_type == "transform":
                 # Negative constraints — transforms must not have gate fields
                 if node.condition is not None:
-                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' must not have 'condition' field.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' must not have 'condition' field.",
+                            "high",
+                            "transform_unexpected_condition",
+                        )
+                    )
                 if node.routes is not None:
-                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' must not have 'routes' field.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}", f"Transform '{node.id}' must not have 'routes' field.", "high", "transform_unexpected_routes"
+                        )
+                    )
                 # Positive constraints — engine requires these as non-empty strings
                 # (TransformSettings.plugin, .on_success, .on_error in config.py
                 #  — field validators call .strip() and reject empty/blank)
                 if not node.plugin:
-                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'plugin'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' is missing required field 'plugin'.",
+                            "high",
+                            "transform_missing_plugin",
+                        )
+                    )
                 if not node.on_success or not node.on_success.strip():
-                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'on_success'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' is missing required field 'on_success'.",
+                            "high",
+                            "transform_missing_on_success",
+                        )
+                    )
                 if not node.on_error or not node.on_error.strip():
-                    errors.append(_err(f"node:{node.id}", f"Transform '{node.id}' is missing required field 'on_error'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Transform '{node.id}' is missing required field 'on_error'.",
+                            "high",
+                            "transform_missing_on_error",
+                        )
+                    )
             elif node.node_type == "coalesce":
                 if node.branches is None:
-                    errors.append(_err(f"node:{node.id}", f"Coalesce '{node.id}' is missing required field 'branches'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Coalesce '{node.id}' is missing required field 'branches'.",
+                            "high",
+                            "coalesce_missing_branches",
+                        )
+                    )
                 if node.policy is None:
-                    errors.append(_err(f"node:{node.id}", f"Coalesce '{node.id}' is missing required field 'policy'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Coalesce '{node.id}' is missing required field 'policy'.",
+                            "high",
+                            "coalesce_missing_policy",
+                        )
+                    )
             elif node.node_type == "aggregation":
                 if not node.plugin:
                     errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'plugin'.", "high"))

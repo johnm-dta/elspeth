@@ -37,7 +37,6 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
-    EdgeType,
     NodeSpec,
     NodeType,
     OutputSpec,
@@ -790,7 +789,7 @@ def build_set_pipeline_candidate(
                 id=e.id,
                 from_node=e.from_node,
                 to_node=e.to_node,
-                edge_type=cast(EdgeType, e.edge_type),
+                edge_type=e.edge_type,
                 label=e.label,
             )
         )
@@ -1230,7 +1229,10 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "id": {"type": "string"},
                         "from_node": {"type": "string"},
                         "to_node": {"type": "string"},
-                        "edge_type": {"type": "string"},
+                        "edge_type": {
+                            "type": "string",
+                            "enum": ["on_success", "on_error", "route_true", "route_false", "fork"],
+                        },
                         "label": {"type": ["string", "null"]},
                     },
                     "required": ["id", "from_node", "to_node", "edge_type"],

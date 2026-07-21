@@ -378,6 +378,13 @@ def guided_redacted_planner_context(guided: GuidedSession) -> dict[str, object]:
         "sources": [
             {
                 "stable_id": stable_id,
+                # Component names are server-authored routing identifiers
+                # (also provider-visible via the current-state context, so no
+                # new egress). Withholding them forces the planner to invent
+                # names for on_success/edge references and dooms candidates to
+                # "unknown node" rejections it cannot see through the closed
+                # repair feedback (elspeth-859e2702dd).
+                "name": source.name,
                 "plugin": source.plugin,
                 "observed_columns": list(source.observed_columns),
                 "option_keys": sorted(source.options),
@@ -389,6 +396,7 @@ def guided_redacted_planner_context(guided: GuidedSession) -> dict[str, object]:
         "outputs": [
             {
                 "stable_id": stable_id,
+                "name": output.name,
                 "plugin": output.plugin,
                 "required_fields": list(output.required_fields),
                 "schema_mode": output.schema_mode,
@@ -543,6 +551,51 @@ def bind_guided_reviewed_components(
                 for edge_key in ("on_success", "on_error"):
                     if topology_node.get(edge_key) in output_rename:
                         topology_node[edge_key] = output_rename[topology_node[edge_key]]
+        topology_edges = bound.get("edges")
+        if isinstance(topology_edges, list):
+            for topology_edge in topology_edges:
+                if not isinstance(topology_edge, dict):
+                    continue
+                for endpoint_key in ("from_node", "to_node"):
+                    if topology_edge.get(endpoint_key) in output_rename:
+                        topology_edge[endpoint_key] = output_rename[topology_edge[endpoint_key]]
+
+    # Resolve residual dangling sink references. Observed planner slip: the
+    # outputs and edges use the reviewed name correctly, but one stale invented
+    # name survives in a routing field — the rename map is then empty and the
+    # rewrite above never runs, yet the candidate is doomed at validation with
+    # feedback the planner cannot act on. With exactly ONE reviewed output the
+    # dangling reference is unambiguous; resolve it structurally. Multi-output
+    # topologies stay untouched — ambiguity belongs to validation.
+    if len(expected_output_names) == 1:
+        only_output = expected_output_names[0]
+        topology_nodes = bound.get("nodes")
+        node_ids = {node.get("id") for node in topology_nodes if isinstance(node, dict)} if isinstance(topology_nodes, list) else set()
+        connection_names = (
+            {node.get("input") for node in topology_nodes if isinstance(node, dict)} if isinstance(topology_nodes, list) else set()
+        )
+        known_targets = set(expected_output_names) | node_ids | connection_names
+
+        def _resolve_dangling(member: dict[str, Any], key: str) -> None:
+            value = member.get(key)
+            if type(value) is str and value and value not in known_targets:
+                member[key] = only_output
+
+        for member in bound["sources"].values():
+            _resolve_dangling(cast(dict[str, Any], member), "on_success")
+        if isinstance(topology_nodes, list):
+            for topology_node in topology_nodes:
+                if isinstance(topology_node, dict):
+                    for key in ("on_success", "on_error"):
+                        if topology_node.get(key) is not None:
+                            _resolve_dangling(topology_node, key)
+        topology_edges = bound.get("edges")
+        if isinstance(topology_edges, list):
+            for topology_edge in topology_edges:
+                if isinstance(topology_edge, dict):
+                    # Only the destination can be a sink; a dangling from_node
+                    # has no unambiguous resolution and stays for validation.
+                    _resolve_dangling(topology_edge, "to_node")
     return cast(GuidedBoundPipeline, bound)
 
 
@@ -556,6 +609,14 @@ def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
         for output in outputs:
             if type(output) is dict and "sink_name" in output:
                 output["name"] = output.pop("sink_name")
+    edges = raw.get("edges")
+    if type(edges) is list:
+        for edge in edges:
+            if type(edge) is dict:
+                # set_pipeline's tool schema makes label optional and its
+                # handler reads it with .get(); canonical EdgeSpec.from_dict
+                # is strict, so apply the same default at this adapter.
+                edge.setdefault("label", None)
     raw.setdefault("metadata", {"name": "Untitled Pipeline", "description": ""})
     raw["version"] = 1
     try:

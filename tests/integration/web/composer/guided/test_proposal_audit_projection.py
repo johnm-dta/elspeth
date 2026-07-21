@@ -321,6 +321,7 @@ def test_planner_context_is_redacted_but_private_anchor_keeps_exact_reviewed_fac
         "sources": [
             {
                 "stable_id": SOURCE_ID,
+                "name": "primary",
                 "plugin": "csv",
                 "observed_columns": ["name", "score"],
                 "option_keys": ["credentials", "inline_blob", "schema"],
@@ -330,6 +331,7 @@ def test_planner_context_is_redacted_but_private_anchor_keeps_exact_reviewed_fac
         "outputs": [
             {
                 "stable_id": OUTPUT_ID,
+                "name": "cleaned",
                 "plugin": "json",
                 "required_fields": ["name"],
                 "schema_mode": "observed",

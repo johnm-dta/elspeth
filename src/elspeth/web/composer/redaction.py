@@ -34,6 +34,7 @@ from elspeth.web.composer.guided_blob_refs import (
     validate_guided_reviewed_blob_source_mapping,
 )
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
+from elspeth.web.composer.state import EdgeType
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 _REDACTED_OPTION_VALUE = "<redacted-option-value>"
@@ -1418,7 +1419,10 @@ class _PipelineEdgeModel(BaseModel):
     id: str
     from_node: str
     to_node: str
-    edge_type: str
+    # The closed EdgeType vocabulary, not free text: Edge.from_dict does not
+    # re-validate, so an open string here would commit vocabulary-invalid
+    # state that the strict web client refuses to decode.
+    edge_type: EdgeType
     label: str | None = None
 
     model_config = ConfigDict(extra="forbid")

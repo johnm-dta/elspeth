@@ -291,6 +291,22 @@ class TestPromoteSetPipelineArgErrorRouting:
         assert isinstance(cause, PydanticValidationError)
         assert any(err["loc"] == ("edges", 0, "to_node") for err in cause.errors())
 
+    def test_edge_unknown_edge_type_raises(self) -> None:
+        """edges[*].edge_type is the closed EdgeType vocabulary, not free text.
+
+        A planner-invented type ("flow") must be rejected at argument
+        validation: ``Edge.from_dict`` does not re-validate, so an open
+        string here commits vocabulary-invalid state that the strict web
+        client refuses to decode (elspeth-859e2702dd).
+        """
+        args = _minimal_valid_args()
+        args["edges"] = [{"id": "e1", "from_node": "a", "to_node": "b", "edge_type": "flow"}]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        assert any(err["loc"] == ("edges", 0, "edge_type") for err in cause.errors())
+
     def test_output_missing_required_plugin_raises(self) -> None:
         """outputs[*] inner ``required: [sink_name, plugin]``."""
         args = _minimal_valid_args()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
 from typing import Any, Final, Literal, cast
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from elspeth.web.composer.guided.resolved import (
 )
 from elspeth.web.composer.guided.state_machine import ComponentTarget, GuidedSession, SinkIntent, SourceIntent
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
+from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS
 
 _PATH_OPTION_NAMES: Final = frozenset({"path", "file"})
 _SOURCE_KIND_PLUGIN: Final = {"csv": "csv", "json": "json", "jsonl": "json", "text": "text"}
@@ -1023,6 +1025,7 @@ def transition_sink_schema_form(
         plugin_name=intent.plugin,
         structural_defaults={"on_write_failure": on_write_failure},
     )
+    options = canonical_sink_local_paths(options)
     pending = dict(session.pending_output_intents)
     pending[stable_id] = SinkIntent(
         name=intent.name,
@@ -1032,6 +1035,44 @@ def transition_sink_schema_form(
     )
     _candidate_fields(session)
     return replace(session, pending_output_intents=pending)
+
+
+_SINK_OUTPUT_POOL: Final = "outputs"
+
+
+def canonical_sink_local_paths(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Root relative sink path options in the managed outputs pool.
+
+    Guided pipelines write to the deployment's managed outputs directory. A
+    bare relative path — the form's natural input — is canonicalized to
+    ``outputs/<path>`` so the set_pipeline S2 allowlist, generated YAML, and
+    the runtime resolver (all of which join relative paths to ``data_dir``)
+    accept one runnable value. Accepting the raw value instead parks an
+    unrepairable S2 rejection inside reviewed authority and wedges planning
+    at REPAIR_EXHAUSTED (elspeth-859e2702dd layer 3).
+
+    Absolute paths pass through untouched: whether one is safe is a
+    deployment question (S2 allowlist) that this pure layer must not hold —
+    the guided respond route allowlist-checks the canonical values with the
+    deployment context before the transition runs. ``..`` segments are
+    rejected here outright: canonicalizing them would silently rewrite
+    intent, and no allowlist can prove them safe pre-resolution.
+    """
+    updated = dict(options)
+    for key in SINK_LOCAL_PATH_OPTION_KEYS:
+        value = updated.get(key)
+        if type(value) is not str or not value or value.startswith(BLOB_REF_PATH_PREFIX):
+            continue
+        raw = PurePosixPath(value)
+        if ".." in raw.parts:
+            raise ValueError(
+                f"option {key!r} must not contain '..' path segments; give a path like 'results.json' or 'reports/results.json'"
+            )
+        if raw.is_absolute():
+            continue
+        if raw.parts[0] != _SINK_OUTPUT_POOL:
+            updated[key] = str(PurePosixPath(_SINK_OUTPUT_POOL) / raw)
+    return updated
 
 
 def transition_sink_field_review(

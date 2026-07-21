@@ -1896,6 +1896,65 @@ def _schema8_schema_authority(
     return SchemaFormAuthority(knobs=knobs, model_validated_options=model_validated, server_options=server_options)
 
 
+def _schema8_require_runnable_sink_form(
+    body: GuidedRespondRequest,
+    *,
+    plugin: str,
+    data_dir: str,
+    session_id: str,
+) -> None:
+    """Reject sink form submissions the downstream runnable contract forbids.
+
+    Mirrors the freeform ``set_output`` tool's own gate — the S2 sink-path
+    allowlist plus the file-sink collision-policy explicitness rule — at the
+    guided form boundary, with the reason in the response. The pure
+    transition canonicalizes relative sink paths into the outputs pool;
+    whether an absolute path lies inside the deployment's allowed sink
+    directories is a deployment fact only this layer holds. Rejecting here
+    keeps an impossible option set out of reviewed authority — reviewed sink
+    options are fixed facts no planner repair may change, so admitting one
+    guarantees planning later dies at REPAIR_EXHAUSTED with no user-visible
+    cause (elspeth-859e2702dd layers 3 and 4).
+    """
+    # Local imports: this module's top-level statement positions anchor signed
+    # judge metadata (see the module-level "Preserve signed module statement
+    # positions" note), so new imports must not shift the import block.
+    from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX
+    from elspeth.web.composer.guided.stage_transitions import canonical_sink_local_paths
+    from elspeth.web.composer.tools._common import validate_composer_file_sink_collision_policy
+    from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
+
+    edited = body.edited_values
+    if (
+        type(edited) is not dict
+        or set(edited) != {"plugin", "options"}
+        or edited["plugin"] != plugin
+        or not isinstance(edited["options"], Mapping)
+    ):
+        return  # closed-shape violations are the transition contract's to reject
+    try:
+        options = canonical_sink_local_paths(edited["options"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Output path is not allowed: {exc}") from exc
+    allowed = allowed_sink_directories(data_dir, session_id=session_id)
+    for key in SINK_LOCAL_PATH_OPTION_KEYS:
+        value = options.get(key)
+        if type(value) is not str or not value or value.startswith(BLOB_REF_PATH_PREFIX):
+            continue
+        resolved = resolve_data_path(value, data_dir)
+        if not any(resolved.is_relative_to(directory) for directory in allowed):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Output option {key!r}: {value!r} is outside this deployment's allowed output locations. "
+                    "Use a relative path like 'results.json' — it is written inside the managed outputs directory."
+                ),
+            )
+    collision_error = validate_composer_file_sink_collision_policy(plugin, options, require_explicit=True)
+    if collision_error is not None:
+        raise HTTPException(status_code=400, detail=collision_error)
+
+
 def _schema8_transition(
     guided: GuidedSession,
     turn: Turn,
@@ -2364,6 +2423,14 @@ async def post_guided_respond(
                     session_id,
                     observed_guided,
                 )
+        elif observed_guided.step is GuidedStep.STEP_2_SINK and current_turn["type"] == TurnType.SCHEMA_FORM.value:
+            _, held_sink_plugin = _schema8_form_target(observed_guided, source=False)
+            _schema8_require_runnable_sink_form(
+                body,
+                plugin=held_sink_plugin,
+                data_dir=str(request.app.state.settings.data_dir),
+                session_id=str(session_id),
+            )
         try:
             _schema8_answer_and_project_next(
                 observed_state,

@@ -628,10 +628,10 @@ def test_sink_schema_form_holds_options_and_emits_stable_deduplicated_candidates
         session,
         target_id=OUTPUT_A,
         turn=turn,
-        response=SchemaFormResponse(plugin="json", options={"path": "/data/out.jsonl", "indent": 2}),
+        response=SchemaFormResponse(plugin="json", options={"path": "out.jsonl", "indent": 2}),
         authority=SchemaFormAuthority(
             knobs=SINK_KNOBS,
-            model_validated_options={"path": "/data/out.jsonl", "indent": 2},
+            model_validated_options={"path": "out.jsonl", "indent": 2},
         ),
     )
 
@@ -655,6 +655,50 @@ def test_schema_forms_reject_wrong_knob_types() -> None:
             response=SchemaFormResponse(plugin="json", options={"indent": "not-an-int"}),
             authority=SchemaFormAuthority(knobs=SINK_KNOBS, model_validated_options={}),
         )
+
+
+def _sink_schema_form_with_path(path: str) -> GuidedSession:
+    session, turn = _sink_options_session()
+    return transition_sink_schema_form(
+        session,
+        target_id=OUTPUT_A,
+        turn=turn,
+        response=SchemaFormResponse(plugin="json", options={"path": path}),
+        authority=SchemaFormAuthority(knobs=SINK_KNOBS, model_validated_options={"path": path}),
+    )
+
+
+def test_sink_schema_form_roots_relative_path_in_outputs_pool() -> None:
+    # A bare filename is what the wizard invites ("colour_output.json").
+    # Stored authority must be the canonical outputs-pool relative path the
+    # set_pipeline S2 allowlist and the runtime resolver both accept —
+    # accepting the raw value wedges planning at an unrepairable rejection
+    # (elspeth-859e2702dd layer 3).
+    result = _sink_schema_form_with_path("colour_output.json")
+    intent = result.pending_output_intents[OUTPUT_A]
+    assert intent.options is not None
+    assert intent.options["path"] == "outputs/colour_output.json"
+
+
+def test_sink_schema_form_keeps_outputs_rooted_and_subfolder_paths_canonical() -> None:
+    already_rooted = _sink_schema_form_with_path("outputs/colour_output.json")
+    assert already_rooted.pending_output_intents[OUTPUT_A].options["path"] == "outputs/colour_output.json"
+
+    subfolder = _sink_schema_form_with_path("reports/july.json")
+    assert subfolder.pending_output_intents[OUTPUT_A].options["path"] == "outputs/reports/july.json"
+
+
+def test_sink_schema_form_rejects_traversal_paths() -> None:
+    for bad in ("../escape.json", "reports/../../escape.json", "/data/../escape.json"):
+        with pytest.raises(ValueError, match="'\\.\\.'"):
+            _sink_schema_form_with_path(bad)
+
+
+def test_sink_schema_form_passes_absolute_paths_through_for_route_allowlisting() -> None:
+    # Whether an absolute path is safe is a deployment question — the respond
+    # route allowlist-checks it with data_dir context before the transition.
+    result = _sink_schema_form_with_path("/data/out.jsonl")
+    assert result.pending_output_intents[OUTPUT_A].options["path"] == "/data/out.jsonl"
 
 
 def test_source_structural_policy_survives_inspection_and_is_removed_from_plugin_options() -> None:
@@ -730,11 +774,11 @@ def test_sink_structural_policy_survives_field_review_and_is_removed_from_plugin
         turn=turn,
         response=SchemaFormResponse(
             plugin="json",
-            options={"path": "/data/out.jsonl", "on_write_failure": "quarantine"},
+            options={"path": "out.jsonl", "on_write_failure": "quarantine"},
         ),
         authority=SchemaFormAuthority(
             knobs=policy_knobs,
-            model_validated_options={"path": "/data/out.jsonl", "on_write_failure": "quarantine"},
+            model_validated_options={"path": "out.jsonl", "on_write_failure": "quarantine"},
         ),
     )
     staged = replace(staged, history=())
@@ -759,11 +803,11 @@ def test_sink_schema_mode_is_preserved_from_validated_options() -> None:
         turn=turn,
         response=SchemaFormResponse(
             plugin="json",
-            options={"path": "/data/out.jsonl", "schema": {"mode": "flexible"}},
+            options={"path": "out.jsonl", "schema": {"mode": "flexible"}},
         ),
         authority=SchemaFormAuthority(
             knobs=SINK_KNOBS,
-            model_validated_options={"path": "/data/out.jsonl", "schema": {"mode": "flexible"}},
+            model_validated_options={"path": "out.jsonl", "schema": {"mode": "flexible"}},
         ),
     )
     staged = replace(staged, history=())
@@ -1147,11 +1191,11 @@ def test_output_edit_preserves_identity_policy_and_target_until_field_review() -
         turn=turn,
         response=SchemaFormResponse(
             plugin="json",
-            options={"path": "/data/revised.jsonl"},
+            options={"path": "revised.jsonl"},
         ),
         authority=SchemaFormAuthority(
             knobs=SINK_KNOBS,
-            model_validated_options={"path": "/data/revised.jsonl"},
+            model_validated_options={"path": "revised.jsonl"},
         ),
     )
 
@@ -1173,7 +1217,7 @@ def test_output_edit_preserves_identity_policy_and_target_until_field_review() -
     assert result.reviewed_outputs[OUTPUT_B] == session.reviewed_outputs[OUTPUT_B]
     revised = result.reviewed_outputs[OUTPUT_A]
     assert revised.name == "output"
-    assert dict(revised.options) == {"path": "/data/revised.jsonl"}
+    assert dict(revised.options) == {"path": "outputs/revised.jsonl"}
     assert revised.required_fields == ("id", "name")
     assert revised.on_write_failure == "failures"
     assert result.active_edit_target is None
@@ -1195,11 +1239,11 @@ def test_output_edit_rejects_hidden_structural_policy_override() -> None:
             turn=turn,
             response=SchemaFormResponse(
                 plugin="json",
-                options={"path": "/data/revised.jsonl", "on_write_failure": "discard"},
+                options={"path": "revised.jsonl", "on_write_failure": "discard"},
             ),
             authority=SchemaFormAuthority(
                 knobs=SINK_KNOBS,
-                model_validated_options={"path": "/data/revised.jsonl", "on_write_failure": "discard"},
+                model_validated_options={"path": "revised.jsonl", "on_write_failure": "discard"},
             ),
         )
 

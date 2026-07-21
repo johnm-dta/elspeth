@@ -497,14 +497,23 @@ def bind_guided_reviewed_components(
     if type(raw_outputs) is not list:
         raise AuditIntegrityError("guided planner candidate outputs are malformed")
     expected_output_names = [guided.reviewed_outputs[stable_id].name for stable_id in guided.output_order]
-    actual_output_names = [item.get("sink_name", item.get("name")) if type(item) is dict else None for item in raw_outputs]
-    if actual_output_names != expected_output_names:
+    # The planner is NOT given the reviewed output NAMES (only stable_id + plugin),
+    # so it authors its own output name and wires sibling on_success/on_error to it.
+    # Enforce STRUCTURAL authority (one candidate dict per reviewed output, in order
+    # — plugin-by-position is validated separately) rather than an unsatisfiable NAME
+    # equality, then remap the planner-invented output name to the reviewed authority
+    # and rewrite every reference so the topology stays wired.
+    if len(raw_outputs) != len(expected_output_names) or any(type(item) is not dict for item in raw_outputs):
         raise AuditIntegrityError("guided planner candidate outputs differ from reviewed authority")
+    output_rename: dict[str, str] = {}
     rebound_outputs: list[GuidedBoundOutput] = []
     for index, stable_id in enumerate(guided.output_order):
         reviewed_output = guided.reviewed_outputs[stable_id]
         candidate = raw_outputs[index]
         assert type(candidate) is dict
+        candidate_name = candidate.get("sink_name", candidate.get("name"))
+        if type(candidate_name) is str and candidate_name != reviewed_output.name:
+            output_rename[candidate_name] = reviewed_output.name
         rebound_outputs.append(
             {
                 "sink_name": reviewed_output.name,
@@ -514,6 +523,26 @@ def bind_guided_reviewed_components(
             }
         )
     bound["outputs"] = rebound_outputs
+    if output_rename:
+        # Outputs are terminal sinks referenced BY NAME in on_success/on_error
+        # routing; rewrite every sibling reference to the renamed reviewed output
+        # so the topology stays wired after the name is restored to authority.
+        sources_map = bound.get("sources")
+        if isinstance(sources_map, dict):
+            for member in sources_map.values():
+                if isinstance(member, dict) and member.get("on_success") in output_rename:
+                    member["on_success"] = output_rename[member["on_success"]]
+        singular_source = bound.get("source")
+        if isinstance(singular_source, dict) and singular_source.get("on_success") in output_rename:
+            singular_source["on_success"] = output_rename[singular_source["on_success"]]
+        topology_nodes = bound.get("nodes")
+        if isinstance(topology_nodes, list):
+            for topology_node in topology_nodes:
+                if not isinstance(topology_node, dict):
+                    continue
+                for edge_key in ("on_success", "on_error"):
+                    if topology_node.get(edge_key) in output_rename:
+                        topology_node[edge_key] = output_rename[topology_node[edge_key]]
     return cast(GuidedBoundPipeline, bound)
 
 

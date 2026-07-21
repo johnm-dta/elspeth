@@ -432,3 +432,86 @@ def test_send_message_freeform_planner_decline_is_a_normal_assistant_message(
         rows = conn.execute(select(chat_messages_table.c.role, chat_messages_table.c.content)).all()
     assistant_rows = [row for row in rows if row.role == "assistant" and _DECLINE_TEXT in (row.content or "")]
     assert len(assistant_rows) == 1
+
+
+def _valid_pipeline_completion(tmp_path: Path) -> Any:
+    """One-shot planner completion emitting a committable csv→json pipeline."""
+    pipeline = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {
+                "path": str(tmp_path / "blobs" / "input.csv"),
+                "schema": {"mode": "flexible", "fields": ["name: str"]},
+            },
+            "on_validation_failure": "discard",
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "rows",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / "result.json"),
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+    }
+    import json as _json
+
+    async def completion(**_kwargs: Any) -> _Response:
+        return _Response(
+            choices=[
+                _Choice(
+                    message=_Message(
+                        content=None,
+                        tool_calls=[
+                            _ToolCall(
+                                id="call-1",
+                                function=_Function(name="emit_pipeline_proposal", arguments=_json.dumps({"pipeline": pipeline})),
+                            )
+                        ],
+                    )
+                )
+            ],
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01},
+        )
+
+    return completion
+
+
+def test_freeform_auto_commit_surfaces_interpretation_reviews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipeline-proposal settlement must run the interpretation-review
+    surfacer against the committed state. The planner path mints proposals
+    without the compose loop's request_interpretation_review dispatch, so
+    skipping the surfacer leaves committed states whose pending
+    interpretation_requirements have NO resolvable event row — the run gate
+    then 422s (interpretation_placeholder_unresolved) with nothing the user
+    can resolve (live: first planner-authored llm pipeline, session ff368dcb).
+    """
+    from unittest.mock import AsyncMock
+
+    (tmp_path / "outputs").mkdir(exist_ok=True)
+    client, _engine, _sessions = _build_app(tmp_path, monkeypatch, _valid_pipeline_completion(tmp_path))
+    composer = client.app.state.composer_service
+    spy = AsyncMock(wraps=composer.surface_pending_interpretation_reviews)
+    monkeypatch.setattr(composer, "surface_pending_interpretation_reviews", spy)
+
+    session_id = client.post("/api/sessions", json={"title": "auto-commit surfacer"}).json()["id"]
+    response = client.post(f"/api/sessions/{session_id}/messages", json={"content": _EMPTY_INTENT})
+
+    assert response.status_code == 200, response.text
+    assert "prepared and validated" in response.text
+    assert spy.await_count == 1, "settlement must surface interpretation reviews for the committed state"
+    kwargs = spy.await_args.kwargs
+    assert kwargs["session_id"] == session_id
+    assert kwargs["current_state_id"] is not None

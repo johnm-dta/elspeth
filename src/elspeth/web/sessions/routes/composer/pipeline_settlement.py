@@ -325,4 +325,19 @@ async def settle_pipeline_proposal_under_compose_lock(
         raise
     if cancellation_state.requested:
         raise asyncio.CancelledError
+    # Surface resolvable interpretation-review EVENTS for every site the
+    # committed pipeline created (llm prompt templates etc.). The planner
+    # path mints proposals without the compose loop's
+    # request_interpretation_review dispatch, so without this pass the
+    # committed state carries pending interpretation_requirements with no
+    # event row — the run gate then fails closed
+    # (interpretation_placeholder_unresolved) with nothing the user can
+    # resolve. Mirrors the guided dispatcher's post-commit surfacing pass;
+    # runs after settlement so events bind to the durable state id.
+    composer = request.app.state.composer_service
+    await composer.surface_pending_interpretation_reviews(
+        prepared.result.updated_state,
+        session_id=str(proposal.session_id),
+        current_state_id=str(settled.state.id),
+    )
     return PipelineRouteSettlement(settlement=settled, validation=validation)

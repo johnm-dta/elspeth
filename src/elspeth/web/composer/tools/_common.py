@@ -41,6 +41,7 @@ from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    parse_secret_ref_marker,
 )
 from elspeth.engine.orchestrator.preflight import check_config_value_sources
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
@@ -1518,12 +1519,15 @@ def _prevalidate_plugin_options(
         _mask_pending_interpretation_placeholders_for_authoring_validation(merged)
 
     # Strip secret_ref markers before validation.  A secret-ref'd field
-    # IS provisioned (the user called wire_secret_ref), just deferred to
+    # IS provisioned (the user called wire_secret_ref, or operator-profile
+    # lowering injected the credential as a scoped marker), just deferred to
     # execution time.  Stripping it may cause Pydantic to report
-    # "field required" — we filter those errors out below.
+    # "field required" — we filter those errors out below.  The canonical
+    # parser accepts both the bare {"secret_ref"} form and the scoped
+    # {"secret_ref", "secret_scope"} form profile lowering emits.
     secret_ref_keys: set[str] = set()
     for key, value in list(merged.items()):
-        if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"], str):
+        if parse_secret_ref_marker(value) is not None:
             secret_ref_keys.add(key)
             del merged[key]
 

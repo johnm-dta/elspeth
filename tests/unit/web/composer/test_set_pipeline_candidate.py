@@ -1622,3 +1622,145 @@ async def test_current_executor_inline_blob_effects_are_single_settlement(tmp_pa
         },
         "on_validation_failure": "discard",
     }
+
+
+def _operator_profile_view(tmp_path: Path) -> ToolContext:
+    """Production-path policy wiring with one OpenRouter LLM operator profile.
+
+    Mirrors the live deployment posture (ELSPETH_WEB__LLM_PROFILES + a
+    server-scoped credential): profile lowering injects ``api_key`` as the
+    scoped secret marker ``{"secret_ref", "secret_scope"}``, which the
+    trained-operator fixtures never exercise.
+    """
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.config import WebSettings
+    from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_model="test/planner",
+        composer_max_composition_turns=3,
+        composer_max_discovery_turns=2,
+        composer_timeout_seconds=20.0,
+        composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
+        llm_profiles={
+            "sonnet": {
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4.6",
+                "credential_scope": "server",
+                "credential_ref": "OPENROUTER_API_KEY",
+            }
+        },
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+
+    class _ServerKeyInventory:
+        def has_server_ref(self, name: str) -> bool:
+            return name == "OPENROUTER_API_KEY"
+
+        def has_user_ref(self, principal: str, name: str) -> bool:
+            return False
+
+        def has_ref(self, principal: str, name: str) -> bool:
+            return name == "OPENROUTER_API_KEY"
+
+        def server_generation(self, name: str) -> str | None:
+            return "gen-1" if name == "OPENROUTER_API_KEY" else None
+
+        def user_generation(self, principal: str, name: str) -> str | None:
+            return None
+
+    snapshot = build_plugin_snapshot(
+        policy=policy,
+        catalog=create_catalog_service(),
+        profiles=profiles,
+        principal_scope="local:profile-test",
+        secret_inventory=_ServerKeyInventory(),
+        generation_key=b"profile-test-key",
+    )
+    view = PolicyCatalogView(create_catalog_service(), snapshot, profiles)
+    return ToolContext(catalog=view, plugin_snapshot=snapshot, data_dir=str(tmp_path))
+
+
+def _ab_multi_query_args(tmp_path: Path) -> dict[str, Any]:
+    """The canonical web A/B shape: ONE llm node, two queries, reconciled row."""
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {
+                "path": str(tmp_path / "blobs" / "colours.csv"),
+                "schema": {"mode": "flexible", "fields": ["color_name: str", "hex: str"]},
+            },
+            "on_validation_failure": "discard",
+        },
+        "nodes": [
+            {
+                "id": "ab_assess",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "assessed",
+                "on_error": "discard",
+                "options": {
+                    "profile": "sonnet",
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": ["color_name", "hex"],
+                    "prompt_template": "Assess the colour {{ row.input_1 }} ({{ row.input_2 }}).",
+                    "queries": {
+                        "tone": {
+                            "input_fields": {"input_1": "color_name", "input_2": "hex"},
+                            "template": 'Emotional tone of {{ row.input_1 }} ({{ row.input_2 }})? JSON: {"value": "<phrase>"}',
+                            "output_fields": [{"suffix": "value", "type": "string"}],
+                        },
+                        "usage": {
+                            "input_fields": {"input_1": "color_name", "input_2": "hex"},
+                            "template": 'One design usage for {{ row.input_1 }} ({{ row.input_2 }})? JSON: {"value": "<context>"}',
+                            "output_fields": [{"suffix": "value", "type": "string"}],
+                        },
+                    },
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "assessed",
+                "plugin": "json",
+                "options": {
+                    "path": str(tmp_path / "outputs" / "colour_ab.json"),
+                    "schema": {"mode": "observed"},
+                    "format": "json",
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+    }
+
+
+def test_profile_lowered_llm_multi_query_candidate_is_acceptable(tmp_path: Path) -> None:
+    """The scoped credential marker from profile lowering must not fail validation.
+
+    Live regression (sessions da1def83 + 5551ba84): every A/B proposal — three
+    sonnet-5 terminals and the opus escape-hatch one-shot — was rejected with
+    "api_key: Input should be a valid string" because prevalidation stripped
+    only the one-key {"secret_ref"} marker and not the two-key scoped marker
+    profile lowering injects. The models repaired blind against a server-side
+    unrepairable rejection until REPAIR_EXHAUSTED.
+    """
+    (tmp_path / "outputs").mkdir(exist_ok=True)
+    context = _operator_profile_view(tmp_path)
+    state = _empty_state()
+
+    candidate = build_set_pipeline_candidate(_ab_multi_query_args(tmp_path), state, context)
+
+    rejection = None if candidate.acceptable else (candidate.result.data or {}).get("error")
+    assert candidate.acceptable is True, f"canonical A/B shape rejected: {rejection}"
+    assert candidate.result.success is True

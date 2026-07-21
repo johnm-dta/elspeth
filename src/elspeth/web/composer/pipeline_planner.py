@@ -483,7 +483,12 @@ def _escape_hatch_notice() -> str:
         "seeing the full conversation above as one freeform puzzle. You have exactly one turn: either "
         "call emit_pipeline_proposal once with a complete, valid pipeline that satisfies the request, "
         "or reply in plain text honestly explaining why the request cannot be built with the available "
-        "plugins. Do not call any other tool."
+        "plugins. Do not call any other tool. If you decline, your FIRST sentence must state the cause "
+        "plainly in the user's terms — distinguish a capability that is installed but not turned on in "
+        "this deployment (an operator can enable it) from one that does not exist or a request that is "
+        "impossible in principle. For example: \"I can't do this here: the LLM transform is not turned "
+        'on in this deployment — an operator needs to enable an LLM profile." Put supporting detail '
+        "after that sentence, not before it."
     )
 
 

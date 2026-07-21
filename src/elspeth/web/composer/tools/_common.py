@@ -1255,6 +1255,33 @@ class PluginPolicyViolation:
     message: str
 
 
+# Plain-language cause per unavailability reason. Each names the DISTINCT
+# deployment reality (not installed vs installed-but-not-enabled vs missing
+# credential ...) so the composer model can tell the user exactly why a
+# capability cannot be used and what an operator would change — instead of
+# echoing a bare policy code.
+_PLUGIN_UNAVAILABLE_EXPLANATIONS: Final[dict[PluginUnavailableReason, str]] = {
+    PluginUnavailableReason.NOT_AUTHORIZED: (
+        "the plugin is installed but not turned on in this deployment's plugin policy; an operator must enable it"
+    ),
+    PluginUnavailableReason.NOT_INSTALLED: "no plugin with this name is installed in this deployment",
+    PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING: (
+        "the plugin is installed but a local requirement it depends on is missing in this deployment"
+    ),
+    PluginUnavailableReason.CREDENTIAL_MISSING: (
+        "the plugin is turned on but the credential it needs is not configured in this deployment"
+    ),
+    PluginUnavailableReason.PROFILE_UNAVAILABLE: (
+        "the plugin is installed but not turned on in this deployment — no operator profile is "
+        "configured for it; an operator must enable one before it can be used"
+    ),
+}
+
+
+def _plugin_unavailable_message(plugin_type: PluginKind, reason: PluginUnavailableReason) -> str:
+    return f"{plugin_type} plugin selection is unavailable ({reason.value}): {_PLUGIN_UNAVAILABLE_EXPLANATIONS[reason]}"
+
+
 def _validate_plugin_name(
     context: ToolContext,
     plugin_type: PluginKind,
@@ -1266,20 +1293,20 @@ def _validate_plugin_name(
     except ValueError:
         return PluginPolicyViolation(
             error_code=PluginUnavailableReason.NOT_INSTALLED,
-            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.NOT_INSTALLED.value})",
+            message=_plugin_unavailable_message(plugin_type, PluginUnavailableReason.NOT_INSTALLED),
         )
     reason = context.catalog.unavailable_reason(plugin_id)
     if reason is not None:
         return PluginPolicyViolation(
             error_code=reason,
-            message=f"{plugin_type} plugin selection is unavailable ({reason.value})",
+            message=_plugin_unavailable_message(plugin_type, reason),
         )
     try:
         context.catalog.get_schema(plugin_type, name)
     except (ValueError, KeyError):
         return PluginPolicyViolation(
             error_code=PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING,
-            message=f"{plugin_type} plugin selection is unavailable ({PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING.value})",
+            message=_plugin_unavailable_message(plugin_type, PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING),
         )
     return None
 
@@ -1876,7 +1903,10 @@ def _prevalidate_transform_for_context(
         finding for finding in profile_validation.policy_findings if finding.stage in {"plugin_enablement", "operator_profile_options"}
     )
     if blocking:
-        return f"Invalid options for transform '{plugin_name}': {blocking[0].error_code}"
+        # Carry the finding's own explanation — the bare error_code alone
+        # (e.g. "profile_unavailable") tells neither the model nor the user
+        # what is actually switched off.
+        return f"Invalid options for transform '{plugin_name}': {blocking[0].error_code} — {blocking[0].message}"
     alias = options["profile"] if "profile" in options else plugin_name
     if not isinstance(alias, str):
         return f"Invalid options for transform '{plugin_name}': profile_unavailable"

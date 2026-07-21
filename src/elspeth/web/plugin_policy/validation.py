@@ -287,7 +287,11 @@ def _profile_unavailable_finding(component: _Component, plugin_id: PluginId) -> 
         component_id=component.component_id,
         component_type=component.component_type,
         error_code="profile_unavailable",
-        message=f"Plugin '{plugin_id}' requires an available operator profile.",
+        message=(
+            f"Plugin '{plugin_id}' is installed but not turned on in this deployment: "
+            "it requires an operator profile and none is configured or available. "
+            "An operator must enable a profile before this plugin can be used."
+        ),
     )
 
 

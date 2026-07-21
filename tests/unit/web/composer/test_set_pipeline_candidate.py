@@ -1215,21 +1215,24 @@ def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], T
             "unknown_plugin",
             unknown,
             _trained_context(data_dir=tmp_path),
-            "Node 'copy': transform plugin selection is unavailable (plugin_not_installed)",
+            "Node 'copy': transform plugin selection is unavailable (plugin_not_installed): "
+            "no plugin with this name is installed in this deployment",
             "plugin_not_installed",
         ),
         (
             "blocked_plugin",
             blocked,
             _blocked_context(PluginId("transform", "passthrough"), data_dir=tmp_path),
-            "Node 'copy': transform plugin selection is unavailable (plugin_not_enabled)",
+            "Node 'copy': transform plugin selection is unavailable (plugin_not_enabled): "
+            "the plugin is installed but not turned on in this deployment's plugin policy; an operator must enable it",
             "plugin_not_enabled",
         ),
         (
             "profile_validation",
             invalid_profile,
             _profile_rejecting_context(data_dir=tmp_path),
-            "Node 'copy': Invalid options for transform 'passthrough': profile_unavailable",
+            "Node 'copy': Invalid options for transform 'passthrough': profile_unavailable — "
+            "The requested operator profile is unavailable.",
             None,
         ),
         (

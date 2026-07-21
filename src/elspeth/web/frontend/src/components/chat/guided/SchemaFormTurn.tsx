@@ -72,16 +72,32 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
     if (!canSubmit()) return;
     const submitted: Record<string, unknown> = {};
     for (const field of visibleFields()) {
-      submitted[field.name] = submittedValue(field, values[field.name]);
+      const value = submittedValue(field, values[field.name]);
+      // Optional non-nullable knobs must be OMITTED when their RESOLVED value is
+      // null rather than sent as an explicit null: the backend schema-form
+      // contract rejects null for a non-nullable option (stage_transitions.py:
+      // "option 'X' is not nullable"), even though the field is optional and the
+      // plugin config supplies its own default (e.g. the JSON sink's `headers` /
+      // `collision_policy` / `indent`). A json-value field can hold the literal
+      // string "null" that submittedValue parses to null, so we test the resolved
+      // value, not the raw input. Required-field validation is unaffected;
+      // nullable optional fields still send null (null is meaningful there).
+      if (value === null && !field.required && !field.nullable) {
+        continue;
+      }
+      submitted[field.name] = value;
     }
 
     onSubmit({
       chosen: null,
+      // The schema_form guided/respond contract accepts EXACTLY {plugin, options}
+      // (backend guided.py — schema-8 cutover befb436f0). Extra keys trip the
+      // closed-shape set-check and 400 the turn ("Guided response does not satisfy
+      // the current turn contract."). The server re-derives observed columns / sample
+      // rows from the stored source intent, so they must NOT be sent here.
       edited_values: {
         plugin: payload.plugin,
         options: submitted,
-        observed_columns: [],
-        sample_rows: [],
       },
       custom_inputs: null,
       proposal_id: null,

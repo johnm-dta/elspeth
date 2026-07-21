@@ -82,11 +82,19 @@ class _Completion(Protocol):
 
 
 class PipelinePlannerError(RuntimeError):
-    """Leak-safe failure raised when the bounded planner cannot continue."""
+    """Leak-safe failure raised when the bounded planner cannot continue.
 
-    def __init__(self, message: str, *, code: str) -> None:
+    ``detail_codes`` carries the closed, leak-safe validation error codes of
+    the last candidate rejection when the failure is a repair/composition
+    exhaustion — the discriminant a live 5xx investigation needs, recorded on
+    the durable failure disposition so it never requires a temp diagnostic.
+    Empty for non-rejection failures (timeout, provider error, ...).
+    """
+
+    def __init__(self, message: str, *, code: str, detail_codes: tuple[str, ...] = ()) -> None:
         super().__init__(message)
         self.code = code
+        self.detail_codes = detail_codes
 
 
 class PlannerDeclined(PipelinePlannerError):
@@ -513,6 +521,17 @@ def _assistant_tool_calls_message(message: Any, calls: tuple[_ParsedToolCall, ..
             for call in calls
         ],
     }
+
+
+def _feedback_error_codes(feedback: Mapping[str, Any]) -> tuple[str, ...]:
+    """Extract the closed error codes from a structural feedback envelope."""
+    validation = feedback.get("validation")
+    if not isinstance(validation, Mapping):
+        return ()
+    errors = validation.get("errors")
+    if not isinstance(errors, list | tuple):
+        return ()
+    return tuple(entry["error_code"] for entry in errors if isinstance(entry, Mapping) and isinstance(entry.get("error_code"), str))
 
 
 def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
@@ -1249,6 +1268,16 @@ async def _plan_pipeline_inner(
     hatch_error: PipelinePlannerError | None = None
     hatch_turn_next = False
     hatch_spent = False
+    # Closed validation codes of the most recent candidate rejection, recorded
+    # on any resulting exhaustion so the durable disposition names the wall.
+    last_rejection_codes: tuple[str, ...] = ()
+
+    def _rejection_exhausted() -> PipelinePlannerError:
+        return PipelinePlannerError(
+            "planner repair budget exhausted",
+            code="REPAIR_EXHAUSTED",
+            detail_codes=last_rejection_codes,
+        )
 
     def _hatch_available() -> bool:
         return model_config.escape_hatch_model is not None and not hatch_spent
@@ -1334,15 +1363,16 @@ async def _plan_pipeline_inner(
                     if not set(claimed_deferred_intent_ids).issubset(eligible_deferred_intent_ids):
                         terminal_feedback = _deferred_intent_claim_feedback()
             if terminal_feedback is not None:
+                last_rejection_codes = _feedback_error_codes(terminal_feedback)
                 if is_hatch_turn:
                     assert hatch_error is not None
                     raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
                     if _hatch_available():
-                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        _engage_escape_hatch(_rejection_exhausted())
                         continue
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                    raise _rejection_exhausted() from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {
@@ -1382,15 +1412,16 @@ async def _plan_pipeline_inner(
                     provider=model_config.provider,
                 )
             except DeferredIntentClaimError:
+                last_rejection_codes = ("deferred_intent_claim",)
                 if is_hatch_turn:
                     assert hatch_error is not None
                     raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
                     if _hatch_available():
-                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        _engage_escape_hatch(_rejection_exhausted())
                         continue
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                    raise _rejection_exhausted() from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {
@@ -1401,15 +1432,16 @@ async def _plan_pipeline_inner(
                 )
                 continue
             except ToolArgumentError as exc:
+                last_rejection_codes = (exc.code or "argument_error",)
                 if is_hatch_turn:
                     assert hatch_error is not None
                     raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
                     if _hatch_available():
-                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        _engage_escape_hatch(_rejection_exhausted())
                         continue
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                    raise _rejection_exhausted() from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {
@@ -1420,15 +1452,16 @@ async def _plan_pipeline_inner(
                 )
                 continue
             except _PipelineCandidateRejected as exc:
+                last_rejection_codes = tuple(entry.error_code for entry in exc.result.validation.errors if entry.error_code)
                 if is_hatch_turn:
                     assert hatch_error is not None
                     raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
                     if _hatch_available():
-                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        _engage_escape_hatch(_rejection_exhausted())
                         continue
-                    raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+                    raise _rejection_exhausted() from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
                     {

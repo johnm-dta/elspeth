@@ -1907,6 +1907,11 @@ async def _handle_planner_failure(
         # discriminant a live 5xx investigation actually needs.
         "planner_code": exc.code,
     }
+    # The closed validation codes of the last candidate rejection when the
+    # failure is an exhaustion — names the wall a live 5xx hit without a temp
+    # diagnostic (empty for non-rejection failures).
+    if exc.detail_codes:
+        envelope["rejection_codes"] = sorted(set(exc.detail_codes))
     # role="audit" keeps this out of the user-visible conversation channel
     # (``_is_composer_audit_tool_message`` excludes every audit row) exactly as
     # the per-LLM-call audit sidecars are; the distinct ``_kind`` keeps it out

@@ -2286,3 +2286,32 @@ async def test_discovery_argument_error_alongside_valid_call_both_feed_back(
     tool_messages = [m for m in completion.requests[1]["messages"] if m["role"] == "tool"]
     assert len(tool_messages) == 2
     assert {inv.tool_name for inv in recorder.invocations} == {"get_plugin_schema", "list_sources"}
+
+
+@pytest.mark.asyncio
+async def test_repair_exhaustion_records_last_rejection_codes(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A candidate rejected to exhaustion must surface WHY on the error, so a
+    live 502 disposition names the blocking validation codes instead of
+    needing a temp DIAG (permanent forensics — the-DB-is-the-log)."""
+    # _invalid_pipeline mints a sink_name mismatch → a closed validation code.
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            repair_budget=1,
+            model_overrides={"escape_hatch_model": None},
+        )
+
+    assert excinfo.value.code == "REPAIR_EXHAUSTED"
+    assert excinfo.value.detail_codes, "exhaustion must carry the last rejection's codes"
+    # Codes are the closed, leak-safe discriminant — no messages/paths.
+    assert all(isinstance(c, str) for c in excinfo.value.detail_codes)

@@ -280,6 +280,9 @@ async def test_freeform_repair_exhaustion_is_translated_to_a_safe_disposition(pa
     envelope = rows[0].tool_calls[0]
     assert envelope["failure_code"] == "invalid_provider_response"
     assert envelope["surface"] == "freeform"
+    # The disposition names the wall: the last rejection's closed validation
+    # codes, so a live 502 is diagnosable from the DB alone.
+    assert envelope["rejection_codes"], "exhaustion disposition must carry the last rejection codes"
 
 
 @pytest.mark.asyncio

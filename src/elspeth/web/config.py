@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import types
+import typing
 from collections.abc import Mapping
 from decimal import Decimal
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationError, ValidationInfo, field_validator, model_validator
@@ -877,12 +879,44 @@ _JSON_OBJECT_FIELDS: frozenset[str] = frozenset(
 )
 
 
+def _annotation_scalar_types(annotation: Any) -> set[type]:
+    """Flatten an annotation (including ``X | None`` unions) to its scalar types."""
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        return {member for arg in typing.get_args(annotation) for member in _annotation_scalar_types(arg)}
+    return {annotation} if isinstance(annotation, type) else set()
+
+
+def _coerce_env_scalar(value: str, annotation: Any) -> object:
+    """Coerce a numeric environment string when the target field is int/float.
+
+    Environment values are always strings, but several fields are declared
+    ``strict=True`` and reject string input outright — without coercion those
+    fields are silently un-settable from the environment (the misconfiguration
+    only detonates as a startup crash-loop). Non-numeric targets, unparseable
+    values, and bool-typed fields pass through unchanged so Pydantic reports
+    them against the original input.
+    """
+    scalar_types = _annotation_scalar_types(annotation)
+    if bool in scalar_types:
+        return value
+    try:
+        if int in scalar_types and float not in scalar_types:
+            return int(value)
+        if float in scalar_types:
+            return float(value)
+    except ValueError:
+        return value
+    return value
+
+
 def settings_from_env() -> WebSettings:
     """Construct :class:`WebSettings` from ``ELSPETH_WEB__*`` variables.
 
     Collection fields use JSON arrays/objects, the literal ``null`` clears an
-    optional scalar, unknown fields fail with their original environment name,
-    and policy-validation failures never echo raw operator input.
+    optional scalar, numeric strings are coerced for strict int/float fields,
+    unknown fields fail with their original environment name, and
+    policy-validation failures never echo raw operator input.
     """
     kwargs: dict[str, object] = {}
     prefix = "ELSPETH_WEB__"
@@ -909,7 +943,7 @@ def settings_from_env() -> WebSettings:
         elif value == "null":
             kwargs[field_name] = None
         else:
-            kwargs[field_name] = value
+            kwargs[field_name] = _coerce_env_scalar(value, WebSettings.model_fields[field_name].annotation)
 
     try:
         return WebSettings(**kwargs)  # type: ignore[arg-type]

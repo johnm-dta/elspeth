@@ -1580,3 +1580,33 @@ def test_advisor_checkpoint_budget_default_and_floor() -> None:
     assert _settings().composer_advisor_checkpoint_max_passes == 2
     with pytest.raises(ValidationError):
         _settings(composer_advisor_checkpoint_max_passes=0)
+
+
+def test_settings_from_env_coerces_numeric_strings_for_strict_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ELSPETH_WEB__* values arrive as strings; strict int/float fields must
+    still be settable from the environment (live regression 2026-07-22: setting
+    ELSPETH_WEB__COMPOSER_PLANNER_MAX_COMPLETION_TOKENS crash-looped the
+    service with int_type because settings_from_env passed the raw string to a
+    strict field)."""
+    import base64
+    import secrets as _secrets
+
+    from elspeth.web.config import settings_from_env
+
+    for key, value in {
+        "ELSPETH_WEB__COMPOSER_MAX_COMPOSITION_TURNS": "30",
+        "ELSPETH_WEB__COMPOSER_MAX_DISCOVERY_TURNS": "10",
+        "ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS": "20.0",
+        "ELSPETH_WEB__COMPOSER_RATE_LIMIT_PER_MINUTE": "10",
+        "ELSPETH_WEB__COMPOSER_PLANNER_MAX_COMPLETION_TOKENS": "32768",
+        "ELSPETH_WEB__COMPOSER_PLANNER_MAX_PROVIDER_CALLS": "80",
+        "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY": base64.b64encode(_secrets.token_bytes(32)).decode(),
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    settings = settings_from_env()
+
+    assert settings.composer_planner_max_completion_tokens == 32768
+    assert settings.composer_planner_max_provider_calls == 80
+    assert settings.composer_max_composition_turns == 30
+    assert settings.composer_timeout_seconds == 20.0

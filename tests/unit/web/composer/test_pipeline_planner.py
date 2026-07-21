@@ -2171,3 +2171,69 @@ async def test_discovery_cycle_without_hatch_still_raises(
 
     assert excinfo.value.code == "DISCOVERY_CYCLE"
     assert len(completion.requests) == 2
+
+
+def _truncated_response(*, completion_tokens: int, cost: object = 0.01) -> _Response:
+    """A response cut off at the output token limit: no tool calls, partial text."""
+    return _Response(
+        choices=[_Choice(message=_Message(content='{"pipeline": {"source": {"plugin": "csv", "opti', tool_calls=None))],
+        usage={"prompt_tokens": 10, "completion_tokens": completion_tokens, "total_tokens": 10 + completion_tokens, "cost": cost},
+    )
+
+
+@pytest.mark.asyncio
+async def test_truncated_response_gets_compactness_repair(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A response cut off at the completion-token cap is repairable, not fatal."""
+    completion = _ScriptedCompletion(
+        _truncated_response(completion_tokens=800),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert len(completion.requests) == 2
+    notices = [
+        message
+        for message in completion.requests[1]["messages"]
+        if message["role"] == "user" and "cut off at the output token limit" in str(message.get("content"))
+    ]
+    assert len(notices) == 1
+    # The truncated call is audited with its own discriminant.
+    assert recorder.llm_calls[0].error_message == "RESPONSE_TRUNCATED"
+
+
+@pytest.mark.asyncio
+async def test_truncated_responses_exhaust_repair_budget_without_hatch(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _truncated_response(completion_tokens=800),
+        _truncated_response(completion_tokens=800),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, repair_budget=1)
+
+    assert excinfo.value.code == "REPAIR_EXHAUSTED"
+    assert len(completion.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_untruncated_malformed_response_stays_fatal(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A short prose reply (well under the cap) is genuine malformed output."""
+    completion = _ScriptedCompletion(_text_response("I think you should use a csv source."))
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    assert excinfo.value.code == "MALFORMED_RESPONSE"
+    assert len(completion.requests) == 1

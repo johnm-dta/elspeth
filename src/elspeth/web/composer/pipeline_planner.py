@@ -477,6 +477,14 @@ def _discovery_pressure_notice(remaining: int) -> str:
     )
 
 
+def _truncated_response_notice() -> str:
+    return (
+        "Your previous response was cut off at the output token limit and has been discarded. "
+        "Respond again more compactly: shorter prompt templates, omit optional fields, and emit "
+        "the tool call with no surrounding prose."
+    )
+
+
 def _escape_hatch_notice() -> str:
     return (
         "The planning budget is exhausted; this is the escape hatch. You are a senior advisor model "
@@ -1209,14 +1217,24 @@ async def _plan_pipeline_inner(
             except PipelinePlannerError as exc:
                 if exc.code != "MALFORMED_RESPONSE":
                     raise
+                # A response that consumed the whole completion budget and
+                # failed to parse was almost certainly cut off mid-write —
+                # that is a capacity event, not malformed output, and the
+                # loop can repair it by asking for a more compact reply.
+                truncated = call.completion_tokens is not None and call.completion_tokens >= budget_policy.max_completion_tokens
                 recorder.record_llm_call(
                     replace(
                         call,
                         status=ComposerLLMCallStatus.MALFORMED_RESPONSE,
                         error_class=type(exc).__name__,
-                        error_message=exc.code,
+                        error_message="RESPONSE_TRUNCATED" if truncated else exc.code,
                     )
                 )
+                if truncated:
+                    raise PipelinePlannerError(
+                        "planner response was truncated at the completion token limit",
+                        code="RESPONSE_TRUNCATED",
+                    ) from exc
                 raise
             recorder.record_llm_call(call)
             message, calls = parsed_response
@@ -1247,22 +1265,39 @@ async def _plan_pipeline_inner(
     while True:
         is_hatch_turn = hatch_turn_next
         hatch_turn_next = False
-        if is_hatch_turn:
-            assert model_config.escape_hatch_model is not None
-            assert hatch_error is not None
-            message, calls, audited_call = await call_model(
-                model_override=model_config.escape_hatch_model,
-                tools_override=[planner_terminal_tool_definition()],
-                allow_text_reply=True,
-            )
-            if not calls:
-                decline_content = _provider_field(message, "content")
-                raise PlannerDeclined(
-                    "planner escape-hatch advisor declined the request",
-                    decline_text=decline_content if type(decline_content) is str else "",
+        try:
+            if is_hatch_turn:
+                assert model_config.escape_hatch_model is not None
+                assert hatch_error is not None
+                message, calls, audited_call = await call_model(
+                    model_override=model_config.escape_hatch_model,
+                    tools_override=[planner_terminal_tool_definition()],
+                    allow_text_reply=True,
                 )
-        else:
-            message, calls, audited_call = await call_model()
+            else:
+                message, calls, audited_call = await call_model()
+        except PipelinePlannerError as exc:
+            if exc.code != "RESPONSE_TRUNCATED":
+                raise
+            if is_hatch_turn:
+                # The advisor's one shot overflowed: the hatch is spent, the
+                # original exhaustion stands.
+                assert hatch_error is not None
+                raise hatch_error from None
+            repair_count += 1
+            if repair_count > repair_budget:
+                if _hatch_available():
+                    _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                    continue
+                raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
+            messages.append({"role": "user", "content": _truncated_response_notice()})
+            continue
+        if is_hatch_turn and not calls:
+            decline_content = _provider_field(message, "content")
+            raise PlannerDeclined(
+                "planner escape-hatch advisor declined the request",
+                decline_text=decline_content if type(decline_content) is str else "",
+            )
         if len(calls) > model_config.max_tool_calls_per_turn:
             raise PipelinePlannerError("planner per-turn tool call budget exhausted", code="TOOL_CALLS_EXHAUSTED")
 

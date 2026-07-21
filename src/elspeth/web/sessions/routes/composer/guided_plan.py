@@ -101,6 +101,7 @@ def _guided_full_failure_code(exc: BaseException) -> GuidedOperationFailureCode:
             "MALFORMED_RESPONSE",
             "PROVIDER_CALLS_EXHAUSTED",
             "REPAIR_EXHAUSTED",
+            "RESPONSE_TRUNCATED",
             "TOOL_CALLS_EXHAUSTED",
             "VALIDATION_FAILED",
         }:

@@ -333,6 +333,7 @@ _ALL_PLANNER_CODES = (
     "COMPOSITION_EXHAUSTED",
     "COST_CAP_EXCEEDED",
     "COST_UNAVAILABLE",
+    "DECLINED",
     "DISCOVERY_CYCLE",
     "DISCOVERY_EXHAUSTED",
     "DISCOVERY_ONLY",
@@ -362,3 +363,67 @@ def test_freeform_planner_failure_code_matches_guided(code: str) -> None:
 
     exc = PipelinePlannerError("planner failure", code=code)
     assert _freeform_planner_failure_code(exc) == _guided_full_failure_code(exc)
+
+
+_DECLINE_TEXT = "I must decline: this request needs a streaming-join capability no available plugin provides."
+
+
+def _decline_after_exhaustion_completion() -> Any:
+    """Primary planner over-explores to discovery exhaustion; the escape-hatch
+    advisor turn answers in text — the honest decline."""
+    counter = {"calls": 0}
+    discovery = ("list_sources", "list_sinks", "list_transforms")
+
+    async def completion(**kwargs: Any) -> _Response:
+        if kwargs["model"] != "test/planner":
+            return _Response(
+                choices=[_Choice(message=_Message(content=_DECLINE_TEXT, tool_calls=[]))],
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01},
+            )
+        name = discovery[counter["calls"] % len(discovery)]
+        counter["calls"] += 1
+        return _Response(
+            choices=[
+                _Choice(
+                    message=_Message(
+                        content=None,
+                        tool_calls=[_ToolCall(id=f"call-{counter['calls']}", function=_Function(name=name, arguments="{}"))],
+                    )
+                )
+            ],
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01},
+        )
+
+    return completion
+
+
+def test_send_message_freeform_planner_decline_is_a_normal_assistant_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An escape-hatch decline is a successful conversational outcome, not a
+    provider failure: 200 with the advisor's own words, no failure disposition,
+    no 'unusable pipeline plan' misattribution."""
+    client, engine, _sessions = _build_app(tmp_path, monkeypatch, _decline_after_exhaustion_completion())
+    session_id = client.post("/api/sessions", json={"title": "freeform planner decline"}).json()["id"]
+
+    response = client.post(f"/api/sessions/{session_id}/messages", json={"content": _EMPTY_INTENT})
+
+    assert response.status_code == 200, response.text
+    assert _DECLINE_TEXT in response.text
+    assert "unusable pipeline plan" not in response.text
+
+    # Not a failure: no disposition row, and progress is not "failed".
+    assert _disposition_rows(engine) == []
+    progress = client.get(f"/api/sessions/{session_id}/composer-progress").json()
+    assert progress.get("phase") != "failed"
+
+    # The planner's LLM audit evidence is durable: three primary discovery
+    # calls plus the advisor overtime turn.
+    assert len(_llm_audit_rows(engine)) == 4
+
+    # The decline lands in the visible conversation as an assistant message.
+    with engine.connect() as conn:
+        rows = conn.execute(select(chat_messages_table.c.role, chat_messages_table.c.content)).all()
+    assistant_rows = [row for row in rows if row.role == "assistant" and _DECLINE_TEXT in (row.content or "")]
+    assert len(assistant_rows) == 1

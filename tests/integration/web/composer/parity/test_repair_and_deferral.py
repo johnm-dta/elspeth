@@ -256,9 +256,10 @@ async def test_freeform_repair_exhaustion_is_translated_to_a_safe_disposition(pa
     valid = _valid_pipeline(parity_env, _LINEAR)
     malformed = emit_proposal_response(_malformed_missing_edges(valid))
     # Budget is 2 (parity settings inherit the WebSettings default); the third
-    # malformed terminal makes repair_count == 3 > 2 → REPAIR_EXHAUSTED (composition
-    # turns reach only 3 of 4, so it is repair — not composition — exhaustion).
-    completion = _ScriptedCompletion(malformed, malformed, malformed)
+    # malformed terminal makes repair_count == 3 > 2, which now engages the
+    # escape-hatch overtime turn on the advisor model. A fourth malformed
+    # terminal spends the hatch, so the original REPAIR_EXHAUSTED stands.
+    completion = _ScriptedCompletion(malformed, malformed, malformed, malformed)
     parity_env.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
     async with parity_env._client() as client:
@@ -271,7 +272,8 @@ async def test_freeform_repair_exhaustion_is_translated_to_a_safe_disposition(pa
     detail = response.json()["detail"]
     assert detail["error_type"] == "composer_planner_failure"
     assert detail["failure_code"] == "invalid_provider_response"
-    assert len(completion.requests) == 3, "planner consumed exactly repair_budget + 1 provider calls"
+    assert len(completion.requests) == 4, "repair_budget + 1 primary calls, then the spent escape-hatch turn"
+    assert completion.requests[3]["model"] != completion.requests[0]["model"], "overtime turn runs on the advisor model"
 
     rows = _disposition_rows(parity_env.app.state.session_engine)
     assert len(rows) == 1, "exactly one durable closed failure-disposition audit row"

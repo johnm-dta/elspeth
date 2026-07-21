@@ -40,6 +40,7 @@ from elspeth.web.composer.pipeline_planner import (
     PipelinePlannerError,
     PlannerBudgetPolicy,
     PlannerCustodyConfig,
+    PlannerDeclined,
     PlannerModelConfig,
     PlannerOriginatingMessage,
     PlannerRequestLifecycle,
@@ -659,7 +660,10 @@ async def test_discovery_round_uses_real_read_only_tool_then_terminal(
 
     assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
     assert len(completion.requests) == 2
-    assert completion.requests[1]["messages"][-1]["role"] == "tool"
+    # Tool results land before the budget-pressure notice that fires at two
+    # remaining discovery turns.
+    assert completion.requests[1]["messages"][-2]["role"] == "tool"
+    assert completion.requests[1]["messages"][-1]["role"] == "user"
     assert len(recorder.invocations) == 1
     assert recorder.invocations[0].tool_name == "list_sources"
     assert [call.planner_call_ordinal for call in recorder.llm_calls] == [1, 2]
@@ -1946,3 +1950,179 @@ async def test_blob_content_discovery_audit_projection_never_retains_content(
     assert invocation.tool_name == "get_blob_content"
     assert "name,score" not in (invocation.result_canonical or "")
     assert set(json.loads(invocation.result_canonical or "{}")) == {"success", "validation", "version"}
+
+
+def _text_response(text: str, *, cost: object = 0.01) -> _Response:
+    return _Response(
+        choices=[_Choice(message=_Message(content=text, tool_calls=None))],
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": cost},
+    )
+
+
+def test_escape_hatch_model_must_be_none_or_nonempty() -> None:
+    with pytest.raises(ValueError, match="escape_hatch_model"):
+        _model(_ScriptedCompletion(), escape_hatch_model="   ")
+
+
+@pytest.mark.asyncio
+async def test_discovery_pressure_notice_injected_at_two_turns_remaining(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    # max_discovery_turns defaults to 3: after the first discovery turn two
+    # remain, which is exactly when the budget-pressure steering must land.
+    first_turn = completion.requests[0]["messages"]
+    second_turn = completion.requests[1]["messages"]
+    assert not any("discovery turns remain" in str(message.get("content")) for message in first_turn)
+    pressure = [
+        message for message in second_turn if message["role"] == "user" and "only 2 discovery turns remain" in str(message.get("content"))
+    ]
+    assert len(pressure) == 1
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_overtime_turn_runs_advisor_with_terminal_tool_only(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        recorder=recorder,
+        model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+    )
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert len(completion.requests) == 3
+    hatch_request = completion.requests[2]
+    assert hatch_request["model"] == "openrouter/advisor-under-test"
+    assert [tool["function"]["name"] for tool in hatch_request["tools"]] == ["emit_pipeline_proposal"]
+    notices = [
+        message for message in hatch_request["messages"] if message["role"] == "user" and "escape hatch" in str(message.get("content"))
+    ]
+    assert len(notices) == 1
+    # The over-budget discovery attempt is dropped: no dangling assistant
+    # tool_calls message without its tool results.
+    for message in hatch_request["messages"]:
+        if message["role"] == "assistant" and message.get("tool_calls"):
+            call_ids = {call["id"] for call in message["tool_calls"]}
+            answered = {reply["tool_call_id"] for reply in hatch_request["messages"] if reply["role"] == "tool"}
+            assert call_ids <= answered
+    # Truthful audit attribution: the overtime call records the advisor model.
+    assert [call.model_requested for call in recorder.llm_calls] == [
+        "anthropic/claude-planner",
+        "anthropic/claude-planner",
+        "openrouter/advisor-under-test",
+    ]
+    # The second discovery batch was never dispatched.
+    assert [invocation.tool_name for invocation in recorder.invocations] == ["list_sources"]
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_text_reply_is_honest_decline(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+        _text_response("I cannot build this pipeline: the request needs a streaming join no available plugin provides."),
+    )
+
+    with pytest.raises(PlannerDeclined) as excinfo:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+        )
+
+    assert excinfo.value.code == "DECLINED"
+    assert "streaming join" in excinfo.value.decline_text
+    assert isinstance(excinfo.value, PipelinePlannerError)
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_non_terminal_reply_reraises_original_exhaustion(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+        _response(("list_models", {})),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+        )
+
+    assert excinfo.value.code == "DISCOVERY_EXHAUSTED"
+    assert not isinstance(excinfo.value, PlannerDeclined)
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_fires_on_repair_exhaustion(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        recorder=recorder,
+        repair_budget=1,
+        model_overrides={"escape_hatch_model": "openrouter/advisor-under-test"},
+    )
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert completion.requests[2]["model"] == "openrouter/advisor-under-test"
+    assert [tool["function"]["name"] for tool in completion.requests[2]["tools"]] == ["emit_pipeline_proposal"]
+
+
+@pytest.mark.asyncio
+async def test_no_hatch_configured_preserves_discovery_exhaustion(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            model_overrides={"max_discovery_turns": 1},
+        )
+
+    assert excinfo.value.code == "DISCOVERY_EXHAUSTED"
+    assert len(completion.requests) == 2

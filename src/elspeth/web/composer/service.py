@@ -103,6 +103,7 @@ from elspeth.web.composer.pipeline_planner import (
     PipelinePlanResult,
     PlannerBudgetPolicy,
     PlannerCustodyConfig,
+    PlannerDeclined,
     PlannerModelConfig,
     PlannerOriginatingMessage,
     PlannerRequestLifecycle,
@@ -2174,6 +2175,7 @@ class ComposerServiceImpl:
                 max_tool_calls_per_turn=self._max_tool_calls_per_turn,
                 max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+                escape_hatch_model=self._settings.composer_advisor_model,
             ),
             rendered_skill=build_system_prompt(self._data_dir),
             repair_budget=self._settings.composer_planner_repair_budget,
@@ -2301,6 +2303,7 @@ class ComposerServiceImpl:
                 max_tool_calls_per_turn=self._max_tool_calls_per_turn,
                 max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+                escape_hatch_model=self._settings.composer_advisor_model,
             ),
             rendered_skill=load_step_planner_skill(guided.step),
             repair_budget=self._settings.composer_planner_repair_budget,
@@ -2591,6 +2594,7 @@ class ComposerServiceImpl:
                         max_tool_calls_per_turn=self._max_tool_calls_per_turn,
                         max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                         api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
+                        escape_hatch_model=self._settings.composer_advisor_model,
                     ),
                     rendered_skill=rendered_skill,
                     repair_budget=self._settings.composer_planner_repair_budget,
@@ -2605,6 +2609,21 @@ class ComposerServiceImpl:
                     recorder=recorder,
                     candidate_finalizer=lambda candidate: candidate,
                 )
+            except PlannerDeclined as declined:
+                # Honest decline from the escape-hatch advisor turn: a
+                # successful conversational outcome, not a provider failure.
+                # Mirror the success path's audit persistence, then surface
+                # the advisor's own words as the assistant message.
+                await self._persist_pipeline_planner_audit(
+                    session_id=session_uuid,
+                    current_state_id=state_uuid,
+                    llm_calls=recorder.llm_calls[planner_llm_start:],
+                    invocations=recorder.invocations[planner_invocation_start:],
+                )
+                decline_message = declined.decline_text.strip() or (
+                    "I could not find a way to build this pipeline with the available components."
+                )
+                return ComposerResult(message=decline_message, state=state)
             except BaseException as exc:
                 exc_dict = exc.__dict__
                 attached_calls = exc_dict["llm_calls"] if "llm_calls" in exc_dict else ()

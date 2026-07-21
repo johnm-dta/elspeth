@@ -192,10 +192,18 @@ def build_planner_capability_manifest(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]],
     canonical_schema: Mapping[str, Any],
+    tool_surface: str = "full",
 ) -> PlannerCapabilityManifest:
-    """Validate and hash the exact messages/tools used by one planner call."""
+    """Validate and hash the exact messages/tools used by one planner call.
+
+    ``tool_surface`` names the advertised palette: ``"full"`` for ordinary
+    planner turns, ``"terminal_only"`` for the escape-hatch overtime turn
+    where the advisor model may only emit the terminal proposal.
+    """
     if type(surface) is not PlannerSurface:
         raise TypeError("surface must be an exact PlannerSurface")
+    if tool_surface not in {"full", "terminal_only"}:
+        raise ValueError("tool_surface must be 'full' or 'terminal_only'")
     if profile != _expected_profile(surface):
         raise AuditIntegrityError("planner surface/profile identity mismatch")
     canonical_json(messages)
@@ -213,7 +221,9 @@ def build_planner_capability_manifest(
         tool_names = tuple(cast(str, tool["function"]["name"]) for tool in tools)
     except (KeyError, TypeError) as exc:
         raise AuditIntegrityError("planner advertised tool definitions are malformed") from exc
-    expected_names = (*PLANNER_DISCOVERY_TOOL_NAMES, PLANNER_TERMINAL_TOOL_NAME)
+    expected_names = (
+        (PLANNER_TERMINAL_TOOL_NAME,) if tool_surface == "terminal_only" else (*PLANNER_DISCOVERY_TOOL_NAMES, PLANNER_TERMINAL_TOOL_NAME)
+    )
     if tool_names != expected_names:
         raise AuditIntegrityError("planner advertised tool identities or order drifted")
     terminal = _schema_mapping(tools[-1].get("function"), path="$tools[-1].function")

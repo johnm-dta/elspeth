@@ -89,6 +89,19 @@ class PipelinePlannerError(RuntimeError):
         self.code = code
 
 
+class PlannerDeclined(PipelinePlannerError):
+    """Honest decline: the escape-hatch advisor answered in text, not a proposal.
+
+    Raised only from the overtime turn. ``decline_text`` is the advisor's own
+    explanation and is intended to be surfaced to the user as an ordinary
+    assistant message, never as a provider failure.
+    """
+
+    def __init__(self, message: str, *, decline_text: str) -> None:
+        super().__init__(message, code="DECLINED")
+        self.decline_text = decline_text
+
+
 class _PipelineCandidateRejected(RuntimeError):
     def __init__(self, result: ToolResult) -> None:
         super().__init__("pipeline candidate was not acceptable")
@@ -148,12 +161,17 @@ class PlannerModelConfig:
     max_tool_calls_per_turn: int
     max_api_attempts: int
     api_retry_base_seconds: float
+    # Senior advisor model for the one-shot escape-hatch overtime turn.
+    # None disables the hatch: budget exhaustion raises exactly as before.
+    escape_hatch_model: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("model_identifier", "provider"):
             value = getattr(self, name)
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} must be a non-empty exact string")
+        if self.escape_hatch_model is not None and (type(self.escape_hatch_model) is not str or not self.escape_hatch_model.strip()):
+            raise ValueError("escape_hatch_model must be a non-empty exact string or None")
         for name in ("max_composition_turns", "max_discovery_turns", "max_tool_calls_per_turn", "max_api_attempts"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -422,7 +440,7 @@ def _parse_json_object(raw: object, *, label: str) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], parsed)
 
 
-def _parse_response_tool_calls(response: Any) -> tuple[Any, tuple[_ParsedToolCall, ...]]:
+def _parse_response_tool_calls(response: Any, *, allow_text: bool = False) -> tuple[Any, tuple[_ParsedToolCall, ...]]:
     choices = _provider_field(response, "choices")
     if not isinstance(choices, list | tuple) or len(choices) != 1:
         raise PipelinePlannerError("planner response must contain exactly one choice", code="MALFORMED_RESPONSE")
@@ -431,6 +449,9 @@ def _parse_response_tool_calls(response: Any) -> tuple[Any, tuple[_ParsedToolCal
         raise PipelinePlannerError("planner response choice is missing its message", code="MALFORMED_RESPONSE")
     raw_calls = _provider_field(message, "tool_calls")
     if not isinstance(raw_calls, list | tuple) or not raw_calls:
+        content = _provider_field(message, "content")
+        if allow_text and type(content) is str and content.strip():
+            return message, ()
         raise PipelinePlannerError("planner response must call a declared tool", code="MALFORMED_RESPONSE")
     parsed: list[_ParsedToolCall] = []
     for raw_call in raw_calls:
@@ -446,6 +467,24 @@ def _parse_response_tool_calls(response: Any) -> tuple[Any, tuple[_ParsedToolCal
     if terminal_calls and len(parsed) != 1:
         raise PipelinePlannerError("terminal proposal call must be the only tool call", code="MALFORMED_RESPONSE")
     return message, tuple(parsed)
+
+
+def _discovery_pressure_notice(remaining: int) -> str:
+    return (
+        f"Budget notice: only {remaining} discovery turns remain before this planning request is cut off. "
+        "Stop exploring, settle the design, and call emit_pipeline_proposal with one complete proposal "
+        "as soon as possible."
+    )
+
+
+def _escape_hatch_notice() -> str:
+    return (
+        "The planning budget is exhausted; this is the escape hatch. You are a senior advisor model "
+        "seeing the full conversation above as one freeform puzzle. You have exactly one turn: either "
+        "call emit_pipeline_proposal once with a complete, valid pipeline that satisfies the request, "
+        "or reply in plain text honestly explaining why the request cannot be built with the available "
+        "plugins. Do not call any other tool."
+    )
 
 
 def _assistant_tool_calls_message(message: Any, calls: tuple[_ParsedToolCall, ...]) -> dict[str, Any]:
@@ -982,12 +1021,19 @@ async def _plan_pipeline_inner(
     repair_count = 0
     seen_discovery: set[tuple[str, str]] = set()
 
-    async def call_model() -> tuple[Any, tuple[_ParsedToolCall, ...], ComposerLLMCall]:
+    async def call_model(
+        *,
+        model_override: str | None = None,
+        tools_override: list[dict[str, Any]] | None = None,
+        allow_text_reply: bool = False,
+    ) -> tuple[Any, tuple[_ParsedToolCall, ...], ComposerLLMCall]:
         nonlocal total_calls, total_cost
+        effective_model = model_override or model_config.model_identifier
+        active_tools = tools if tools_override is None else tools_override
         cache_marked_messages, cache_marked_tools = (
-            apply_anthropic_cache_markers(messages, tools)
-            if supports_anthropic_prompt_cache_markers(model_config.model_identifier)
-            else (list(messages), list(tools))
+            apply_anthropic_cache_markers(messages, active_tools)
+            if supports_anthropic_prompt_cache_markers(effective_model)
+            else (list(messages), list(active_tools))
         )
         assert cache_marked_tools is not None
         call_input_snapshot = json.loads(
@@ -1008,6 +1054,7 @@ async def _plan_pipeline_inner(
             messages=marked_messages,
             tools=marked_tools,
             canonical_schema=canonical_set_pipeline_schema(),
+            tool_surface="full" if tools_override is None else "terminal_only",
         )
         request_size = len(canonical_json({"messages": marked_messages, "tools": marked_tools}).encode("utf-8"))
         if request_size > budget_policy.max_request_bytes:
@@ -1026,7 +1073,7 @@ async def _plan_pipeline_inner(
             started_ns = time.monotonic_ns()
             response: Any = None
             kwargs: dict[str, Any] = {
-                "model": model_config.model_identifier,
+                "model": effective_model,
                 "messages": marked_messages,
                 "tools": marked_tools,
                 "max_tokens": budget_policy.max_completion_tokens,
@@ -1045,7 +1092,7 @@ async def _plan_pipeline_inner(
                 response = await asyncio.wait_for(model_config.completion(**kwargs), timeout=remaining)
             except asyncio.CancelledError as exc:
                 cancelled_call = build_llm_call_record(
-                    model_requested=model_config.model_identifier,
+                    model_requested=effective_model,
                     messages=marked_messages,
                     tools=marked_tools,
                     status=ComposerLLMCallStatus.CANCELLED,
@@ -1064,7 +1111,7 @@ async def _plan_pipeline_inner(
                 raise
             except TimeoutError as exc:
                 timed_out_call = build_llm_call_record(
-                    model_requested=model_config.model_identifier,
+                    model_requested=effective_model,
                     messages=marked_messages,
                     tools=marked_tools,
                     status=ComposerLLMCallStatus.TIMEOUT,
@@ -1092,7 +1139,7 @@ async def _plan_pipeline_inner(
                 elif isinstance(exc, LiteLLMBadRequestError):
                     status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
                 failed_call = build_llm_call_record(
-                    model_requested=model_config.model_identifier,
+                    model_requested=effective_model,
                     messages=marked_messages,
                     tools=marked_tools,
                     status=status,
@@ -1123,7 +1170,7 @@ async def _plan_pipeline_inner(
                 ) from None
 
             call = build_llm_call_record(
-                model_requested=model_config.model_identifier,
+                model_requested=effective_model,
                 messages=marked_messages,
                 tools=marked_tools,
                 status=ComposerLLMCallStatus.SUCCESS,
@@ -1153,7 +1200,7 @@ async def _plan_pipeline_inner(
                 recorder.record_llm_call(call)
                 raise PipelinePlannerError("planner provider cost continuation cap exceeded", code="COST_CAP_EXCEEDED")
             try:
-                parsed_response = _parse_response_tool_calls(response)
+                parsed_response = _parse_response_tool_calls(response, allow_text=allow_text_reply)
             except PipelinePlannerError as exc:
                 if exc.code != "MALFORMED_RESPONSE":
                     raise
@@ -1171,16 +1218,60 @@ async def _plan_pipeline_inner(
             return message, calls, call
         raise AssertionError("provider attempt loop exited without return or exception")
 
+    # ── Escape-hatch state ────────────────────────────────────────────────
+    # On budget exhaustion, instead of failing immediately, one overtime turn
+    # runs on the senior advisor model with the terminal tool only. A text
+    # reply on that turn is an honest decline (PlannerDeclined); anything
+    # other than one clean accepted proposal re-raises the original error.
+    hatch_error: PipelinePlannerError | None = None
+    hatch_turn_next = False
+    hatch_spent = False
+
+    def _hatch_available() -> bool:
+        return model_config.escape_hatch_model is not None and not hatch_spent
+
+    def _engage_escape_hatch(error: PipelinePlannerError) -> None:
+        # The over-budget attempt is dropped from the conversation so no
+        # assistant tool_calls message dangles without its tool results.
+        nonlocal hatch_error, hatch_turn_next, hatch_spent
+        hatch_error = error
+        hatch_turn_next = True
+        hatch_spent = True
+        messages.append({"role": "user", "content": _escape_hatch_notice()})
+
     while True:
-        message, calls, audited_call = await call_model()
+        is_hatch_turn = hatch_turn_next
+        hatch_turn_next = False
+        if is_hatch_turn:
+            assert model_config.escape_hatch_model is not None
+            assert hatch_error is not None
+            message, calls, audited_call = await call_model(
+                model_override=model_config.escape_hatch_model,
+                tools_override=[planner_terminal_tool_definition()],
+                allow_text_reply=True,
+            )
+            if not calls:
+                decline_content = _provider_field(message, "content")
+                raise PlannerDeclined(
+                    "planner escape-hatch advisor declined the request",
+                    decline_text=decline_content if type(decline_content) is str else "",
+                )
+        else:
+            message, calls, audited_call = await call_model()
         if len(calls) > model_config.max_tool_calls_per_turn:
             raise PipelinePlannerError("planner per-turn tool call budget exhausted", code="TOOL_CALLS_EXHAUSTED")
 
         terminal_calls = tuple(call for call in calls if call.name == _TERMINAL_TOOL_NAME)
         if terminal_calls:
-            composition_turns += 1
-            if composition_turns > model_config.max_composition_turns:
-                raise PipelinePlannerError("planner composition turn budget exhausted", code="COMPOSITION_EXHAUSTED")
+            if not is_hatch_turn:
+                composition_turns += 1
+                if composition_turns > model_config.max_composition_turns:
+                    if _hatch_available():
+                        _engage_escape_hatch(
+                            PipelinePlannerError("planner composition turn budget exhausted", code="COMPOSITION_EXHAUSTED")
+                        )
+                        continue
+                    raise PipelinePlannerError("planner composition turn budget exhausted", code="COMPOSITION_EXHAUSTED")
             call = terminal_calls[0]
             terminal_feedback: Mapping[str, Any] | None = None
             pipeline: dict[str, Any] | None = None
@@ -1203,8 +1294,14 @@ async def _plan_pipeline_inner(
                     if not set(claimed_deferred_intent_ids).issubset(eligible_deferred_intent_ids):
                         terminal_feedback = _deferred_intent_claim_feedback()
             if terminal_feedback is not None:
+                if is_hatch_turn:
+                    assert hatch_error is not None
+                    raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
+                    if _hatch_available():
+                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        continue
                     raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
@@ -1245,8 +1342,14 @@ async def _plan_pipeline_inner(
                     provider=model_config.provider,
                 )
             except DeferredIntentClaimError:
+                if is_hatch_turn:
+                    assert hatch_error is not None
+                    raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
+                    if _hatch_available():
+                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        continue
                     raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
@@ -1258,8 +1361,14 @@ async def _plan_pipeline_inner(
                 )
                 continue
             except ToolArgumentError as exc:
+                if is_hatch_turn:
+                    assert hatch_error is not None
+                    raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
+                    if _hatch_available():
+                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        continue
                     raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
@@ -1271,8 +1380,14 @@ async def _plan_pipeline_inner(
                 )
                 continue
             except _PipelineCandidateRejected as exc:
+                if is_hatch_turn:
+                    assert hatch_error is not None
+                    raise hatch_error from None
                 repair_count += 1
                 if repair_count > repair_budget:
+                    if _hatch_available():
+                        _engage_escape_hatch(PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED"))
+                        continue
                     raise PipelinePlannerError("planner repair budget exhausted", code="REPAIR_EXHAUSTED") from None
                 messages.append(_assistant_tool_calls_message(message, calls))
                 messages.append(
@@ -1284,6 +1399,12 @@ async def _plan_pipeline_inner(
                 )
                 continue
 
+        if is_hatch_turn:
+            # The advisor did anything other than one clean terminal proposal
+            # or an honest text decline: the hatch is spent, the original
+            # exhaustion stands.
+            assert hatch_error is not None
+            raise hatch_error
         if any(call.name not in _PLANNER_DISCOVERY_TOOL_NAME_SET for call in calls):
             raise PipelinePlannerError(
                 "planner may execute read-only discovery tools only before its terminal proposal",
@@ -1291,6 +1412,9 @@ async def _plan_pipeline_inner(
             )
         discovery_turns += 1
         if discovery_turns > model_config.max_discovery_turns:
+            if _hatch_available():
+                _engage_escape_hatch(PipelinePlannerError("planner discovery turn budget exhausted", code="DISCOVERY_EXHAUSTED"))
+                continue
             raise PipelinePlannerError("planner discovery turn budget exhausted", code="DISCOVERY_EXHAUSTED")
         keys = tuple((call.name, stable_hash(call.arguments)) for call in calls)
         if any(key in seen_discovery for key in keys) or len(set(keys)) != len(keys):
@@ -1376,6 +1500,9 @@ async def _plan_pipeline_inner(
         for call, result in discovery_results:
             messages.append({"role": "tool", "tool_call_id": call.call_id, "content": serialize_tool_result(result)})
             await emit_progress(lifecycle.progress, tool_completed_progress_event(call.name, result.success))
+        remaining_discovery = model_config.max_discovery_turns - discovery_turns
+        if remaining_discovery == 2:
+            messages.append({"role": "user", "content": _discovery_pressure_notice(remaining_discovery)})
 
 
 __all__ = [
@@ -1385,6 +1512,7 @@ __all__ = [
     "PipelinePlannerError",
     "PlannerBudgetPolicy",
     "PlannerCustodyConfig",
+    "PlannerDeclined",
     "PlannerModelConfig",
     "PlannerOriginatingMessage",
     "PlannerRequestLifecycle",

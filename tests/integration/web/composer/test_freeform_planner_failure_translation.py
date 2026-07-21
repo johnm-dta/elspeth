@@ -244,11 +244,11 @@ def _assert_no_sentinel_leak(engine: Any, response_text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("completion_factory", "expected_status", "expected_failure_code"),
+    ("completion_factory", "expected_status", "expected_failure_code", "expected_planner_code"),
     [
-        (_malformed_completion, 502, "invalid_provider_response"),
-        (_timeout_completion, 504, "provider_timeout"),
-        (_provider_error_completion, 503, "provider_unavailable"),
+        (_malformed_completion, 502, "invalid_provider_response", "MALFORMED_RESPONSE"),
+        (_timeout_completion, 504, "provider_timeout", "TIMEOUT"),
+        (_provider_error_completion, 503, "provider_unavailable", "PROVIDER_ERROR"),
     ],
     ids=["malformed", "timeout", "provider_error"],
 )
@@ -258,6 +258,7 @@ def test_send_message_freeform_planner_failure_is_translated(
     completion_factory: Any,
     expected_status: int,
     expected_failure_code: str,
+    expected_planner_code: str,
 ) -> None:
     client, engine, _sessions = _build_app(tmp_path, monkeypatch, completion_factory())
     session_id = client.post("/api/sessions", json={"title": "freeform planner failure"}).json()["id"]
@@ -280,6 +281,9 @@ def test_send_message_freeform_planner_failure_is_translated(
     assert len(disposition_rows) == 1
     assert disposition_rows[0].tool_calls[0]["failure_code"] == expected_failure_code
     assert disposition_rows[0].tool_calls[0]["surface"] == "freeform"
+    # The raw planner code is forensically durable — the closed failure_code
+    # buckets many codes and is useless for root-causing a live 5xx.
+    assert disposition_rows[0].tool_calls[0]["planner_code"] == expected_planner_code
 
     # The already-durable planner LLM-call audit evidence still lands (and is
     # NOT re-persisted as a duplicate) alongside the disposition record.

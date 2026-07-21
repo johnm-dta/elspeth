@@ -1900,6 +1900,11 @@ async def _handle_planner_failure(
         "_kind": "planner_failure_disposition",
         "surface": "freeform",
         "failure_code": failure_code,
+        # The raw PipelinePlannerError code: failure_code buckets many codes
+        # (e.g. DISCOVERY_CYCLE and MALFORMED_RESPONSE both read
+        # invalid_provider_response) and the code is the closed, leak-safe
+        # discriminant a live 5xx investigation actually needs.
+        "planner_code": exc.code,
     }
     # role="audit" keeps this out of the user-visible conversation channel
     # (``_is_composer_audit_tool_message`` excludes every audit row) exactly as

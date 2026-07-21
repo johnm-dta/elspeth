@@ -2126,3 +2126,48 @@ async def test_no_hatch_configured_preserves_discovery_exhaustion(
 
     assert excinfo.value.code == "DISCOVERY_EXHAUSTED"
     assert len(completion.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_fires_on_discovery_cycle(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A cycling planner is stuck — the cycle guard engages the hatch, not a 502."""
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        recorder=recorder,
+        model_overrides={"escape_hatch_model": "openrouter/advisor-under-test"},
+    )
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert completion.requests[2]["model"] == "openrouter/advisor-under-test"
+    assert [tool["function"]["name"] for tool in completion.requests[2]["tools"]] == ["emit_pipeline_proposal"]
+    # The repeated discovery batch is never dispatched.
+    assert [invocation.tool_name for invocation in recorder.invocations] == ["list_sources"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_cycle_without_hatch_still_raises(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sources", {})),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    assert excinfo.value.code == "DISCOVERY_CYCLE"
+    assert len(completion.requests) == 2

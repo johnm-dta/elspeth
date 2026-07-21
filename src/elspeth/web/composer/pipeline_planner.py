@@ -1418,6 +1418,11 @@ async def _plan_pipeline_inner(
             raise PipelinePlannerError("planner discovery turn budget exhausted", code="DISCOVERY_EXHAUSTED")
         keys = tuple((call.name, stable_hash(call.arguments)) for call in calls)
         if any(key in seen_discovery for key in keys) or len(set(keys)) != len(keys):
+            # A cycling planner is stuck by definition — hand the puzzle to
+            # the advisor rather than failing the request.
+            if _hatch_available():
+                _engage_escape_hatch(PipelinePlannerError("planner discovery repetition/cycle guard fired", code="DISCOVERY_CYCLE"))
+                continue
             raise PipelinePlannerError("planner discovery repetition/cycle guard fired", code="DISCOVERY_CYCLE")
         seen_discovery.update(keys)
         await emit_progress(lifecycle.progress, tool_batch_progress_event(tuple(call.name for call in calls)))

@@ -1283,12 +1283,42 @@ def _plugin_unavailable_message(plugin_type: PluginKind, reason: PluginUnavailab
     return f"{plugin_type} plugin selection is unavailable ({reason.value}): {_PLUGIN_UNAVAILABLE_EXPLANATIONS[reason]}"
 
 
+# gate/coalesce/queue are built-in node_types wired with plugin=null — they do
+# not exist in the plugin registry, and answering a registry probe for them
+# with "not installed" invites a false honest decline ("this deployment cannot
+# merge branches"). These names are closed composer vocabulary, safe to echo.
+_STRUCTURAL_NODE_TYPE_GUIDANCE: Final[dict[str, str]] = {
+    "coalesce": (
+        "'coalesce' is not a plugin — it is a built-in node_type that needs no plugin. Wire it as a "
+        "node with node_type='coalesce', plugin=null, branches mapping each branch name to its "
+        "incoming connection, policy (e.g. 'require_all') and merge (e.g. 'union'); downstream nodes "
+        "read the coalesce node id as their input. For running several LLM assessments per row, "
+        "prefer ONE llm transform with a `queries` map instead of fork/coalesce."
+    ),
+    "gate": (
+        "'gate' is not a plugin — it is a built-in node_type that needs no plugin. Wire it as a node "
+        "with node_type='gate', plugin=null, a `condition` row expression and routes={'true': ..., "
+        "'false': ...}; route to 'fork' with fork_to=[...] to fan a row out to several branches."
+    ),
+    "queue": (
+        "'queue' is not a plugin — it is a built-in node_type that needs no plugin, used for fan-in: "
+        "a node with node_type='queue', plugin=null whose id doubles as its connection name; upstream "
+        "nodes point on_success at it and one downstream node reads it as input."
+    ),
+}
+
+
 def _validate_plugin_name(
     context: ToolContext,
     plugin_type: PluginKind,
     name: str,
 ) -> PluginPolicyViolation | None:
     """Validate a new plugin selection against one request policy view."""
+    if plugin_type == "transform" and name in _STRUCTURAL_NODE_TYPE_GUIDANCE:
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.NOT_INSTALLED,
+            message=_STRUCTURAL_NODE_TYPE_GUIDANCE[name],
+        )
     try:
         plugin_id = PluginId(plugin_type, name)
     except ValueError:

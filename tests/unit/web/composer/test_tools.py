@@ -13942,3 +13942,47 @@ class TestExplainStructuralNodeShapeCodes:
         )
         assert result.success is True
         assert "on_success" in result.data["suggested_fix"]
+
+
+class TestStructuralNodeTypeProbedAsPlugin:
+    """gate/coalesce/queue are built-in node_types, not plugins. A model that
+    probes the plugin registry for them must be taught the wiring, not told
+    "not installed" — live regression: the composer honestly declined an A/B
+    request on the false premise that coalesce "is not installed in this
+    deployment" (session 9afca49d)."""
+
+    def _trained_pair(self) -> tuple[Any, Any]:
+        from elspeth.web.dependencies import create_catalog_service
+
+        full = create_catalog_service()
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(full)
+        return PolicyCatalogView.for_trained_operator(full, snapshot), snapshot
+
+    @pytest.mark.parametrize(
+        ("name", "expected_fragments"),
+        [
+            ("coalesce", ("node_type", "branches", "policy", "queries")),
+            ("gate", ("node_type", "fork_to", "routes")),
+            ("queue", ("node_type", "fan-in")),
+        ],
+    )
+    def test_get_plugin_schema_teaches_structural_node_types(
+        self,
+        name: str,
+        expected_fragments: tuple[str, ...],
+    ) -> None:
+        policy_catalog, snapshot = self._trained_pair()
+
+        result = execute_tool(
+            "get_plugin_schema",
+            {"plugin_type": "transform", "name": name},
+            _empty_state(),
+            policy_catalog,
+            plugin_snapshot=snapshot,
+        )
+
+        assert result.success is False
+        message = result.data["error"]
+        assert "not a plugin" in message
+        for fragment in expected_fragments:
+            assert fragment in message, f"teaching message for {name!r} must mention {fragment!r}: {message}"

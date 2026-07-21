@@ -432,7 +432,7 @@ def _build_get_guided_turn(
         if pending.phase == "plugin_options":
             if pending.plugin is None:  # pragma: no cover - guarded by SinkIntent
                 raise InvariantError("STEP_2 plugin_options intent requires a plugin")
-            return build_step_2_schema_form_turn(pending.plugin, catalog)
+            return build_step_2_schema_form_turn(pending.plugin, catalog, prefilled_options=pending.options)
         if pending.phase == "field_review":
             observed_columns = tuple(
                 dict.fromkeys(
@@ -1962,6 +1962,7 @@ def _schema8_transition(
     *,
     new_stable_id: UUID,
     source_inspection_facts: SourceInspectionFacts | None = None,
+    sink_prefill_options: Mapping[str, Any] | None = None,
 ) -> tuple[GuidedSession, Mapping[str, Any]]:
     if body.proposal_id is not None or body.draft_hash is not None or body.edit_target is not None:
         raise _schema8_unsupported_stage(guided.step)
@@ -2029,6 +2030,7 @@ def _schema8_transition(
                 permitted_plugins=_schema8_permitted_plugins(turn),
                 new_stable_id=new_stable_id if not selection_targets else None,
                 target_id=selection_targets[0] if len(selection_targets) == 1 else None,
+                prefill_options=sink_prefill_options,
             )
         else:
             raise _schema8_unsupported_stage(guided.step)
@@ -2122,6 +2124,7 @@ def _schema8_answer_and_project_next(
     shield_available: bool,
     new_stable_id: UUID,
     source_inspection_facts: SourceInspectionFacts | None = None,
+    sink_prefill_options: Mapping[str, Any] | None = None,
 ) -> tuple[CompositionState, PreparedGuidedJsonPayload, Turn | None, PreparedGuidedJsonPayload | None]:
     if body.control_signal == ControlSignal.EXIT_TO_FREEFORM.value:
         _schema8_only_response_fields(body, "control_signal")
@@ -2142,6 +2145,7 @@ def _schema8_answer_and_project_next(
             body,
             new_stable_id=new_stable_id,
             source_inspection_facts=source_inspection_facts,
+            sink_prefill_options=sink_prefill_options,
         )
     response_id = guided_json_payload_id("turn_response", response_payload)
     answered_record = _replace(

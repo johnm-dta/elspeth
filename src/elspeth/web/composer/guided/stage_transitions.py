@@ -958,8 +958,14 @@ def transition_sink_plugin_selection(
     permitted_plugins: Sequence[str],
     new_stable_id: UUID | None = None,
     target_id: str | None = None,
+    prefill_options: Mapping[str, Any] | None = None,
 ) -> GuidedSession:
-    """Move one output from plugin selection to plugin options."""
+    """Move one output from plugin selection to plugin options.
+
+    ``prefill_options`` (a chat resolution's sink options) are staged on the
+    intent so the plugin_options schema form renders them as prefill; they are
+    never committed without the form submission's full validation pass.
+    """
 
     _require_active_turn(
         session,
@@ -977,7 +983,7 @@ def transition_sink_plugin_selection(
         new_stable_id=new_stable_id,
     )
     pending = dict(session.pending_output_intents)
-    pending[stable_id] = SinkIntent(name=name, phase="plugin_options", plugin=plugin, options=None)
+    pending[stable_id] = SinkIntent(name=name, phase="plugin_options", plugin=plugin, options=prefill_options)
     output_order = (*session.output_order, stable_id) if created else session.output_order
     return replace(session, output_order=output_order, pending_output_intents=pending)
 

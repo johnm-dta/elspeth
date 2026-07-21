@@ -663,6 +663,15 @@ async def post_guided_chat_schema8(
                                 latency_ms=chat_result.latency_ms,
                                 error_class="InlineSourceNotApplied",
                             )
+                    sink_prefill_options: dict[str, Any] | None = None
+                    if (
+                        sink_resolution is not None
+                        and prospective.step is GuidedStep.STEP_2_SINK
+                        and TurnType(current_turn["type"]) is TurnType.SINGLE_SELECT
+                    ):
+                        (resolved_output,) = sink_resolution.outputs
+                        sink_prefill_options = dict(deep_thaw(resolved_output.options))
+                        sink_prefill_options["on_write_failure"] = resolved_output.on_write_failure
                     transition_body = _transition_request(
                         body=body,
                         guided=prospective,
@@ -708,6 +717,7 @@ async def post_guided_chat_schema8(
                                 shield_available=shield_available,
                                 new_stable_id=uuid4(),
                                 source_inspection_facts=source_inspection_facts,
+                                sink_prefill_options=sink_prefill_options,
                             )
                             transition_succeeded = True
                         except (PluginConfigError, InvariantError, TypeError, ValueError):

@@ -517,8 +517,11 @@ class SinkIntent:
             if self.plugin is not None or self.options is not None:
                 raise ValueError("SinkIntent plugin_selection phase cannot carry later-phase values")
         elif self.phase == "plugin_options":
-            if self.plugin is None or self.options is not None:
-                raise ValueError("SinkIntent plugin_options phase requires only a selected plugin")
+            # ``options`` at this phase are staged prefill values from a chat
+            # resolution — rendered into the schema form, never committed
+            # without the form submission's full validation pass.
+            if self.plugin is None:
+                raise ValueError("SinkIntent plugin_options phase requires a selected plugin")
         elif self.plugin is None or self.options is None:
             raise ValueError("SinkIntent field_review phase requires plugin and options")
         if self.options is not None:

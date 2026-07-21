@@ -25,6 +25,7 @@ import keyword
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema import FieldDefinition
 from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
@@ -265,22 +266,29 @@ def build_step_2_single_select_turn(
 def build_step_2_schema_form_turn(
     plugin: str,
     catalog: CatalogServiceProtocol,
+    *,
+    prefilled_options: Mapping[str, Any] | None = None,
 ) -> Turn:
     """Build a ``schema_form`` Turn for the chosen sink plugin.
 
     Emitted after the user picks a sink plugin in Step 2's ``single_select``
     turn.  The schema block is the plugin's full JSON schema; ``prefilled``
-    seeds ``schema.mode: "observed"``.
+    seeds ``schema.mode: "observed"`` and merges any staged chat-resolution
+    options (``SinkIntent.options``) so a chat-resolved sink renders as a
+    live, continuable form instead of a bare one.
 
     Args:
         plugin: The plugin name chosen by the user (e.g. ``"json"``).
         catalog: Plugin catalog for retrieving the plugin's JSON schema.
+        prefilled_options: Staged sink options from a chat resolution.
 
     Returns:
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
     schema_info = catalog.get_schema("sink", plugin)
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}}
+    if prefilled_options is not None:
+        prefilled.update(deep_thaw(prefilled_options))
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": plugin,

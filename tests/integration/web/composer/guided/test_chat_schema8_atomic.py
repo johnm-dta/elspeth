@@ -24,7 +24,12 @@ from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.guided.state_machine import GuidedSession
-from elspeth.web.sessions._guided_step_chat import GuidedStepChatOnlyResult, Step1SourceResolvedResult, StepChatResult
+from elspeth.web.sessions._guided_step_chat import (
+    GuidedStepChatOnlyResult,
+    Step1SourceResolvedResult,
+    Step2SinkResolvedResult,
+    StepChatResult,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import guided_operations_table
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -763,6 +768,100 @@ def test_inline_source_walks_prefilled_form_through_inspection_to_resolved_sourc
     assert source["plugin"] == "csv"
     assert tuple(source["observed_columns"]) == ("name", "value")
     assert source["options"]["path"] == prefilled["path"]
+
+
+async def _resolved_sink_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
+    sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                name="result",
+                plugin="json",
+                options={"path": "out.json", "schema": {"mode": "observed"}},
+                required_fields=(),
+                schema_mode="observed",
+                on_write_failure="discard",
+            ),
+        )
+    )
+    return Step2SinkResolvedResult(
+        chat=StepChatResult(
+            assistant_message="I set up the JSON sink.",
+            status=ComposerChatTurnStatus.SUCCESS,
+            latency_ms=1,
+            error_class=None,
+        ),
+        sink=sink,
+    )
+
+
+def test_sink_resolution_prefills_schema_form_from_chat_options(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sink resolution's options must survive plugin selection as prefill.
+
+    One chat message per stage is the tutorial contract: after the resolution
+    answers the sink single_select, the schema form must render with the
+    resolution's options (path included) so the wizard's Continue is live —
+    not the bare ``path: Not set`` stall.
+    """
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
+    chat = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=_chat_body(initial_turn))
+    schema_turn = chat.json()["next_turn"]
+    prefilled = schema_turn["payload"]["prefilled"]
+    form = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": schema_turn["turn_token"],
+            "edited_values": {
+                "plugin": "csv",
+                "options": {
+                    "path": prefilled["path"],
+                    "schema": prefilled["schema"],
+                    "on_validation_failure": prefilled["on_validation_failure"],
+                },
+            },
+        },
+    )
+    inspect_turn = form.json()["next_turn"]
+    confirm = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": inspect_turn["turn_token"],
+            "edited_values": {"columns": ["name", "value"]},
+        },
+    )
+    review_turn = confirm.json()["next_turn"]
+    assert review_turn["type"] == "review_components"
+    finish = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": review_turn["turn_token"],
+            "component_action": {"action": "finish", "component_kind": "source"},
+        },
+    )
+    assert finish.status_code == 200, finish.json()
+    sink_select_turn = finish.json()["next_turn"]
+    assert sink_select_turn["type"] == "single_select"
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_sink_provider, raising=False)
+    sink_chat = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json=_chat_body(sink_select_turn, message="Save the results to a JSON file."),
+    )
+
+    assert sink_chat.status_code == 200, sink_chat.json()
+    sink_form_turn = sink_chat.json()["next_turn"]
+    assert sink_form_turn["type"] == "schema_form"
+    sink_prefilled = sink_form_turn["payload"]["prefilled"]
+    assert sink_prefilled["path"] == "out.json"
+    assert sink_prefilled["schema"]["mode"] == "observed"
+    assert sink_prefilled["on_write_failure"] == "discard"
 
 
 def test_inline_source_defers_to_existing_ready_uploaded_blob(

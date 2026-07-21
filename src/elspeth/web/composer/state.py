@@ -2454,6 +2454,34 @@ class CompositionState:
                 )
                 continue
 
+            # Authored pipeline_decision reviews must use a registered decision
+            # term: the resolve-side artifact-hash registry raises on unknown
+            # terms, so a novel term mints an unresolvable review event and
+            # wedges the session at the run gate.
+            from elspeth.web.interpretation_state import REGISTERED_PIPELINE_DECISION_USER_TERMS
+
+            authored_requirements = node.options.get("interpretation_requirements")
+            if isinstance(authored_requirements, (list, tuple)):
+                for requirement in authored_requirements:
+                    if not isinstance(requirement, Mapping):
+                        continue
+                    if requirement.get("kind") != "pipeline_decision":
+                        continue
+                    term = requirement.get("user_term")
+                    if not isinstance(term, str) or term.strip() not in REGISTERED_PIPELINE_DECISION_USER_TERMS:
+                        errors.append(
+                            _err(
+                                f"node:{node.id}",
+                                f"Node '{node.id}' declares a pipeline_decision review with unregistered "
+                                f"user_term {term!r}. Registered decision kinds: "
+                                f"{sorted(REGISTERED_PIPELINE_DECISION_USER_TERMS)}. Drop the requirement and "
+                                "record the rationale in metadata.description, or use an "
+                                "llm_prompt_template review for prompt-shaped decisions.",
+                                "high",
+                                "pipeline_decision_unregistered",
+                            )
+                        )
+
             batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
             if batch_placement_error is not None:
                 errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))

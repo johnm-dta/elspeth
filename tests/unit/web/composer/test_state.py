@@ -6023,6 +6023,24 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
             _node(id="g_bad", node_type="gate", plugin=None),
             _node(id="g_half", node_type="gate", plugin=None, condition="True", routes={"true": "out"}),
             _node(id="t_dangling", on_success="nowhere", on_error="missing_sink"),
+            _node(
+                id="t_novel_decision",
+                options={
+                    "interpretation_requirements": [
+                        {
+                            "id": "novel_decision_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "ab_reconciliation_retention",
+                            "status": "pending",
+                            "draft": "Retain both variants in the reconciled row.",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ]
+                },
+            ),
         ),
         edges=(),
         outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
@@ -6042,5 +6060,6 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
         ("node:g_half", "gate_route_labels_mismatch"),
         ("node:t_dangling", "transform_on_success_dangling"),
         ("node:t_dangling", "transform_on_error_unknown_sink"),
+        ("node:t_novel_decision", "pipeline_decision_unregistered"),
     ):
         assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"

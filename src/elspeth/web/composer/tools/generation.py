@@ -443,6 +443,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
     (
+        r"pipeline_decision_unregistered",
+        "A pipeline_decision interpretation review may only use one of the registered decision kinds — novel decision terms can never be reviewed or resolved.",
+        "Remove the pipeline_decision entry from the node's interpretation_requirements (record the rationale in metadata.description instead), or use an llm_prompt_template review for prompt-shaped decisions. Registered kinds: drop_raw_html_fields, web_scrape_http_identity, prompt_injection_shield_recommendation.",
+    ),
+    (
         r"plugin_options_invalid",
         "One or more of the component's options failed its plugin schema (missing required option, wrong shape, flexible schema without fields, or — for llm — a missing/invalid operator profile alias).",
         "Call get_plugin_schema(<plugin_type>, <plugin_name>) for the exact option shapes and allowed values (the llm transform's 'profile' enum lists the operator-approved aliases), fix only the offending options, and re-emit. For schema options: use {mode: observed} to infer types, or provide explicit fields with mode fixed/flexible.",

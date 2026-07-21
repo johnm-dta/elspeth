@@ -788,7 +788,7 @@ def test_unknown_pipeline_decision_user_term_fails_closed() -> None:
         )
     )
 
-    with pytest.raises(ValueError, match="unknown pipeline_decision user_term"):
+    with pytest.raises(ValueError, match="not a registered decision kind"):
         reconcile_authoritative_reviews(previous, proposed)
 
     result = _execute_set_pipeline(_exact_arguments(previous).data, previous, _trained_context())

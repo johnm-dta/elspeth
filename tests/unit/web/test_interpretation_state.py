@@ -1813,3 +1813,25 @@ def test_refine_prompt_shield_warnings_rewrites_c_to_b_when_available() -> None:
     assert other[0]["message"] == "unrelated warning"
     unchanged = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=False)
     assert any(PROMPT_SHIELD_WARNING_DRAFT in w["message"] for w in unchanged)
+
+
+def test_pipeline_decision_semantics_rejects_unregistered_user_term() -> None:
+    """A pipeline_decision review term outside the closed registry must be
+    rejected at validation — the resolve-side artifact-hash registry raises
+    on unknown terms, so accepting one at authoring mints an event that can
+    NEVER be resolved and wedges the session (live: session 0b33d895,
+    model-invented term 'ab_reconciliation_retention' → resolve 500)."""
+    import pytest as _pytest
+
+    from elspeth.web.interpretation_state import validate_pipeline_decision_semantics
+
+    with _pytest.raises(ValueError, match="registered"):
+        validate_pipeline_decision_semantics(
+            node_id="reconcile",
+            plugin="field_mapper",
+            options={},
+            user_term="ab_reconciliation_retention",
+            draft="Retain both variants in the reconciled row.",
+            context="test",
+            web_scrape_raw_fields=frozenset(),
+        )

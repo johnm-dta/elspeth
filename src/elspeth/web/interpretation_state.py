@@ -37,6 +37,17 @@ SOURCE_COMPONENT_ID = "source"
 INTERPRETATION_REVIEW_PENDING_CODE = "interpretation_review_pending"
 PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
 RAW_HTML_CLEANUP_USER_TERM: Final[str] = "drop_raw_html_fields"
+# The CLOSED set of reviewable pipeline-decision terms. Every member must have
+# a projection helper in ``pipeline_decision_artifact_hash`` — that registry
+# raises on unknown terms at resolve time, so membership here is what makes an
+# authored pipeline_decision requirement resolvable at all.
+REGISTERED_PIPELINE_DECISION_USER_TERMS: Final[frozenset[str]] = frozenset(
+    {
+        "drop_raw_html_fields",
+        "web_scrape_http_identity",
+        "prompt_injection_shield_recommendation",
+    }
+)
 RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
 WEB_SCRAPE_HTTP_IDENTITY_USER_TERM: Final[str] = "web_scrape_http_identity"
 PROMPT_SHIELD_USER_TERM: Final[str] = "prompt_injection_shield_recommendation"
@@ -143,6 +154,17 @@ def validate_pipeline_decision_semantics(
 ) -> None:
     """Validate that reviewed pipeline-shaping decisions match node behavior."""
 
+    normalized_term = user_term.strip()
+    if normalized_term not in REGISTERED_PIPELINE_DECISION_USER_TERMS:
+        # The resolve-side artifact-hash registry raises on unknown terms, so
+        # accepting a novel term here mints an interpretation event that can
+        # never be resolved — the session wedges at the run gate.
+        raise ValueError(
+            f"{context}: pipeline_decision user_term {user_term!r} is not a registered decision kind; "
+            f"registered kinds: {sorted(REGISTERED_PIPELINE_DECISION_USER_TERMS)}. Novel decisions cannot "
+            "be reviewed or resolved — drop the requirement and record the rationale in "
+            "metadata.description, or use an llm_prompt_template review for prompt-shaped decisions."
+        )
     if _is_web_scrape_http_identity_decision(user_term=user_term):
         if plugin != "web_scrape":
             raise ValueError(

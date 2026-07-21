@@ -41,7 +41,7 @@ import { isGuidedBuildActive } from "./guided/guidedBuildActive";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
 import { PipelineValidationSummary } from "./guided/PipelineValidationSummary";
-import { humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
+import { clientWireBlockerMessages, humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
 import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
 import {
   AcknowledgementLiveRegion,
@@ -658,11 +658,15 @@ export function ChatPanel({
   // side): the persisted composition carries its Stage-1 errors; a non-empty
   // list means a confirm would be rejected server-side, so WireStageTurn
   // disables the button and names the issues instead of offering a dead click.
+  // The guided deferred-commit placeholder status is excluded: pre-commit
+  // guided states are empty-by-design until Confirm wiring commits the
+  // proposal, so that status is resolved by the confirm itself and gating on
+  // it deadlocks guided authoring (see clientWireBlockerMessages).
   // Messages route through the same humaniser the validation summary uses —
   // an engineer-grade contract dump must not land verbatim in the blockers
   // panel either (same error-rendering discipline).
   const wireValidationIssues = useMemo<string[]>(() => {
-    const raw = compositionState?.validation_errors ?? [];
+    const raw = clientWireBlockerMessages(compositionState?.validation_errors ?? []);
     if (raw.length === 0) return raw;
     const phraseFor = makePhraseFor(compositionState);
     return raw.map(

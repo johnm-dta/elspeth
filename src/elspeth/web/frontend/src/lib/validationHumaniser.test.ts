@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clientWireBlockerMessages,
   formatFindingBody,
   humaniseValidationMessage,
   makePhraseFor,
@@ -314,5 +315,21 @@ describe("formatFindingBody", () => {
       phraseFor,
     );
     expect(calls).toEqual([["csv_refunds_a1b2", "source"]]);
+  });
+});
+
+describe("clientWireBlockerMessages", () => {
+  it("drops the guided deferred-commit placeholder status", () => {
+    expect(clientWireBlockerMessages(["guided_composition_invalid"])).toEqual([]);
+  });
+
+  it("keeps real validation messages while dropping the placeholder", () => {
+    expect(
+      clientWireBlockerMessages(["guided_composition_invalid", "No source configured."]),
+    ).toEqual(["No source configured."]);
+  });
+
+  it("passes ordinary error lists through untouched", () => {
+    expect(clientWireBlockerMessages(["No sinks configured."])).toEqual(["No sinks configured."]);
   });
 });

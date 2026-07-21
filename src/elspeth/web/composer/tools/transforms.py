@@ -559,7 +559,7 @@ def _execute_upsert_node(
             return _failure_result(state, f"Node '{node_id}': {expr_error}")
         parity_error = _validate_gate_route_parity(condition, validated.routes)
         if parity_error is not None:
-            return _failure_result(state, f"Node '{node_id}': {parity_error}")
+            return _failure_result(state, f"Node '{node_id}': {parity_error}", error_code="gate_route_labels_mismatch")
     if node_type == "aggregation":
         trigger_error = _validate_aggregation_trigger(validated.trigger)
         if trigger_error is not None:

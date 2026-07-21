@@ -6021,6 +6021,7 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
             _node(id="t_bad", on_success=None, on_error=None),
             _node(id="c_bad", node_type="coalesce", plugin=None),
             _node(id="g_bad", node_type="gate", plugin=None),
+            _node(id="g_half", node_type="gate", plugin=None, condition="True", routes={"true": "out"}),
         ),
         edges=(),
         outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
@@ -6037,5 +6038,6 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
         ("node:c_bad", "coalesce_missing_policy"),
         ("node:g_bad", "gate_missing_condition"),
         ("node:g_bad", "gate_missing_routes"),
+        ("node:g_half", "gate_route_labels_mismatch"),
     ):
         assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"

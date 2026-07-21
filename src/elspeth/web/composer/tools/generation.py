@@ -442,6 +442,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "A gate node needs a routes mapping for its condition outcomes.",
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
+    (
+        r"gate_route_labels_mismatch|route labels don't match",
+        'A boolean gate condition routes on exactly the labels "true" and "false" — both must be present even when they share a destination.',
+        'Use routes={"true": <destination>, "false": <destination>}. For a pure fan-out gate: condition=\'True\', routes={"true": "fork", "false": "fork"}, fork_to=[<branch connections>]. Only string-returning conditions may use custom route labels.',
+    ),
 )
 
 

@@ -13986,3 +13986,19 @@ class TestStructuralNodeTypeProbedAsPlugin:
         assert "not a plugin" in message
         for fragment in expected_fragments:
             assert fragment in message, f"teaching message for {name!r} must mention {fragment!r}: {message}"
+
+
+class TestExplainGateRouteLabels:
+    def test_explains_gate_route_labels_mismatch(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "gate_route_labels_mismatch"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        fix = result.data["suggested_fix"]
+        assert '"true"' in fix and '"false"' in fix
+        assert "fork" in fix

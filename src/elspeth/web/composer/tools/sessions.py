@@ -650,7 +650,7 @@ def build_set_pipeline_candidate(
                 return _failure_result(state, f"Node '{node_id}': {expr_error}")
             parity_error = _validate_gate_route_parity(node.condition, node.routes)
             if parity_error is not None:
-                return _failure_result(state, f"Node '{node_id}': {parity_error}")
+                return _failure_result(state, f"Node '{node_id}': {parity_error}", error_code="gate_route_labels_mismatch")
 
     # 3. Validate output plugins and options
     #

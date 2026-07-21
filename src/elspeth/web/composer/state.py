@@ -2483,7 +2483,9 @@ class CompositionState:
                         # not green-light a pipeline runtime config later rejects.
                         parity_error = _validate_gate_route_parity(node.condition, node.routes)
                         if parity_error is not None:
-                            errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {parity_error}", "high"))
+                            errors.append(
+                                _err(f"node:{node.id}", f"Gate '{node.id}': {parity_error}", "high", "gate_route_labels_mismatch")
+                            )
                 if node.routes is None:
                     errors.append(
                         _err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high", "gate_missing_routes")

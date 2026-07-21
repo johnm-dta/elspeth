@@ -14002,3 +14002,19 @@ class TestExplainGateRouteLabels:
         fix = result.data["suggested_fix"]
         assert '"true"' in fix and '"false"' in fix
         assert "fork" in fix
+
+
+class TestExplainDanglingDestinations:
+    def test_explains_transform_on_success_dangling(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "explain_validation_error",
+            {"error_text": "transform_on_success_dangling"},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        fix = result.data["suggested_fix"]
+        assert "sink_name" in fix
+        assert "input" in fix

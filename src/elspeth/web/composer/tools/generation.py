@@ -443,6 +443,16 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
     (
+        r"transform_on_success_dangling|aggregation_on_success_dangling|source_on_success_dangling|is neither a sink nor a known connection",
+        "An on_success destination must be an existing sink name or a connection another node reads as its input.",
+        "Point on_success at one of outputs[].sink_name exactly, or at the connection name a downstream node declares as its input. Call get_pipeline_state to list the current sink names and node input connections, then re-emit with a matching destination.",
+    ),
+    (
+        r"transform_on_error_unknown_sink|references unknown sink",
+        "An on_error destination may only be 'discard' or an existing sink name.",
+        "Set on_error='discard', or point it at one of outputs[].sink_name exactly.",
+    ),
+    (
         r"gate_route_labels_mismatch|route labels don't match",
         'A boolean gate condition routes on exactly the labels "true" and "false" — both must be present even when they share a destination.',
         'Use routes={"true": <destination>, "false": <destination>}. For a pure fan-out gate: condition=\'True\', routes={"true": "fork", "false": "fork"}, fork_to=[<branch connections>]. Only string-returning conditions may use custom route labels.',

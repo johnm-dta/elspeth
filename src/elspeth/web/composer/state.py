@@ -756,6 +756,7 @@ def _validate_runtime_route_destinations(
                     component,
                     message,
                     "high",
+                    "source_on_success_dangling",
                 )
             )
 
@@ -767,6 +768,7 @@ def _validate_runtime_route_destinations(
                         f"node:{node.id}",
                         f"Transform '{node.id}' on_success '{node.on_success}' is neither a sink nor a known connection.",
                         "high",
+                        "transform_on_success_dangling",
                     )
                 )
             if node.on_error is not None and node.on_error != "discard" and node.on_error not in output_names:
@@ -775,6 +777,7 @@ def _validate_runtime_route_destinations(
                         f"node:{node.id}",
                         f"Transform '{node.id}' on_error '{node.on_error}' references unknown sink.",
                         "high",
+                        "transform_on_error_unknown_sink",
                     )
                 )
             continue
@@ -786,6 +789,7 @@ def _validate_runtime_route_destinations(
                         f"node:{node.id}",
                         f"Aggregation '{node.id}' on_success '{node.on_success}' is neither a sink nor a known connection.",
                         "high",
+                        "aggregation_on_success_dangling",
                     )
                 )
             continue

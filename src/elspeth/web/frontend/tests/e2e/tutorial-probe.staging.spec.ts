@@ -15,6 +15,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { harnessCtx, resetToFirstRun, cleanSessions } from "./helpers/tutorial-harness";
 
 const SHOT_DIR =
+  process.env.TUTORIAL_PROBE_SHOT_DIR ??
   "/tmp/claude-1000/-home-john-elspeth/92b95b1e-c2e4-4139-98fe-f6d036587be2/scratchpad/tutorial-probe";
 let shotN = 0;
 async function shot(page: Page, label: string): Promise<void> {

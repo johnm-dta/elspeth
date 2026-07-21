@@ -4027,7 +4027,7 @@ class TestSchemaContractValidation:
                 condition=None,
                 routes=None,
                 fork_to=None,
-                branches=("a_out", "b_out"),
+                branches={"branch_a": "a_out", "branch_b": "b_out"},
                 policy="require_all",
                 merge="nested",
             )
@@ -4159,7 +4159,7 @@ class TestSchemaContractValidation:
             self._make_transform(
                 "ta",
                 "path_a",
-                "out_a",
+                "mid_a",
                 options={"required_input_fields": ["text"]},
             )
         )
@@ -4167,12 +4167,28 @@ class TestSchemaContractValidation:
             self._make_transform(
                 "tb",
                 "path_b",
-                "out_b",
+                "mid_b",
                 options={"required_input_fields": ["text"]},
             )
         )
-        state = state.with_output(self._make_output("out_a"))
-        state = state.with_output(self._make_output("out_b"))
+        state = state.with_node(
+            NodeSpec(
+                id="rejoin",
+                node_type="coalesce",
+                plugin=None,
+                input="mid_a",
+                on_success="merged",
+                on_error=None,
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches={"path_a": "mid_a", "path_b": "mid_b"},
+                policy="require_all",
+                merge="union",
+            )
+        )
+        state = state.with_output(self._make_output("merged"))
         state = state.with_edge(self._make_edge("e1", "source", "g1"))
         state = state.with_edge(self._make_edge("e2", "g1", "ta"))
         state = state.with_edge(self._make_edge("e3", "g1", "tb"))
@@ -5666,9 +5682,26 @@ class TestPassThroughComposerParity:
             self._make_transform(
                 "pt_node",
                 "path_a",
-                "main",
+                "pt_out",
                 plugin="passthrough",
                 options={"schema": {"mode": "observed"}},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="rejoin",
+                node_type="coalesce",
+                plugin=None,
+                input="pt_out",
+                on_success="main",
+                on_error=None,
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches={"path_a": "pt_out"},
+                policy="require_all",
+                merge="union",
             )
         )
         state = state.with_output(
@@ -5699,11 +5732,16 @@ class TestPassThroughComposerParity:
 
         result = state.validate()
 
+        # Engine-legal fork chains route branches through a coalesce (or a
+        # sink-named branch); preview deliberately defers coalesce-fed sink
+        # contracts to the runtime validator with an explicit skip warning
+        # rather than fabricating a contract row. The previous assertion
+        # (a satisfied contract at output:main) was reachable only in a
+        # fork-into-transform-into-sink shape the engine rejects at pre-run
+        # ("fork branch with no destination").
         assert result.is_valid, result.errors
-        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
-        assert set(sink_contract.producer_guarantees) == {"id", "body"}
-        assert sink_contract.consumer_requires == ("body",)
-        assert sink_contract.satisfied is True
+        assert any("coalesce" in w.message.lower() and "skipped" in w.message.lower() for w in result.warnings)
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
 
     def test_preview_fails_closed_when_known_pass_through_constructor_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Probe failure on a known pass-through plugin → Stage 1 rejects pipeline.
@@ -6073,3 +6111,74 @@ def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
         ("node:c_vocab", "coalesce_merge_invalid"),
     ):
         assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"
+
+
+def test_gate_fork_branches_must_reach_a_coalesce_branch_or_sink() -> None:
+    """Mirror the engine's fork-branch destination rule at composition time.
+
+    Live session d4ea3d8a: committed pipeline failed engine pre-run because
+    the gate's fork_to names ('branch_a'/'branch_b') appeared nowhere in any
+    coalesce branches keys or sink names — the model keyed coalesce branches
+    by incoming connection instead of fork branch name. Composer validation
+    accepted it: valid-but-not-runnable.
+    """
+
+    def _node(**overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": "n",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "rows",
+            "on_success": "out",
+            "on_error": "discard",
+            "options": {},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="rows", options={}, on_validation_failure="discard"),
+        nodes=(
+            _node(
+                id="fork_rows",
+                node_type="gate",
+                plugin=None,
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=["branch_a", "branch_b"],
+                on_success=None,
+                on_error=None,
+            ),
+            _node(id="tone", input="branch_a", on_success="tone_out"),
+            _node(id="usage", input="branch_b", on_success="usage_out"),
+            _node(
+                id="reconcile",
+                node_type="coalesce",
+                plugin=None,
+                input="tone_out",
+                on_success=None,
+                on_error=None,
+                branches={"tone_out": "tone_out", "usage_out": "usage_out"},
+                policy="require_all",
+                merge="union",
+            ),
+            _node(id="finalize", input="reconcile", on_success="out"),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = state.validate()
+    entries = [(e.component, e.error_code) for e in result.errors]
+    assert ("node:fork_rows", "fork_branch_no_destination") in entries, entries
+    offending = next(e for e in result.errors if e.error_code == "fork_branch_no_destination")
+    assert "branch_a" in offending.message
+    assert "tone_out" in offending.message

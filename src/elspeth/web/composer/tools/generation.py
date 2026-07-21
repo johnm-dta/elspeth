@@ -443,6 +443,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
     (
+        r"fork_branch_no_destination|fork branch '(.+)' with no destination",
+        "Every gate fork_to branch name must land somewhere: as a KEY in a coalesce 'branches' mapping, or as an exact sink name.",
+        "Key the coalesce branches by the gate's fork branch names — e.g. fork_to=['branch_a','branch_b'] pairs with branches={'branch_a': '<connection arriving from that branch>', 'branch_b': '<connection>'} — where each value is the connection reaching the coalesce after any per-branch transforms (the transform's on_success).",
+    ),
+    (
         r"coalesce_policy_invalid|coalesce_merge_invalid",
         "Coalesce policy and merge use the engine's closed vocabularies.",
         "Set policy to one of: require_all, quorum, best_effort, first — and merge to one of: union, nested, select. For an A/B rejoin that combines branch fields into one row: policy='require_all', merge='union'.",

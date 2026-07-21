@@ -760,6 +760,35 @@ def _validate_runtime_route_destinations(
                 )
             )
 
+    # Mirror the engine's fork-branch destination rule: every gate fork_to
+    # name must be a key in some coalesce 'branches' mapping (arrival is
+    # tracked by FORK BRANCH NAME, not by the connection that reaches the
+    # coalesce) or match a sink name exactly. The engine rejects this at
+    # pre-run; without the mirror a committed fork/coalesce pipeline is
+    # valid-but-not-runnable.
+    coalesce_branch_names = {
+        str(branch_name)
+        for candidate in nodes
+        if candidate.node_type == "coalesce" and candidate.branches is not None
+        for branch_name in (candidate.branches.keys() if isinstance(candidate.branches, Mapping) else candidate.branches)
+    }
+    for node in nodes:
+        if node.node_type == "gate" and node.fork_to:
+            for branch in node.fork_to:
+                if branch not in coalesce_branch_names and branch not in output_names:
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Gate '{node.id}' fork branch '{branch}' has no destination: it must be a key "
+                            "in some coalesce 'branches' mapping or match a sink name exactly. "
+                            f"Coalesce branch keys: {sorted(coalesce_branch_names)}; sinks: {sorted(output_names)}. "
+                            "Key coalesce branches by FORK BRANCH NAME, with each value naming the connection "
+                            "that arrives at the coalesce after any per-branch transforms.",
+                            "high",
+                            "fork_branch_no_destination",
+                        )
+                    )
+
     for node in nodes:
         if node.node_type == "transform":
             if node.on_success is not None and node.on_success not in output_names and node.on_success not in consumer_connections:

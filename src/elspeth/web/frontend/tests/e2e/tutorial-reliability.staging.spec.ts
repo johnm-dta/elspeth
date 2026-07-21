@@ -142,6 +142,10 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   const primaries = [
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Source inspection review (inspect_and_confirm): rendered after the
+    // chat-resolved inline source is materialized into a session blob and
+    // inspected — confirming the observed columns is the designed answer.
+    page.getByRole("button", { name: "Looks right", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
     // built is observed-mode (pass-all-through), and the real output fields come
     // from the downstream transforms — so the correct, designed answer here is

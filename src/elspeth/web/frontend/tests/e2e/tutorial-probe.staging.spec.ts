@@ -114,6 +114,10 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   const primaries = [
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Source inspection review (inspect_and_confirm): rendered after the
+    // chat-resolved inline source is materialized into a session blob and
+    // inspected — confirming the observed columns is the designed answer.
+    page.getByRole("button", { name: "Looks right", exact: true }),
     // Output required-fields turn: the LLM-built sink is observed-mode, so the
     // designed answer is the escape, not ticking the source's column.
     page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),

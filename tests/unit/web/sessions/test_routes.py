@@ -4490,6 +4490,10 @@ class TestMessageRoutes:
 
     def test_guided_chat_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
         """Step-1 chat source commit failures must not return ToolResult reprs."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.blobs import BlobRecord
+        from elspeth.contracts.enums import CreationModality
         from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
         from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
         from elspeth.web.composer.tools import ToolResult
@@ -4508,6 +4512,32 @@ class TestMessageRoutes:
             knob_schema={"fields": []},
         )
         app.state.catalog_service = catalog
+
+        async def fake_create_blob(session_uuid, filename, content, mime_type, created_by="user", source_description=None):
+            return BlobRecord(
+                id=uuid.uuid4(),
+                session_id=session_uuid,
+                filename=filename,
+                mime_type=mime_type,
+                size_bytes=len(content),
+                content_hash=None,
+                storage_path="blobs/test",
+                created_at=datetime.now(UTC),
+                created_by=created_by,
+                source_description=source_description,
+                status="ready",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
+            )
+
+        app.state.blob_service = MagicMock(spec=BlobServiceProtocol)
+        app.state.blob_service.list_blobs.return_value = []
+        app.state.blob_service.create_blob.side_effect = fake_create_blob
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post("/api/sessions", json={"title": "Guided chat source failure"})

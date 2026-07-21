@@ -16,11 +16,13 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.web.composer.guided.audit import emit_intent_cancelled
-from elspeth.web.composer.guided.chat_solver import DeferredIntentManagementChatRequest
+from elspeth.web.composer.guided.chat_solver import DeferredIntentManagementChatRequest, Step1SourceChatResolution
+from elspeth.web.composer.guided.emitters import _inspection_matches_source_plugin
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, Turn, TurnType
 from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
+from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.sessions._guided_step_chat import (
     GuidedStepChatEmptyResult,
     GuidedStepChatOnlyResult,
@@ -58,6 +60,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.schemas import GuidedChatRequest, GuidedChatResponse, GuidedRespondRequest
 
 from .._helpers import (
+    BlobQuotaExceededError,
     BufferingRecorder,
     ChatRole,
     ChatTurn,
@@ -73,6 +76,7 @@ from .._helpers import (
     _composer_progress_sink,
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
+    _inspect_latest_ready_session_blob,
     _is_client_disconnect_cancel,
     _publish_progress,
     _replace,
@@ -313,6 +317,54 @@ def _transition_request(
                 payload["control_signal"] = ControlSignal.PASSTHROUGH.value
             return GuidedRespondRequest.model_validate(payload, strict=True)
     return None
+
+
+async def _step_1_inline_source_inspection_facts(
+    *,
+    blob_service: Any,
+    session_id: UUID,
+    resolution: Step1SourceChatResolution,
+    source_description: str,
+) -> SourceInspectionFacts | None:
+    """Materialize inline resolve_source content as an upload-equivalent blob.
+
+    The newest ready session blob stays authoritative — exactly the blob the
+    wizard respond route would bind — so an uploaded file always wins over
+    inline content and a retried operation reuses its own earlier blob instead
+    of duplicating it. Inline bytes are stored only when the session has no
+    ready blob at all. Facts that cannot prefill the chosen plugin are dropped
+    so the transition falls back to the existing advisory-only flow rather
+    than failing the turn.
+
+    Custody note (deliberate, reviewed): the blob is written through
+    ``create_blob`` with ``created_by="assistant"`` — upload-equivalent
+    custody, the mechanism the implementation brief settled on. Full
+    ``reserve_inline_custody`` provenance (LLM_GENERATED modality) is not
+    reachable here: it requires a durable originating chat-message row, which
+    only exists after this operation settles. The LLM authorship breadcrumb
+    lives in ``source_description`` instead.
+    """
+    facts = await _inspect_latest_ready_session_blob(blob_service, session_id)
+    if facts is None:
+        content = resolution.content.encode("utf-8")
+        record = await blob_service.create_blob(
+            session_id,
+            resolution.filename,
+            content,
+            resolution.mime_type,
+            created_by="assistant",
+            source_description=source_description,
+        )
+        facts = inspect_blob_content(
+            content=content,
+            filename=record.filename,
+            mime_type=record.mime_type,
+            blob_id=record.id,
+            content_hash=record.content_hash,
+        )
+    if not _inspection_matches_source_plugin(resolution.plugin, facts):
+        return None
+    return facts
 
 
 async def post_guided_chat_schema8(
@@ -574,6 +626,43 @@ async def post_guided_chat_schema8(
                     management = deferred_request_management(deferred)
                     settled_management_action = management.action if management is not None else None
                     cancelled_intent = management.effective_intent if type(management) is DeferredRequestCancelled else None
+                    source_inspection_facts: SourceInspectionFacts | None = None
+                    if (
+                        source_resolution is not None
+                        and prospective.step is GuidedStep.STEP_1_SOURCE
+                        and TurnType(current_turn["type"]) is TurnType.SINGLE_SELECT
+                    ):
+                        try:
+                            source_inspection_facts = await _step_1_inline_source_inspection_facts(
+                                blob_service=request.app.state.blob_service,
+                                session_id=session_id,
+                                resolution=source_resolution,
+                                source_description=(
+                                    "Guided Step-1 chat resolve_source inline content "
+                                    f"(LLM-generated; model {settings.composer_model}; "
+                                    f"operation {body.operation_id})."
+                                ),
+                            )
+                        except (BlobQuotaExceededError, UnicodeEncodeError) as materialize_exc:
+                            source_resolution = None
+                            chat_result = StepChatResult(
+                                assistant_message=(
+                                    (
+                                        "I could not store the generated source content because this "
+                                        "session's storage quota is full. Remove an uploaded file or "
+                                        "provide a smaller source, then try again."
+                                    )
+                                    if isinstance(materialize_exc, BlobQuotaExceededError)
+                                    else (
+                                        "I could not store the generated source content because it "
+                                        "contains characters that cannot be encoded. Describe the "
+                                        "source again or upload the file directly."
+                                    )
+                                ),
+                                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                                latency_ms=chat_result.latency_ms,
+                                error_class="InlineSourceNotApplied",
+                            )
                     transition_body = _transition_request(
                         body=body,
                         guided=prospective,
@@ -618,6 +707,7 @@ async def post_guided_chat_schema8(
                                 catalog=catalog,
                                 shield_available=shield_available,
                                 new_stable_id=uuid4(),
+                                source_inspection_facts=source_inspection_facts,
                             )
                             transition_succeeded = True
                         except (PluginConfigError, InvariantError, TypeError, ValueError):

@@ -660,3 +660,192 @@ def test_expired_operation_takeover_fences_stale_worker_and_both_join_winner(
     assert operation["status"] == "completed"
     assert operation["attempt"] == 2
     assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
+
+
+def test_single_select_inline_source_resolution_materializes_blob_and_prefills_schema_form(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline resolve_source content with no uploaded blob becomes a session blob.
+
+    The plugin-selection transition must carry inspection facts derived from
+    the materialized bytes so the next turn is a blob-backed, continuable
+    schema form instead of the bare ``options: null`` stall.
+    """
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    assert initial_turn["type"] == "single_select"
+    body = _chat_body(initial_turn, message="The rows are name,value pairs; create the source inline.")
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
+
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
+
+    assert first.status_code == 200, first.json()
+    first_json = first.json()
+    assert first_json["assistant_message"] == "I prepared the CSV source."
+    assert first_json["assistant_message_kind"] == "assistant"
+
+    blobs = asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id)))
+    assert len(blobs) == 1
+    blob = blobs[0]
+    assert blob.filename == "source.csv"
+    assert blob.mime_type == "text/csv"
+    assert blob.created_by == "assistant"
+    assert blob.status == "ready"
+    content = asyncio.run(composer_test_client.app.state.blob_service.read_blob_content(blob.id))
+    assert content == b"name,value\nalice,1\n"
+
+    next_turn = first_json["next_turn"]
+    assert next_turn["type"] == "schema_form"
+    prefilled = next_turn["payload"]["prefilled"]
+    assert prefilled["path"] == f"blob:{blob.id}"
+    assert prefilled["on_validation_failure"] == "discard"
+    assert prefilled["schema"]["mode"] in {"flexible", "observed"}
+
+    record = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert record is not None
+    persisted_guided = record.composer_meta["guided_session"]
+    intent = next(iter(persisted_guided["pending_source_intents"].values()))
+    assert intent["phase"] == "plugin_options"
+    assert intent["plugin"] == "csv"
+    assert intent["inspection_facts"] is not None
+
+
+def test_inline_source_walks_prefilled_form_through_inspection_to_resolved_source(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The materialized inline blob drives the wizard to a reviewed source."""
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
+    chat = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=_chat_body(initial_turn))
+    assert chat.status_code == 200, chat.json()
+    schema_turn = chat.json()["next_turn"]
+    assert schema_turn["type"] == "schema_form"
+    prefilled = schema_turn["payload"]["prefilled"]
+    assert prefilled["path"].startswith("blob:")
+
+    form = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": schema_turn["turn_token"],
+            "edited_values": {
+                "plugin": "csv",
+                "options": {
+                    "path": prefilled["path"],
+                    "schema": prefilled["schema"],
+                    "on_validation_failure": prefilled["on_validation_failure"],
+                },
+            },
+        },
+    )
+    assert form.status_code == 200, form.json()
+    inspect_turn = form.json()["next_turn"]
+    assert inspect_turn["type"] == "inspect_and_confirm"
+
+    confirm = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={
+            "operation_id": str(uuid4()),
+            "turn_token": inspect_turn["turn_token"],
+            "edited_values": {"columns": ["name", "value"]},
+        },
+    )
+    assert confirm.status_code == 200, confirm.json()
+
+    record = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert record is not None
+    persisted_guided = record.composer_meta["guided_session"]
+    assert persisted_guided["pending_source_intents"] == {}
+    source = next(iter(persisted_guided["reviewed_sources"].values()))
+    assert source["plugin"] == "csv"
+    assert tuple(source["observed_columns"]) == ("name", "value")
+    assert source["options"]["path"] == prefilled["path"]
+
+
+def test_inline_source_defers_to_existing_ready_uploaded_blob(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uploaded blob stays authoritative; inline content is not stored."""
+    session_id = _create_session(composer_test_client)
+    uploaded = asyncio.run(
+        composer_test_client.app.state.blob_service.create_blob(
+            UUID(session_id),
+            "uploaded.csv",
+            b"name,value\nuploaded,9\n",
+            "text/csv",
+            created_by="user",
+        )
+    )
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
+
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=_chat_body(initial_turn))
+
+    assert first.status_code == 200, first.json()
+    blobs = asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id)))
+    assert [blob.id for blob in blobs] == [uploaded.id]
+    next_turn = first.json()["next_turn"]
+    assert next_turn["type"] == "schema_form"
+    assert next_turn["payload"]["prefilled"]["path"] == f"blob:{uploaded.id}"
+
+
+def test_inline_source_unencodable_content_settles_as_advisory_without_blob(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lone-surrogate content from the provider must not 500 the turn."""
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+
+    async def surrogate_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
+        resolution = replace(_source_resolution(), content="name,value\n\ud800,1\n")
+        return Step1SourceResolvedResult(
+            chat=StepChatResult(
+                assistant_message=resolution.assistant_message,
+                status=ComposerChatTurnStatus.SUCCESS,
+                latency_ms=1,
+                error_class=None,
+            ),
+            resolution=resolution,
+        )
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", surrogate_provider, raising=False)
+
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=_chat_body(initial_turn))
+
+    assert first.status_code == 200, first.json()
+    first_json = first.json()
+    assert first_json["assistant_message_kind"] == "synthetic_failure"
+    assert first_json["guided_session"]["chat_history"][-1]["synthetic_failure_reason"] == "not_applied"
+    assert first_json["next_turn"]["turn_token"] == initial_turn["turn_token"]
+    assert asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id))) == []
+
+
+def test_inline_source_quota_failure_settles_as_advisory_without_blob(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A quota-rejected inline source must not pretend it was applied."""
+    from elspeth.web.blobs.service import BlobQuotaExceededError
+
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _resolved_source_provider, raising=False)
+    quota = AsyncMock(
+        spec=composer_test_client.app.state.blob_service.create_blob,
+        side_effect=BlobQuotaExceededError(session_id, current_bytes=10, limit_bytes=10),
+    )
+    monkeypatch.setattr(composer_test_client.app.state.blob_service, "create_blob", quota)
+
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=_chat_body(initial_turn))
+
+    assert first.status_code == 200, first.json()
+    first_json = first.json()
+    assert first_json["assistant_message_kind"] == "synthetic_failure"
+    assert first_json["guided_session"]["chat_history"][-1]["synthetic_failure_reason"] == "not_applied"
+    assert first_json["next_turn"]["turn_token"] == initial_turn["turn_token"]
+    assert asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id))) == []

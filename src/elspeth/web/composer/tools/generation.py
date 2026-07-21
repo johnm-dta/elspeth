@@ -443,6 +443,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
     ),
     (
+        r"plugin_options_invalid",
+        "One or more of the component's options failed its plugin schema (missing required option, wrong shape, flexible schema without fields, or — for llm — a missing/invalid operator profile alias).",
+        "Call get_plugin_schema(<plugin_type>, <plugin_name>) for the exact option shapes and allowed values (the llm transform's 'profile' enum lists the operator-approved aliases), fix only the offending options, and re-emit. For schema options: use {mode: observed} to infer types, or provide explicit fields with mode fixed/flexible.",
+    ),
+    (
         r"transform_on_success_dangling|aggregation_on_success_dangling|source_on_success_dangling|is neither a sink nor a known connection",
         "An on_success destination must be an existing sink name or a connection another node reads as its input.",
         "Point on_success at one of outputs[].sink_name exactly, or at the connection name a downstream node declares as its input. Call get_pipeline_state to list the current sink names and node input connections, then re-emit with a matching destination.",

@@ -416,7 +416,7 @@ def build_set_pipeline_candidate(
                 return _failure_result(state, f"Source '{source_name}': {path_error}")
             src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
             if src_prevalidation is not None:
-                return _failure_result(state, f"Source '{source_name}': {src_prevalidation}")
+                return _failure_result(state, f"Source '{source_name}': {src_prevalidation}", error_code="plugin_options_invalid")
             source_specs[source_name] = SourceSpec(
                 plugin=src_plugin,
                 on_success=source_model.on_success,
@@ -606,7 +606,7 @@ def build_set_pipeline_candidate(
             )
             node_prevalidation = _prevalidate_transform_for_context(context, node_plugin, review_options)
             if node_prevalidation is not None:
-                return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
+                return _failure_result(state, f"Node '{node_id}': {node_prevalidation}", error_code="plugin_options_invalid")
 
             # Operator-profiled transforms (an ``llm`` node authored with a
             # ``profile`` alias) carry their private provider config — the
@@ -717,7 +717,7 @@ def build_set_pipeline_candidate(
             return _failure_result(state, f"Output '{out_name}': {out_path_error}")
         out_prevalidation = _prevalidate_sink(out_plugin, out_options)
         if out_prevalidation is not None:
-            return _failure_result(state, f"Output '{out_name}': {out_prevalidation}")
+            return _failure_result(state, f"Output '{out_name}': {out_prevalidation}", error_code="plugin_options_invalid")
         out_collision_error = validate_composer_file_sink_collision_policy(
             out_plugin,
             out_options,

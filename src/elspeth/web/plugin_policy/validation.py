@@ -216,7 +216,7 @@ def _lower_profiled_components(
         }
         alias = authored_options.pop("profile", None)
         if not isinstance(alias, str) or alias not in aliases:
-            findings.append(_profile_unavailable_finding(component, plugin_id))
+            findings.append(_profile_unavailable_finding(component, plugin_id, available_aliases=tuple(aliases)))
             continue
         public_schema = resolved_public_schema.json_schema
         public_options = {"profile": alias, **authored_options}
@@ -281,17 +281,34 @@ def _lower_profiled_components(
     )
 
 
-def _profile_unavailable_finding(component: _Component, plugin_id: PluginId) -> PluginPolicyFinding:
+def _profile_unavailable_finding(
+    component: _Component,
+    plugin_id: PluginId,
+    available_aliases: tuple[str, ...] = (),
+) -> PluginPolicyFinding:
+    # Two distinct realities share this error code: profiles exist but the
+    # options failed to select one (author-fixable — name the aliases), and
+    # no profile is configured or available at all (operator-fixable).
+    # Conflating them told authors "an operator must enable a profile" while
+    # a valid alias was sitting in the enum, causing false honest declines.
+    if available_aliases:
+        message = (
+            f"Plugin '{plugin_id}' requires an operator profile and the options did not select "
+            f"one: set the 'profile' option to one of the operator-approved aliases "
+            f"{sorted(available_aliases)!r}."
+        )
+    else:
+        message = (
+            f"Plugin '{plugin_id}' is installed but not turned on in this deployment: "
+            "it requires an operator profile and none is configured or available. "
+            "An operator must enable a profile before this plugin can be used."
+        )
     return PluginPolicyFinding(
         stage="operator_profile_options",
         component_id=component.component_id,
         component_type=component.component_type,
         error_code="profile_unavailable",
-        message=(
-            f"Plugin '{plugin_id}' is installed but not turned on in this deployment: "
-            "it requires an operator profile and none is configured or available. "
-            "An operator must enable a profile before this plugin can be used."
-        ),
+        message=message,
     )
 
 

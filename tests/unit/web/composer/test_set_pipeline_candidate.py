@@ -1233,7 +1233,7 @@ def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], T
             _profile_rejecting_context(data_dir=tmp_path),
             "Node 'copy': Invalid options for transform 'passthrough': profile_unavailable — "
             "The requested operator profile is unavailable.",
-            None,
+            "plugin_options_invalid",
         ),
         (
             "invalid_options",
@@ -1241,7 +1241,7 @@ def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], T
             _trained_context(data_dir=tmp_path),
             "Node 'copy': Invalid options for transform 'passthrough': schema: Field required. Use 'schema: {mode: "
             "observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
-            None,
+            "plugin_options_invalid",
         ),
         (
             "escaping_path",

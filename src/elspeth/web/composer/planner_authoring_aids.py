@@ -29,8 +29,19 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Final
 
+from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginSummary
+
+# The registered shield-review constants and the untrusted-producer set are the
+# contract's single source of truth (interpretation_state); importing them —
+# private set included — is deliberate, so the taught row can never drift.
+from elspeth.web.interpretation_state import (
+    _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS,
+    PROMPT_SHIELD_AVAILABLE_DRAFT,
+    PROMPT_SHIELD_USER_TERM,
+    PROMPT_SHIELD_WARNING_DRAFT,
+)
 
 # The prompt never models a fabricated identifier — provenance is the lesson.
 PLACEHOLDER_BLOB_ID: Final[str] = "<blob_id copied verbatim from a list_blobs or create_blob result>"
@@ -69,6 +80,35 @@ _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
 )
 
 _FORK_EXEMPLAR_CONTENT: Final[str] = "ticket_id,body\nT-1001,Cannot log in since the update\nT-1002,Invoice totals look wrong\n"
+
+
+def _prompt_shield_rules(*, shield_available: bool, untrusted_producers: tuple[str, ...]) -> list[str]:
+    """Shield-staging rules quoting the registered review constants verbatim.
+
+    The prompt-injection shield review is ADVISORY end-to-end (warnings only,
+    excluded from the blocking contract), so no rejection code ever teaches it
+    on a repair turn — these aids are the only lever. Tutorial finalizer
+    battery (dim_c under-flag): the replan planner non-deterministically
+    omitted the row on the scrape→summarize llm node. Constants are imported
+    from ``interpretation_state`` so the taught row can never drift from the
+    contract (the 52322ebe1 discipline); the draft is chosen by the LIVE
+    snapshot's shield selection, mirroring the warning→available upgrade the
+    server itself applies, and memoizes correctly because the aids cache is
+    keyed by snapshot hash.
+    """
+    draft = PROMPT_SHIELD_AVAILABLE_DRAFT if shield_available else PROMPT_SHIELD_WARNING_DRAFT
+    producers = " or ".join(sorted(untrusted_producers))
+    return [
+        f"When an llm transform consumes externally-fetched content (any path from a {producers} "
+        "output reaches its input), stage the prompt-injection shield review ON THAT LLM NODE: "
+        "add one pending pipeline_decision entry to its options.interpretation_requirements "
+        "(a sibling of the node's other options).",
+        f'Use exactly: {{"kind": "pipeline_decision", "user_term": "{PROMPT_SHIELD_USER_TERM}", "draft": "{draft}"}} '
+        "— copy the user_term and draft strings verbatim.",
+        "The review is advisory and never blocks the pipeline, but omitting it hides a "
+        "prompt-injection exposure decision from the operator's review cards.",
+        "Skip the row only when an authorized prompt-injection shield transform is already wired between the fetch step and the llm node.",
+    ]
 
 
 def _usable_llm_profile_alias(catalog: PolicyCatalogView) -> str | None:
@@ -478,6 +518,14 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
         aids["fork_coalesce"] = {
             "rules": list(_FORK_COALESCE_RULES),
             "set_pipeline_exemplar": fork_coalesce,
+        }
+    visible_untrusted_producers = tuple(sorted(_UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS & visible["transform"]))
+    if visible_untrusted_producers and "llm" in visible["transform"]:
+        aids["prompt_shield"] = {
+            "rules": _prompt_shield_rules(
+                shield_available=dict(catalog.snapshot.selected).get(PluginCapability.PROMPT_SHIELD) is not None,
+                untrusted_producers=visible_untrusted_producers,
+            ),
         }
     aids["discovery_digest"] = {
         "guidance": _DISCOVERY_DIGEST_GUIDANCE,

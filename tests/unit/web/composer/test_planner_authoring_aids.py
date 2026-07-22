@@ -574,3 +574,93 @@ class TestAuthoringAidsPayload:
         view, _snapshot = _trained_view()
 
         canonical_json(build_planner_authoring_aids(view))
+
+
+class TestPromptShieldRules:
+    """The aids teach shield-staging with the registered constants verbatim.
+
+    Tutorial finalizer battery (dim_c under-flag): the replan planner
+    non-deterministically omitted the ADVISORY prompt_injection_shield
+    review row on the scrape→summarize llm node. The omission carries no
+    rejection code (the shield review is advisory — warnings only, excluded
+    from the blocking contract), so the authoring aids are the ONLY teaching
+    lever. Following the 52322ebe1 discipline, the rule must quote the
+    registered user_term and the deployment-honest draft constant verbatim —
+    imported constants, so the aids can never drift from the contract.
+    """
+
+    def test_trained_view_quotes_term_and_available_draft_verbatim(self) -> None:
+        from elspeth.web.interpretation_state import (
+            PROMPT_SHIELD_AVAILABLE_DRAFT,
+            PROMPT_SHIELD_USER_TERM,
+            PROMPT_SHIELD_WARNING_DRAFT,
+        )
+
+        view, snapshot = _trained_view()
+        # The trained snapshot SELECTS a prompt shield — the honest draft is
+        # the shield-available wording (mirrors the warning→available upgrade
+        # the server itself applies when the shield is selected).
+        from elspeth.contracts.plugin_capabilities import PluginCapability
+
+        assert dict(snapshot.selected).get(PluginCapability.PROMPT_SHIELD) is not None
+
+        aids = build_planner_authoring_aids(view)
+        rendered = "\n".join(aids["prompt_shield"]["rules"])
+        assert PROMPT_SHIELD_USER_TERM in rendered
+        assert PROMPT_SHIELD_AVAILABLE_DRAFT in rendered
+        assert PROMPT_SHIELD_WARNING_DRAFT not in rendered
+
+    def test_shieldless_view_quotes_the_warning_draft_verbatim(self) -> None:
+        from unittest.mock import MagicMock
+
+        from elspeth.contracts.plugin_capabilities import PluginCapability
+        from elspeth.web.interpretation_state import (
+            PROMPT_SHIELD_AVAILABLE_DRAFT,
+            PROMPT_SHIELD_USER_TERM,
+            PROMPT_SHIELD_WARNING_DRAFT,
+        )
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+
+        catalog = create_catalog_service()
+        trained = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        shieldless = PluginAvailabilitySnapshot.create(
+            policy_hash="prompt-shield-rules-shieldless",
+            principal_scope="local:prompt-shield-rules",
+            available=trained.available,
+            unavailable=(),
+            selected=tuple(
+                (capability, plugin)
+                for capability, plugin in dict(trained.selected).items()
+                if capability is not PluginCapability.PROMPT_SHIELD
+            ),
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="prompt-shield-rules-generation",
+        )
+        view = PolicyCatalogView(catalog, shieldless, MagicMock(spec=OperatorProfileRegistry))
+
+        aids = build_planner_authoring_aids(view)
+        rules = aids["prompt_shield"]["rules"]
+        rendered = "\n".join(rules)
+        assert PROMPT_SHIELD_USER_TERM in rendered
+        assert PROMPT_SHIELD_WARNING_DRAFT in rendered
+        assert PROMPT_SHIELD_AVAILABLE_DRAFT not in rendered
+
+    def test_rules_name_the_untrusted_producer_and_the_llm_attachment_point(self) -> None:
+        view, _snapshot = _trained_view()
+
+        rendered = "\n".join(build_planner_authoring_aids(view)["prompt_shield"]["rules"])
+        assert "web_scrape" in rendered
+        assert "interpretation_requirements" in rendered
+        assert "llm" in rendered
+
+    def test_section_renders_under_the_live_profile_posture(self, tmp_path: Path) -> None:
+        # The failing surface is the tutorial/guided walk under the operator-
+        # profile posture — pin that the section actually reaches it (web_scrape
+        # and llm are policy-visible there), not just the trained fixture.
+        from elspeth.web.interpretation_state import PROMPT_SHIELD_USER_TERM
+
+        view, _snapshot = _profile_view(tmp_path)
+
+        rendered = "\n".join(build_planner_authoring_aids(view)["prompt_shield"]["rules"])
+        assert PROMPT_SHIELD_USER_TERM in rendered

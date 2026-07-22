@@ -483,6 +483,102 @@ describe("sessionStore — guided-mode fields and actions", () => {
     );
   });
 
+  it("respondGuided: blocks while a guided chat is in flight (single in-flight-mutation gate)", async () => {
+    // Session 93edfc90: a long-running respond (the step-3 replan runs the
+    // planner in-request, 3-4 min) plus a second concurrent guided mutation
+    // hung the server. The two pending flags must gate EACH OTHER — one
+    // in-flight guided mutation per session, whichever endpoint carries it.
+    const { respondGuided: apiRespond } = await import("@/api/client");
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedChatPending: true,
+    });
+
+    const outcome = await useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(outcome.status).toBe("not_applied");
+    expect((outcome as { reason?: string }).reason).toBe("pending");
+    expect(apiRespond).not.toHaveBeenCalled();
+  });
+
+  it("chatGuided: blocks while a guided respond is in flight (single in-flight-mutation gate)", async () => {
+    const { chatGuided: apiChat, respondGuided: apiRespond } = await import("@/api/client");
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      compositionState: sampleCompositionState as never,
+      guidedResponsePending: true,
+    });
+
+    await useSessionStore.getState().chatGuided("add a filter step");
+
+    expect(apiChat).not.toHaveBeenCalled();
+    expect(apiRespond).not.toHaveBeenCalled();
+    // The gate is a silent no-op (the disabled affordances own the messaging);
+    // it must not thrash pending/error state.
+    expect(useSessionStore.getState().guidedChatPending).toBe(false);
+    expect(useSessionStore.getState().guidedResponsePending).toBe(true);
+  });
+
+  it("respondGuided: settles pending and un-pins a submitting review on a same-session generation-stale response", async () => {
+    // A same-session generation advance that publishes NOTHING (here: a
+    // seedGuided whose start POST fails) leaves the long respond's eventual
+    // response generation-stale. The stale drop must still settle the
+    // in-flight submit — clearing guidedResponsePending and moving the
+    // proposal review off "submitting" — or every primary and the Send stay
+    // disabled forever and the review pins "Submitting this proposal
+    // decision…".
+    const { respondGuided: apiRespond, startGuidedSession } = await import("@/api/client");
+    let resolveRespond!: (value: unknown) => void;
+    (apiRespond as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRespond = resolve;
+      }),
+    );
+    (startGuidedSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new TypeError("interleaved seed failed"),
+    );
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleProposalTurn,
+    });
+
+    const inFlight = useSessionStore.getState().respondGuided({
+      chosen: ["review_wiring"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+    expect(useSessionStore.getState().guidedProposalReview?.status).toBe("submitting");
+
+    await expect(
+      useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial"),
+    ).rejects.toThrow("interleaved seed failed");
+
+    resolveRespond(sampleRespondResponse);
+    const outcome = await inFlight;
+
+    expect(outcome).toMatchObject({ status: "not_applied", reason: "stale" });
+    const state = useSessionStore.getState();
+    expect(state.guidedResponsePending).toBe(false);
+    expect(state.guidedProposalReview?.status).not.toBe("submitting");
+  });
+
   it("respondGuided: reuses one operation id for an ambiguous retry of the exact action and turn", async () => {
     const { respondGuided } = await import("@/api/client");
     const respondMock = respondGuided as ReturnType<typeof vi.fn>;

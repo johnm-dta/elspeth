@@ -2318,6 +2318,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       guidedNextTurn,
       guidedTerminal,
       guidedResponsePending,
+      guidedChatPending,
     } = get();
     if (activeSessionId === null) {
       return {
@@ -2331,7 +2332,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // request before the authoritative response settles. A transport-uncertain
     // retry happens only after the catch clears pending, at which point the
     // retained descriptor reuses the original operation id and request body.
-    if (guidedResponsePending) {
+    //
+    // Single in-flight-mutation gate (session 93edfc90): a guided CHAT in
+    // flight also blocks a respond — the two endpoints mutate the same
+    // guided session, and a respond racing a chat fires a second concurrent
+    // server mutation (the step-3 replan runs the planner in-request for
+    // minutes; a concurrent submit hung the server). chatGuided carries the
+    // mirror-image check.
+    if (guidedResponsePending || guidedChatPending) {
       return {
         status: "not_applied",
         reason: "pending",
@@ -2390,6 +2398,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             },
           }),
     });
+    // A generation-stale drop must still SETTLE the in-flight submit when the
+    // requested session is still active (a same-session generation advance —
+    // e.g. a seedGuided resync — published nothing on this submit's behalf):
+    // leaving guidedResponsePending true disables every primary and the Send
+    // forever, and a "submitting" proposal review pins "Submitting this
+    // proposal decision…". A cross-session drop is left to the
+    // clearedGuidedState() reset the session-switch actions apply.
+    const settleStaleSubmit = () => {
+      if (get().activeSessionId !== requestedSessionId) return;
+      const review = get().guidedProposalReview;
+      set({
+        guidedResponsePending: false,
+        ...(proposalBinding !== null &&
+        review !== null &&
+        review.status === "submitting" &&
+        review.proposal_id === proposalBinding.proposal_id &&
+        review.draft_hash === proposalBinding.draft_hash
+          ? { guidedProposalReview: { status: "stale", ...proposalBinding } }
+          : {}),
+      });
+    };
     let responseReceived = false;
     try {
       const response = await api.respondGuided(activeSessionId, request);
@@ -2398,6 +2427,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Stale-fetch guard (Codex #4): drop the response if the active session
       // changed while the request was in flight.
       if (!guidedPublicationIsCurrent(requestedSessionId, publicationGeneration)) {
+        settleStaleSubmit();
         return {
           status: "not_applied",
           reason: "stale",
@@ -2414,6 +2444,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         publicationGeneration,
       );
       if (!applied) {
+        settleStaleSubmit();
         return {
           status: "not_applied",
           reason: "stale",
@@ -2437,6 +2468,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           return { status: "applied" };
         }
         if (resync === "stale") {
+          settleStaleSubmit();
           return {
             status: "not_applied",
             reason: "stale",
@@ -2836,6 +2868,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
     if (guidedSession === null) {
       throw new Error("chatGuided called before guidedSession loaded");
+    }
+    // Single in-flight-mutation gate (session 93edfc90), mirror of
+    // respondGuided's: one guided mutation per session at a time, whichever
+    // endpoint carries it. A silent no-op, not an error — the affordances
+    // that reach here are already disabled/unmounted while a mutation is in
+    // flight (ChatInput disabled={guidedResponsePending}; the pending swap
+    // unmounts the input during a chat), so this is the store-level backstop
+    // against a race the UI gate missed.
+    if (get().guidedChatPending || get().guidedResponsePending) {
+      return;
     }
     if (compositionState === null) {
       const requestedSessionId = activeSessionId;

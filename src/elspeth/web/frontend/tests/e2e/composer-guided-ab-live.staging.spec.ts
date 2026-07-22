@@ -2,16 +2,32 @@
 // composer-guided-ab-live.staging.spec.ts — THE TWO-LLM A/B TEST, guided
 // surface (real LLM planner + real LLM pipeline run, live deployment).
 //
-// The guided-wizard twin of composer-ab-live.staging.spec.ts (the freeform
-// A/B test). Same A/B contract: one colours CSV goes in, each row forks into
-// TWO separate LLM assessments with different prompts (variant A: emotional
-// tone, variant B: design usage context), and the variants are reconciled into
-// a single row per colour — color_name, hex, and both variant outputs — before
-// landing in a JSON sink. It drives the exact wizard mechanics of
-// composer-guided-live.staging.spec.ts (the guided colour pass-through) up to
-// the transforms phase, then diverges: instead of accepting an auto-proposal,
-// it DESCRIBES the fork → two-LLM → reconcile shape in the guided transforms
-// composer and lets the real planner author it.
+// The guided-wizard twin of composer-ab-live.staging.spec.ts (the freeform A/B
+// test). Same A/B contract: one colours CSV goes in, each row forks into TWO
+// separate LLM assessments with different prompts (variant A: emotional tone,
+// variant B: design usage context), and the variants are reconciled into a
+// single row per colour — color_name, hex, and both variant outputs — before
+// landing in a JSON sink.
+//
+// INTENT-UP-FRONT (the shipped 7.1 model — see below). The whole A/B pipeline
+// intent is carried on POST /guided/start (profile "live"); the wizard then
+// REVIEWS the source (CSV) and output (JSON sink) stages exactly like the
+// pass-through colour test, and at the Output→Transforms transition the planner
+// auto-fires FROM the root intent and stages the "Review pipeline proposal".
+// step_3 is therefore review-only.
+//
+// WHY NOT drive the transforms via the step_3 docked composer: the frontend
+// `chatGuided` routes on `compositionState === null` (sessionStore.ts) — first
+// message → POST /guided/start, later messages → POST /guided/chat. By step_3
+// the wizard walk has settled durable composition states, so a docked-composer
+// Send there routes to /guided/chat and the backend rejects it with a 409
+// ("Schema-8 CHAT is not available for step_3_transforms", guided_chat_atomic.py
+// preflight, empty deferred_intents). The intent MUST ride on /guided/start
+// instead — and /guided/start idempotent-no-ops once a checkpoint exists, so it
+// is issued as the FIRST guided operation, before the wizard creates one. This
+// spec issues it via the authed REST context (like the freeform twin's direct
+// ctx calls); the UI then hydrates the guided wizard from the persisted
+// checkpoint on load (selectSession → GET /guided), so no "Switch to guided".
 //
 // Requires the deployment to have an LLM operator profile configured
 // (ELSPETH_WEB__LLM_PROFILES) — without one the composer must honestly decline,
@@ -49,6 +65,7 @@
 // output as "GUIDED-AB-LIVE SESSION <id>".
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -213,19 +230,47 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
     let passed = false;
     try {
       // ── Out-of-band setup: session + colour CSV blob ─────────────────────
-      // Upload FIRST, then pick CSV in the wizard: the upload fast-path binds
-      // the blob and auto-configures the observed schema. (Choosing CSV before
-      // uploading routes into a SCHEMA_FORM dead end — the documented trap.)
+      // Upload FIRST so the wizard's CSV source lands on the upload fast-path
+      // summary (blob-bound path + observed schema) rather than a SCHEMA_FORM
+      // dead end (the documented trap).
       const session = await createSession(ctx, "guided-ab-live-two-llm-test");
       sessionId = session.id;
       console.log(`GUIDED-AB-LIVE SESSION ${sessionId}`);
       await uploadBlob(ctx, sessionId, BLOB_FILENAME, csv);
 
+      // ── Intent-up-front: seed the guided session via POST /guided/start ──
+      // The WHOLE A/B pipeline intent (adapted verbatim from composer-ab-live's
+      // request, field keys pinned to `tone`/`usage`) is the root intent. This
+      // is the FIRST guided operation for the session, before any turn creates a
+      // checkpoint (/guided/start idempotent-no-ops once one exists). The wizard
+      // then reviews source/output and the planner auto-authors the fork →
+      // two-LLM → reconcile pipeline at Output→Transforms.
+      const abIntent =
+        `I uploaded ${BLOB_FILENAME} (color_name,hex — ${expectedRows.length} rows). ` +
+        `Build an A/B assessment pipeline: read the CSV, then fork each row into TWO ` +
+        `separate LLM assessments with different prompts — variant A: describe the ` +
+        `emotional tone of the colour in one short phrase; variant B: suggest one design ` +
+        `usage context for the colour. Then reconcile the two variants back into a single ` +
+        `row per colour holding color_name, hex, tone (from variant A) and usage (from ` +
+        `variant B), and write all ${expectedRows.length} reconciled rows to a JSON file ` +
+        `named ${sinkFilename}.`;
+      const startResp = await ctx.post(`/api/sessions/${sessionId}/guided/start`, {
+        data: { profile: "live", intent: abIntent, operation_id: randomUUID() },
+      });
+      expect(
+        startResp.ok(),
+        `POST /guided/start failed (${startResp.status()}): ${(await startResp.text()).slice(0, 500)}`,
+      ).toBe(true);
+
+      // ── Load the guided wizard (hydrated from the persisted checkpoint) ──
+      // selectSession GETs /guided and renders the wizard from guidedSession —
+      // no "Switch to guided" (the session is already guided). waitForChatReady
+      // catches the brief freeform frame (store inits guidedSession=null before
+      // the fetch resolves); the guided composer then replaces it.
       const composer = new ComposerPage(page);
       await composer.goto(sessionId);
       await composer.waitForChatReady();
-      await page.getByRole("button", { name: "Switch to guided" }).click();
-      await expect(page.getByLabel(/guided composer/i)).toBeVisible();
+      await expect(page.getByLabel(/guided composer/i)).toBeVisible({ timeout: 30_000 });
       await shot(page, "guided-shell");
 
       // ── Step 1 source: SINGLE_SELECT — CSV binds the uploaded blob ───────
@@ -280,39 +325,14 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
       await page.getByRole("button", { name: "Finish outputs" }).click();
       await shot(page, "outputs-finished");
 
-      // ── Step 3 transforms: DESCRIBE the A/B shape to the real planner ────
-      // Live guided step_3 begins with NO proposal (ChatPanel.tsx: "STEP_3
-      // begins with NO proposal … so the operator can describe the transforms").
-      // The docked "Describe what you want" composer routes the first message
-      // through /guided/start → the real planner. This is the guided twin's
-      // whole point: the pass-through spec accepted an auto-proposal here; the
-      // A/B twin authors a fork → two-LLM → reconcile pipeline from a prompt.
-      const stepChat = page.getByRole("region", { name: "Describe what you want" });
-      const stepChatInput = stepChat.getByLabel("Message input");
-      const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
-      await expect(stepChatInput).toBeVisible({ timeout: 60_000 });
-      await expect(stepChatInput).toBeEnabled();
-      await shot(page, "transforms-intake");
-
-      // Adapted from composer-ab-live's request, trimmed to the transform only
-      // (the wizard already bound the CSV source and the JSON sink). The output
-      // field KEYS are pinned to `tone` and `usage` exactly so the planner emits
-      // those names and the assertion below reads the right keys.
-      const transformsRequest =
-        `For each colour row, fork into TWO separate LLM assessments with different ` +
-        `prompts — variant A: describe the emotional tone of the colour in one short ` +
-        `phrase; variant B: suggest one design usage context for the colour. Then ` +
-        `reconcile the two variants back into a single row per colour holding ` +
-        `color_name, hex, tone (from variant A) and usage (from variant B).`;
-      // Single send only — re-sending mid-build re-triggers the driver.
-      await stepChatInput.fill(transformsRequest);
-      await stepChatSend.click();
-
-      // ── THE FRONTIER: the planner authors the fork/reconcile pipeline ────
-      // Race the committed proposal against any compose failure surface so a
-      // failed planner turn fails the spec with the server's own words rather
-      // than after a blind timeout. On timeout, dump the visible-affordance
-      // inventory to localize the divergence for forensics.
+      // ── THE FRONTIER: Output→Transforms AUTO-FIRES the real planner ──────
+      // With the whole A/B intent set at /guided/start, the planner authors the
+      // fork → two-LLM → reconcile pipeline at this transition and STAGES the
+      // "Review pipeline proposal" — step_3 is review-only (no step_3 chat; that
+      // would 409 as Schema-8 CHAT-not-available). Race the committed proposal
+      // against any compose failure surface so a failed planner turn fails the
+      // spec with the server's own words rather than after a blind timeout; on
+      // timeout, dump the visible-affordance inventory to localize the divergence.
       const proposal = page.getByRole("article", { name: "Review pipeline proposal" });
       const failureSurface = page
         .getByText(
@@ -330,7 +350,7 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
             {
               timeout: 11 * 60_000,
               intervals: [2_000],
-              message: "waiting for the guided A/B planner to author a pipeline proposal",
+              message: "waiting for the guided A/B planner to auto-stage a pipeline proposal",
             },
           )
           .not.toBe("pending");
@@ -346,9 +366,9 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
       await expect(proposal).toBeVisible();
       await shot(page, "transforms-proposal");
 
-      // ── Resolve the authored prompts' interpretation reviews, then advance ─
-      // The two LLM prompts surface as acknowledgement cards that gate the
-      // proposal's "Review wiring" button. Clear them via the guided-native
+      // ── Step 3 transforms: resolve the prompts' reviews, then advance ────
+      // The two authored LLM prompts surface as acknowledgement cards that gate
+      // the proposal's "Review wiring" button. Clear them via the guided-native
       // Accept path until the button re-enables (see resolveOneAcknowledgement).
       const reviewButton = proposal.getByRole("button", { name: "Review wiring" });
       await advanceWhenReady(page, reviewButton, "Review wiring");

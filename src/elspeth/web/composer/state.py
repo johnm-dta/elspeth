@@ -363,22 +363,58 @@ Severity = Literal["high", "medium", "low"]
 
 
 @dataclass(frozen=True, slots=True)
+class SchemaContractDetail:
+    """Redaction-safe structural facts for a schema-contract rejection.
+
+    The planner's repair feedback (``_allowlisted_candidate_feedback``)
+    strips raw validation messages — they can quote plugin option values or
+    row content — and keys enrichment on the closed ``error_code`` alone. A
+    bare ``schema_contract_violation`` is not repairable within the repair
+    budget: the planner must know WHICH edge failed and WHICH fields are
+    missing. This detail carries exactly those facts and nothing else:
+    ``producer``/``consumer`` are pipeline component identifiers (node ids /
+    ``output:<name>`` / source producer ids) and the field tuples are schema
+    FIELD NAMES from validated contract config — pipeline metadata the
+    session owner authored, never user row content — so forwarding them does
+    not re-open the message redaction boundary.
+    """
+
+    producer: str
+    consumer: str
+    missing_fields: tuple[str, ...] = ()
+    extra_fields: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON responses."""
+        result: dict[str, Any] = {"producer": self.producer, "consumer": self.consumer}
+        if self.missing_fields:
+            result["missing_fields"] = list(self.missing_fields)
+        if self.extra_fields:
+            result["extra_fields"] = list(self.extra_fields)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
 class ValidationEntry:
     """Structured validation message with component attribution.
 
-    All fields are scalars. frozen=True is sufficient.
+    Scalar fields plus an optional frozen ``contract`` detail; frozen=True
+    is sufficient for immutability.
     """
 
     component: str
     message: str
     severity: Severity
     error_code: str | None = None
+    contract: SchemaContractDetail | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for JSON responses."""
-        result = {"component": self.component, "message": self.message, "severity": self.severity}
+        result: dict[str, Any] = {"component": self.component, "message": self.message, "severity": self.severity}
         if self.error_code is not None:
             result["error_code"] = self.error_code
+        if self.contract is not None:
+            result["contract"] = self.contract.to_dict()
         return result
 
 
@@ -689,6 +725,7 @@ def _batch_distribution_profile_value_field_entries(
                     field_type=field_type,
                 ),
                 "high",
+                "batch_value_field_not_numeric",
             )
         )
 
@@ -990,6 +1027,7 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
                     "pipeline_composer.md)."
                 ),
                 severity="high",
+                error_code="web_scrape_http_identity_invalid",
             )
     return None
 
@@ -1030,6 +1068,7 @@ def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[
                     "identity before the pipeline can be considered valid."
                 ),
                 severity="high",
+                error_code="web_scrape_http_identity_invalid",
             )
         )
     return tuple(errors)
@@ -1053,6 +1092,7 @@ def _validate_aggregation_trigger(node_id: str, trigger: Mapping[str, Any]) -> V
             component=f"node:{node_id}",
             message=f"Aggregation '{node_id}' trigger is invalid: {detail}",
             severity="high",
+            error_code="aggregation_trigger_invalid",
         )
     return None
 
@@ -1146,6 +1186,7 @@ def _check_schema_contracts(
                 "pipeline",
                 "Reserved node id 'source' cannot be used in composer state because contract walk-back uses it as the source sentinel.",
                 "high",
+                "reserved_node_id",
             )
         )
         return tuple(errors), tuple(contract_warnings), ()
@@ -1267,6 +1308,7 @@ def _check_schema_contracts(
                 f"connection:{connection_name}",
                 f"Duplicate producer for connection '{connection_name}': {first_desc} and {second_desc}.",
                 "high",
+                "duplicate_connection_producer",
             )
         )
 
@@ -1291,6 +1333,7 @@ def _check_schema_contracts(
                 f"{first_desc} ({first_node}) and {second_desc} ({second_node}). "
                 "Use a gate for fan-out.",
                 "high",
+                "duplicate_connection_consumer",
             )
         )
 
@@ -1306,6 +1349,7 @@ def _check_schema_contracts(
                 "pipeline",
                 f"Connection names overlap with sink names: {overlap}. Connection names and sink names must be disjoint.",
                 "high",
+                "connection_sink_name_overlap",
             )
         )
 
@@ -1723,7 +1767,7 @@ def _check_schema_contracts(
                 None,
             )
         except ValueError as exc:
-            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _parse_consumer_locked_input(
         node: NodeSpec,
@@ -1731,7 +1775,7 @@ def _check_schema_contracts(
         try:
             return _consumer_locked_input_set(node), None
         except ValueError as exc:
-            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _parse_sink_required_fields(
         output: OutputSpec,
@@ -1742,7 +1786,7 @@ def _check_schema_contracts(
                 None,
             )
         except ValueError as exc:
-            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _parse_sink_locked_input(
         output: OutputSpec,
@@ -1750,7 +1794,7 @@ def _check_schema_contracts(
         try:
             return _sink_locked_input_set(output), None
         except ValueError as exc:
-            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high")
+            return None, _err(f"output:{output.name}", f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _parse_producer_guarantees(
         producer: ProducerEntry,
@@ -1758,7 +1802,7 @@ def _check_schema_contracts(
         try:
             return _effective_producer_guarantees(producer), None
         except ValueError as exc:
-            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
+            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _parse_producer_vote(
         producer: ProducerEntry,
@@ -1773,7 +1817,7 @@ def _check_schema_contracts(
         try:
             return _effective_producer_vote(producer), None
         except ValueError as exc:
-            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
+            return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _consumer_effective_required_set(node: NodeSpec) -> frozenset[str]:
         """Return the consumer's EFFECTIVE required-input fields.
@@ -1802,7 +1846,7 @@ def _check_schema_contracts(
         try:
             return _consumer_effective_required_set(node), None
         except ValueError as exc:
-            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high", "contract_config_invalid")
 
     def _producer_is_typed_source(producer: ProducerEntry) -> bool:
         """Return whether the producer presents a TYPED (non-observed) schema.
@@ -1899,6 +1943,16 @@ def _check_schema_contracts(
                         f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
                         f"Missing fields: [{_format_fields(missing_fields)}].",
                         "high",
+                        "schema_contract_violation",
+                        # Producer/consumer ids + schema field names are
+                        # pipeline identifiers from validated config, never
+                        # user row content — safe for the planner's redacted
+                        # repair feedback (see SchemaContractDetail).
+                        contract=SchemaContractDetail(
+                            producer=actual_producer.producer_id,
+                            consumer=node.id,
+                            missing_fields=tuple(sorted(missing_fields)),
+                        ),
                     )
                 )
 
@@ -1922,6 +1976,14 @@ def _check_schema_contracts(
                         f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
                         f"Missing fields: [{_format_fields(implicit_missing)}].",
                         "high",
+                        "schema_contract_violation",
+                        # Same redaction judgment as the explicit-required
+                        # site above: identifiers + field names only.
+                        contract=SchemaContractDetail(
+                            producer=actual_producer.producer_id,
+                            consumer=node.id,
+                            missing_fields=tuple(sorted(implicit_missing)),
+                        ),
                     )
                 )
 
@@ -1968,6 +2030,13 @@ def _check_schema_contracts(
                         f"Extra fields rejected by consumer input contract: [{_format_fields(extras)}]. "
                         f"{fix_suggestion}",
                         "high",
+                        "locked_input_extras",
+                        # Identifiers + field names only (see SchemaContractDetail).
+                        contract=SchemaContractDetail(
+                            producer=actual_producer.producer_id,
+                            consumer=node.id,
+                            extra_fields=tuple(sorted(extras)),
+                        ),
                     )
                 )
 
@@ -2049,6 +2118,13 @@ def _check_schema_contracts(
                             f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
                             f"Missing fields: [{_format_fields(missing_fields)}].",
                             "high",
+                            "sink_contract_violation",
+                            # Identifiers + field names only (see SchemaContractDetail).
+                            contract=SchemaContractDetail(
+                                producer=actual_producer.producer_id,
+                                consumer=f"output:{output.name}",
+                                missing_fields=tuple(sorted(missing_fields)),
+                            ),
                         )
                     )
 
@@ -2078,6 +2154,13 @@ def _check_schema_contracts(
                             f"Fix by relaxing the sink schema (mode: flexible) or by inserting a "
                             f"field_mapper with select_only: true to drop the extras before this sink.",
                             "high",
+                            "sink_locked_extras",
+                            # Identifiers + field names only (see SchemaContractDetail).
+                            contract=SchemaContractDetail(
+                                producer=actual_producer.producer_id,
+                                consumer=f"output:{output.name}",
+                                extra_fields=tuple(sorted(extras)),
+                            ),
                         )
                     )
 
@@ -2145,6 +2228,14 @@ def _check_schema_contracts(
                 f"Fix by removing the missing field(s) from the schema declaration, OR by extending "
                 f"`mapping` so the transform actually emits them, OR by setting select_only: false.",
                 "high",
+                "transform_contract_violation",
+                # Self-inconsistency: producer and consumer are the same node;
+                # missing_fields are declared-but-unemitted schema field names.
+                contract=SchemaContractDetail(
+                    producer=node.id,
+                    consumer=node.id,
+                    missing_fields=tuple(sorted(missing)),
+                ),
             )
         )
 
@@ -2418,16 +2509,16 @@ class CompositionState:
 
         # 1. Source exists
         if not self.sources:
-            errors.append(_err("source", "No source configured.", "high"))
+            errors.append(_err("source", "No source configured.", "high", "no_source_configured"))
         for source_name in self.sources:
             source_name_error = _composer_source_name_validation_message(source_name)
             if source_name_error is not None:
                 component = "source" if source_name == "source" else f"source:{source_name}"
-                errors.append(_err(component, source_name_error, "high"))
+                errors.append(_err(component, source_name_error, "high", "source_name_invalid"))
 
         # 2. At least one output
         if not self.outputs:
-            errors.append(_err("pipeline", "No sinks configured.", "high"))
+            errors.append(_err("pipeline", "No sinks configured.", "high", "no_sinks_configured"))
 
         # 3. Edge references valid
         node_ids = {n.id for n in self.nodes}
@@ -2436,21 +2527,36 @@ class CompositionState:
         valid_to = node_ids | output_names
         for edge in self.edges:
             if edge.from_node not in valid_from:
-                errors.append(_err(f"edge:{edge.id}", f"Edge '{edge.id}' references unknown node '{edge.from_node}' as from_node.", "high"))
+                errors.append(
+                    _err(
+                        f"edge:{edge.id}",
+                        f"Edge '{edge.id}' references unknown node '{edge.from_node}' as from_node.",
+                        "high",
+                        "edge_unknown_node",
+                    )
+                )
             if edge.to_node not in valid_to:
-                errors.append(_err(f"edge:{edge.id}", f"Edge '{edge.id}' references unknown node '{edge.to_node}' as to_node.", "high"))
+                errors.append(
+                    _err(
+                        f"edge:{edge.id}",
+                        f"Edge '{edge.id}' references unknown node '{edge.to_node}' as to_node.",
+                        "high",
+                        "edge_unknown_node",
+                    )
+                )
 
         # 4. Node IDs unique
         seen_node_ids: set[str] = set()
         for node in self.nodes:
             if node.id in seen_node_ids:
-                errors.append(_err(f"node:{node.id}", f"Duplicate node ID: '{node.id}'.", "high"))
+                errors.append(_err(f"node:{node.id}", f"Duplicate node ID: '{node.id}'.", "high", "duplicate_node_id"))
             if node.id == "source" or node.id.startswith("source:"):
                 errors.append(
                     _err(
                         f"node:{node.id}",
                         f"Reserved node id '{node.id}' cannot use the source producer namespace.",
                         "high",
+                        "reserved_node_id",
                     )
                 )
             seen_node_ids.add(node.id)
@@ -2459,14 +2565,14 @@ class CompositionState:
         seen_output_names: set[str] = set()
         for output in self.outputs:
             if output.name in seen_output_names:
-                errors.append(_err(f"output:{output.name}", f"Duplicate output name: '{output.name}'.", "high"))
+                errors.append(_err(f"output:{output.name}", f"Duplicate output name: '{output.name}'.", "high", "duplicate_output_name"))
             seen_output_names.add(output.name)
 
         # 6. Edge IDs unique
         seen_edge_ids: set[str] = set()
         for edge in self.edges:
             if edge.id in seen_edge_ids:
-                errors.append(_err(f"edge:{edge.id}", f"Duplicate edge ID: '{edge.id}'.", "high"))
+                errors.append(_err(f"edge:{edge.id}", f"Duplicate edge ID: '{edge.id}'.", "high", "duplicate_edge_id"))
             seen_edge_ids.add(edge.id)
 
         # 7. Node type field consistency
@@ -2513,11 +2619,11 @@ class CompositionState:
 
             batch_placement_error = _batch_aware_placement_error(node.id, node.node_type, node.plugin, node.output_mode)
             if batch_placement_error is not None:
-                errors.append(_err(f"node:{node.id}", batch_placement_error, "high"))
+                errors.append(_err(f"node:{node.id}", batch_placement_error, "high", "batch_transform_misplaced"))
 
             batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
             if batch_required_error is not None:
-                errors.append(_err(f"node:{node.id}", batch_required_error, "high"))
+                errors.append(_err(f"node:{node.id}", batch_required_error, "high", "batch_required_fields_invalid"))
 
             abuse_contact_error = _validate_web_scrape_abuse_contact_not_reserved(node)
             if abuse_contact_error is not None:
@@ -2528,7 +2634,10 @@ class CompositionState:
                 if node.condition is None:
                     errors.append(
                         _err(
-                            f"node:{node.id}", f"Gate '{node.id}' is missing required field 'condition'.", "high", "gate_missing_condition"
+                            f"node:{node.id}",
+                            f"Gate '{node.id}' is missing required field 'condition'.",
+                            "high",
+                            "gate_missing_condition",
                         )
                     )
                 else:
@@ -2537,7 +2646,7 @@ class CompositionState:
                     # session deserialization).
                     expr_error = _validate_gate_expression(node.condition)
                     if expr_error is not None:
-                        errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {expr_error}", "high"))
+                        errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {expr_error}", "high", "gate_condition_invalid"))
                     elif node.routes is not None:
                         # Route-label / condition-return-type parity — mirror of
                         # GateSettings.validate_boolean_routes so the composer does
@@ -2642,11 +2751,25 @@ class CompositionState:
                     )
             elif node.node_type == "aggregation":
                 if not node.plugin:
-                    errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'plugin'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Aggregation '{node.id}' is missing required field 'plugin'.",
+                            "high",
+                            "aggregation_missing_plugin",
+                        )
+                    )
                 # Engine requires on_error as non-empty string
                 # (AggregationSettings.on_error in config.py)
                 if not node.on_error or not node.on_error.strip():
-                    errors.append(_err(f"node:{node.id}", f"Aggregation '{node.id}' is missing required field 'on_error'.", "high"))
+                    errors.append(
+                        _err(
+                            f"node:{node.id}",
+                            f"Aggregation '{node.id}' is missing required field 'on_error'.",
+                            "high",
+                            "aggregation_missing_on_error",
+                        )
+                    )
                 # Runtime treats a missing/empty trigger as end-of-source-only.
                 # If early triggers are present, validate them through the same
                 # TriggerConfig parser used by settings load.
@@ -2661,6 +2784,7 @@ class CompositionState:
                             f"node:{node.id}",
                             f"Aggregation '{node.id}' output_mode must be 'passthrough' or 'transform', got '{node.output_mode}'.",
                             "high",
+                            "aggregation_output_mode_invalid",
                         )
                     )
             elif node.node_type == "queue":
@@ -2670,7 +2794,7 @@ class CompositionState:
                 # block after connection completeness.
                 queue_error = queue_node_contract_error(node)
                 if queue_error is not None:
-                    errors.append(_err(f"node:{node.id}", queue_error, "high"))
+                    errors.append(_err(f"node:{node.id}", queue_error, "high", "queue_config_invalid"))
 
         errors.extend(_validate_runtime_route_destinations(self.sources, self.nodes, self.outputs))
 
@@ -2687,6 +2811,7 @@ class CompositionState:
                             f"node:{node.id}",
                             f"Coalesce '{node.id}' branches {missing_branches} are not reachable from any runtime connection.",
                             "high",
+                            "coalesce_branch_unreachable",
                         )
                     )
                 continue
@@ -2698,6 +2823,7 @@ class CompositionState:
                         f"Node '{node.id}' input '{node.input}' is not reachable from any runtime connection "
                         "(source.on_success, node.on_success/on_error, routes, or fork_to).",
                         "high",
+                        "node_input_not_reachable",
                     )
                 )
 
@@ -2721,6 +2847,7 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Queue '{node.id}' has no downstream consumer; a queue must feed exactly one ordinary node.",
                         "high",
+                        "queue_no_consumer",
                     )
                 )
             if node.id in self.sources:
@@ -2729,6 +2856,7 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Queue '{node.id}' collides with a source of the same name; source and queue names must be globally unique.",
                         "high",
+                        "queue_name_collision",
                     )
                 )
             if node.id == "source" or node.id.startswith("source:"):
@@ -2739,6 +2867,7 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Queue '{node.id}' uses the reserved source producer namespace ('source' / 'source:<name>').",
                         "high",
+                        "reserved_node_id",
                     )
                 )
             if node.id in sink_output_names:
@@ -2747,6 +2876,7 @@ class CompositionState:
                         f"node:{node.id}",
                         f"Queue '{node.id}' collides with a sink of the same name; connection and sink names must be disjoint.",
                         "high",
+                        "connection_sink_name_overlap",
                     )
                 )
 

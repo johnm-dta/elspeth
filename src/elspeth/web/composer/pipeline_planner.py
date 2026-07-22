@@ -618,6 +618,19 @@ def _feedback_error_codes(feedback: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(entry["error_code"] for entry in errors if isinstance(entry, Mapping) and isinstance(entry.get("error_code"), str))
 
 
+def _candidate_rejection_codes(result: ToolResult) -> tuple[str, ...]:
+    """Name every rejection entry for the per-attempt trail, coded or not.
+
+    A codeless entry surfaces as the ``"validation_error"`` placeholder —
+    the same fallback ``_allowlisted_candidate_feedback`` projects — rather
+    than silently vanishing. Filtering codeless entries out produced
+    REPAIR_EXHAUSTED trails with ``rejection_codes=[]`` while rejections
+    existed (guided session 5113b7ac, 2026-07-22): the run looked
+    rejection-free precisely when the planner was blindest.
+    """
+    return tuple(entry.error_code or "validation_error" for entry in result.validation.errors)
+
+
 def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
     """Project only structured validation fields already safe for tool output.
 
@@ -644,6 +657,16 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
         guidance = explain_validation_code(code)
         if guidance is not None:
             projected["explanation"], projected["suggested_fix"] = guidance
+        if entry.contract is not None:
+            # Structured contract facts: producer/consumer component ids and
+            # schema FIELD NAMES from validated contract config — pipeline
+            # metadata the session owner authored, never user row content
+            # (see SchemaContractDetail in composer.state). Without them a
+            # schema-contract rejection is a bare code the planner cannot
+            # repair within budget: it must know WHICH edge failed and WHICH
+            # fields are missing. This stays inside the message-redaction
+            # boundary this allowlist protects.
+            projected["contract"] = entry.contract.to_dict()
         errors.append(projected)
     return {
         "success": False,
@@ -1645,7 +1668,7 @@ async def _plan_pipeline_inner(
                 )
                 continue
             except _PipelineCandidateRejected as exc:
-                last_rejection_codes = tuple(entry.error_code for entry in exc.result.validation.errors if entry.error_code)
+                last_rejection_codes = _candidate_rejection_codes(exc.result)
                 if is_hatch_turn:
                     trail.log_attempt("hatch", "candidate_rejected", codes=last_rejection_codes, led_to="terminal")
                     assert hatch_error is not None

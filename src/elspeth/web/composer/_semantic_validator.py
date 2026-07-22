@@ -41,6 +41,7 @@ from elspeth.web.composer._validation_probe import prepare_validation_probe_opti
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
+    SchemaContractDetail,
     Severity,
     ValidationEntry,
 )
@@ -246,6 +247,7 @@ def validate_semantic_contracts(
                                 f"undeclared (coalesce, ambiguous, or unreachable)."
                             ),
                             cast(Severity, req.severity),
+                            "semantic_contract_violation",
                         )
                     )
             continue
@@ -315,6 +317,14 @@ def validate_semantic_contracts(
                         f"node:{node.id}",
                         message,
                         cast(Severity, req.severity),
+                        "semantic_contract_violation",
+                        # Producer/consumer node ids are pipeline identifiers,
+                        # never row content — safe for the planner's redacted
+                        # repair feedback (see SchemaContractDetail).
+                        contract=SchemaContractDetail(
+                            producer=upstream_producer.producer_id,
+                            consumer=node.id,
+                        ),
                     )
                 )
             elif outcome is SemanticOutcome.UNKNOWN and req.unknown_policy is UnknownSemanticPolicy.FAIL:
@@ -344,6 +354,11 @@ def validate_semantic_contracts(
                             f"{semantic_detail}"
                         ),
                         cast(Severity, req.severity),
+                        "semantic_contract_violation",
+                        contract=SchemaContractDetail(
+                            producer=upstream_producer.producer_id,
+                            consumer=node.id,
+                        ),
                     )
                 )
 

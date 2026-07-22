@@ -1237,7 +1237,14 @@ async def test_invalid_candidate_gets_allowlisted_feedback_then_repairs(
     assert set(json.loads(feedback["content"])) == {"success", "validation", "guidance"}
     feedback_payload = json.loads(feedback["content"])
     assert set(feedback_payload["validation"]) == {"is_valid", "errors"}
-    assert all(set(item) <= {"component", "severity", "error_code", "error_class"} for item in feedback_payload["validation"]["errors"])
+    # Closed codes may additionally carry the STATIC catalogue enrichment
+    # (explanation/suggested_fix, always paired) and schema-contract entries
+    # the structured "contract" facts (component ids + schema field names,
+    # never row content) — nothing else may ride.
+    for item in feedback_payload["validation"]["errors"]:
+        assert {"component", "severity", "error_code", "error_class"} <= set(item), item
+        assert set(item) <= {"component", "severity", "error_code", "error_class", "explanation", "suggested_fix", "contract"}, item
+        assert ("explanation" in item) == ("suggested_fix" in item), item
     assert raw_canary not in feedback["content"]
     assert raw_canary not in canonical_json([call.to_dict() for call in recorder.llm_calls])
 

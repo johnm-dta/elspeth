@@ -227,15 +227,25 @@ def _assert_allowlisted_feedback_shape(feedback: dict[str, Any], *, error_class:
         # additionally carry the STATIC (explanation, suggested_fix) catalogue
         # text keyed by the code (tools.generation.explain_validation_code) — a
         # public constant, never per-request data — so the redaction-safe
-        # allowlist widens by exactly those two paired keys and nothing else.
+        # allowlist widens by exactly those two paired keys. A schema-contract
+        # rejection may additionally carry the structured "contract" facts
+        # (producer/consumer component ids + schema FIELD NAMES from validated
+        # config — pipeline metadata, never row content; see
+        # SchemaContractDetail in composer.state). Nothing else may ride.
         assert {"component", "severity", "error_code", "error_class"} <= set(entry), entry
-        assert set(entry) <= {"component", "severity", "error_code", "error_class", "explanation", "suggested_fix"}, entry
+        assert set(entry) <= {"component", "severity", "error_code", "error_class", "explanation", "suggested_fix", "contract"}, entry
         assert ("explanation" in entry) == ("suggested_fix" in entry), entry
+        if "contract" in entry:
+            assert set(entry["contract"]) <= {"producer", "consumer", "missing_fields", "extra_fields"}, entry
         assert entry["error_class"] == error_class
-    # No provider prose, plugin name, or option value may ride the feedback.
+    # No provider prose, plugin name, option value, or raw message may ride
+    # the feedback. The static catalogue enrichment legitimately mentions the
+    # WORD "options" (e.g. "patch_node_options"), so the leak canary checks
+    # the redaction boundary itself: no "message" key (raw validation text)
+    # and no denied-plugin identifier anywhere in the projection.
     blob = json.dumps(feedback)
     assert _POLICY_DENIED_TRANSFORM not in blob
-    assert "options" not in blob
+    assert '"message"' not in blob
 
 
 # --------------------------------------------------------------------------- #

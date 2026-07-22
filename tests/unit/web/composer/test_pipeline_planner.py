@@ -1184,6 +1184,12 @@ def test_allowlisted_candidate_feedback_enriches_node_shape_codes() -> None:
     assert "RAW_MESSAGE_CANARY" not in json.dumps(feedback)
     assert all(e["error_class"] == "ValidationError" for e in entries)
 
+    # The feedback teaches the expansion move: live planners called
+    # explain_validation_error with junk like {"error_text": "ValidationError"}
+    # because nothing told them the exact code string is the key. One static
+    # line, no topology hints (mid-repair suggestions have derailed runs).
+    assert feedback["guidance"] == ("To expand any code, call explain_validation_error with the exact code string.")
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["set_pipeline", "hallucinated_tool"])
@@ -1225,7 +1231,10 @@ async def test_invalid_candidate_gets_allowlisted_feedback_then_repairs(
     assert proposal.proposal.repair_count == 1
     feedback = completion.requests[1]["messages"][-1]
     assert feedback["role"] == "tool"
-    assert set(json.loads(feedback["content"])) == {"success", "validation"}
+    # "guidance" is a static usage line (how to expand a code via
+    # explain_validation_error) — never per-request data, so it does not
+    # widen the redaction boundary this allowlist protects.
+    assert set(json.loads(feedback["content"])) == {"success", "validation", "guidance"}
     feedback_payload = json.loads(feedback["content"])
     assert set(feedback_payload["validation"]) == {"is_valid", "errors"}
     assert all(set(item) <= {"component", "severity", "error_code", "error_class"} for item in feedback_payload["validation"]["errors"])

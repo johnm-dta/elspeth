@@ -485,6 +485,35 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
 )
 
 
+# The closed validation codes the planner's redacted repair feedback can carry
+# (see ``pipeline_planner._allowlisted_candidate_feedback``). Every entry MUST
+# resolve through :func:`explain_validation_code` — the explain tool's fallback
+# advertises this list and its fuzzy route scans for these substrings, so a
+# dead entry would route the model to a code that then explains nothing
+# (test_closed_code_catalogue_is_fully_explainable pins the invariant).
+_CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
+    "unknown_node_type",
+    "coalesce_on_success_must_be_sink",
+    "coalesce_missing_policy",
+    "coalesce_missing_branches",
+    "coalesce_policy_invalid",
+    "coalesce_merge_invalid",
+    "transform_missing_on_success",
+    "transform_missing_on_error",
+    "transform_on_success_dangling",
+    "transform_on_error_unknown_sink",
+    "aggregation_on_success_dangling",
+    "source_on_success_dangling",
+    "gate_missing_condition",
+    "gate_missing_routes",
+    "gate_route_labels_mismatch",
+    "fork_branch_no_destination",
+    "pipeline_decision_unregistered",
+    "interpretation_requirements_invalid",
+    "plugin_options_invalid",
+)
+
+
 def _extract_validator_expected_hint(error_text: str) -> str | None:
     """Pull the ``Expected ...`` span out of a validator error string.
 
@@ -570,7 +599,32 @@ def _execute_explain_validation_error(
                     "suggested_fix": _augment_with_expected_hint(fix, error_text),
                 },
             )
-    # No match — return a generic response
+    # Fuzzy route: live planners pass junk like "ValidationError" or
+    # "node:X ValidationError validation_error" instead of the message or the
+    # bare code. A closed code buried in noise (any case) still resolves —
+    # the direct pattern pass above is case-sensitive, so this catches e.g.
+    # an upper-cased code echoed from a log line.
+    lowered = error_text.lower()
+    for code in _CLOSED_VALIDATION_ERROR_CODES:
+        if code in lowered:
+            guidance = explain_validation_code(code)
+            if guidance is None:  # pragma: no cover — catalogue invariant is test-pinned
+                continue
+            explanation, fix = guidance
+            return ToolResult(
+                success=True,
+                updated_state=state,
+                validation=validation,
+                affected_nodes=(),
+                data={
+                    "error_text": error_text,
+                    "error_code": code,
+                    "explanation": explanation,
+                    "suggested_fix": _augment_with_expected_hint(fix, error_text),
+                },
+            )
+    # No match at all — teach usage instead of an unhelpful generic. The codes
+    # are a public static catalogue, so listing them leaks nothing.
     return ToolResult(
         success=True,
         updated_state=state,
@@ -578,11 +632,13 @@ def _execute_explain_validation_error(
         affected_nodes=(),
         data={
             "error_text": error_text,
-            "explanation": "This error is not in the known pattern catalogue.",
+            "explanation": "The text does not match any known validation message or closed error_code.",
             "suggested_fix": _augment_with_expected_hint(
-                "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+                "Call explain_validation_error with the exact error_code string from the rejection "
+                "feedback's validation.errors[].error_code. Closed codes: " + ", ".join(_CLOSED_VALIDATION_ERROR_CODES) + ".",
                 error_text,
             ),
+            "known_codes": list(_CLOSED_VALIDATION_ERROR_CODES),
         },
     )
 

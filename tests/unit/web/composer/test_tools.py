@@ -9492,17 +9492,44 @@ class TestExplainValidationError:
         assert result.success is True
         assert "unique" in result.data["explanation"].lower()
 
-    def test_unknown_error_returns_generic(self) -> None:
+    def test_unknown_error_teaches_closed_codes(self) -> None:
+        """Unmatched text returns the closed-code catalogue, not a shrug.
+
+        Live guided sessions (bad64533-08a1, 2026-07-22) called the tool with
+        exactly ``{"error_text": "ValidationError"}`` — the error_class from
+        repair feedback, not a message or code — and got a generic non-answer
+        mid-repair. The fallback now teaches usage: name the closed codes and
+        say to pass the exact ``error_code`` string.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        for junk in ("ValidationError", "node:merge_branches ValidationError validation_error"):
+            result = execute_tool(
+                "explain_validation_error",
+                {"error_text": junk},
+                state,
+                catalog,
+            )
+            assert result.success is True
+            assert "does not match" in result.data["explanation"]
+            assert "error_code" in result.data["suggested_fix"]
+            # The catalogue itself rides along so the model can route next turn.
+            assert "unknown_node_type" in result.data["suggested_fix"]
+            assert "coalesce_missing_policy" in result.data["known_codes"]
+
+    def test_fuzzy_routes_closed_code_embedded_in_noise(self) -> None:
+        """A closed code buried in noise (any case) resolves to its guidance."""
         state = _empty_state()
         catalog = _mock_catalog()
         result = execute_tool(
             "explain_validation_error",
-            {"error_text": "Some completely unknown error."},
+            {"error_text": "node:merge_branches COALESCE_MISSING_POLICY"},
             state,
             catalog,
         )
         assert result.success is True
-        assert "not in the known pattern" in result.data["explanation"]
+        assert result.data["error_code"] == "coalesce_missing_policy"
+        assert "policy=" in result.data["suggested_fix"] and "merge=" in result.data["suggested_fix"]
 
     def test_explains_path_violation(self) -> None:
         state = _empty_state()
@@ -9613,8 +9640,8 @@ class TestExplainValidationError:
             catalog,
         )
         assert result.success is True
-        # Falls through to generic explanation but still surfaces the hint.
-        assert "not in the known pattern" in result.data["explanation"]
+        # Falls through to the closed-code fallback but still surfaces the hint.
+        assert "does not match" in result.data["explanation"]
         assert ("Expected single-key dict like {'field_name': 'type'} or a string like 'field_name: type'.") in result.data["suggested_fix"]
 
     def test_no_hint_appended_when_expected_substring_absent(self) -> None:
@@ -9714,6 +9741,23 @@ class TestExplainValidationCode:
         # omitting the block entirely converges where a malformed row loops.
         assert "omit" in fix.lower()
         assert "user_term" in explanation or "malformed" in explanation.lower()
+
+    def test_closed_code_catalogue_is_fully_explainable(self) -> None:
+        """Every advertised closed code must resolve to catalogue guidance.
+
+        ``_CLOSED_VALIDATION_ERROR_CODES`` is what the explain tool's fallback
+        advertises and what its fuzzy route scans for — a code listed there
+        that ``explain_validation_code`` cannot resolve would route the model
+        to a dead end.
+        """
+        from elspeth.web.composer.tools.generation import (
+            _CLOSED_VALIDATION_ERROR_CODES,
+            explain_validation_code,
+        )
+
+        assert _CLOSED_VALIDATION_ERROR_CODES
+        for code in _CLOSED_VALIDATION_ERROR_CODES:
+            assert explain_validation_code(code) is not None, code
 
     def test_unmatched_code_returns_none(self) -> None:
         from elspeth.web.composer.tools.generation import explain_validation_code

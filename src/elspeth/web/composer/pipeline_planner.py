@@ -569,6 +569,12 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
             "is_valid": validation.is_valid,
             "errors": errors,
         },
+        # Static usage line, never per-request data. Live planners called
+        # explain_validation_error with junk ({"error_text": "ValidationError"})
+        # because nothing said the exact code string is the lookup key. Kept
+        # deliberately free of topology hints — mid-repair suggestions have
+        # derailed otherwise-converging repairs.
+        "guidance": "To expand any code, call explain_validation_error with the exact code string.",
     }
 
 

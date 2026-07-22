@@ -217,7 +217,20 @@ async function driveGuidedWalk(page: Page): Promise<void> {
       expect(assertedSummary, "expected to observe a read-only decision summary").toBe(true);
       return;
     }
-    if (!(await guidedPanel.isVisible().catch(() => false))) return;
+    if (!(await guidedPanel.isVisible().catch(() => false))) {
+      // On terminal=completed the guided panel is replaced by the completion
+      // surface ("Pipeline summary") — which may still hold pending Accept
+      // cards: the wire-confirm commit surfaces interpretation events AFTER
+      // the terminal lands, and TutorialGuidedShell defers the run handoff
+      // until they drain. Keep pumping resolveVisibleReviews there; the run
+      // turn mounts (and the loop exits above) once the last card resolves.
+      // Exit only when NEITHER surface is present.
+      const completionVisible = await page
+        .getByRole("region", { name: /pipeline summary/i })
+        .isVisible()
+        .catch(() => false);
+      if (!completionVisible) return;
+    }
 
     if (
       !assertedSummary &&

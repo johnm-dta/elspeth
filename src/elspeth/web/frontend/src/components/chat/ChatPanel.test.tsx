@@ -2910,6 +2910,70 @@ assistant_message_kind: "synthetic_failure",
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
   });
 
+  it("renders pending interpretation Accept cards on the completed surface", () => {
+    // The guided wire-confirm commit surfaces interpretation events AFTER the
+    // terminal lands (f3db92c00 — the writer boundary needs the committed
+    // nodes), so the completion surface is the first place the Accept cards
+    // can render. Without the stack here the events are orphaned: no surface
+    // offers resolution, and the run gate (tutorial auto-run, freeform-style
+    // execute) fails closed forever (session e1332b5a). Applies to tutorial
+    // AND plain guided completion alike.
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedTerminal: terminal,
+    });
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "session-guided": {
+          "event-1": {
+            id: "event-1",
+            session_id: "session-guided",
+            composition_state_id: "22222222-2222-2222-2222-222222222222",
+            affected_node_id: "summarize_page",
+            tool_call_id: "backend_auto_surface:1",
+            user_term: "llm_prompt_template:summarize_page",
+            kind: "llm_prompt_template",
+            llm_draft: "Summarise {{ row.page_content }}",
+            accepted_value: null,
+            choice: "pending",
+            created_at: "2026-07-22T00:00:00Z",
+            resolved_at: null,
+            actor: "composer-llm",
+            interpretation_source: "user_approved",
+            model_identifier: "planner-model",
+            model_version: "planner-model",
+            provider: "test",
+            composer_skill_hash: "0".repeat(64),
+            arguments_hash: null,
+            hash_domain_version: null,
+            runtime_model_identifier_at_resolve: null,
+            runtime_model_version_at_resolve: null,
+            resolved_prompt_template_hash: null,
+          },
+        },
+      },
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("acknowledgement-card")).toBeInTheDocument();
+  });
+
   it("tutorial completed: renders validation feedback on the reset tutorial shell", () => {
     const terminal: TerminalState = {
       kind: "completed",
@@ -2944,7 +3008,11 @@ assistant_message_kind: "synthetic_failure",
     render(<ChatPanel isTutorial />);
 
     expect(screen.getByTestId("pipeline-validation-summary")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent(/looks good/i);
+    // Multiple role="status" elements exist on the completed surface (the
+    // validation summary plus the always-mounted acknowledgement live
+    // region) — assert the validation one specifically.
+    const statuses = screen.getAllByRole("status");
+    expect(statuses.some((el) => /looks good/i.test(el.textContent ?? ""))).toBe(true);
   });
 
   it("does not render ExitToFreeformButton on the completed surface (regression pin for elspeth-obs-0a1002de6d)", () => {

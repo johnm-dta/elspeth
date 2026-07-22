@@ -1477,6 +1477,24 @@ export function ChatPanel({
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
+        {/* The guided wire-confirm commit surfaces interpretation events
+            AFTER the terminal lands (the writer boundary needs the committed
+            nodes), so the completion surface is the FIRST place the Accept
+            cards can render. Without the stack here the events are orphaned —
+            no surface offers resolution and the run gate (tutorial auto-run,
+            freeform-style execute) fails closed forever (session e1332b5a).
+            Same persistent-mount contract as the guided surface: the stack
+            returns null when empty; the live region is unconditional. */}
+        <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+        <AcknowledgementStack
+          sessionId={activeSessionId ?? ""}
+          isTutorial={isTutorial}
+          onResolved={(newState) => {
+            if (newState !== null) {
+              useSessionStore.setState({ compositionState: newState });
+            }
+          }}
+        />
         {isTutorial && <PipelineValidationSummary isTutorial />}
         <CompletionSummary terminal={guidedSession.terminal} isTutorial={isTutorial} />
         <InlineRunResults />

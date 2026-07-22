@@ -9,6 +9,7 @@ import {
   EXIT_TO_FREEFORM_ACTION,
   useSessionStore,
 } from "@/stores/sessionStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import {
   acquireGuidedRetry,
   clearGuidedRetry,
@@ -102,6 +103,19 @@ export function TutorialGuidedShell({
   const seedGuided = useSessionStore((s) => s.seedGuided);
   const resetForTutorialSession = useSessionStore(
     (s) => s.resetForTutorialSession,
+  );
+  // Pending interpretation-review count for THIS session. The wire-confirm
+  // commit surfaces the Accept cards AFTER the guided terminal lands (the
+  // event writer boundary validates nodes against the committed state), so a
+  // completed session may still carry unresolved reviews. The completion
+  // handoff below defers while any remain: handing off immediately would
+  // mount the run turn — which auto-fires POST /tutorial/run — and the run
+  // 409s (tutorial_interpretations_pending) with the guided surface already
+  // unmounted, leaving nothing that can resolve the cards. The learner
+  // resolves them on the completion surface (the review-before-run teaching
+  // moment); draining the last one releases the run.
+  const pendingReviewCount = useInterpretationEventsStore((s) =>
+    Object.keys(s.pendingBySession[sessionId] ?? {}).length,
   );
   const startedRef = useRef(false);
   // A shell hands off exactly once per mount, whether the terminal it
@@ -229,14 +243,14 @@ export function TutorialGuidedShell({
     if (guidedSession !== undefined && guidedSession !== null && kind == null) {
       sawActiveRef.current = true;
     }
-    if (kind === "completed" && sawActiveRef.current) {
+    if (kind === "completed" && sawActiveRef.current && pendingReviewCount === 0) {
       handedOffRef.current = true;
       onCompleted(sessionId);
     } else if (kind === "exited_to_freeform" && sawActiveRef.current) {
       handedOffRef.current = true;
       onExited?.(sessionId);
     }
-  }, [guidedSession, onCompleted, onExited, sessionId]);
+  }, [guidedSession, onCompleted, onExited, sessionId, pendingReviewCount]);
 
   const bookends = guidedSession?.profile?.bookends ?? true;
 

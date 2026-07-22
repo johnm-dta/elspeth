@@ -687,6 +687,52 @@ describe("TutorialGuidedShell", () => {
     expect(onCompleted).toHaveBeenCalledTimes(1);
   });
 
+  it("defers onCompleted while pending interpretation reviews exist, then hands off once resolved", async () => {
+    // The wire-confirm commit surfaces the Accept cards AFTER the guided
+    // terminal lands (the event writer boundary needs the committed nodes),
+    // so at terminal=completed the reviews may still be pending. Handing off
+    // immediately mounts the run turn — which auto-fires POST /tutorial/run —
+    // and the run 409s (tutorial_interpretations_pending) with the guided
+    // surface already unmounted: nothing left can resolve the cards. The
+    // shell holds the completion handoff until pendingBySession drains; the
+    // learner resolves the cards on the completion surface (this IS the
+    // review-before-run teaching moment), and the last resolution releases
+    // the run.
+    const { useInterpretationEventsStore } = await import(
+      "@/stores/interpretationEventsStore"
+    );
+    const onCompleted = vi.fn();
+    render(
+      <TutorialGuidedShell sessionId="sess-1" onCompleted={onCompleted} />,
+    );
+    await waitFor(() => expect(seedGuidedMock).toHaveBeenCalled());
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload(null),
+    } as never);
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "sess-1": {
+          "event-1": { id: "event-1", session_id: "sess-1" },
+        },
+      },
+    } as never);
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload("completed"),
+    } as never);
+    await Promise.resolve();
+    expect(onCompleted).not.toHaveBeenCalled();
+
+    useInterpretationEventsStore.setState({
+      pendingBySession: { "sess-1": {} },
+    } as never);
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("sess-1"));
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+    useInterpretationEventsStore.setState({ pendingBySession: {} } as never);
+  });
+
   it("does NOT call onCompleted when the guided session exits to freeform (F-FE2)", async () => {
     // exited_to_freeform is a terminal kind, but leaving the wizard for freeform
     // is not a graduation: only terminal.kind === "completed" hands off.

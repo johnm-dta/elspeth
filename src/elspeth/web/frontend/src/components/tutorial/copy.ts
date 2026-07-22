@@ -87,8 +87,13 @@ export const TURN_7_LEARNING_BULLETS = [
   },
   {
     title: "Ask Elspeth.",
+    // Trails into the freeform-for-complex note (operator 2026-07-23),
+    // folded into this existing chat-panel guidance rather than a new item:
+    // the chat panel is also where freeform composition happens, so the
+    // escalation reads as one thought — ask when confused, go freeform when
+    // the guided wizard isn't enough. Shared verbatim with the skip path.
     body:
-      "If anything in a pipeline (a plugin name, a transform's effect, a recorded assumption) doesn't make sense, ask in the chat panel. The composer can explain the pipeline it just built, in plain English, against the actual node options.",
+      "If anything in a pipeline (a plugin name, a transform's effect, a recorded assumption) doesn't make sense, ask in the chat panel. The composer can explain the pipeline it just built, in plain English, against the actual node options. And for particularly complex pipelines you will need to use freeform mode — the same chat panel, building the pipeline up step by step instead of through the guided wizard.",
   },
   {
     title: "LLMs are confident even when they're wrong.",

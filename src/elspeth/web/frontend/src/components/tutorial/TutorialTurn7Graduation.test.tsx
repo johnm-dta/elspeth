@@ -89,6 +89,12 @@ describe("TutorialTurn7Graduation", () => {
     expect(screen.getByText("Read before you run.")).toBeInTheDocument();
     expect(screen.getByText("Ask Elspeth.")).toBeInTheDocument();
     expect(screen.getByText("LLMs are confident even when they're wrong.")).toBeInTheDocument();
+    // Operator note (2026-07-23), folded into the existing "Ask Elspeth."
+    // guidance rather than a new item: particularly complex pipelines need
+    // freeform mode, built step by step.
+    expect(
+      screen.getByText(/particularly complex pipelines.*freeform mode/i),
+    ).toBeInTheDocument();
 
     window.removeEventListener("tutorial_graduation_shown", eventListener);
   });
@@ -281,8 +287,12 @@ describe("TutorialTurn7Graduation — skip-variant copy (elspeth-918f4434b3)", (
     expect(
       screen.getByText(/nothing executes without your say-so/i),
     ).toBeInTheDocument();
-    // Shared bullets (no just-ran claims) render on both paths.
+    // Shared bullets (no just-ran claims) render on both paths — including
+    // the freeform-for-complex-pipelines note riding "Ask Elspeth.".
     expect(screen.getByText("Ask Elspeth.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/particularly complex pipelines.*freeform mode/i),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("LLMs are confident even when they're wrong."),
     ).toBeInTheDocument();

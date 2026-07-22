@@ -705,6 +705,161 @@ def test_authored_short_form_llm_review_is_canonicalized_not_a_keyerror(tmp_path
     assert candidate.result.updated_state.validate() is not None
 
 
+def test_guided_tutorial_shape_short_form_review_builds_a_valid_candidate(tmp_path: Path) -> None:
+    """Tutorial-shaped live path: guided finalizer + reviewed blob source + short-form review.
+
+    Reconstructs the guided first-run tutorial's step-3 re-plan exactly as it
+    crashed live: a blob-backed reviewed csv source, a json sink, and a
+    planner-authored ``web_scrape -> llm -> field_mapper`` pipeline whose LLM node
+    carries the skill's short-form ``prompt_injection_shield_recommendation``
+    review. ``bind_guided_reviewed_components`` restores the reviewed
+    source/output, and ``build_set_pipeline_candidate`` (through the reviewed
+    source authority) must resolve the ``blob:`` path AND canonicalise the short
+    form into a valid candidate — where a raw ``KeyError('id')`` used to escape.
+    """
+    from elspeth.web.composer.guided.planning import (
+        bind_guided_reviewed_components,
+        guided_private_reviewed_facts,
+    )
+    from elspeth.web.composer.guided.protocol import GuidedStep
+    from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    source_options = {
+        "schema": {"fields": ["url: str"], "mode": "flexible"},
+        "path": f"blob:{blob.id}",
+        "delimiter": ",",
+        "encoding": "utf-8",
+    }
+    output_options = {
+        "schema": {"mode": "observed"},
+        "path": "outputs/output.json",
+        "collision_policy": "auto_increment",
+        "mode": "write",
+    }
+    source_id = str(uuid4())
+    output_id = str(uuid4())
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="source",
+                plugin="csv",
+                options=source_options,
+                observed_columns=("url",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="output",
+                plugin="json",
+                options=output_options,
+                required_fields=("url",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    planner_pipeline = {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "options": deepcopy(source_options),
+                "on_success": "raw_rows",
+                "on_validation_failure": "discard",
+            }
+        },
+        "nodes": [
+            {
+                "id": "scrape",
+                "node_type": "transform",
+                "plugin": "web_scrape",
+                "input": "raw_rows",
+                "on_success": "scraped",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": "page_content",
+                    "fingerprint_field": "page_fingerprint",
+                    "http": {"abuse_contact": "ops@foundryside.dev", "scraping_reason": "Tutorial demo"},
+                },
+            },
+            {
+                "id": "summarise",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped",
+                "on_success": "summarised",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ page_content }}",
+                    "interpretation_requirements": [_short_form_shield_review()],
+                },
+            },
+            {
+                "id": "shape",
+                "node_type": "transform",
+                "plugin": "field_mapper",
+                "input": "summarised",
+                "on_success": "output",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}, "mapping": {"page_content": "summary"}},
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {"sink_name": "output", "plugin": "json", "options": deepcopy(output_options), "on_write_failure": "discard"},
+        ],
+        "metadata": {"name": "tutorial"},
+    }
+
+    finalized = bind_guided_reviewed_components(planner_pipeline, guided)
+    facts = guided_private_reviewed_facts(guided)
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+
+    candidate = build_set_pipeline_candidate(
+        dict(finalized),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert candidate.acceptable is True, candidate.result.to_dict()
+    # The reviewed blob path resolved to the private storage path...
+    assert candidate.result.updated_state.sources["source"].options["path"] == blob.storage_path
+    # ...and the short-form llm review canonicalised into a pending full-form row.
+    llm_node = next(node for node in candidate.result.updated_state.nodes if node.plugin == "llm")
+    shield = next(
+        item
+        for item in deep_thaw(llm_node.options["interpretation_requirements"])
+        if item["user_term"] == "prompt_injection_shield_recommendation"
+    )
+    assert shield["id"] == "prompt_injection_shield_recommendation:summarise"
+    assert shield["status"] == "pending"
+
+
 def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) -> None:
     args = _linear_args(tmp_path)
     args["source"]["on_success"] = "main"

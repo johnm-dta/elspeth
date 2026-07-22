@@ -3551,6 +3551,38 @@ async def post_guided_respond(
                             ),
                             state=cancellation_state,
                         )
+                        # Surface resolvable interpretation-review EVENTS for every
+                        # site the committed pipeline created (llm prompt templates
+                        # etc.). The guided planner mints proposals without the
+                        # compose loop's request_interpretation_review dispatch, so
+                        # without this pass the committed state carries pending
+                        # interpretation_requirements with NO event row — no Accept
+                        # card ever renders and /execute fails closed with
+                        # UnresolvedInterpretationPlaceholderError (tutorial session
+                        # e1332b5a). Mirrors the freeform settlement's post-commit
+                        # pass (pipeline_settlement.py); runs after settlement so
+                        # events bind to the durable accepted state, whose persisted
+                        # nodes the writer boundary validates against. Provenance is
+                        # the proposal row's planner identity — the model that
+                        # authored the drafts under review. Runs even under a
+                        # deferred cancellation: the settlement is durable, and
+                        # skipping here would orphan the session in exactly the
+                        # failure this pass exists to prevent.
+                        from elspeth.web.composer.service import surface_pending_interpretation_reviews_for_state
+
+                        await _await_with_deferred_cancellation(
+                            surface_pending_interpretation_reviews_for_state(
+                                prepared.result.updated_state,
+                                sessions_service=service,
+                                session_id=str(session_id),
+                                current_state_id=str(accepted.result_state.id),
+                                model_identifier=authority.row.composer_model_identifier or "guided-planner",
+                                model_version=authority.row.composer_model_version or "guided-planner",
+                                provider=authority.row.composer_provider or "unknown",
+                                composer_skill_hash=authority.row.composer_skill_hash or "",
+                            ),
+                            state=cancellation_state,
+                        )
                         if cancellation_state.requested:
                             cancellation = asyncio.CancelledError()
                             cancellation.__dict__[_GUIDED_ATOMIC_SETTLEMENT_COMPLETED] = True

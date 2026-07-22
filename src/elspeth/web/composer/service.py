@@ -907,6 +907,226 @@ def _compose_preflight_repair_message(runtime_result: ValidationResult, *, next_
     )
 
 
+async def _auto_surface_prompt_template_reviews_for_state(
+    state: CompositionState,
+    *,
+    sessions_service: SessionServiceProtocol,
+    session_id: str,
+    current_state_id: str,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    composer_skill_hash: str,
+) -> None:
+    """Canonical ``llm_prompt_template`` surfacing pass (see the instance method).
+
+    Module-level so persistence-layer callers that hold a sessions service but
+    no composer instance (the guided wire-confirm settlement) can run the SAME
+    surfacing the chat dispatcher and freeform settlement run, passing the
+    provenance they actually hold (for guided commits: the proposal row's
+    planner identity).
+    """
+
+    events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+    for site in interpretation_sites(state):
+        if site.kind is not InterpretationKind.LLM_PROMPT_TEMPLATE:
+            continue
+        node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
+        if node is None:
+            continue
+        options = node.options
+        prompt_template = options["prompt_template"]
+        if type(prompt_template) is not str or not prompt_template:
+            raise InvariantError(
+                "_auto_surface_prompt_template_reviews: prompt-template interpretation site lost its non-empty prompt_template"
+            )
+        # Draft-aware dedup (Task 7 HIGH-2): skip the node only when a pending
+        # PT event already carries the node's CURRENT prompt_template. A stale
+        # pending event from a prior turn whose draft is an OLDER skeleton must
+        # NOT suppress re-surfacing — node-id-only dedup would brick the review
+        # after a multi-turn prompt edit (the stale event survives, the
+        # Case-A skeleton-hash resolve gate then rejects forever, and the LLM
+        # can no longer re-surface). The stale event lingers cosmetically; a
+        # governed SUPERSEDED/cancel primitive is a follow-up.
+        if any(
+            event.affected_node_id == site.component_id
+            and event.llm_draft == prompt_template
+            and event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+            for event in events
+        ):
+            continue
+        # The create_pending gate (sessions/service.py) REQUIRES exactly one
+        # pending PT requirement on the node for this user_term. Surface only
+        # where that precondition holds — otherwise create_pending would raise
+        # and crash the compose loop. A prompt_template node with no pending PT
+        # requirement is the requirement-None enumerator branch
+        # (_missing_prompt_template_review_sites) and is left to the orphan gate.
+        if not ComposerServiceImpl._has_pending_prompt_template_requirement(options, user_term=site.user_term):
+            continue
+        await sessions_service.create_pending_interpretation_event(
+            session_id=UUID(session_id),
+            composition_state_id=UUID(current_state_id),
+            affected_node_id=site.component_id,
+            tool_call_id=f"backend_auto_surface:{uuid4()}",  # (D1)
+            user_term=site.user_term,
+            kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+            llm_draft=prompt_template,
+            model_identifier=model_identifier,  # (D2)
+            model_version=model_version,  # (D2)
+            provider=provider,  # (D2)
+            composer_skill_hash=composer_skill_hash,  # (D2)
+        )
+
+
+def _backend_surface_args_for_site(
+    state: CompositionState,
+    site: InterpretationReviewSite,
+) -> tuple[str, str, str] | None:
+    """Return ``(affected_node_id, user_term, llm_draft)`` for a site, or
+    ``None`` when the writer-boundary precondition does not hold.
+
+    Reads the draft straight from the node/source pending requirement so
+    the strict ``create_pending_interpretation_event`` writer boundary
+    accepts the insert. ``None`` means "no matching pending requirement" —
+    the site is left for the run-time gate (designed advisory polarity).
+    """
+
+    if site.kind is InterpretationKind.INVENTED_SOURCE:
+        source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
+        if source is None:
+            return None
+        options = source.options if isinstance(source.options, Mapping) else {}
+        if SOURCE_AUTHORING_KEY not in options:
+            return None
+        draft = ComposerServiceImpl._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
+        if draft is None:
+            return None
+        return (SOURCE_COMPONENT_ID, site.user_term, draft)
+
+    node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
+    if node is None:
+        return None
+    options = node.options if isinstance(node.options, Mapping) else {}
+    if site.kind is InterpretationKind.LLM_MODEL_CHOICE:
+        model = options.get("model")
+        if not isinstance(model, str) or not model:
+            return None
+        # W1 (writer-boundary necessary-but-not-sufficient): the writer's
+        # model_choice else-branch routes through _find_llm_transform_node,
+        # which ALSO requires a non-empty prompt_template
+        # (sessions/service.py). The model_choice SITE emitter fires on
+        # `model` alone, so a model-only node yields a site the writer would
+        # REJECT with InterpretationResolveError(ValueError). Guard the
+        # precondition here (mirroring the PT path's
+        # _has_pending_prompt_template_requirement) and leave the site
+        # fail-closed at the run-time gate — the designed advisory polarity.
+        prompt_template = options.get("prompt_template")
+        if not isinstance(prompt_template, str) or not prompt_template:
+            return None
+        draft = ComposerServiceImpl._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
+        if draft is None or draft != model:
+            return None
+        return (node.id, site.user_term, draft)
+    if site.kind is InterpretationKind.PIPELINE_DECISION:
+        draft = ComposerServiceImpl._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
+        if draft is None:
+            return None
+        return (node.id, site.user_term, draft)
+    if site.kind is InterpretationKind.VAGUE_TERM:
+        # Only authored/staged vague-term requirements are surfaced.
+        # Bare legacy placeholders carry no requirement and are left
+        # fail-closed at the run-time gate; never invent a draft.
+        draft = ComposerServiceImpl._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
+        if draft is None:
+            return None
+        return (node.id, site.user_term, draft)
+    return None
+
+
+async def surface_pending_interpretation_reviews_for_state(
+    state: CompositionState,
+    *,
+    sessions_service: SessionServiceProtocol,
+    session_id: str | None,
+    current_state_id: str | None,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    composer_skill_hash: str,
+) -> None:
+    """Kind-general pending-review surfacer over one persisted state (B1).
+
+    Canonical shared implementation behind
+    :meth:`ComposerServiceImpl.surface_pending_interpretation_reviews` — see
+    that method's docstring for the polarity/skip contract. Module-level so
+    the guided wire-confirm settlement (which holds a sessions service and
+    the proposal row's planner provenance, but no composer instance) can run
+    the SAME pass the chat dispatcher and freeform settlement run; without it
+    a guided commit whose nodes carry pending requirements produces no event
+    rows, no Accept card ever renders, and /execute fails closed with
+    ``UnresolvedInterpretationPlaceholderError`` (tutorial session e1332b5a).
+    """
+
+    if session_id is None or current_state_id is None:
+        return
+    # llm_prompt_template is already handled by the existing surfacer,
+    # which carries the exact draft-aware dedup the writer boundary needs.
+    await _auto_surface_prompt_template_reviews_for_state(
+        state,
+        sessions_service=sessions_service,
+        session_id=session_id,
+        current_state_id=current_state_id,
+        model_identifier=model_identifier,
+        model_version=model_version,
+        provider=provider,
+        composer_skill_hash=composer_skill_hash,
+    )
+    events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
+    for site in interpretation_sites(state):
+        if site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+            continue  # handled above
+        surfaced = _backend_surface_args_for_site(state, site)
+        if surfaced is None:
+            continue
+        affected_node_id, user_term, llm_draft = surfaced
+        if any(
+            event.affected_node_id == affected_node_id
+            and event.user_term is not None
+            and event.user_term.strip() == user_term.strip()
+            and event.kind is site.kind
+            and (event.llm_draft or "").strip() == llm_draft.strip()
+            for event in events
+        ):
+            continue
+        # W1 backstop: the per-kind precondition above is NECESSARY but not
+        # always SUFFICIENT (e.g. pipeline_decision must additionally pass
+        # validate_pipeline_decision_semantics, which the surfacer does not
+        # replicate). create_pending_interpretation_event raises a ValueError
+        # subclass on any boundary mismatch, and this runs AFTER
+        # save_composition_state at a persist seam with NO outer except — so
+        # an unguarded raise would 500 and wedge the session. Skip the site
+        # instead; it stays fail-closed at the run-time gate (advisory
+        # polarity). Deliberately not slog'd: a skipped advisory surface is
+        # not a telemetry/audit event, matching the existing surfacer's
+        # silent precondition skips.
+        try:
+            await sessions_service.create_pending_interpretation_event(
+                session_id=UUID(session_id),
+                composition_state_id=UUID(current_state_id),
+                affected_node_id=affected_node_id,
+                tool_call_id=f"backend_auto_surface:{uuid4()}",
+                user_term=user_term,
+                kind=site.kind,
+                llm_draft=llm_draft,
+                model_identifier=model_identifier,
+                model_version=model_version,
+                provider=provider,
+                composer_skill_hash=composer_skill_hash,
+            )
+        except ValueError:
+            continue
+
+
 class ComposerServiceImpl:
     """LLM-driven pipeline composer with dual-counter budget and discovery caching.
 
@@ -1332,61 +1552,21 @@ class ComposerServiceImpl:
 
         if session_id is None or current_state_id is None:
             return
-        sessions_service = self._require_sessions_service()
-        events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
-        for site in interpretation_sites(state):
-            if site.kind is not InterpretationKind.LLM_PROMPT_TEMPLATE:
-                continue
-            node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
-            if node is None:
-                continue
-            options = node.options
-            prompt_template = options["prompt_template"]
-            if type(prompt_template) is not str or not prompt_template:
-                raise InvariantError(
-                    "_auto_surface_prompt_template_reviews: prompt-template interpretation site lost its non-empty prompt_template"
-                )
-            # Draft-aware dedup (Task 7 HIGH-2): skip the node only when a pending
-            # PT event already carries the node's CURRENT prompt_template. A stale
-            # pending event from a prior turn whose draft is an OLDER skeleton must
-            # NOT suppress re-surfacing — node-id-only dedup would brick the review
-            # after a multi-turn prompt edit (the stale event survives, the
-            # Case-A skeleton-hash resolve gate then rejects forever, and the LLM
-            # can no longer re-surface). The stale event lingers cosmetically; a
-            # governed SUPERSEDED/cancel primitive is a follow-up.
-            if any(
-                event.affected_node_id == site.component_id
-                and event.llm_draft == prompt_template
-                and event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
-                for event in events
-            ):
-                continue
-            # The create_pending gate (sessions/service.py) REQUIRES exactly one
-            # pending PT requirement on the node for this user_term. Surface only
-            # where that precondition holds — otherwise create_pending would raise
-            # and crash the compose loop. A prompt_template node with no pending PT
-            # requirement is the requirement-None enumerator branch
-            # (_missing_prompt_template_review_sites) and is left to the orphan gate.
-            if not self._has_pending_prompt_template_requirement(options, user_term=site.user_term):
-                continue
-            await sessions_service.create_pending_interpretation_event(
-                session_id=UUID(session_id),
-                composition_state_id=UUID(current_state_id),
-                affected_node_id=site.component_id,
-                tool_call_id=f"backend_auto_surface:{uuid4()}",  # (D1)
-                user_term=site.user_term,
-                kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
-                llm_draft=prompt_template,
-                # (D2 / Task 7 LOW-b) model_version == model_identifier == self._model
-                # is INTENTIONAL here: a backend-derived surface has no LLM response
-                # object to resolve a provider-reported model from, so we cannot use
-                # the LLM-surfaced path's safe_response_model(response). This deliberate
-                # divergence is the most audit-honest value available at this surface.
-                model_identifier=self._model,  # (D2)
-                model_version=self._model,  # (D2)
-                provider=self._availability.provider or "unknown",  # (D2)
-                composer_skill_hash=self._composer_skill_hash,  # (D2)
-            )
+        # (D2 / Task 7 LOW-b) model_version == model_identifier == self._model
+        # is INTENTIONAL here: a backend-derived surface has no LLM response
+        # object to resolve a provider-reported model from, so we cannot use
+        # the LLM-surfaced path's safe_response_model(response). This deliberate
+        # divergence is the most audit-honest value available at this surface.
+        await _auto_surface_prompt_template_reviews_for_state(
+            state,
+            sessions_service=self._require_sessions_service(),
+            session_id=session_id,
+            current_state_id=current_state_id,
+            model_identifier=self._model,  # (D2)
+            model_version=self._model,  # (D2)
+            provider=self._availability.provider or "unknown",  # (D2)
+            composer_skill_hash=self._composer_skill_hash,  # (D2)
+        )
 
     @staticmethod
     def _has_pending_prompt_template_requirement(options: Mapping[str, Any], *, user_term: str) -> bool:
@@ -1461,123 +1641,16 @@ class ComposerServiceImpl:
 
         if session_id is None or current_state_id is None:
             return
-        # llm_prompt_template is already handled by the existing surfacer,
-        # which carries the exact draft-aware dedup the writer boundary needs.
-        await self._auto_surface_prompt_template_reviews(
+        await surface_pending_interpretation_reviews_for_state(
             state,
+            sessions_service=self._require_sessions_service(),
             session_id=session_id,
             current_state_id=current_state_id,
+            model_identifier=self._model,
+            model_version=self._model,
+            provider=self._availability.provider or "unknown",
+            composer_skill_hash=self._composer_skill_hash,
         )
-        sessions_service = self._require_sessions_service()
-        events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
-        for site in interpretation_sites(state):
-            if site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
-                continue  # handled above
-            surfaced = self._backend_surface_args_for_site(state, site)
-            if surfaced is None:
-                continue
-            affected_node_id, user_term, llm_draft = surfaced
-            if any(
-                event.affected_node_id == affected_node_id
-                and event.user_term is not None
-                and event.user_term.strip() == user_term.strip()
-                and event.kind is site.kind
-                and (event.llm_draft or "").strip() == llm_draft.strip()
-                for event in events
-            ):
-                continue
-            # W1 backstop: the per-kind precondition above is NECESSARY but not
-            # always SUFFICIENT (e.g. pipeline_decision must additionally pass
-            # validate_pipeline_decision_semantics, which the surfacer does not
-            # replicate). create_pending_interpretation_event raises a ValueError
-            # subclass on any boundary mismatch, and this runs AFTER
-            # save_composition_state at a persist seam with NO outer except — so
-            # an unguarded raise would 500 and wedge the session. Skip the site
-            # instead; it stays fail-closed at the run-time gate (advisory
-            # polarity). Deliberately not slog'd: a skipped advisory surface is
-            # not a telemetry/audit event, matching the existing surfacer's
-            # silent precondition skips.
-            try:
-                await sessions_service.create_pending_interpretation_event(
-                    session_id=UUID(session_id),
-                    composition_state_id=UUID(current_state_id),
-                    affected_node_id=affected_node_id,
-                    tool_call_id=f"backend_auto_surface:{uuid4()}",
-                    user_term=user_term,
-                    kind=site.kind,
-                    llm_draft=llm_draft,
-                    model_identifier=self._model,
-                    model_version=self._model,
-                    provider=self._availability.provider or "unknown",
-                    composer_skill_hash=self._composer_skill_hash,
-                )
-            except ValueError:
-                continue
-
-    def _backend_surface_args_for_site(
-        self,
-        state: CompositionState,
-        site: InterpretationReviewSite,
-    ) -> tuple[str, str, str] | None:
-        """Return ``(affected_node_id, user_term, llm_draft)`` for a site, or
-        ``None`` when the writer-boundary precondition does not hold.
-
-        Reads the draft straight from the node/source pending requirement so
-        the strict ``create_pending_interpretation_event`` writer boundary
-        accepts the insert. ``None`` means "no matching pending requirement" —
-        the site is left for the run-time gate (designed advisory polarity).
-        """
-
-        if site.kind is InterpretationKind.INVENTED_SOURCE:
-            source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
-            if source is None:
-                return None
-            options = source.options if isinstance(source.options, Mapping) else {}
-            if SOURCE_AUTHORING_KEY not in options:
-                return None
-            draft = self._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
-            if draft is None:
-                return None
-            return (SOURCE_COMPONENT_ID, site.user_term, draft)
-
-        node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
-        if node is None:
-            return None
-        options = node.options if isinstance(node.options, Mapping) else {}
-        if site.kind is InterpretationKind.LLM_MODEL_CHOICE:
-            model = options.get("model")
-            if not isinstance(model, str) or not model:
-                return None
-            # W1 (writer-boundary necessary-but-not-sufficient): the writer's
-            # model_choice else-branch routes through _find_llm_transform_node,
-            # which ALSO requires a non-empty prompt_template
-            # (sessions/service.py). The model_choice SITE emitter fires on
-            # `model` alone, so a model-only node yields a site the writer would
-            # REJECT with InterpretationResolveError(ValueError). Guard the
-            # precondition here (mirroring the PT path's
-            # _has_pending_prompt_template_requirement) and leave the site
-            # fail-closed at the run-time gate — the designed advisory polarity.
-            prompt_template = options.get("prompt_template")
-            if not isinstance(prompt_template, str) or not prompt_template:
-                return None
-            draft = self._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
-            if draft is None or draft != model:
-                return None
-            return (node.id, site.user_term, draft)
-        if site.kind is InterpretationKind.PIPELINE_DECISION:
-            draft = self._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
-            if draft is None:
-                return None
-            return (node.id, site.user_term, draft)
-        if site.kind is InterpretationKind.VAGUE_TERM:
-            # Only authored/staged vague-term requirements are surfaced.
-            # Bare legacy placeholders carry no requirement and are left
-            # fail-closed at the run-time gate; never invent a draft.
-            draft = self._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
-            if draft is None:
-                return None
-            return (node.id, site.user_term, draft)
-        return None
 
     @staticmethod
     @trust_boundary(

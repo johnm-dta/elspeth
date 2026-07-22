@@ -2573,6 +2573,140 @@ class TestStep2IntraStep:
             assert storage_path not in json.dumps(restored)
             assert all(storage_path not in repr(event.payload) for event in events)
 
+    def test_confirm_wiring_surfaces_pending_interpretation_events_for_committed_llm_prompts(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The wire-confirm commit must surface the events freeform settlement surfaces.
+
+        Tutorial session e1332b5a: the guided walk completed with a committed
+        llm node carrying a canonicalized pending ``llm_prompt_template``
+        requirement, but ZERO interpretation_events rows existed — the guided
+        wire-confirm path never ran the post-commit surfacing pass that both
+        the freeform settlement route (pipeline_settlement.py) and the guided
+        CHAT dispatcher run. No Accept card could ever render, and /execute
+        then refused with ``UnresolvedInterpretationPlaceholderError``. After
+        confirm, a pending event must exist for the committed node, bound to
+        the accepted durable state (the writer boundary validates the node
+        against that state's row).
+        """
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.core.canonical import stable_hash
+        from elspeth.web.composer.guided.planning import guided_private_reviewed_facts
+        from elspeth.web.composer.pipeline_planner import PipelinePlanResult
+        from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface
+
+        session_id = _create_session(composer_test_client)
+        prompt = "Summarise this row in one short sentence."
+
+        async def llm_planner(
+            *,
+            guided,
+            base,
+            supersedes_draft_hash,
+            recorder,
+            correction_target=None,
+            **_kwargs,
+        ):
+            del recorder, correction_target
+            source = guided.reviewed_sources[guided.source_order[0]]
+            output = guided.reviewed_outputs[guided.output_order[0]]
+            pipeline = {
+                "sources": {
+                    source.name: {
+                        "plugin": source.plugin,
+                        "options": deep_thaw(source.options),
+                        "on_success": "llm_rows",
+                        "on_validation_failure": source.on_validation_failure,
+                    }
+                },
+                "nodes": [
+                    {
+                        "id": "summarize_rows",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "input": "llm_rows",
+                        "on_success": output.name,
+                        "on_error": "discard",
+                        "options": {
+                            "schema": {"mode": "observed"},
+                            "profile": "task-role",
+                            "prompt_template": prompt,
+                            "response_field": "summary",
+                            "interpretation_requirements": [
+                                {
+                                    "id": "llm_prompt_template:summarize_rows:summarize_rows",
+                                    "kind": "llm_prompt_template",
+                                    "user_term": "llm_prompt_template:summarize_rows",
+                                    "status": "pending",
+                                    "draft": prompt,
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": output.name,
+                        "plugin": output.plugin,
+                        "options": deep_thaw(output.options),
+                        "on_write_failure": output.on_write_failure,
+                    }
+                ],
+            }
+            proposal = PipelineProposal.create(
+                pipeline=pipeline,
+                base=base,
+                reviewed_facts=guided_private_reviewed_facts(guided),
+                surface=PlannerSurface.GUIDED_STAGED,
+                repair_count=0,
+                skill_hash=stable_hash("llm-prompt-review-test-planner"),
+                covered_deferred_intent_ids=(),
+                supersedes_draft_hash=supersedes_draft_hash,
+            )
+            return (
+                PipelinePlanResult(
+                    proposal=proposal,
+                    tool_call_id=f"guided-test-{proposal.draft_hash[:16]}",
+                    custody_result="not_required",
+                    model_identifier="llm-prompt-review-test-planner",
+                    model_version="v1",
+                    provider="test",
+                ),
+                {
+                    "source": frozenset({source.plugin}),
+                    "transform": frozenset({"llm"}),
+                    "sink": frozenset({output.plugin}),
+                },
+            )
+
+        monkeypatch.setattr(
+            composer_test_client.app.state.composer_service,
+            "plan_guided_pipeline",
+            llm_planner,
+        )
+        staged = self._stage_proposal(composer_test_client, session_id, filename="llm_reviewed.jsonl")
+        assert staged["next_turn"]["type"] == "propose_pipeline"
+
+        _review_wiring(composer_test_client, session_id)
+        accepted = _confirm_wiring(composer_test_client, session_id)
+        assert accepted["terminal"]["kind"] == "completed"
+
+        session_service = composer_test_client.app.state.session_service
+        events = asyncio.run(session_service.list_interpretation_events(UUID(session_id), status="pending"))
+        prompt_events = [event for event in events if event.affected_node_id == "summarize_rows"]
+        assert len(prompt_events) == 1, [(event.affected_node_id, str(event.kind), event.user_term) for event in events]
+        event = prompt_events[0]
+        assert event.kind is not None and event.kind.value == "llm_prompt_template"
+        assert event.llm_draft == prompt
+        # Bound to the accepted durable state — the writer boundary validated
+        # the node against that state's persisted nodes JSON.
+        current = asyncio.run(session_service.get_current_state(UUID(session_id)))
+        assert current is not None
+        assert str(event.composition_state_id) == str(current.id)
+
     def test_confirm_wiring_failure_after_dispatch_audit_insert_preserves_failure_evidence_only(
         self,
         composer_test_client: TestClient,

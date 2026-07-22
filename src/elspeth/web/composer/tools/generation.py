@@ -405,7 +405,7 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         r"unknown[ _]node_type",
         "The node_type is not one of the composer's node kinds: aggregation, coalesce, gate, queue, transform. There is no 'fork' node_type.",
-        "Forking is expressed with a GATE node: set routes={'true': 'fork', 'false': 'fork'} and fork_to=['branch_a', 'branch_b']; each branch node reads one branch name as its input, and branches rejoin at a COALESCE node (branches + policy + merge). A node after the coalesce consumes it by setting input='<coalesce id>' — the coalesce's own on_success may only name a sink. For running SEVERAL LLM assessments per row, prefer ONE llm transform with a `queries` map instead — each query has its own template and output_fields merged onto the same row, no fork/coalesce needed.",
+        "Keep your current pipeline shape and change ONLY the invalid node: forking is expressed with a GATE node — node_type='gate', condition='True', routes={'true': 'fork', 'false': 'fork'}, fork_to=['branch_a', 'branch_b']; each branch node reads one branch name as its input, and branches rejoin at a COALESCE node (branches + policy + merge). A node after the coalesce consumes it by setting input='<coalesce id>' — the coalesce's own on_success may only name a sink.",
     ),
     (
         r"coalesce_on_success_must_be_sink|Coalesce on_success must point to a sink",

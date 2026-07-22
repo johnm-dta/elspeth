@@ -6,7 +6,7 @@ must say so, list the supported canonical structures, explain wrong-stage
 retention / back-edit, and describe the tutorial as a guided workflow profile.
 It must NOT tell users to switch to freeform because guided cannot express a
 supported topology. Where schema/epoch numbers are encoded, the runbook must use
-the Plan 05 values (session epoch 35, guided schema 10, Landscape epoch 28), not
+the current values (session epoch 35, guided schema 10, Landscape epoch 29), not
 the design doc's stale 8/28.
 """
 
@@ -105,14 +105,14 @@ def test_runbook_uses_plan_05_epoch_and_schema_numbers() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
     current_cutover = runbook.split("## Current Cutover:", maxsplit=1)[1].split("## Historical Cutover:", maxsplit=1)[0]
 
-    # Plan 05 headline values: session epoch 35, guided schema 10, Landscape 28.
+    # Current release values: session epoch 35, guided schema 10, Landscape 29.
     assert "session epoch 35" in current_cutover
-    assert "Landscape epoch 28" in current_cutover
+    assert "Landscape epoch 29" in current_cutover
     assert "guided schema 10" in runbook
 
     # The recreation/rollback record reference must name epoch-35, not the stale
     # epoch-30 the header-bump left behind (elspeth composer-parity fix).
-    assert "session-epoch-35/Landscape-epoch-28 record" in current_cutover
+    assert "session-epoch-35/Landscape-epoch-29 record" in current_cutover
     assert "repair the epoch-35 release forward" in current_cutover
     assert "epoch-30" not in current_cutover
 

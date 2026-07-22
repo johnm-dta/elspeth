@@ -1,4 +1,4 @@
-"""Operator documentation contract for epoch-28 sink effects."""
+"""Operator documentation contract for epoch-29 sink effects."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ REQUIRED_EFFECT_DOC_TERMS = {
     "UNKNOWN",
     "NO_INSPECTION_REQUIRED",
     "publication_performed",
-    "epoch 28",
+    "epoch 29",
 }
 
 

@@ -19,8 +19,10 @@ def test_readme_advertises_current_release_surface() -> None:
     # Current release line is shown, not a stale RC badge.
     assert "Status: 0.7.1" in text
     assert "status-0.7.1" in text
-    # The detailed 0.7.0 summary remains as historical release context.
-    assert "## What Changed In 0.7.0" in text
+    # The release summary follows the current line and names its hard cutover.
+    assert "## What Changed In 0.7.1" in text
+    assert "session store moves\nfrom epoch 26 to 35" in text
+    assert "Landscape moves from epoch 22\nto 29" in text
 
     # Key evaluator-facing release references remain.
     assert "[Audit and Lineage Guarantees](docs/release/guarantees.md)" in text

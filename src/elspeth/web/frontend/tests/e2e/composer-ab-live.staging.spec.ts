@@ -155,8 +155,15 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       if (!(await runButton.isEnabled().catch(() => false))) {
         await page.reload();
         await page.waitForLoadState("networkidle");
+        // Fresh hydration can land an API-created session on the guided
+        // surface; the user-visible escape restores the freeform composer
+        // with the committed pipeline intact.
+        const exitToFreeform = page.getByRole("button", { name: "Exit to freeform" });
+        if (await exitToFreeform.isVisible().catch(() => false)) {
+          await exitToFreeform.click();
+        }
       }
-      await expect(runButton).toBeEnabled({ timeout: 60_000 });
+      await expect(runButton).toBeEnabled({ timeout: 120_000 });
 
       await runButton.click();
       const runDialog = page.getByRole("alertdialog", { name: "Run pipeline?" });

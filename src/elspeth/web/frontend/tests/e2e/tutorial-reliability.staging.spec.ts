@@ -151,6 +151,10 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     // the designed advance (mirrors composer-guided-live).
     page.getByRole("button", { name: "Finish sources", exact: true }),
     page.getByRole("button", { name: "Finish outputs", exact: true }),
+    // Transient provider failure on a step chat ("I'm unavailable right now")
+    // leaves a Retry affordance; pressing it is the designed recovery. Last in
+    // priority so it never preempts forward progress.
+    page.getByRole("button", { name: "Retry", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
     // built is observed-mode (pass-all-through), and the real output fields come
     // from the downstream transforms — so the correct, designed answer here is

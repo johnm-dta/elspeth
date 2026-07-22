@@ -203,6 +203,29 @@
   line-height: 1.4;
 }
 
+.plugin-card-prose-body {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+/* Prose fields (usage_when_to_use / usage_when_not_to_use) render through
+   the shared MarkdownRenderer (elspeth-b7b1b62940), which sets its own
+   font-size/line-height on .markdown-body itself — that wins over the
+   inherited xs/1.4 above. Re-assert the catalog card's denser reference-card
+   typography here so the shared chat dialect doesn't inflate prose inside
+   the compact card. */
+.plugin-card-prose-body .markdown-body {
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+/* Inline and fenced code in common.css set an explicit --font-size-sm the
+   override above doesn't reach; keep code at the card's density too. */
+.plugin-card-prose-body .markdown-body .inline-code,
+.plugin-card-prose-body .markdown-body .code-block {
+  font-size: var(--font-size-xs);
+}
+
 .plugin-card-example-code {
   max-height: 140px;
   margin: var(--space-xs) 0 0;

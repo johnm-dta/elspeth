@@ -103,6 +103,8 @@ class PipelineConfig:
     gates: Sequence[GateSettings] = field(default_factory=list)
     aggregation_settings: Mapping[str, AggregationSettings] = field(default_factory=dict)
     coalesce_settings: Sequence[CoalesceSettings] = field(default_factory=list)
+    sink_effect_modes: Mapping[str, str] = field(default_factory=dict, repr=False)
+    sink_effect_admission: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         from elspeth.contracts.errors import OrchestrationInvariantError
@@ -118,7 +120,7 @@ class PipelineConfig:
         object.__setattr__(self, "transforms", tuple(self.transforms))
         object.__setattr__(self, "gates", tuple(self.gates))
         object.__setattr__(self, "coalesce_settings", tuple(self.coalesce_settings))
-        freeze_fields(self, "sources", "sinks", "config", "aggregation_settings")
+        freeze_fields(self, "sources", "sinks", "config", "aggregation_settings", "sink_effect_modes")
 
 
 @dataclass(frozen=True, slots=True)

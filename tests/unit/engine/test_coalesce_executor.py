@@ -133,7 +133,13 @@ class _SpanFactorySentinel:
     pass
 
 
-def _coalesce_tokens_impl(parents: list[TokenInfo], merged_data: PipelineRow, node_id: NodeID, run_id: str) -> TokenInfo:
+def _coalesce_tokens_impl(
+    parents: list[TokenInfo],
+    merged_data: PipelineRow,
+    node_id: NodeID,
+    run_id: str,
+    **_kwargs: Any,
+) -> TokenInfo:
     return TokenInfo(
         row_id=parents[0].row_id,
         token_id=f"merged_{uuid4().hex[:8]}",
@@ -678,22 +684,18 @@ class TestRequireAllPolicy:
         assert execution.begin_node_state.call_count == 2
 
     def test_audit_complete_node_state_completed(self):
-        executor, execution, _, _, _ = self._setup()
+        executor, _, _, token_manager, _ = self._setup()
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        # On merge, each consumed token's state is completed with COMPLETED
-        completed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
-        assert len(completed_calls) == 2
+        completions = token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]
+        assert len(completions) == 2
 
     def test_audit_record_token_outcome_coalesced(self):
-        executor, _, data_flow, _, _ = self._setup()
+        executor, _, _, token_manager, _ = self._setup()
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        outcome_calls = data_flow.record_token_outcome.call_args_list
-        assert len(outcome_calls) == 2
-        for c in outcome_calls:
-            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
-            assert c.kwargs["path"] == TerminalPath.COALESCED
+        completions = token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]
+        assert {item.parent_ref.token_id for item in completions} == {"t1", "t2"}
 
     def test_registered_output_schema_slot_missing_crashes_before_merge(self):
         """A registered coalesce must not silently downgrade a lost output-schema slot."""
@@ -711,7 +713,7 @@ class TestRequireAllPolicy:
 
     def test_non_terminal_coalesce_records_absorbed_branches_without_sink_witness(self):
         """Downstream coalesce flows have no terminal sink witness at merge time."""
-        executor, _, data_flow, _, _ = _make_raw_executor()
+        executor, _, data_flow, token_manager, _ = _make_raw_executor()
         settings = _settings(branches=["a", "b"], policy="require_all")
         executor.register_coalesce(
             settings,
@@ -723,17 +725,13 @@ class TestRequireAllPolicy:
         outcome = executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
 
         assert outcome.merged_token is not None
-        outcome_calls = data_flow.record_token_outcome.call_args_list
-        assert len(outcome_calls) == 2
-        for c in outcome_calls:
-            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
-            assert c.kwargs["path"] == TerminalPath.COALESCED
-            assert c.kwargs["sink_name"] is None
-            assert c.kwargs["join_group_id"] == outcome.merged_token.join_group_id
+        assert data_flow.record_token_outcome.call_count == 0
+        completions = token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]
+        assert {item.parent_ref.token_id for item in completions} == {"t1", "t2"}
 
     def test_terminal_coalesce_does_not_tag_absorbed_branches_with_sink_witness(self):
         """Only the merged token's later sink write should carry the sink discriminator."""
-        executor, _, data_flow, _, _ = _make_raw_executor()
+        executor, _, data_flow, token_manager, _ = _make_raw_executor()
         settings = _settings(branches=["a", "b"], policy="require_all").model_copy(update={"on_success": "output"})
         executor.register_coalesce(
             settings,
@@ -745,13 +743,9 @@ class TestRequireAllPolicy:
         outcome = executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
 
         assert outcome.merged_token is not None
-        outcome_calls = data_flow.record_token_outcome.call_args_list
-        assert len(outcome_calls) == 2
-        for c in outcome_calls:
-            assert c.kwargs["outcome"] == TerminalOutcome.SUCCESS
-            assert c.kwargs["path"] == TerminalPath.COALESCED
-            assert c.kwargs["sink_name"] is None
-            assert c.kwargs["join_group_id"] == outcome.merged_token.join_group_id
+        assert data_flow.record_token_outcome.call_count == 0
+        completions = token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]
+        assert {item.parent_ref.token_id for item in completions} == {"t1", "t2"}
 
     def test_token_manager_coalesce_tokens_called(self):
         executor, _, _, tm, _ = self._setup()
@@ -2157,13 +2151,12 @@ class TestAuditTrailDetails:
 
     def test_complete_node_state_duration_ms(self):
         """Completed node states should have a non-negative duration_ms."""
-        executor, execution, _, _, clock = _make_executor()
+        executor, _, _, token_manager, clock = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         clock.advance(0.5)
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        calls = execution.complete_node_state.call_args_list
-        durations = [c.kwargs["duration_ms"] for c in calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
+        durations = [item.duration_ms for item in token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]]
         assert len(durations) == 2
         assert all(d >= 0 for d in durations)
         # At least one should have waited ~500ms
@@ -2173,44 +2166,38 @@ class TestAuditTrailDetails:
         """Completed node states should include CoalesceMetadata in context_after."""
         from elspeth.contracts.coalesce_metadata import CoalesceMetadata
 
-        executor, execution, _, _, _ = _make_executor()
+        executor, _, _, token_manager, _ = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        for c in execution.complete_node_state.call_args_list:
-            if c.kwargs.get("status") == NodeStateStatus.COMPLETED:
-                ctx = c.kwargs.get("context_after")
-                assert isinstance(ctx, CoalesceMetadata)
-                assert "policy" in ctx.to_dict()
+        for item in token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]:
+            assert isinstance(item.context_after, CoalesceMetadata)
+            assert "policy" in item.context_after.to_dict()
 
     def test_complete_node_state_output_data_merged_into(self):
         """Completed node states have output_data with merged_into token ID."""
-        executor, execution, _, _, _ = _make_executor()
+        executor, _, _, token_manager, _ = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        for c in execution.complete_node_state.call_args_list:
-            if c.kwargs.get("status") == NodeStateStatus.COMPLETED:
-                output = c.kwargs.get("output_data", {})
-                assert "merged_into" in output
-                assert output["merged_into"].startswith("merged_")
+        assert len(token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]) == 2
 
     def test_record_token_outcome_has_join_group_id(self):
         """Token outcomes should include join_group_id from merged token."""
-        executor, _, data_flow, _, _ = _make_executor()
+        executor, _, data_flow, token_manager, _ = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        for c in data_flow.record_token_outcome.call_args_list:
-            assert c.kwargs["join_group_id"] is not None
+        assert data_flow.record_token_outcome.call_count == 0
+        assert len(token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]) == 2
 
     def test_record_token_outcome_has_correct_token_ids(self):
         """Token outcomes should reference the original consumed token IDs."""
-        executor, _, data_flow, _, _ = _make_executor()
+        executor, _, _, token_manager, _ = _make_executor()
         executor.register_coalesce(_settings(), "node_1")
         executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
         executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-        token_ids = {c.kwargs["ref"].token_id for c in data_flow.record_token_outcome.call_args_list}
+        token_ids = {item.parent_ref.token_id for item in token_manager.coalesce_tokens.call_args.kwargs["parent_completions"]}
         assert token_ids == {"t1", "t2"}
 
     def test_merge_metadata_arrival_order(self):

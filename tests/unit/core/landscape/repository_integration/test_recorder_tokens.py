@@ -953,12 +953,8 @@ class TestAtomicTokenOperations:
         assert retrieved is not None
         assert retrieved.join_group_id == merged.join_group_id
 
-    def test_expand_token_skips_parent_outcome_for_batch_aggregation(self) -> None:
-        """expand_token with record_parent_outcome=False skips EXPANDED recording.
-
-        Batch aggregation uses expand_token to create children but records
-        CONSUMED_IN_BATCH separately for the parent (different semantics).
-        """
+    def test_expand_token_records_batch_parent_outcome_atomically(self) -> None:
+        """Batch expansion cannot create children without consuming its parent."""
         db = LandscapeDB.in_memory()
         factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
@@ -980,20 +976,30 @@ class TestAtomicTokenOperations:
             ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
+        batch = factory.execution.create_batch(
+            run_id=run.run_id,
+            aggregation_node_id=node.node_id,
+            batch_id="batch-expand",
+        )
+        factory.execution.add_batch_member(batch.batch_id, parent_token.token_id, 0)
 
-        # Expand with record_parent_outcome=False (batch aggregation pattern)
+        # The batch-specific terminal path is recorded in the same transaction
+        # as the expanded children.
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=2,
-            record_parent_outcome=False,  # Don't record EXPANDED
             output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch.batch_id,
         )
 
         # Children should be created
         assert len(children) == 2
 
-        # But parent should NOT have an outcome yet
         outcome = factory.data_flow.get_token_outcome(parent_token.token_id)
-        assert outcome is None, "Parent should not have outcome when record_parent_outcome=False"
+        assert outcome is not None
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.BATCH_CONSUMED
+        assert outcome.batch_id == batch.batch_id

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -126,21 +127,34 @@ class TestSendMessageRequest:
 class TestForkSessionRequest:
     def test_rejects_invalid_uuid(self) -> None:
         with pytest.raises(ValidationError):
-            ForkSessionRequest(from_message_id="not-a-uuid", new_message_content="fork")
+            ForkSessionRequest(operation_id=str(uuid.uuid4()), from_message_id="not-a-uuid", new_message_content="fork")
 
     @pytest.mark.parametrize("content", ["", "   ", "\u200b", "\ufeff"])
     def test_rejects_blank_or_invisible_new_message_content(self, content: str) -> None:
         with pytest.raises(ValidationError):
             ForkSessionRequest(
+                operation_id=str(uuid.uuid4()),
                 from_message_id="550e8400-e29b-41d4-a716-446655440000",
                 new_message_content=content,
             )
 
-    def test_accepts_valid_uuid(self) -> None:
+    def test_requires_operation_id(self) -> None:
+        with pytest.raises(ValidationError, match="operation_id"):
+            ForkSessionRequest(from_message_id=uuid.uuid4(), new_message_content="fork")
+
+    def test_accepts_strict_current_shape(self) -> None:
         import uuid
 
-        req = ForkSessionRequest(from_message_id=uuid.uuid4(), new_message_content="fork")
+        operation_id = str(uuid.uuid4())
+        req = ForkSessionRequest(
+            operation_id=operation_id,
+            from_message_id=uuid.uuid4(),
+            new_message_content="fork",
+        )
+        assert req.operation_id == operation_id
         assert req.new_message_content == "fork"
+        assert type(req).model_config.get("strict") is True
+        assert type(req).model_config.get("extra") == "forbid"
 
 
 class TestRevertStateRequest:
@@ -164,6 +178,7 @@ class TestSessionRequestExtraFieldsRejected:
             (
                 ForkSessionRequest,
                 {
+                    "operation_id": "00000000-0000-4000-8000-000000000001",
                     "from_message_id": "550e8400-e29b-41d4-a716-446655440000",
                     "new_message_content": "fork",
                     "extra": True,
@@ -384,6 +399,16 @@ class TestSessionStrictCoercionRejected:
         with pytest.raises(ValidationError):
             ValidationEntryResponse(component=42, message="m", severity="warning")  # type: ignore[arg-type]
 
+    def test_validation_entry_response_preserves_public_error_code(self) -> None:
+        response = ValidationEntryResponse(
+            component="node:shield",
+            message="The operator profile is unavailable.",
+            severity="high",
+            error_code="profile_unavailable",
+        )
+
+        assert response.model_dump()["error_code"] == "profile_unavailable"
+
 
 class TestSessionExtraFieldsRejected:
     """Extra fields must raise, not be silently dropped."""
@@ -422,9 +447,23 @@ class TestSessionExtraFieldsRejected:
             MessageWithStateResponse(message=msg, state=None, usage_tokens=100)  # type: ignore[call-arg]
 
     def test_fork_session_response_rejects_extra(self) -> None:
-        session = SessionResponse(**_valid_session_response_kwargs())  # type: ignore[arg-type]
         with pytest.raises(ValidationError, match="extra"):
-            ForkSessionResponse(session=session, messages=[], composition_state=None, note="x")  # type: ignore[call-arg]
+            ForkSessionResponse(session_id=uuid.uuid4(), note="x")  # type: ignore[call-arg]
+
+
+def test_fork_response_is_strict_locator_only() -> None:
+    session_id = uuid.uuid4()
+
+    response = ForkSessionResponse(session_id=session_id)
+
+    assert response.model_dump(mode="python") == {"session_id": session_id}
+    with pytest.raises(ValidationError, match="session"):
+        ForkSessionResponse.model_validate(
+            {
+                "session_id": session_id,
+                "session": _valid_session_response_kwargs(),
+            }
+        )
 
 
 class TestSessionResponseHappyPath:
@@ -455,13 +494,11 @@ class TestSessionResponseHappyPath:
 def test_workflow_profile_response_wire_subset_and_strict() -> None:
     from elspeth.web.sessions.schemas import WorkflowProfileResponse
 
-    model = WorkflowProfileResponse(coaching=True, bookends=True, recipe_match=True, advisor_checkpoints=True)
+    model = WorkflowProfileResponse(coaching=True, bookends=True)
     dumped = model.model_dump()
     assert set(dumped.keys()) == {
         "coaching",
         "bookends",
-        "recipe_match",
-        "advisor_checkpoints",
     }
 
     import pydantic
@@ -470,8 +507,6 @@ def test_workflow_profile_response_wire_subset_and_strict() -> None:
         WorkflowProfileResponse(
             coaching=True,
             bookends=True,
-            recipe_match=True,
-            advisor_checkpoints=True,
             injected="leak",
         )
 
@@ -479,6 +514,4 @@ def test_workflow_profile_response_wire_subset_and_strict() -> None:
         WorkflowProfileResponse(
             coaching="yes",
             bookends=True,
-            recipe_match=True,
-            advisor_checkpoints=True,
         )

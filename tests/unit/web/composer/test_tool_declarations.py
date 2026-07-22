@@ -15,8 +15,11 @@ shape (so a future refactor cannot silently re-author the LLM-facing schema).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
 from elspeth.web.composer.tools._dispatch import get_tool_definitions
 from elspeth.web.composer.tools.blobs import (
     _CREATE_BLOB_DECLARATION,
@@ -63,14 +66,7 @@ _EXPECTED_CREATE_BLOB_DEFINITION: dict[str, object] = {
             },
             "mime_type": {
                 "type": "string",
-                "enum": [
-                    "text/plain",
-                    "application/json",
-                    "text/csv",
-                    "application/x-jsonlines",
-                    "application/jsonl",
-                    "text/jsonl",
-                ],
+                "enum": sorted(ALLOWED_MIME_TYPES),
                 "description": "MIME type of the content.",
             },
             "content": {
@@ -155,10 +151,10 @@ _EXPECTED_APPLY_PIPELINE_RECIPE_DEFINITION: dict[str, object] = {
 
 
 class TestCreateBlobMigration:
-    """The migration must be byte-identity-preserving for create_blob."""
+    """The declaration stays pinned except for its shared MIME authority."""
 
     def test_get_tool_definitions_emits_expected_create_blob_definition(self) -> None:
-        """The LLM-facing schema for create_blob is exactly the pre-migration shape."""
+        """The LLM-facing schema derives MIME values from the shared contract."""
         definitions = get_tool_definitions()
         create_blob = next(d for d in definitions if d["name"] == "create_blob")
         assert create_blob == _EXPECTED_CREATE_BLOB_DEFINITION
@@ -529,7 +525,8 @@ class TestStep3DiscoveryTierMigration:
                         "description": (
                             "Optional: return only one component — 'source', a node ID, or an output name. "
                             "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
-                            "or pass the empty string."
+                            "or pass the empty string. Use 'set_pipeline_arguments' for the exact public "
+                            "payload accepted by set_pipeline; ordinary inspection output is diagnostic only."
                         ),
                     },
                 },
@@ -737,6 +734,28 @@ class TestStep3MutationTierMigration:
         assert isinstance(params, dict)
         assert params["required"] == ["nodes", "edges", "outputs"]
 
+    def test_narrow_edit_tool_descriptions_are_explicit(self) -> None:
+        set_pipeline = self._get("set_pipeline")
+        splice = self._get("splice_transform")
+        patch_node = self._get("patch_node_options")
+
+        assert "create or fully rebuild" in str(set_pipeline["description"])
+        assert "narrow edit" in str(set_pipeline["description"])
+        assert "splice_transform" in str(set_pipeline["description"])
+        for intent_word in ("insert", "between", "before", "after", "direct linear"):
+            assert intent_word in str(splice["description"])
+        assert "option-only" in str(patch_node["description"])
+
+    def test_core_skill_routes_each_edit_shape_to_one_supported_tool(self) -> None:
+        skill = (Path(__file__).parents[4] / "src/elspeth/web/composer/skills/pipeline_composer.md").read_text(encoding="utf-8")
+
+        assert "one-transform insertion" in skill
+        assert "`splice_transform`" in skill
+        assert "option-only edit" in skill
+        assert "`patch_node_options`" in skill
+        assert "intentional full rebuild" in skill
+        assert "`set_pipeline`" in skill
+
     def test_upsert_node_required(self) -> None:
         defn = self._get("upsert_node")
         params = defn["parameters"]
@@ -755,7 +774,7 @@ class TestStep3MutationTierMigration:
         mutations = [d for d in _REGISTERED_TOOLS if d.kind is ToolKind.MUTATION]
         for d in mutations:
             assert d.cacheable is False, f"{d.name} mutation must not be cacheable"
-        # Confirm we have all 14 standard mutations.
+        # Confirm we have all standard mutations.
         names = {d.name for d in mutations}
         expected = {
             "set_source",
@@ -772,6 +791,7 @@ class TestStep3MutationTierMigration:
             "set_pipeline",
             "clear_source",
             "apply_pipeline_recipe",
+            "splice_transform",
         }
         assert names == expected
 

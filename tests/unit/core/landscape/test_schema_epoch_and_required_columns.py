@@ -1,27 +1,117 @@
-"""Schema epoch + required-columns + provenance-write guards (epoch 22)."""
+"""Schema epoch + required-shape + provenance-write guards (epoch 29)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex
 
 from elspeth.contracts.scheduler import SchedulerEventType
-from elspeth.core.landscape.database import _REQUIRED_COLUMNS
+from elspeth.core.landscape.database import _REQUIRED_COLUMNS, _REQUIRED_COMPOSITE_FOREIGN_KEYS, _REQUIRED_INDEXES, LandscapeDB
 from elspeth.core.landscape.schema import (
     SQLITE_SCHEMA_EPOCH,
+    artifacts_table,
+    batches_table,
     checkpoints_table,
     metadata,
     node_states_table,
+    nodes_table,
     routing_events_table,
+    run_web_plugin_policy_table,
+    token_parents_table,
     token_work_items_table,
     tokens_table,
 )
 from tests.fixtures.landscape import make_recorder_with_run
 
 
-def test_epoch_is_twenty_two() -> None:
-    assert SQLITE_SCHEMA_EPOCH == 22
+def test_epoch_is_twenty_nine() -> None:
+    assert SQLITE_SCHEMA_EPOCH == 29
+
+
+def test_epoch_29_requires_node_output_contract_hash() -> None:
+    assert "output_contract_hash" in nodes_table.c
+    assert ("nodes", "output_contract_hash") in set(_REQUIRED_COLUMNS)
+
+
+def test_epoch_29_requires_batch_expansion_effect_claim() -> None:
+    assert "expansion_group_id" in batches_table.c
+    assert ("batches", "expansion_group_id") in set(_REQUIRED_COLUMNS)
+
+
+def test_epoch_29_run_scopes_token_ancestry() -> None:
+    assert "run_id" in token_parents_table.c
+    assert ("token_parents", "run_id") in set(_REQUIRED_COLUMNS)
+    required_foreign_keys = set(_REQUIRED_COMPOSITE_FOREIGN_KEYS)
+    assert (
+        "token_parents",
+        ("token_id", "run_id"),
+        "tokens",
+        ("token_id", "run_id"),
+    ) in required_foreign_keys
+    assert (
+        "token_parents",
+        ("parent_token_id", "run_id"),
+        "tokens",
+        ("token_id", "run_id"),
+    ) in required_foreign_keys
+
+
+def test_epoch_25_artifact_idempotency_index_is_partial_and_cross_dialect() -> None:
+    index = next(index for index in artifacts_table.indexes if index.name == "uq_artifacts_run_idempotency_key")
+
+    assert index.unique is True
+    assert [column.name for column in index.columns] == ["run_id", "idempotency_key"]
+    sqlite_ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+    postgres_ddl = str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+    assert "UNIQUE INDEX uq_artifacts_run_idempotency_key" in sqlite_ddl
+    assert "WHERE idempotency_key IS NOT NULL" in sqlite_ddl
+    assert "UNIQUE INDEX uq_artifacts_run_idempotency_key" in postgres_ddl
+    assert "WHERE idempotency_key IS NOT NULL" in postgres_ddl
+
+
+def test_epoch_25_artifact_idempotency_index_is_required_at_startup() -> None:
+    assert ("artifacts", "uq_artifacts_run_idempotency_key") in _REQUIRED_INDEXES
+
+
+def test_fresh_sqlite_schema_reflects_artifact_idempotency_index() -> None:
+    db = LandscapeDB.in_memory()
+    try:
+        indexes = {entry["name"]: entry for entry in inspect(db.engine).get_indexes("artifacts")}
+    finally:
+        db.close()
+
+    reflected = indexes["uq_artifacts_run_idempotency_key"]
+    assert reflected["unique"] == 1
+    assert reflected["column_names"] == ["run_id", "idempotency_key"]
+    assert "idempotency_key IS NOT NULL" in str(reflected["dialect_options"]["sqlite_where"])
+
+
+def test_epoch_23_web_plugin_policy_table_is_one_to_one_with_runs() -> None:
+    assert "run_web_plugin_policy" in metadata.tables
+    assert run_web_plugin_policy_table.primary_key.columns.keys() == ["run_id"]
+    assert {column.name for column in run_web_plugin_policy_table.columns} == {
+        "run_id",
+        "schema_version",
+        "policy_hash",
+        "snapshot_hash",
+        "authorized_plugin_ids_json",
+        "available_plugin_ids_json",
+        "control_modes_json",
+        "selected_implementations_json",
+        "selected_profile_aliases_json",
+        "plugin_code_identities_json",
+        "binding_generation_fingerprint",
+        "decision_codes_json",
+    }
+
+
+def test_required_columns_include_epoch_23_web_plugin_policy_evidence() -> None:
+    required = set(_REQUIRED_COLUMNS)
+    for column in run_web_plugin_policy_table.columns:
+        assert ("run_web_plugin_policy", column.name) in required
 
 
 def test_token_work_items_has_barrier_blocked_at() -> None:

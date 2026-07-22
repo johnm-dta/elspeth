@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import pytest
+from sqlalchemy import event, func, select
+from sqlalchemy.engine import Connection
 
 from elspeth.contracts import BatchStatus, NodeType, TriggerType
 from elspeth.contracts.audit import TokenRef
@@ -8,7 +13,9 @@ from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import batch_members_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -228,8 +235,101 @@ class TestAddBatchMember:
         _db, factory = _setup_two_runs_with_batch_integrity_records()
         factory.execution.create_batch("run-A", "agg-1", batch_id="batch-A")
 
-        with pytest.raises(AuditIntegrityError):
+        with pytest.raises(AuditIntegrityError, match=r"belongs to run 'run-B'.*belongs to run 'run-A'"):
             factory.execution.add_batch_member("batch-A", "tok-B", ordinal=0)
+
+        assert factory.execution.get_batch_members("batch-A") == []
+
+    @pytest.mark.parametrize(
+        "status",
+        [BatchStatus.EXECUTING, BatchStatus.COMPLETED, BatchStatus.FAILED],
+    )
+    def test_rejects_every_non_draft_batch_status(self, status: BatchStatus) -> None:
+        """DRAFT is the sole status in which batch membership is mutable."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        if status is BatchStatus.EXECUTING:
+            factory.execution.update_batch_status("b-1", status)
+        else:
+            factory.execution.complete_batch("b-1", status)
+
+        with pytest.raises(AuditIntegrityError, match=rf"status {status.value!r}.*immutable"):
+            factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        assert factory.execution.get_batch_members("b-1") == []
+
+    def test_nonexistent_batch_fails_without_membership(self) -> None:
+        _db, factory = _setup_with_token()
+
+        with pytest.raises(AuditIntegrityError, match="batch missing not found"):
+            factory.execution.add_batch_member("missing", "tok-1", ordinal=0)
+
+        assert factory.execution.get_batch_members("missing") == []
+
+    def test_caller_connection_preserves_draft_guard_and_atomic_write(self) -> None:
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+
+        with db.write_connection() as conn:
+            member = factory.execution.add_batch_member("b-1", "tok-1", ordinal=0, conn=conn)
+
+        assert member.run_id == "run-1"
+        assert [record.token_id for record in factory.execution.get_batch_members("b-1")] == ["tok-1"]
+
+    def test_caller_connection_rejects_closed_batch_without_poisoning_transaction(self) -> None:
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="closed")
+        factory.execution.update_batch_status("closed", BatchStatus.EXECUTING)
+        factory.execution.create_batch("run-1", "agg-1", batch_id="open")
+
+        with db.write_connection() as conn:
+            with pytest.raises(AuditIntegrityError, match=r"status 'executing'.*immutable"):
+                factory.execution.add_batch_member("closed", "tok-1", ordinal=0, conn=conn)
+            factory.execution.add_batch_member("open", "tok-1", ordinal=0, conn=conn)
+
+        assert factory.execution.get_batch_members("closed") == []
+        assert [member.token_id for member in factory.execution.get_batch_members("open")] == ["tok-1"]
+
+    def test_duplicate_membership_remains_a_conflict(self) -> None:
+        """The hardening does not turn natural-key collisions into success."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        assert len(factory.execution.get_batch_members("b-1")) == 1
+
+    def test_duplicate_ordinal_remains_a_conflict(self) -> None:
+        """Two different tokens cannot occupy the same batch ordinal."""
+        _db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+        factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            factory.execution.add_batch_member("b-1", "tok-2", ordinal=0)
+
+        assert [member.token_id for member in factory.execution.get_batch_members("b-1")] == ["tok-1"]
+
+    def test_failure_after_insert_rolls_back_membership(self) -> None:
+        """An exception after the INSERT cannot leave a partially committed member."""
+        db, factory = _setup_with_token()
+        factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
+
+        def fail_after_member_insert(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("INSERT INTO BATCH_MEMBERS"):
+                raise RuntimeError("injected post-insert failure")
+
+        event.listen(db.engine, "after_cursor_execute", fail_after_member_insert)
+        try:
+            with pytest.raises(RuntimeError, match="injected post-insert failure"):
+                factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
+        finally:
+            event.remove(db.engine, "after_cursor_execute", fail_after_member_insert)
+
+        with db.read_only_connection() as conn:
+            assert conn.execute(select(func.count()).select_from(batch_members_table)).scalar_one() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1132,6 +1232,223 @@ class TestRegisterArtifact:
 
         assert artifact.idempotency_key == "idem-key-1"
 
+    def test_identical_idempotent_retry_returns_original_artifact(self):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+
+        first = factory.execution.register_artifact(**values, artifact_id="artifact-first")
+        retried = factory.execution.register_artifact(**values, artifact_id="artifact-retry-proposal")
+
+        assert retried == first
+        assert retried.artifact_id == "artifact-first"
+        assert len(factory.execution.get_artifacts("run-1")) == 1
+
+    @pytest.mark.parametrize(
+        ("field", "divergent_value"),
+        [
+            ("state_id", "state-2"),
+            ("sink_node_id", "sink-1"),
+            ("artifact_type", "json"),
+            ("path", "/output/different.csv"),
+            ("content_hash", "sha256:different"),
+            ("size_bytes", 513),
+        ],
+    )
+    def test_idempotency_key_reuse_with_divergent_effect_fails_closed(self, field: str, divergent_value: str | int):
+        _db, factory = _setup_with_sink()
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="json_sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "first"},
+            state_id="state-1",
+        )
+        factory.execution.begin_node_state(
+            "tok-2",
+            "source-0",
+            "run-1",
+            1,
+            {"data": "second"},
+            state_id="state-2",
+        )
+        values: dict[str, str | int] = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+        original = factory.execution.register_artifact(
+            run_id=str(values["run_id"]),
+            state_id=str(values["state_id"]),
+            sink_node_id=str(values["sink_node_id"]),
+            artifact_type=str(values["artifact_type"]),
+            path=str(values["path"]),
+            content_hash=str(values["content_hash"]),
+            size_bytes=int(values["size_bytes"]),
+            idempotency_key=str(values["idempotency_key"]),
+        )
+        values[field] = divergent_value
+
+        with pytest.raises(AuditIntegrityError, match=field):
+            factory.execution.register_artifact(
+                run_id=str(values["run_id"]),
+                state_id=str(values["state_id"]),
+                sink_node_id=str(values["sink_node_id"]),
+                artifact_type=str(values["artifact_type"]),
+                path=str(values["path"]),
+                content_hash=str(values["content_hash"]),
+                size_bytes=int(values["size_bytes"]),
+                idempotency_key=str(values["idempotency_key"]),
+            )
+
+        assert factory.execution.get_artifacts("run-1") == [original]
+
+    def test_null_idempotency_keys_remain_independent(self):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+        }
+
+        first = factory.execution.register_artifact(**values)
+        second = factory.execution.register_artifact(**values)
+
+        assert first.artifact_id != second.artifact_id
+        assert len(factory.execution.get_artifacts("run-1")) == 2
+
+    def test_same_idempotency_key_is_independent_between_runs(self):
+        _db, factory = _setup_two_runs_with_batch_integrity_records()
+        values = {
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "opaque-logical-effect",
+        }
+
+        run_a = factory.execution.register_artifact(run_id="run-A", state_id="state-A", **values)
+        run_b = factory.execution.register_artifact(run_id="run-B", state_id="state-B", **values)
+
+        assert run_a.artifact_id != run_b.artifact_id
+        assert factory.execution.get_artifacts("run-A") == [run_a]
+        assert factory.execution.get_artifacts("run-B") == [run_b]
+
+    def test_fault_before_outer_commit_rolls_back_idempotency_reservation(self):
+        db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+
+        with pytest.raises(RuntimeError, match="fault before commit"), db.write_connection() as conn:
+            factory.execution.register_artifact(**values, conn=conn)
+            raise RuntimeError("fault before commit")
+
+        committed = factory.execution.register_artifact(**values)
+        assert factory.execution.get_artifacts("run-1") == [committed]
+
+    def test_retry_after_response_loss_after_commit_returns_committed_identity(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _db, factory = _setup_with_sink()
+        factory.execution.begin_node_state(
+            "tok-1",
+            "source-0",
+            "run-1",
+            0,
+            {"data": "test"},
+            state_id="state-1",
+        )
+        values = {
+            "run_id": "run-1",
+            "state_id": "state-1",
+            "sink_node_id": "sink-0",
+            "artifact_type": "csv",
+            "path": "/output/result.csv",
+            "content_hash": "sha256:abc",
+            "size_bytes": 512,
+            "idempotency_key": "run-1:row-1:csv_sink",
+        }
+        real_write_connection = factory.execution.artifacts._ops.write_connection
+
+        @contextmanager
+        def _commit_then_lose_response() -> Iterator[Connection]:
+            with real_write_connection() as conn:
+                yield conn
+            raise RuntimeError("response lost after commit before return to caller")
+
+        monkeypatch.setattr(factory.execution.artifacts._ops, "write_connection", _commit_then_lose_response)
+        with pytest.raises(RuntimeError, match="response lost after commit"):
+            factory.execution.register_artifact(**values, artifact_id="artifact-committed-before-response-loss")
+
+        committed = factory.execution.get_artifacts("run-1")
+        assert len(committed) == 1
+        monkeypatch.setattr(factory.execution.artifacts._ops, "write_connection", real_write_connection)
+        retried = factory.execution.register_artifact(**values, artifact_id="artifact-retry-after-response-loss")
+        assert retried.artifact_id == "artifact-committed-before-response-loss"
+        assert retried.created_at == committed[0].created_at
+        assert factory.execution.get_artifacts("run-1") == [retried]
+
     def test_rejects_producer_state_from_different_run(self):
         """Artifacts must not be attributed to a node state from another run."""
         _db, factory = _setup_two_runs_with_batch_integrity_records()
@@ -1394,3 +1711,96 @@ class TestGetArtifacts:
         ids_second = [a.artifact_id for a in artifacts_second]
         assert ids_first == ids_second
         assert len(ids_first) == 3
+
+
+class TestAddBatchMemberGuardedPostgresLockOrder:
+    """PostgreSQL parent-lock acquisition order for batch membership (elspeth-a580f44add).
+
+    Outcome recording (``TokenOutcomeRepository.lock_token_outcome_dependencies``)
+    locks ``tokens`` FOR UPDATE first and then takes an implicit FK ``KEY SHARE``
+    on ``batches`` when it writes a batch-scoped outcome row.  Membership must
+    acquire its parent locks in the same token-first order; locking the batch
+    row first while the membership INSERT waits on the token FK lock deadlocks
+    against a concurrent outcome write and aborts one audit transaction.
+    """
+
+    @staticmethod
+    def _run_guarded_add(statements: list[str]):
+        """Drive add_batch_member_guarded against a statement-recording fake."""
+        from types import SimpleNamespace
+        from typing import cast
+
+        from sqlalchemy.dialects import postgresql
+
+        from elspeth.core.landscape.execution.batches import add_batch_member_guarded
+
+        token_row = SimpleNamespace(token_id="tok-1")
+        batch_row = SimpleNamespace(run_id="run-1", status="draft")
+        inserted_row = SimpleNamespace(batch_id="batch-1", run_id="run-1", token_id="tok-1", ordinal=0)
+
+        class _RecordedResult:
+            def __init__(self, rows: list[object]) -> None:
+                self._rows = rows
+
+            def fetchone(self) -> object | None:
+                return self._rows[0] if self._rows else None
+
+            def fetchall(self) -> list[object]:
+                return list(self._rows)
+
+        class _RecordingPostgresConnection:
+            dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+            def execute(self, statement: object) -> _RecordedResult:
+                compiled = statement.compile(dialect=postgresql.dialect())  # type: ignore[attr-defined]
+                sql = " ".join(str(compiled).upper().split())
+                statements.append(sql)
+                if sql.startswith("INSERT INTO BATCH_MEMBERS"):
+                    return _RecordedResult([inserted_row])
+                if sql.startswith("SELECT") and "FROM TOKENS" in sql:
+                    return _RecordedResult([token_row])
+                if sql.startswith("SELECT") and "FROM BATCHES" in sql:
+                    return _RecordedResult([batch_row])
+                raise AssertionError(f"unexpected statement: {sql}")
+
+        return add_batch_member_guarded(
+            cast(Connection, _RecordingPostgresConnection()),
+            batch_id="batch-1",
+            token_id="tok-1",
+            ordinal=0,
+        )
+
+    def test_postgres_membership_locks_token_before_batch(self):
+        """The token row lock must be acquired before the batch FOR UPDATE."""
+        statements: list[str] = []
+        member = self._run_guarded_add(statements)
+
+        assert member.batch_id == "batch-1"
+        assert member.token_id == "tok-1"
+
+        token_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM TOKENS" in sql and "FOR UPDATE" in sql]
+        batch_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM BATCHES" in sql and "FOR UPDATE" in sql]
+
+        assert token_locks, (
+            "PostgreSQL membership path must lock the token row FOR UPDATE before "
+            "anything else (token-first order shared with outcome recording); "
+            f"observed statements: {statements}"
+        )
+        assert batch_locks, f"PostgreSQL membership path must keep its batch FOR UPDATE guard; observed statements: {statements}"
+        assert token_locks[0] < batch_locks[0], (
+            "PostgreSQL membership path must acquire the token lock BEFORE the batch "
+            "FOR UPDATE — batch-first order deadlocks against token-first outcome "
+            f"recording; observed statements: {statements}"
+        )
+
+    def test_postgres_membership_keeps_draft_guard_and_insert_last(self):
+        """Reordering the locks must not drop the DRAFT guard or reorder the INSERT."""
+        statements: list[str] = []
+        self._run_guarded_add(statements)
+
+        insert_indexes = [i for i, sql in enumerate(statements) if sql.startswith("INSERT INTO BATCH_MEMBERS")]
+        batch_locks = [i for i, sql in enumerate(statements) if sql.startswith("SELECT") and "FROM BATCHES" in sql and "FOR UPDATE" in sql]
+        assert len(insert_indexes) == 1
+        assert batch_locks and batch_locks[0] < insert_indexes[0], (
+            f"batch FOR UPDATE status guard must still precede the membership INSERT; observed statements: {statements}"
+        )

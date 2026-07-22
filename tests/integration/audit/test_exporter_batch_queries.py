@@ -73,6 +73,7 @@ def _run_linear_on_db(
         sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sinks["default"])},
+        sink_effect_modes={"default": "write"},
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
@@ -119,6 +120,7 @@ def _run_fork_on_db(
         transforms=[as_transform(t) for t in tx_list],
         sinks={name: as_sink(s) for name, s in all_sinks.items()},
         gates=[gate],
+        sink_effect_modes=dict.fromkeys(all_sinks, "write"),
     )
 
     result = Orchestrator(db).run(config, graph=graph, payload_store=payload_store)
@@ -254,12 +256,12 @@ def _seed_exporter_isolation_records(db: LandscapeDB, run_id: str, label: str) -
 
     artifact = factory.execution.register_artifact(
         run_id,
-        sink_state.state_id,
         sink_node_id,
         artifact_type="test",
         path=f"file:///tmp/elspeth-exporter-isolation-{label}.json",
         content_hash="0" * 64,
         size_bytes=0,
+        state_id=sink_state.state_id,
         artifact_id=f"audit-extra-artifact-{label}",
         idempotency_key=f"audit-extra-artifact-{label}",
     )
@@ -352,7 +354,15 @@ def _assert_export_relationships_are_closed(grouped: dict[str, list[dict[str, An
         assert member["token_id"] in token_ids
     for artifact in grouped.get("artifact", []):
         assert artifact["sink_node_id"] in node_ids
-        assert artifact["produced_by_state_id"] in state_ids
+        state_id = artifact["produced_by_state_id"]
+        effect_id = artifact["sink_effect_id"]
+        assert (state_id is None) != (effect_id is None)
+        if state_id is not None:
+            assert artifact["producer_kind"] == "node_state"
+            assert state_id in state_ids
+        else:
+            assert artifact["producer_kind"] == "sink_effect"
+            assert isinstance(effect_id, str) and effect_id
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -615,8 +625,10 @@ class TestExporterRowBatchStreaming:
             run_id = self._build_seeded_fork_run(db, tmp_path)
             key = b"row-batch-equivalence-key"
 
-            signed_default = list(LandscapeExporter(db, signing_key=key).export_run(run_id, sign=True))
-            signed_batched = list(LandscapeExporter(db, signing_key=key, row_batch_size=1).export_run(run_id, sign=True))
+            signed_default = list(LandscapeExporter(db, signing_key=key, signer_key_id="row-batch-key").export_run(run_id, sign=True))
+            signed_batched = list(
+                LandscapeExporter(db, signing_key=key, signer_key_id="row-batch-key", row_batch_size=1).export_run(run_id, sign=True)
+            )
 
             # Every data record — signature included — must match; only the
             # trailing manifest legitimately differs (exported_at timestamp).

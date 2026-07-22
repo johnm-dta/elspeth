@@ -106,7 +106,7 @@ The web deployment is a source-checkout service:
 - Azure plugin dependency extra when using Azure services: `.[azure]`
 - Uvicorn transport: Unix domain socket at `/run/elspeth/uvicorn.sock`
 - Static frontend build command: `npm run build` from `src/elspeth/web/frontend`
-- Frontend build dependency: Node.js 20.19+ or a newer compatible LTS release
+- Frontend build dependency: Node.js 24.x with npm 11.x
 - Required non-local settings (web service refuses to start without these —
   no Python default):
   - `ELSPETH_WEB__SECRET_KEY` (non-loopback hosts; reject default)
@@ -363,16 +363,16 @@ elspeth_python_packages:
   - python3.12-venv
   - python3.12-dev
 elspeth_node_binary: /usr/bin/node
-# How Node.js 20.19+ gets onto the host. Pick ONE:
+# How Node.js 24.x gets onto the host. Pick ONE:
 #   - elspeth_node_packages populated with apt-installable names
-#     (the apt source must ship Node 20.19+; Ubuntu 22.04 defaults do
+#     (the apt source must ship Node 24.x; Ubuntu defaults do
 #     not). Leave elspeth_install_nodesource_repo at false.
 #   - elspeth_install_nodesource_repo: true
-#     adds the official NodeSource Node 20.x repo before package install.
+#     adds the official NodeSource Node 24.x repo before package install.
 #     Sets elspeth_node_packages to ['nodejs'] if it's still empty.
 #   - Bake Node.js into the VM image and leave both empty; the role's
 #     verify-Node-version assert will accept any pre-installed Node
-#     20.19+ at elspeth_node_binary.
+#     24.x at elspeth_node_binary.
 elspeth_node_packages: []
 elspeth_install_nodesource_repo: false
 elspeth_system_packages:
@@ -785,7 +785,7 @@ auditability of escalations, model-provider dependency).
 
 Use the same role for both Ubuntu releases, but make Python provisioning
 explicit. The frontend lockfile currently includes packages that require
-Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
+Node.js 24.x, so do not rely on the Ubuntu
 `nodejs` package unless your apt source is pinned to a compatible version.
 
 ```yaml
@@ -805,7 +805,7 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
     - ansible_distribution_version == "22.04"
     - elspeth_python312_apt_repository is defined
 
-- name: Provision NodeSource Node 20.x apt repo (optional)
+- name: Provision NodeSource Node 24.x apt repo (optional)
   when: elspeth_install_nodesource_repo | default(false) | bool
   block:
     - name: Ensure NodeSource apt key directory exists
@@ -845,14 +845,14 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
       # and accept the risk. The risk-register entry "NodeSource apt
       # key fetched without checksum pin" applies.
 
-    - name: Configure NodeSource apt source for Node 20.x
+    - name: Configure NodeSource apt source for Node 24.x
       ansible.builtin.copy:
         dest: /etc/apt/sources.list.d/nodesource.list
         owner: root
         group: root
         mode: "0644"
         content: |
-          deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_20.x nodistro main
+          deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_24.x nodistro main
 
     - name: Add nodejs to the install list when NodeSource is in use
       ansible.builtin.set_fact:
@@ -888,30 +888,28 @@ Node.js 20.19+ or a newer compatible LTS release, so do not rely on the Ubuntu
     fail_msg: >-
       Node.js was not found at {{ elspeth_node_binary }}
       (exit code {{ elspeth_node_version.rc }}). The frontend bundle
-      build needs Node.js 20.19+. Resolve by one of:
+      build needs Node.js 24.x. Resolve by one of:
         (a) set elspeth_node_packages to a list installable by apt
-            (e.g. ['nodejs'] when your apt source ships Node 20.19+),
+            (e.g. ['nodejs'] when your apt source ships Node 24.x),
         (b) enable elspeth_install_nodesource_repo=true to add the
-            official NodeSource apt repo for Node 20.x (Ubuntu 22.04
-            does NOT ship Node 20.19+ in the default repos),
+            official NodeSource apt repo for Node 24.x,
         (c) bake Node.js into the VM image and set elspeth_node_binary
             to its install path.
 
 - name: Fail if Node.js is too old for the frontend lockfile
   ansible.builtin.assert:
     that:
-      - elspeth_node_version.stdout is match('v(20\\.(1[9]|[2-9][0-9])|2[2-9]\\.|[3-9][0-9]\\.)')
+      - elspeth_node_version.stdout is match('v24\\.')
     fail_msg: >-
       Node.js at {{ elspeth_node_binary }} is
       {{ elspeth_node_version.stdout }}, but the frontend lockfile
-      requires Node.js 20.19+ or a newer compatible LTS. The default
-      Ubuntu 22.04 nodejs package is too old; the default Ubuntu
-      24.04 nodejs package depends on the apt mirror's snapshot.
+      requires Node.js 24.x. The default Ubuntu nodejs package depends
+      on the apt mirror's snapshot and may be too old.
       Resolve by one of:
         (a) point elspeth_node_packages at a newer apt source,
         (b) set elspeth_install_nodesource_repo=true to provision the
-            NodeSource Node 20.x repo,
-        (c) re-bake the VM image with Node.js 20.19+ pre-installed.
+            NodeSource Node 24.x repo,
+        (c) re-bake the VM image with Node.js 24.x pre-installed.
 ```
 
 If your organization does not permit third-party apt repositories on Ubuntu
@@ -2892,17 +2890,18 @@ migration runner. For now, the deploy procedure is:
    service, removes stale `.db-wal` / `.db-shm` sidecars (which
    otherwise replay over the restored file on next open), and
    archives the pre-rollback `audit.db` off-host before overwrite.
-2. **For a schema-incompatible 0.7.0 upgrade**, stop the service and follow the
-   two-database reset runbook before handing the site back to users:
+2. **For a schema-incompatible 0.7.1 upgrade from 0.7.0**, stop the service and
+   recreate the session database before handing the site back to users:
    ```bash
    sudo -u elspeth rm /var/lib/elspeth/sessions.db
-   sudo -u elspeth rm /var/lib/elspeth/runs/audit.db
    sudo systemctl restart elspeth-web.service
    ```
    The exact paths and SQLite sidecar handling depend on the deployment; use
    [staging-session-db-recreation.md](staging-session-db-recreation.md) as the
-   current operational source of truth. `data/auth.db` is separate and survives
-   the 0.7.0 reset.
+   current operational source of truth. Keep the epoch-22 Landscape audit DB
+   for a direct 0.7.0→0.7.1 upgrade. Deployments crossing from an older release
+   must also apply the historical 0.7.0 two-database reset. `data/auth.db` is
+   separate and survives both reset paths.
 3. **On rollback**, restore both pre-deploy snapshots before re-running the
    previous-version playbook. See [Rollback Automation](#rollback-automation).
 4. **Snapshot retention**: keep at least the last three pre-deploy snapshots
@@ -2925,8 +2924,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 25 does not match
-SESSION_SCHEMA_EPOCH=26. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 34 does not match
+SESSION_SCHEMA_EPOCH=35. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 
@@ -2939,12 +2938,13 @@ some other application entirely.
 The "schema-incompatible upgrade" decision is *not* a judgement call —
 the running code asserts it on startup. The deploy procedure should:
 
-1. Snapshot `sessions.db` (per the standard snapshot task above).
+1. Archive `sessions.db` as evidence (per the standard snapshot task above).
 2. Restart the service (the role's standard restart-and-verify gate
    already covers this).
 3. If the restart fails with `SessionSchemaError`, the error message
    itself is the actionable instruction: delete the file, restart again.
-   The snapshot is the rollback aid; the live DB is disposable.
+   The archive is diagnostic evidence, not a downgrade database; recreate the
+   live DB with the current release.
 
 **What happens if you skip the delete.**
 The service refuses to start at all. There is no partial-functionality
@@ -2962,7 +2962,16 @@ exhausts and the unit goes into `failed` state.
 | 3 | `composition_proposals.user_message_id` added (chat-message provenance). |
 | 4 | `composer_completion_events_table` added (Phase 6A — `mark_ready_for_review`, `export_yaml`). |
 | 5 | Per-event-type partial CHECK constraints on `composer_completion_events` (Phase 6A post-merge hardening). |
-| 26 | 0.7.0 current schema; includes guided Composer state, local auth/email-verification support, and first-run tutorial resume fields. |
+| 26 | 0.7.0 schema; includes guided Composer state, local auth/email-verification support, and first-run tutorial resume fields. |
+| 27 | Adds the account-wide freeform-primer dismissal preference. |
+| 28 | Adds the cross-dialect application/store/epoch identity proof. |
+| 29 | Adds guided schema 8 and durable fenced guided-operation reservations. |
+| 30 | Adds the closed `quota_exceeded` failure code for stable HTTP 413 fork replay. |
+| 31 | Adds guided schema 9 and durable pipeline-proposal replay locators. |
+| 32 | Binds exact audit evidence to failed guided operations. |
+| 33 | Adds the durable guided-start negative admission barrier. |
+| 34 | Adds guided schema 10 and removes obsolete advisor counters. |
+| 35 | Current schema; adds exclusive guided-confirmation proposal admission. |
 
 The constant should be the authoritative reference; this table is a
 durability aid for operators reading the runbook in isolation.
@@ -3706,7 +3715,7 @@ HSTS max-age and includeSubDomains/preload rows further down). -->
 | `elspeth` service account added to `caddy` group for log access | An elspeth compromise gains read access to all Caddy access logs | Runbook explicitly says NOT to add `elspeth` to the Caddy group; elspeth does not need Caddy log access |
 | HSTS `includeSubDomains` or `preload` enabled without explicit audit | One-way pin extends to every subdomain or to the browser preload list; rollback requires waiting out cached max-age or a multi-week preload-removal cycle | `elspeth_hsts_include_subdomains` and `elspeth_hsts_preload` are explicit booleans defaulting to `false`; both require a discrete variable change visible in Git history |
 | HSTS max-age bumped to 1 year before TLS posture is proven | Botched cert during the year-long pin bricks the domain for clients that cached the policy | `elspeth_hsts_max_age` variable with documented three-stage ramp (300 → 86400 → 31536000); ramp progression is an auditable variable change, not a Caddyfile diff |
-| Node.js missing or too old crashes the deploy late with an opaque message | Operator wastes time triaging "Node too old" without knowing which lever to pull | Two-step assert: first checks Node is present and names the three resolution paths (apt source, NodeSource repo, image bake); second checks the version is ≥ 20.19 and repeats the resolution paths with the observed version |
+| Node.js missing or too old crashes the deploy late with an opaque message | Operator wastes time triaging "Node too old" without knowing which lever to pull | Two-step assert: first checks Node is present and names the three resolution paths (apt source, NodeSource repo, image bake); second requires Node 24.x and repeats the resolution paths with the observed version |
 | NodeSource apt key fetched without checksum pin | Supply-chain compromise of nodesource.com replaces the key and silently changes the package source | NodeSource get_url task pins the key by SHA256 via `vault_nodesource_apt_key_sha256`; runbook documents how to obtain and rotate the value |
 | Container app discovery treats auth/permission failures as "app does not exist" | One-shot bootstrap task tries to create over the running app; deploy ends in a half-applied confused state | "Distinguish 404 from auth / permission / network failures" assert fires loudly with operator guidance on the typical fix (Container Apps Reader role) |
 | Traffic-shift PATCH abbreviates the container spec | ARM PATCH-merge replaces `containers[]` wholesale and drops env vars, secret refs, probes; new revision starts up without `SECRET_KEY`, fails health probe, gets deactivated, and operator chases the wrong root cause | Container spec extracted into `templates/container-app-template.yml.j2`, loaded once into `elspeth_container_template` fact, consumed by both bootstrap PUT and traffic-shift PATCH; runbook calls this REQUIRED, not stylistic |

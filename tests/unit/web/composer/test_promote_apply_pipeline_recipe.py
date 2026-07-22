@@ -23,12 +23,11 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -39,6 +38,8 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_apply_pipeline_recipe
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _empty_state() -> CompositionState:
@@ -52,8 +53,10 @@ def _empty_state() -> CompositionState:
     )
 
 
-def _mock_catalog() -> MagicMock:
-    return MagicMock(spec=CatalogService)
+def _context() -> ToolContext:
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return ToolContext(catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot), plugin_snapshot=snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +79,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
     def test_empty_arguments_raise_tool_argument_error(self) -> None:
         """A bare ``{}`` is missing both required fields (recipe_name, slots)."""
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_apply_pipeline_recipe({}, _empty_state(), ToolContext(catalog=_mock_catalog()))
+            _execute_apply_pipeline_recipe({}, _empty_state(), _context())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_slots_raises_tool_argument_error(self) -> None:
@@ -84,7 +87,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
             _execute_apply_pipeline_recipe(
                 {"recipe_name": "classify-rows-llm-jsonl"},
                 _empty_state(),
-                ToolContext(catalog=_mock_catalog()),
+                _context(),
             )
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
@@ -96,7 +99,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
             _execute_apply_pipeline_recipe(
                 {"recipe_name": "classify-rows-llm-jsonl", "slots": "not a dict"},
                 _empty_state(),
-                ToolContext(catalog=_mock_catalog()),
+                _context(),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -110,7 +113,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
                     "source": {"plugin": "csv"},  # belongs on set_pipeline
                 },
                 _empty_state(),
-                ToolContext(catalog=_mock_catalog()),
+                _context(),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -127,7 +130,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
         result = _execute_apply_pipeline_recipe(
             {"recipe_name": "", "slots": {}},
             _empty_state(),
-            ToolContext(catalog=_mock_catalog()),
+            _context(),
         )
         assert result.success is False
         assert result.data is not None
@@ -144,7 +147,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
         result = _execute_apply_pipeline_recipe(
             {"recipe_name": "no-such-recipe", "slots": {}},
             _empty_state(),
-            ToolContext(catalog=_mock_catalog()),
+            _context(),
         )
         assert result.success is False
         assert result.data is not None
@@ -179,7 +182,7 @@ class TestPromoteApplyPipelineRecipeArgErrorRouting:
                 },
             },
             _empty_state(),
-            ToolContext(catalog=_mock_catalog()),
+            _context(),
         )
         # The recipe → set_pipeline path may succeed or produce a
         # _failure_result depending on the mock catalog's plugin
@@ -375,7 +378,7 @@ def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: py
         _execute_apply_pipeline_recipe(
             {"recipe_name": "anything", "slots": {}},
             pre_state,
-            ToolContext(catalog=_mock_catalog()),
+            _context(),
         )
 
     msg = str(exc_info.value)

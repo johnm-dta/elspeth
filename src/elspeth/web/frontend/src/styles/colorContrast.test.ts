@@ -24,6 +24,7 @@ const BADGE_TOKEN_KINDS = [
   "sink",
   "aggregation",
   "coalesce",
+  "queue",
 ] as const;
 
 it("loads inspected CSS through the runtime stylesheet barrel", () => {
@@ -440,6 +441,28 @@ describe("role-family surface contrast", () => {
     );
   });
 
+  it("keeps dark success/status visually green instead of collapsing into teal info chrome", () => {
+    const success = hexToRgb(extractRootToken("--color-success"));
+    const statePositive = hexToRgb(extractRootToken("--color-state-positive"));
+    const info = hexToRgb(extractRootToken("--color-info"));
+
+    expect(extractRootToken("--color-status-completed")).toBe(
+      extractRootToken("--color-success"),
+    );
+    expect(extractRootToken("--color-success")).not.toBe(
+      extractRootToken("--color-state-positive"),
+    );
+    expect(extractRootToken("--color-success")).not.toBe(
+      extractRootToken("--color-info"),
+    );
+    // Success should read as green at a glance; info/state-positive retain
+    // the cyan/teal family. The old dark success token differed from teal by
+    // only two blue-channel points, making status and info hierarchy mushy.
+    expect(success.g - success.b).toBeGreaterThanOrEqual(35);
+    expect(Math.abs(statePositive.g - statePositive.b)).toBeLessThanOrEqual(40);
+    expect(info.b).toBeGreaterThan(info.g);
+  });
+
   it("uses opaque badge background tokens with non-text contrast in both themes", () => {
     for (const kind of BADGE_TOKEN_KINDS) {
       const foregroundToken = `--color-badge-${kind}`;
@@ -452,6 +475,38 @@ describe("role-family surface contrast", () => {
 
       expect(contrastRatio(darkForeground, darkBackground)).toBeGreaterThanOrEqual(3);
       expect(contrastRatio(lightForeground, lightBackground)).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+describe("queue badge tokens (composer-queue-exposure)", () => {
+  // The queue badge shares one reviewed palette with the website hand-mirror
+  // and must clear BOTH contrast gates. Dark ~6.43:1, light ~5.09:1 — well
+  // above the 3:1 non-text floor the badge suite enforces. Pin the exact hexes
+  // so a future palette rebalance cannot silently drift the queue badge.
+  it("uses the reviewed dark and light queue badge foreground/background pair", () => {
+    const darkForeground = extractRootToken("--color-badge-queue");
+    const darkBackground = extractRootToken("--color-badge-queue-bg");
+    const lightForeground = extractLightThemeToken("--color-badge-queue");
+    const lightBackground = extractLightThemeToken("--color-badge-queue-bg");
+
+    expect(darkForeground).toBe("#ff91c8");
+    expect(darkBackground).toBe("#4a2238");
+    expect(lightForeground).toBe("#a13770");
+    expect(lightBackground).toBe("#f3e1eb");
+
+    expect(contrastRatio(darkForeground, darkBackground)).toBeGreaterThanOrEqual(6);
+    expect(contrastRatio(lightForeground, lightBackground)).toBeGreaterThanOrEqual(5);
+  });
+
+  it("keeps the queue badge hue distinct from the other badge foregrounds in both themes", () => {
+    for (const kind of ["source", "transform", "gate", "sink", "aggregation", "coalesce"] as const) {
+      expect(extractRootToken("--color-badge-queue")).not.toBe(
+        extractRootToken(`--color-badge-${kind}`),
+      );
+      expect(extractLightThemeToken("--color-badge-queue")).not.toBe(
+        extractLightThemeToken(`--color-badge-${kind}`),
+      );
     }
   });
 });
@@ -469,6 +524,7 @@ describe("forced-colors accessibility fallbacks", () => {
     expect(forcedColorsBlock).toContain(".type-badge-sink");
     expect(forcedColorsBlock).toContain(".type-badge-aggregation");
     expect(forcedColorsBlock).toContain(".type-badge-coalesce");
+    expect(forcedColorsBlock).toContain(".type-badge-queue");
     expect(forcedColorsBlock).toContain(".react-flow__edge-path");
     expect(forcedColorsBlock).toContain(".yaml-toolbar-btn[data-copied=\"true\"]");
     // First-run tutorial high-contrast fallbacks

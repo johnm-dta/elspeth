@@ -154,7 +154,7 @@ def make_service() -> object:
     """Return a zero-arg factory producing a wired ``ComposerServiceImpl``."""
 
     def _factory() -> ComposerServiceImpl:
-        return ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+        return ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
 
     return _factory
 
@@ -411,6 +411,97 @@ async def test_summarize_renders_intent_values_but_redacts_secret_shaped_keys(si
     assert "model=gpt-5.5" in summary  # allowlisted value rendered
     assert "sk-SECRET-VALUE" not in summary  # secret value NEVER rendered
     assert "api_key" in summary  # but its presence is disclosed by name
+
+
+def test_summarize_renders_dynamic_field_contract_values() -> None:
+    """The advisor must see configured producer/consumer field names.
+
+    Hiding these values made a live advisor assume ``web_scrape`` emitted a
+    ``content`` field even though the pipeline configured
+    ``content_field=page_content``.  It then falsely blocked the matching LLM
+    input contract.
+    """
+    from elspeth.web.composer.service import _summarize_pipeline_for_advisor
+
+    source = SourceSpec(
+        plugin="inline_blob",
+        on_success="scrape_in",
+        options={},
+        on_validation_failure="discard",
+    )
+    scrape = NodeSpec(
+        id="scrape",
+        node_type="transform",
+        plugin="web_scrape",
+        input="scrape_in",
+        on_success="llm_in",
+        on_error=None,
+        options={
+            "url_field": "url",
+            "content_field": "page_content",
+            "fingerprint_field": "page_fp",
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    llm = NodeSpec(
+        id="summarise",
+        node_type="transform",
+        plugin="llm",
+        input="llm_in",
+        on_success="mapped",
+        on_error=None,
+        options={
+            "required_input_fields": ["page_content"],
+            "prompt_template": "Summarise {{ row.page_content }}.",
+            "response_field": "summary",
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    mapper = NodeSpec(
+        id="output_fields",
+        node_type="transform",
+        plugin="field_mapper",
+        input="mapped",
+        on_success="output",
+        on_error=None,
+        options={
+            "mapping": {"url": "url", "summary": "summary"},
+            "select_only": True,
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    state = CompositionState(
+        source=source,
+        nodes=(scrape, llm, mapper),
+        edges=(),
+        outputs=(OutputSpec(name="output", plugin="json", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    summary = _summarize_pipeline_for_advisor(state)
+
+    assert "url_field=url" in summary
+    assert "content_field=page_content" in summary
+    assert "fingerprint_field=page_fp" in summary
+    assert "response_field=summary" in summary
+    assert "mapping={'url': 'url', 'summary': 'summary'}" in summary
+    assert "select_only=True" in summary
 
 
 @pytest.mark.asyncio
@@ -1048,7 +1139,7 @@ def test_summary_with_many_large_prompts_stays_under_char_cap():
         version=2,
     )
 
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
     args = service._build_checkpoint_arguments(phase="end", state=state)
     total_chars = len(_build_advisor_user_message(args))
     assert total_chars < char_cap, f"{total_chars} >= {char_cap}; no headroom"

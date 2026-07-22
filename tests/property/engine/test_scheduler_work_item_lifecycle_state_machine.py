@@ -49,7 +49,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import Bundle, RuleBasedStateMachine, invariant, rule
 from sqlalchemy import create_engine, insert, select
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import NodeType, TerminalPath
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, RunLeadershipLostError
 from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkStatus
@@ -349,7 +349,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             row_payload_json=self.payload,
             sink_name=SINK_NAME,
             outcome="success",
-            path="completed",
+            path=TerminalPath.DEFAULT_FLOW.value,
             error_hash=None,
             error_message=None,
             now=now,
@@ -466,7 +466,13 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             return
         now = self._tick()
         token_ids = tuple(item.token_id for item in blocked)
-        terminalized = self.repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=barrier_key, token_ids=token_ids, now=now)
+        terminalized = self.repo.mark_blocked_barrier_terminal(
+            run_id=RUN_ID,
+            barrier_key=barrier_key,
+            token_ids=token_ids,
+            now=now,
+            coordination_token=LEADER_TOKEN,
+        )
         assert terminalized == len(blocked)
         for item in blocked:
             item.status = TokenWorkStatus.TERMINAL
@@ -488,14 +494,19 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
                 row_payload_json=self.payload,
                 sink_name=SINK_NAME,
                 outcome="success",
-                path="completed",
+                path=TerminalPath.DEFAULT_FLOW.value,
                 error_hash=None,
                 error_message=None,
             )
             for item in blocked
         }
         transitioned = self.repo.mark_blocked_barrier_pending_sink_many(
-            run_id=RUN_ID, barrier_key=barrier_key, handoffs=handoffs, now=now, pending_sink_lease_owner=owner
+            run_id=RUN_ID,
+            barrier_key=barrier_key,
+            handoffs=handoffs,
+            now=now,
+            coordination_token=LEADER_TOKEN,
+            pending_sink_lease_owner=owner,
         )
         assert transitioned == len(blocked)
         for item in blocked:
@@ -513,7 +524,13 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
         foreign_barrier = next(barrier for barrier in BARRIERS if barrier != model.barrier_key)
         now = self._tick()
         with pytest.raises(AuditIntegrityError):
-            self.repo.mark_blocked_barrier_terminal(run_id=RUN_ID, barrier_key=foreign_barrier, token_ids=(token_id,), now=now)
+            self.repo.mark_blocked_barrier_terminal(
+                run_id=RUN_ID,
+                barrier_key=foreign_barrier,
+                token_ids=(token_id,),
+                now=now,
+                coordination_token=LEADER_TOKEN,
+            )
 
     # -------------------------------------------------------------------------
     # Rules: journal-first adoption (ADR-030 §E.2, slice 3)
@@ -608,7 +625,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
             and item.lease_expires_at < now
             and item.lease_owner != caller_owner
         ]
-        recovered = self.repo.recover_expired_leases(run_id=RUN_ID, now=now, caller_owner=caller_owner)
+        recovered = self.repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=now, caller_owner=caller_owner)
         assert recovered == len(expected)
         if not expected:
             return
@@ -660,7 +677,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
                 row_payload_json=self.payload,
                 sink_name=SINK_NAME,
                 outcome="success",
-                path="completed",
+                path=TerminalPath.DEFAULT_FLOW.value,
                 error_hash=None,
                 error_message=None,
                 now=now,
@@ -785,7 +802,7 @@ def test_expired_pending_sink_lease_recovers_in_place_preserving_attempt_and_wor
         row_payload_json=payload,
         sink_name=SINK_NAME,
         outcome="success",
-        path="completed",
+        path=TerminalPath.DEFAULT_FLOW.value,
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),
@@ -798,7 +815,7 @@ def test_expired_pending_sink_lease_recovers_in_place_preserving_attempt_and_wor
     assert reclaimed.attempt == 1
 
     expired_at = now + timedelta(seconds=LEASE_SECONDS + 3)
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
 
     with engine.connect() as conn:
         row = (

@@ -31,6 +31,10 @@ RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
 
 ValidationCheckName = Literal[
+    "plugin_enablement",
+    "operator_profile_options",
+    "required_control_availability",
+    "required_control_coverage",
     "path_allowlist",
     "web_scrape_network_policy",
     "secret_refs",
@@ -41,6 +45,8 @@ ValidationCheckName = Literal[
     "managed_identity_policy",
     "llm_retry_budget_policy",
     "llm_base_url_policy",
+    "llm_tracing_policy",
+    "aws_s3_endpoint_url_policy",
     "settings_load",
     "plugin_instantiation",
     "value_source_compliance",
@@ -53,6 +59,10 @@ ValidationCheckName = Literal[
 ]
 VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
 
+CHECK_PLUGIN_ENABLEMENT: Final[ValidationCheckName] = "plugin_enablement"
+CHECK_OPERATOR_PROFILE_OPTIONS: Final[ValidationCheckName] = "operator_profile_options"
+CHECK_REQUIRED_CONTROL_AVAILABILITY: Final[ValidationCheckName] = "required_control_availability"
+CHECK_REQUIRED_CONTROL_COVERAGE: Final[ValidationCheckName] = "required_control_coverage"
 CHECK_PATH_ALLOWLIST: Final[ValidationCheckName] = "path_allowlist"
 CHECK_WEB_SCRAPE_NETWORK_POLICY: Final[ValidationCheckName] = "web_scrape_network_policy"
 CHECK_SECRET_REFS: Final[ValidationCheckName] = "secret_refs"
@@ -63,6 +73,8 @@ CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
 CHECK_MANAGED_IDENTITY_POLICY: Final[ValidationCheckName] = "managed_identity_policy"
 CHECK_LLM_RETRY_BUDGET_POLICY: Final[ValidationCheckName] = "llm_retry_budget_policy"
 CHECK_LLM_BASE_URL_POLICY: Final[ValidationCheckName] = "llm_base_url_policy"
+CHECK_LLM_TRACING_POLICY: Final[ValidationCheckName] = "llm_tracing_policy"
+CHECK_AWS_S3_ENDPOINT_URL_POLICY: Final[ValidationCheckName] = "aws_s3_endpoint_url_policy"
 CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
 RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
 CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
@@ -74,6 +86,10 @@ CHECK_STATE_EXISTS: Final[ValidationCheckName] = "state_exists"
 CHECK_ADVISOR_SIGNOFF: Final[ValidationCheckName] = "advisor_signoff"
 
 VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    CHECK_PLUGIN_ENABLEMENT,
+    CHECK_OPERATOR_PROFILE_OPTIONS,
+    CHECK_REQUIRED_CONTROL_AVAILABILITY,
+    CHECK_REQUIRED_CONTROL_COVERAGE,
     CHECK_PATH_ALLOWLIST,
     CHECK_WEB_SCRAPE_NETWORK_POLICY,
     CHECK_SECRET_REFS,
@@ -84,6 +100,8 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_LLM_BASE_URL_POLICY,
+    CHECK_LLM_TRACING_POLICY,
+    CHECK_AWS_S3_ENDPOINT_URL_POLICY,
     CHECK_SETTINGS,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
     CHECK_VALUE_SOURCE_COMPLIANCE,
@@ -763,6 +781,7 @@ class RunDiagnosticOperation(_StrictResponse):
     operation_id: str
     node_id: str
     operation_type: RunDiagnosticOperationType
+    sink_effect_id: str | None
     status: RunDiagnosticOperationStatus
     duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
@@ -775,10 +794,18 @@ class RunDiagnosticArtifact(_StrictResponse):
 
     artifact_id: str
     sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
     artifact_type: str
     path_or_uri: str
     size_bytes: int = Field(ge=0)
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: datetime
+
+
+RunOutputArtifactStorageKind = Literal["blob", "payload", "sink_file", "unknown"]
 
 
 class RunOutputArtifact(_StrictResponse):
@@ -795,17 +822,43 @@ class RunOutputArtifact(_StrictResponse):
     when the file is gone, or when the path resolves outside the
     sink-allowlist. Lets the UI suppress download buttons that would
     otherwise 4xx on click.
+
+    ``storage_kind`` is a structured discriminator classifying
+    ``path_or_uri`` against elspeth's real filesystem storage layouts
+    (see ``_classify_storage_kind`` in ``web/execution/outputs.py``):
+
+    * ``"blob"``      — the composer blob store, ``{data_dir}/blobs/...``
+    * ``"payload"``   — the content-addressed payload store,
+                        ``{data_dir}/payloads/...``
+    * ``"sink_file"`` — the canonical sink output directory,
+                        ``{data_dir}/outputs/...``
+    * ``"unknown"``   — anything else (a user-configured path outside
+                        those layouts, an object-store URI, or a legacy
+                        caller that omitted ``data_dir``)
+
+    "blob" and "payload" are elspeth's own opaque internal storage —
+    the UI must never render their basename or full path as the row
+    title; it renders a friendly label instead. Independent of
+    ``downloadable``/``exists_now``: classification does not require the
+    file to exist on disk (a purged blob-store path still reports
+    ``storage_kind="blob"``).
     """
 
     artifact_id: str
     sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
     artifact_type: str
     path_or_uri: str
     content_hash: str
     size_bytes: int = Field(ge=0)
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     created_at: datetime
     exists_now: bool
     downloadable: bool
+    storage_kind: RunOutputArtifactStorageKind
 
 
 PreviewContentType = Literal["text", "csv", "jsonl", "json", "binary"]

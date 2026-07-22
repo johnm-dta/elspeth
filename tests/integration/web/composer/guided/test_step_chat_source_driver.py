@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 import pytest
 
-from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_1_source_chat
+from elspeth.web.composer.guided.chat_solver import (
+    GuidedChatEmptyOutcome,
+    GuidedChatProseOutcome,
+    Step1SourceResolvedOutcome,
+    maybe_resolve_step_1_source_chat,
+)
 from elspeth.web.composer.guided.resolved import SourceResolved
 
 
@@ -77,13 +82,14 @@ async def test_source_driver_retries_inline_json_control_advice_into_tool_call()
             user_message='Create a simple inline JSON source with [{"line": "alpha"}].',
             plugin_hint="json",
             current_source=None,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     assert len(calls) == 2
-    assert outcome.prose_reply is None
-    assert outcome.resolution is not None
+    assert type(outcome) is Step1SourceResolvedOutcome
     assert outcome.resolution.plugin == "json"
     assert outcome.resolution.observed_columns == ("line",)
 
@@ -91,6 +97,8 @@ async def test_source_driver_retries_inline_json_control_advice_into_tool_call()
 @pytest.mark.asyncio
 async def test_source_driver_includes_current_source_in_prompt() -> None:
     current = SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="json",
         options={"schema": {"mode": "observed"}, "blob_ref": "abc"},
         observed_columns=("url",),
@@ -123,12 +131,14 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
             user_message="add a second url",
             plugin_hint="json",
             current_source=current,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
+    assert type(outcome) is Step1SourceResolvedOutcome
     result = outcome.resolution
-    assert result is not None
     assert result.plugin == "json"
     # The system prompt is SPLIT: messages[0] is the stable skill head (the
     # markable cache prefix), and the dynamic block — including the current-source
@@ -160,6 +170,8 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
     # (stamped by handle_step_1_source) and source_authoring (stamped by
     # set_source_from_blob for LLM-authored / dynamic sources).
     current = SourceResolved(
+        name="source",
+        on_validation_failure="discard",
         plugin="json",
         options={
             "schema": {"mode": "observed"},
@@ -203,12 +215,14 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
             user_message="add a second url",
             plugin_hint="json",
             current_source=current,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
+    assert type(outcome) is Step1SourceResolvedOutcome
     result = outcome.resolution
-    assert result is not None
     # Drop-direction: both keys are server-owned; neither may survive an LLM source
     # resolution (set_source rejects caller-supplied blob_ref / source_authoring,
     # which turned the next Send into a 400 "Step 1 source commit failed").
@@ -257,11 +271,13 @@ async def test_source_driver_captures_prose_reply_on_decline() -> None:
             user_message="what is a source?",
             plugin_hint="json",
             current_source=None,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply == "Here is some advice."
+    assert type(outcome) is GuidedChatProseOutcome
+    assert outcome.assistant_message == "Here is some advice."
 
 
 @pytest.mark.asyncio
@@ -301,8 +317,10 @@ async def test_source_driver_rejects_scaffold_leak_in_declined_prose() -> None:
             user_message="what is a source?",
             plugin_hint="json",
             current_source=None,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
 
@@ -341,11 +359,12 @@ async def test_source_driver_declines_prose_beside_hallucinated_tool_call() -> N
             user_message="what sources can I use?",
             plugin_hint="json",
             current_source=None,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply is None
+    assert type(outcome) is GuidedChatEmptyOutcome
 
 
 @pytest.mark.asyncio
@@ -367,8 +386,9 @@ async def test_source_driver_returns_both_none_on_empty_response() -> None:
             user_message="what is a source?",
             plugin_hint="json",
             current_source=None,
+            available_source_plugins=("json",),
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
-    assert outcome.resolution is None
-    assert outcome.prose_reply is None
+    assert type(outcome) is GuidedChatEmptyOutcome

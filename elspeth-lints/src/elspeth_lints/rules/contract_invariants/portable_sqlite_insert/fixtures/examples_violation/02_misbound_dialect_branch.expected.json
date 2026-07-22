@@ -1,0 +1,12 @@
+[
+  {
+    "column": 15,
+    "file_path": "src/elspeth/writer.py",
+    "fingerprint": "6da5aa9f711c3d69",
+    "line": 10,
+    "message": "Dialect branch for 'postgresql' invokes the sqlite insert builder 'sqlite_insert'; bind each dialect branch to the insert builder it actually executes.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  }
+]

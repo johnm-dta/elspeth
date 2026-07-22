@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import types
 from collections.abc import Mapping
+from enum import Enum
 from inspect import isclass
 from typing import Annotated, Any, Literal, NotRequired, TypedDict, Union, cast, get_args, get_origin
 
@@ -61,6 +62,7 @@ class KnobField(TypedDict):
     nullable: bool
     enum: NotRequired[list[str]]
     item_kind: NotRequired[Literal["text", "number-int", "number-float"]]
+    item_schema: NotRequired[KnobSchema]
     visible_when: NotRequired[VisibilityPredicate]
 
 
@@ -68,27 +70,11 @@ class KnobSchema(TypedDict):
     fields: list[KnobField]
 
 
-class RecipeContext(TypedDict):
-    recipe_name: str
-    description: str
-    alternatives: list[str]
-
-
-class _PluginOptionsPayload(TypedDict):
+class SchemaFormPayload(TypedDict):
     mode: Literal["plugin_options"]
     plugin: str
     knobs: KnobSchema
     prefilled: dict[str, object]
-
-
-class _RecipeDecisionPayload(TypedDict):
-    mode: Literal["recipe_decision"]
-    knobs: KnobSchema
-    prefilled: dict[str, object]
-    recipe_context: RecipeContext
-
-
-SchemaFormPayload = _PluginOptionsPayload | _RecipeDecisionPayload
 
 
 class KnobSchemaLoweringError(Exception):
@@ -145,10 +131,15 @@ def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:
 def _kind_for_scalar(
     inner: Any,
 ) -> tuple[Literal["text", "number-int", "number-float", "checkbox", "enum", "json-value"], list[str] | None]:
-    """Map a Python scalar or Literal type to a field kind and enum values."""
+    """Map a Python scalar, Literal, or Enum type to a field kind and enum values."""
     if get_origin(inner) is Literal:
         values = [str(value) for value in get_args(inner)]
         return "enum", values
+    if isclass(inner) and issubclass(inner, Enum):
+        # A closed Enum (e.g. the LLM ResponseFormat / OutputFieldType StrEnums)
+        # is a genuine enumeration, not an opaque json-value. Expose its member
+        # values so discovery advertises the real choice set.
+        return "enum", [str(member.value) for member in inner]
     if inner in _TYPE_TO_KIND:
         return _TYPE_TO_KIND[inner], None
     return "json-value", None
@@ -183,6 +174,104 @@ def _base_field(
     return field
 
 
+# Bound on nested-model recursion depth. The typed query models nest at most
+# two levels (queries -> QueryDefinition -> output_fields -> OutputFieldConfig),
+# so a small bound is ample and guards against a self-referential model.
+_MAX_NESTED_DEPTH = 4
+
+
+def _member_nested_model(member: Any) -> type[BaseModel] | None:
+    """Return the nested ``BaseModel`` a ``list[M]`` / ``dict[str, M]`` / ``M`` carries."""
+    member = _unwrap_annotated(member)
+    origin = get_origin(member)
+    if origin is list:
+        args = get_args(member)
+        if len(args) == 1:
+            item = _unwrap_annotated(args[0])
+            if isclass(item) and issubclass(item, BaseModel):
+                return item
+        return None
+    if origin in (dict, Mapping):
+        args = get_args(member)
+        if len(args) == 2:
+            value = _unwrap_annotated(args[1])
+            if isclass(value) and issubclass(value, BaseModel):
+                return value
+        return None
+    if isclass(member) and issubclass(member, BaseModel):
+        return member
+    return None
+
+
+def _dual_form_nested_model(annotation: Any) -> tuple[type[BaseModel], bool] | None:
+    """Detect the dual-form ``list[M] | dict[str, M]`` (optionally ``| None``) shape.
+
+    This is the public shape of ``LLMConfig.queries``: a mapping keyed by query
+    name and a list of named entries, both carrying the same nested model ``M``.
+    A plain ``list[M]``, ``dict[str, M]``, or scalar union is intentionally *not*
+    matched here — only the list+dict union that would otherwise collapse to an
+    opaque ``json-value`` knob. Returns ``(M, nullable)`` or ``None``.
+    """
+    annotation = _unwrap_annotated(annotation)
+    if get_origin(annotation) not in (types.UnionType, Union):
+        return None
+    args = get_args(annotation)
+    nullable = type(None) in args
+    members = [arg for arg in args if arg is not type(None)]
+    if len(members) < 2:
+        return None
+    models: set[type[BaseModel]] = set()
+    for member in members:
+        model = _member_nested_model(member)
+        if model is None:
+            return None
+        models.add(model)
+    if len(models) != 1:
+        return None
+    return next(iter(models)), nullable
+
+
+def _lower_nested_field(name: str, info: FieldInfo, *, depth: int) -> KnobField:
+    """Lower one field of a nested model, recursing into further nested models."""
+    inner, nullable = _unwrap_optional(info.annotation)
+    origin = get_origin(inner)
+
+    if depth < _MAX_NESTED_DEPTH:
+        if origin is list:
+            args = get_args(inner)
+            if len(args) == 1:
+                item = _unwrap_annotated(args[0])
+                if isclass(item) and issubclass(item, BaseModel):
+                    field = _base_field(name=name, info=info, kind="json-array", nullable=nullable)
+                    field["item_schema"] = _lower_nested_model(item, depth=depth + 1)
+                    return field
+        if origin in (dict, Mapping):
+            args = get_args(inner)
+            if len(args) == 2:
+                value = _unwrap_annotated(args[1])
+                if isclass(value) and issubclass(value, BaseModel):
+                    field = _base_field(name=name, info=info, kind="json-object", nullable=nullable)
+                    field["item_schema"] = _lower_nested_model(value, depth=depth + 1)
+                    return field
+        if isclass(inner) and issubclass(inner, BaseModel):
+            field = _base_field(name=name, info=info, kind="json-object", nullable=nullable)
+            field["item_schema"] = _lower_nested_model(inner, depth=depth + 1)
+            return field
+
+    # Scalars, enums, string-lists, and dict[str, scalar] reuse the flat lowering.
+    return _lower_field(name, info, plugin_kind="", plugin_name="", composer_tier_default="common")
+
+
+def _lower_nested_model(model_cls: type[BaseModel], *, depth: int) -> KnobSchema:
+    """Lower every (non-hidden) field of a nested model to a nested ``KnobSchema``."""
+    fields: list[KnobField] = []
+    for name, info in model_cls.model_fields.items():
+        if _is_composer_hidden(info):
+            continue
+        fields.append(_lower_nested_field(name, info, depth=depth))
+    return {"fields": fields}
+
+
 def _lower_field(
     name: str,
     info: FieldInfo,
@@ -192,6 +281,16 @@ def _lower_field(
     composer_tier_default: str,
 ) -> KnobField:
     del plugin_kind, plugin_name, composer_tier_default
+
+    # Dual-form nested-model union (LLMConfig.queries): expose the typed query
+    # structure instead of collapsing the list|dict union to an opaque json-value.
+    dual_form = _dual_form_nested_model(info.annotation)
+    if dual_form is not None:
+        model_cls, nullable = dual_form
+        field = _base_field(name=name, info=info, kind="json-array", nullable=nullable)
+        field["item_schema"] = _lower_nested_model(model_cls, depth=1)
+        return field
+
     inner, nullable = _unwrap_optional(info.annotation)
     origin = get_origin(inner)
 

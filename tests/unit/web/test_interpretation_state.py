@@ -83,6 +83,51 @@ def _state_with_cleanup_node(options: dict[str, object]) -> CompositionState:
     )
 
 
+def _state_with_web_scrape_identity_node(
+    *,
+    abuse_contact: str = "abuse-contact-unset@elspeth.foundryside.dev",
+    scraping_reason: str = "User-requested public web fetch for rules download",
+    allowed_hosts: object | None = "public_only",
+) -> CompositionState:
+    http: dict[str, object] = {
+        "abuse_contact": abuse_contact,
+        "scraping_reason": scraping_reason,
+    }
+    if allowed_hosts is not None:
+        http["allowed_hosts"] = allowed_hosts
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "content_fingerprint",
+                    "format": "markdown",
+                    "http": http,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 def _state_with_web_scrape_cleanup_node(options: dict[str, object]) -> CompositionState:
     return CompositionState(
         source=None,
@@ -468,6 +513,40 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
+def test_term_matched_cleanup_row_with_rephrased_draft_is_malformed_not_absent() -> None:
+    state = _state_with_web_scrape_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "summary": "summary",
+            },
+            "select_only": True,
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "cleanup-decision",
+                    "kind": "pipeline_decision",
+                    "user_term": RAW_HTML_CLEANUP_USER_TERM,
+                    "status": "pending",
+                    "draft": "Drop the scraped HTML content and fingerprint columns before the sink.",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        }
+    )
+
+    contract_error = raw_html_cleanup_review_contract_error(state)
+
+    assert contract_error is not None
+    assert "malformed" in contract_error
+    assert "raw html" in contract_error
+    assert "fingerprint" in contract_error
+    assert "copy" in contract_error.lower()
+    assert "Stage a pending pipeline_decision" not in contract_error
+
+
 def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() -> None:
     state = _state_with_web_scrape_cleanup_node(
         {
@@ -504,7 +583,7 @@ def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() 
 
 def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
     # The gate topology routes web_scrape output into the LLM via gate routes,
-    # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
+    # exercising the _output_stream_graph producer walk (routes/fork_to). The
     # Prompt-shield recommendation is advisory, not blocking:
     # an unshielded LLM-over-scrape surfaces a warning and still composes.
     state = _state_with_web_scrape_gate_to_llm()
@@ -527,6 +606,257 @@ def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None
     warning_pairs = prompt_shield_recommendation_warning_pairs(state)
 
     assert warning_pairs == ()
+
+
+# ── Queue fan-in prompt-shield asymmetry (elspeth-a5b86149d4) ────────────
+# A declared queue fans multiple upstream producers into one LLM. The
+# prompt-injection shield analysis MUST stay conservative across every
+# predecessor path — never resolve to whichever producer registered last.
+#   consumes_untrusted  = ANY predecessor path reaches untrusted-without-shield
+#   has_authorized_shield = ALL predecessor paths prove a shield
+#   a missing/unknown predecessor path is fail-safe (NOT proven safe)
+
+
+def _queue(queue_id: str = "inbound") -> NodeSpec:
+    return NodeSpec(
+        id=queue_id,
+        node_type="queue",
+        plugin=None,
+        input=queue_id,
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _web_scrape(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="web_scrape",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={"url_field": "url", "content_field": "content"},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _shield(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="azure_prompt_shield",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _passthrough(node_id: str, *, input_stream: str, on_success: str) -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="value_transform",
+        input=input_stream,
+        on_success=on_success,
+        on_error="stop",
+        options={"operations": [{"target": "x", "expression": "1"}]},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _llm(node_id: str = "classify", *, input_stream: str = "inbound") -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input=input_stream,
+        on_success="out",
+        on_error="stop",
+        options={"prompt_template": "Classify {{ row.content }}."},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _state(nodes: tuple[NodeSpec, ...]) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=nodes,
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def test_prompt_shield_before_web_scrape_does_not_bless_downstream_llm() -> None:
+    """A shield before the untrusted producer cannot sanitize content it has not produced yet."""
+    state = _state(
+        (
+            _shield("premature_shield", input_stream="rows", on_success="shielded_rows"),
+            _web_scrape("scrape", input_stream="shielded_rows", on_success="inbound"),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs
+    message = next(message for component, message in warning_pairs if component == "node:classify")
+    assert "web_scrape upstream without an authorized prompt-injection shield between them" in message
+
+
+def test_queue_fan_in_untrusted_on_any_predecessor_marks_downstream_untrusted() -> None:
+    """One untrusted predecessor among many taints the downstream LLM (ANY-path rule)."""
+    # Order: the benign transform registers LAST, so the pre-fix single-producer
+    # map would resolve `inbound` to it and MISS the untrusted web_scrape path.
+    state = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _passthrough("benign_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs
+    message = next(msg for component, msg in warning_pairs if component == "node:classify")
+    assert "consumes externally-fetched content from a web_scrape upstream" in message
+
+
+def test_queue_fan_in_shield_authorized_only_when_all_predecessors_shielded() -> None:
+    """A shield on one predecessor is not enough: an unshielded path still warns (ALL-path rule)."""
+    # Order: shield_a registers LAST, so the pre-fix single-producer map would
+    # resolve `inbound` to the shield and silence the warning (the inversion).
+    partially_shielded = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(partially_shielded)
+
+    assert warning_pairs, "an unshielded predecessor path must still surface the shield advisory"
+    message = next(msg for component, msg in warning_pairs if component == "node:classify")
+    assert "consumes externally-fetched content from a web_scrape upstream" in message
+
+    # When EVERY predecessor path is shielded, State A is silent.
+    fully_shielded = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="scraped_b"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _shield("shield_b", input_stream="scraped_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    assert prompt_shield_recommendation_warning_pairs(fully_shielded) == ()
+
+
+def test_queue_fan_in_one_unknown_predecessor_emits_conservative_warning() -> None:
+    """An unprovable (missing-upstream) predecessor is fail-safe, so the advisory still fires."""
+    # shield_a registers LAST → pre-fix map silences; post-fix ALL-path proof
+    # fails because the mystery predecessor's upstream is unknown.
+    state = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="scraped_a"),
+            _passthrough("mystery_b", input_stream="ghost_stream", on_success="inbound"),
+            _shield("shield_a", input_stream="scraped_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs, "an unknown predecessor path must not be treated as proven-shielded"
+    assert any(component == "node:classify" for component, _msg in warning_pairs)
+
+
+def test_queue_fan_in_artifact_hash_covers_all_sorted_predecessor_paths() -> None:
+    """The prompt-shield artifact hash binds every predecessor path, order-invariant."""
+    baseline = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    reversed_order = _state(
+        (
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+
+    def _hash(state: CompositionState) -> str:
+        llm = next(node for node in state.nodes if node.plugin == "llm")
+        return pipeline_decision_artifact_hash(llm, state.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    baseline_hash = _hash(baseline)
+
+    # Insertion order of the two predecessors does not change the hash.
+    assert baseline_hash == _hash(reversed_order)
+
+    # Changing EITHER predecessor changes the hash.
+    changed_a = _state(
+        (
+            _web_scrape("scrape_a_renamed", input_stream="rows_a", on_success="inbound"),
+            _web_scrape("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    changed_b = _state(
+        (
+            _web_scrape("scrape_a", input_stream="rows_a", on_success="inbound"),
+            _passthrough("scrape_b", input_stream="rows_b", on_success="inbound"),
+            _queue(),
+            _llm(),
+        )
+    )
+    assert _hash(changed_a) != baseline_hash
+    assert _hash(changed_b) != baseline_hash
 
 
 def _state_with_plain_llm_only() -> CompositionState:
@@ -1249,6 +1579,64 @@ def test_prompt_shield_hash_survives_model_swap() -> None:
     assert pre_swap_hash == post_swap_hash
 
 
+def test_web_scrape_http_identity_hash_binds_wire_visible_defaults() -> None:
+    state = _state_with_web_scrape_identity_node()
+
+    artifact_hash = pipeline_decision_artifact_hash(
+        state.nodes[0],
+        state.nodes,
+        user_term="web_scrape_http_identity",
+    )
+
+    assert artifact_hash == stable_hash(
+        {
+            "review_kind": "web_scrape_http_identity",
+            "node_id": "fetch_pages",
+            "abuse_contact": "abuse-contact-unset@elspeth.foundryside.dev",
+            "scraping_reason": "User-requested public web fetch for rules download",
+            "allowed_hosts": "public_only",
+        }
+    )
+
+
+def test_web_scrape_http_identity_hash_changes_when_identity_changes() -> None:
+    state_a = _state_with_web_scrape_identity_node()
+    state_b = _state_with_web_scrape_identity_node(abuse_contact="ops@agency.gov.au")
+
+    hash_a = pipeline_decision_artifact_hash(state_a.nodes[0], state_a.nodes, user_term="web_scrape_http_identity")
+    hash_b = pipeline_decision_artifact_hash(state_b.nodes[0], state_b.nodes, user_term="web_scrape_http_identity")
+
+    assert hash_a != hash_b
+
+
+def test_web_scrape_http_identity_hash_treats_omitted_allowed_hosts_as_public_only() -> None:
+    state_explicit = _state_with_web_scrape_identity_node(allowed_hosts="public_only")
+    state_omitted = _state_with_web_scrape_identity_node(allowed_hosts=None)
+
+    hash_explicit = pipeline_decision_artifact_hash(
+        state_explicit.nodes[0],
+        state_explicit.nodes,
+        user_term="web_scrape_http_identity",
+    )
+    hash_omitted = pipeline_decision_artifact_hash(
+        state_omitted.nodes[0],
+        state_omitted.nodes,
+        user_term="web_scrape_http_identity",
+    )
+
+    assert hash_explicit == hash_omitted
+
+
+def test_web_scrape_http_identity_hash_changes_when_fetch_boundary_changes() -> None:
+    state_a = _state_with_web_scrape_identity_node()
+    state_b = _state_with_web_scrape_identity_node(allowed_hosts=["10.0.0.0/8"])
+
+    hash_a = pipeline_decision_artifact_hash(state_a.nodes[0], state_a.nodes, user_term="web_scrape_http_identity")
+    hash_b = pipeline_decision_artifact_hash(state_b.nodes[0], state_b.nodes, user_term="web_scrape_http_identity")
+
+    assert hash_a != hash_b
+
+
 def test_prompt_shield_warning_is_advisory_not_blocking() -> None:
     state = _state_with_web_scrape_llm_pair(
         _unshielded_review_llm_options(
@@ -1459,3 +1847,25 @@ def test_refine_prompt_shield_warnings_rewrites_c_to_b_when_available() -> None:
     assert other[0]["message"] == "unrelated warning"
     unchanged = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=False)
     assert any(PROMPT_SHIELD_WARNING_DRAFT in w["message"] for w in unchanged)
+
+
+def test_pipeline_decision_semantics_rejects_unregistered_user_term() -> None:
+    """A pipeline_decision review term outside the closed registry must be
+    rejected at validation — the resolve-side artifact-hash registry raises
+    on unknown terms, so accepting one at authoring mints an event that can
+    NEVER be resolved and wedges the session (live: session 0b33d895,
+    model-invented term 'ab_reconciliation_retention' → resolve 500)."""
+    import pytest as _pytest
+
+    from elspeth.web.interpretation_state import validate_pipeline_decision_semantics
+
+    with _pytest.raises(ValueError, match="registered"):
+        validate_pipeline_decision_semantics(
+            node_id="reconcile",
+            plugin="field_mapper",
+            options={},
+            user_term="ab_reconciliation_retention",
+            draft="Retain both variants in the reconciled row.",
+            context="test",
+            web_scrape_raw_fields=frozenset(),
+        )

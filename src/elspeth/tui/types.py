@@ -36,7 +36,11 @@ class TuiArtifactInfo(TypedDict):
     content_hash: str
     size_bytes: int
     sink_node_id: str
-    produced_by_state_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
 
 
 class TokenOutcomeDisplayInfo(TypedDict, total=False):
@@ -117,6 +121,7 @@ class TreeSelection(TypedDict, total=False):
     row_id: str
     sink: str
     state_id: str
+    sink_effect_id: str
     edge_id: str
     from_node_id: str
     to_node_id: str
@@ -130,6 +135,9 @@ class TreeSelection(TypedDict, total=False):
     artifact_path_or_uri: str
     artifact_hash: str
     artifact_size_bytes: int
+    artifact_producer_kind: Literal["node_state", "sink_effect"]
+    artifact_publication_performed: bool
+    artifact_publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     message: str
 
 
@@ -166,6 +174,7 @@ class NodeStateInfo(TypedDict, total=False):
 
     # Optional - present after execution
     state_id: str
+    sink_effect_id: str
     token_id: str
     status: str
     started_at: str
@@ -193,6 +202,7 @@ class SelectionDetailInfo(TypedDict, total=False):
     to_node_id: str
     edge_label: str
     state_id: str
+    sink_effect_id: str
     outcome: str
     outcome_path: str
     completed: bool
@@ -202,6 +212,9 @@ class SelectionDetailInfo(TypedDict, total=False):
     artifact_path_or_uri: str
     artifact_hash: str
     artifact_size_bytes: int
+    artifact_producer_kind: Literal["node_state", "sink_effect"]
+    artifact_publication_performed: bool
+    artifact_publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
     message: str
 
 

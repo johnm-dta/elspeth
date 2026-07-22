@@ -38,6 +38,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.coordination import CoordinationToken
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.schema import SchemaConfig
     from elspeth.contracts.schema_contract import PipelineRow
+    from elspeth.core.landscape.execution.node_states import NodeStateRepository
 
 __all__ = ["DataFlowRepository"]
 
@@ -80,8 +82,8 @@ class DataFlowRepository:
     connection provider and :class:`DatabaseOps` instances, so test seams
     that patch ``repo._db`` / ``repo._ops`` attributes remain effective.
 
-    Atomic transactions in fork/coalesce/expand preserved via direct
-    LandscapeDB.connection() usage.
+    Atomic transactions in fork/coalesce/expand use the connection provider's
+    explicit write-transaction boundary.
 
     NOTE: nodes table has composite PK (node_id, run_id). Always filter
     by both columns when querying individual nodes.
@@ -98,13 +100,21 @@ class DataFlowRepository:
         validation_error_loader: ValidationErrorLoader,
         transform_error_loader: TransformErrorLoader,
         payload_store: PayloadStore | None = None,
+        node_state_repository: NodeStateRepository | None = None,
     ) -> None:
         self._db = db
         self._ops = ops
         self._payload_store = payload_store
         self.ownership = RowTokenOwnership(ops)
-        self.tokens = RowTokenRepository(db, ops, ownership=self.ownership, payload_store=payload_store)
-        self.outcomes = TokenOutcomeRepository(ops, token_outcome_loader=token_outcome_loader, ownership=self.ownership)
+        self.outcomes = TokenOutcomeRepository(db, ops, token_outcome_loader=token_outcome_loader, ownership=self.ownership)
+        self.tokens = RowTokenRepository(
+            db,
+            ops,
+            ownership=self.ownership,
+            payload_store=payload_store,
+            outcomes=self.outcomes,
+            node_states=node_state_repository,
+        )
         self.graph = GraphAuditRepository(ops, node_loader=node_loader, edge_loader=edge_loader)
         self.errors = ErrorAuditRepository(
             ops,
@@ -301,6 +311,8 @@ class DataFlowRepository:
         row_id: str,
         merged_payload: Mapping[str, object],
         *,
+        coalesce_node_id: str | None = None,
+        parent_state_ids: Sequence[str] | None = None,
         merged_contract: SchemaContract,
         step_in_pipeline: int | None = None,
     ) -> Token:
@@ -309,9 +321,20 @@ class DataFlowRepository:
             parent_refs,
             row_id,
             merged_payload,
+            coalesce_node_id=coalesce_node_id,
+            parent_state_ids=parent_state_ids,
             merged_contract=merged_contract,
             step_in_pipeline=step_in_pipeline,
         )
+
+    def finalize_coalesce_effect(
+        self,
+        *,
+        merged: Token,
+        parent_completions: Sequence[CoalesceParentCompletion],
+    ) -> None:
+        """Atomically terminalize the parents of one materialized coalesce."""
+        self.tokens.finalize_coalesce_effect(merged=merged, parent_completions=parent_completions)
 
     def expand_token(
         self,
@@ -321,7 +344,8 @@ class DataFlowRepository:
         *,
         output_contract: SchemaContract,
         step_in_pipeline: int | None = None,
-        record_parent_outcome: bool = True,
+        parent_path: TerminalPath = TerminalPath.EXPAND_PARENT,
+        parent_batch_id: str | None = None,
     ) -> tuple[list[Token], str]:
         """Expand a token into multiple child tokens (deaggregation)."""
         return self.tokens.expand_token(
@@ -330,10 +354,15 @@ class DataFlowRepository:
             child_payloads,
             output_contract=output_contract,
             step_in_pipeline=step_in_pipeline,
-            record_parent_outcome=record_parent_outcome,
+            parent_path=parent_path,
+            parent_batch_id=parent_batch_id,
         )
 
     # ── Token outcome recording (TokenOutcomeRepository) ───────────────────
+
+    def lock_token_outcome_dependencies(self, refs: Sequence[TokenRef], *, conn: Connection) -> None:
+        """Prelock token dependencies before a composed outcome transaction mutates states."""
+        self.outcomes.lock_token_outcome_dependencies(refs, conn=conn)
 
     def _validate_outcome_fields(
         self,

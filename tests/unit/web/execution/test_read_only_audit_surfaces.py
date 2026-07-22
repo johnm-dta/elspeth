@@ -42,9 +42,17 @@ class _SettingsFake:
     landscape_url: str
     landscape_passphrase: str | None = None
     data_dir: Path | None = None
+    payload_store_path: Path | None = None
 
     def get_landscape_url(self) -> str:
         return self.landscape_url
+
+    def get_payload_store_path(self) -> Path | None:
+        # Mirrors WebSettings.get_payload_store_path (config.py): explicit
+        # override wins, else data_dir-relative default.
+        if self.payload_store_path is not None:
+            return self.payload_store_path
+        return self.data_dir / "payloads" if self.data_dir is not None else None
 
 
 @pytest.fixture

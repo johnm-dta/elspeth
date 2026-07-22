@@ -388,7 +388,7 @@ def _make_minimal_settings(tmp_path: Path, *, config_hash_override: str | None =
         "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
     }
-    (tmp_path / "payloads").mkdir(exist_ok=True)
+    (tmp_path / "payloads").mkdir(mode=0o700, exist_ok=True)
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
@@ -685,12 +685,22 @@ class TestJoinCommand:
         finally:
             db.close()
 
-        failing_sink = SimpleNamespace(
-            name="failing_sink",
-            node_id="sink-failing",
-            on_start=_CallRecorder(side_effect=RuntimeError("sink startup failed")),
-            on_complete=_CallRecorder(),
-            close=_CallRecorder(),
+        from elspeth.contracts.hashing import stable_hash as effect_stable_hash
+        from elspeth.engine.orchestrator.preflight import (
+            SinkEffectExecutionPurpose,
+            SinkEffectRuntimeBinding,
+        )
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        failing_sink = JSONSink(dict(settings_config.sinks["default"].options))
+        failing_sink.node_id = "sink-failing"
+        failing_sink._on_write_failure = settings_config.sinks["default"].on_write_failure
+        failing_sink.on_start = _CallRecorder(side_effect=RuntimeError("sink startup failed"))  # type: ignore[method-assign]
+        failing_sink.on_complete = _CallRecorder()  # type: ignore[method-assign]
+        failing_sink.close = _CallRecorder()  # type: ignore[method-assign]
+        effect_mode = type(failing_sink)._resolve_sink_effect_mode(
+            dict(settings_config.sinks["default"].options),
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
         )
         plugins = SimpleNamespace(
             sources={"primary": object()},
@@ -698,6 +708,16 @@ class TestJoinCommand:
             transforms=[],
             aggregations={},
             sinks={"default": failing_sink},
+            sink_effect_bindings={
+                "default": SinkEffectRuntimeBinding(
+                    sink_name="default",
+                    sink=failing_sink,
+                    sink_type=type(failing_sink),
+                    config_fingerprint=effect_stable_hash(dict(settings_config.sinks["default"].options)),
+                    purpose=SinkEffectExecutionPurpose.FOLLOWER,
+                    effect_mode=effect_mode,
+                )
+            },
         )
         execution_graph = SimpleNamespace(get_aggregation_id_map=_CallRecorder({}))
 
@@ -711,7 +731,7 @@ class TestJoinCommand:
                 ["join", run_id, "--settings", str(settings_path)],
             )
 
-        assert result.exit_code == 4
+        assert result.exit_code == 4, (result.output, result.exception)
         mock_build_follower.assert_called_once()
         failing_sink.on_start.assert_called_once()
         failing_sink.on_complete.assert_called_once()
@@ -802,7 +822,7 @@ def _make_jsonl_settings(tmp_path: Path) -> Path:
         "landscape": {"url": f"sqlite:///{tmp_path / 'landscape.db'}"},
         "payload_store": {"backend": "filesystem", "base_path": str(tmp_path / "payloads")},
     }
-    (tmp_path / "payloads").mkdir(exist_ok=True)
+    (tmp_path / "payloads").mkdir(mode=0o700, exist_ok=True)
     settings_path = tmp_path / "settings.yaml"
     settings_path.write_text(yaml.dump(config))
     return settings_path
@@ -949,9 +969,8 @@ class TestRunSchemaCompatibility:
             "schema epoch is incompatible:\n"
             "Database epoch: 21\n"
             "Current epoch: 22\n\n"
-            "To fix this, either:\n"
-            "  1. Delete the database file and let ELSPETH recreate it, or\n"
-            "  2. Run: elspeth landscape migrate (when available)\n\n"
+            "Pre-1.0 schemas are not migrated in place. Uninstall the deployment,\n"
+            "delete/recreate the database, and reinstall this ELSPETH version.\n\n"
             f"Database: sqlite:///{tmp_path / 'landscape.db'}"
         )
 
@@ -962,7 +981,7 @@ class TestRunSchemaCompatibility:
         combined = result.output
         assert "Landscape database schema is outdated" in combined
         assert "schema epoch is incompatible" in combined
-        assert "Delete the database file" in combined
+        assert "delete/recreate the database" in combined
         assert "SchemaCompatibilityError" not in combined
         assert "Traceback" not in combined, f"Must not emit a traceback.\nOutput:\n{combined}"
 

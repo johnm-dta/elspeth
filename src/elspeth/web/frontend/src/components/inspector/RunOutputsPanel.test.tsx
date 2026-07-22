@@ -43,13 +43,19 @@ function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArti
   return {
     artifact_id: "art-1",
     sink_node_id: "results",
+    producer_kind: "sink_effect",
+    produced_by_state_id: null,
+    sink_effect_id: "effect-1",
     artifact_type: "file",
     path_or_uri: "file:///data/outputs/results.csv",
     content_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
     size_bytes: 1024,
+    publication_performed: true,
+    publication_evidence_kind: "returned",
     created_at: "2026-05-10T00:00:00Z",
     exists_now: true,
     downloadable: true,
+    storage_kind: "sink_file",
     ...overrides,
   };
 }
@@ -123,6 +129,35 @@ describe("RunOutputsPanel", () => {
     );
     expect(screen.queryByText("Download")).not.toBeInTheDocument();
     expect(screen.queryByText("Preview")).not.toBeInTheDocument();
+  });
+
+  it("does not leak raw internal storage paths in unavailable-row tooltips", async () => {
+    // Regression for elspeth-52af16f9ae: the frontend previously guessed
+    // "internal storage" from a path-shape regex that no repo code
+    // actually produces. The backend now classifies storage_kind
+    // structurally; a purged blob-store artifact (exists_now=false)
+    // must still mask its raw path in the tooltip.
+    const rawPath = "/var/lib/elspeth/data/blobs/session-1/blob-abc_report.json";
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri: rawPath,
+          exists_now: false,
+          downloadable: false,
+          storage_kind: "blob",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    const unavailable = await screen.findByText(/no longer available on disk/i);
+    expect(unavailable).toHaveAttribute(
+      "title",
+      "Recorded artifact for final_report",
+    );
+    expect(unavailable.getAttribute("title")).not.toContain(rawPath);
   });
 
   it("shows the 'outside allowed sink directories' tooltip when not downloadable", async () => {
@@ -265,6 +300,55 @@ describe("RunOutputsPanel", () => {
       expect(screen.getByText('{"a":1,"b":2}')).toBeInTheDocument(),
     );
     expect(screen.getByText('{"a":3,"b":4}')).toBeInTheDocument();
+
+    // jsonl has no column structure of its own, but it still gets a real
+    // th scope="col" header cell through the shared PreviewTable rather
+    // than rendering headerless (or with the old fake bold-td header).
+    const header = screen.getByRole("columnheader");
+    expect(header.tagName).toBe("TH");
+    expect(header.getAttribute("scope")).toBe("col");
+  });
+
+  it("renders nothing for an empty csv/jsonl preview body instead of an empty table shell", async () => {
+    // buildTabularPreviewModel returns null for zero data lines; TabularPreview
+    // must render nothing rather than an empty PreviewTable — this empty
+    // state must keep working across the TabularPreview rewrite.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({ preview_text: "", row_count_preview: null }),
+    );
+
+    const { container } = render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Hide preview/ })).toBeInTheDocument(),
+    );
+    expect(container.querySelector(".structured-preview-table")).toBeNull();
+    expect(screen.queryByRole("columnheader")).not.toBeInTheDocument();
+  });
+
+  it("renders csv preview headers as real th[scope=col], not a fake bold-td header", async () => {
+    // Regression for elspeth-611a05668e: csv/jsonl previously rendered
+    // through a bespoke inline-styled table that faked its header row
+    // with a bold <td>. Both the csv/jsonl and JSON table renderers now
+    // share one PreviewTable component with a real thead/th scope="col".
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact()]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(csvPreview());
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    const headerCells = await screen.findAllByRole("columnheader");
+    expect(headerCells.map((el) => el.textContent)).toEqual(["col1", "col2"]);
+    headerCells.forEach((cell) => {
+      expect(cell.tagName).toBe("TH");
+      expect(cell.getAttribute("scope")).toBe("col");
+    });
   });
 
   it("renders TSV preview (content_type=csv, tab-separated) with tab delimiter sniffing", async () => {
@@ -294,6 +378,134 @@ describe("RunOutputsPanel", () => {
     expect(screen.getByText("value")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText("19.95")).toBeInTheDocument();
+  });
+
+  it("pretty-prints JSON previews and offers a table view for record arrays", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([fileArtifact({ path_or_uri: "file:///data/outputs/results.json" })]),
+    );
+    (fetchRunOutputPreview as ReturnType<typeof vi.fn>).mockResolvedValue(
+      csvPreview({
+        content_type: "json",
+        preview_text: '[{"id":1,"status":"ok"},{"id":2,"status":"error"}]',
+        row_count_preview: null,
+      }),
+    );
+
+    const { container } = render(<RunOutputsPanel runId={RUN_ID} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Preview$/ }));
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-codeblock-format="json"]')?.textContent).toContain(
+        '"id": 1,',
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Table view" }));
+
+    expect(screen.getByText("id")).toBeInTheDocument();
+    expect(screen.getByText("status")).toBeInTheDocument();
+    expect(screen.getByText("error")).toBeInTheDocument();
+  });
+
+  it("derives a friendly artifact label instead of showing opaque blob-store paths", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "/home/john/.local/share/elspeth/data/blobs/session-1/blob-abc_report.json",
+          storage_kind: "blob",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("final_report")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(
+        "/home/john/.local/share/elspeth/data/blobs/session-1/blob-abc_report.json",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("derives a friendly artifact label for payload-store paths too", async () => {
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "/home/john/.local/share/elspeth/data/payloads/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+          storage_kind: "payload",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("final_report")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(
+        "/home/john/.local/share/elspeth/data/payloads/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves legitimate hash-like filenames when storage_kind is not internal storage", async () => {
+    // Regression for elspeth-52af16f9ae: this filename would have matched
+    // the old sha256-basename regex heuristic, but only blob/payload
+    // storage_kind values mask — a user-configured sink directory outside
+    // the recognised layouts classifies "unknown", so the raw name must
+    // render as-is.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri:
+            "file:///srv/exports/sha256-abcdef0123456789abcdef0123456789.json",
+          storage_kind: "unknown",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("sha256-abcdef0123456789abcdef0123456789.json"),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("final_report")).not.toBeInTheDocument();
+  });
+
+  it("preserves user output filenames that include a blob-storage-looking directory name without exposing the raw path", async () => {
+    // Regression for elspeth-52af16f9ae: a user-configured sink path that
+    // happens to contain a "blob-storage" segment is classified
+    // storage_kind="sink_file" by the backend (it's not under the real
+    // blob-store layout), so the basename must render as-is — the old
+    // regex heuristic would have masked this incorrectly. The full local
+    // file URI is still server-private and must not leak through the title.
+    (fetchRunOutputs as ReturnType<typeof vi.fn>).mockResolvedValue(
+      manifest([
+        fileArtifact({
+          sink_node_id: "final_report",
+          path_or_uri: "file:///data/outputs/blob-storage/report.json",
+          storage_kind: "sink_file",
+        }),
+      ]),
+    );
+
+    render(<RunOutputsPanel runId={RUN_ID} />);
+
+    await waitFor(() => expect(screen.getByText("report.json")).toBeInTheDocument());
+    expect(screen.getByTitle("report.json")).toBeInTheDocument();
+    expect(screen.queryByTitle("file:///data/outputs/blob-storage/report.json")).not.toBeInTheDocument();
+    expect(screen.queryByText("final_report")).not.toBeInTheDocument();
   });
 
   it("transitions to 'no longer available on disk' on artifact_purged_or_moved race", async () => {

@@ -305,15 +305,15 @@ class TestReadOnlyConnectionDefenseInDepth:
             conn.execute(text("DROP TABLE IF EXISTS runs"))
         db.close()
 
-    def test_read_only_does_not_affect_normal_connections(self, tmp_path: Path) -> None:
-        """PRAGMA query_only is connection-scoped — normal connections still write."""
+    def test_read_only_does_not_affect_write_connections(self, tmp_path: Path) -> None:
+        """PRAGMA query_only is connection-scoped — write connections still write."""
         from sqlalchemy import text
 
         from elspeth.core.landscape.database import LandscapeDB
 
         db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'test.db'}")
-        # Normal connection can write
-        with db.connection() as conn:
+        # Explicit write connection can write
+        with db.write_connection() as conn:
             conn.execute(text("CREATE TABLE test_rw (id INTEGER)"))
             conn.execute(text("INSERT INTO test_rw VALUES (1)"))
 
@@ -322,8 +322,8 @@ class TestReadOnlyConnectionDefenseInDepth:
             result = conn.execute(text("SELECT * FROM test_rw")).fetchall()
             assert len(result) == 1
 
-        # Normal connection still works after read-only was used
-        with db.connection() as conn:
+        # Explicit write connection still works after read-only was used
+        with db.write_connection() as conn:
             conn.execute(text("INSERT INTO test_rw VALUES (2)"))
             count_row = conn.execute(text("SELECT COUNT(*) FROM test_rw")).fetchone()
             assert count_row is not None

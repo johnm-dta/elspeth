@@ -12,12 +12,19 @@ Uses BaseAzureSafetyTransform for shared batch infrastructure.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypedDict
 
 from pydantic import BaseModel, Field
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms.azure.base import (
     BaseAzureSafetyConfig,
@@ -122,9 +129,38 @@ class AzureContentSafety(BaseAzureSafetyTransform):
     """
 
     name = "azure_content_safety"
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE_WITH_POLICY
+    policy_capabilities = frozenset(
+        {
+            CapabilityDeclaration(
+                PluginCapability.CONTENT_SAFETY,
+                ControlRole.OUTPUT,
+                blocks_positive_detection=True,
+            )
+        }
+    )
+
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool:
+        if not super().is_effective_blocking_control(capability=capability, role=role, options=options):
+            return False
+        thresholds = options.get("thresholds")
+        if not isinstance(thresholds, Mapping):
+            return True
+        values = tuple(thresholds.get(category) for category in ("hate", "violence", "sexual", "self_harm"))
+        # Runtime flags only severities strictly above the configured threshold;
+        # Azure's closed 0..6 response range makes four sixes a no-op.
+        return not all(type(value) is int and value >= 6 for value in values)
+
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:275a42d602a3ffe0"
+    source_file_hash: str | None = "sha256:99c7979ca759fc26"
     config_model = AzureContentSafetyConfig
     passes_through_input = True
 

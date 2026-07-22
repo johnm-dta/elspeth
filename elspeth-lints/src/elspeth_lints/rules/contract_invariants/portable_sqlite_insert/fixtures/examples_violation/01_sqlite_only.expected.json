@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "src/elspeth/writer.py",
+    "fingerprint": "69b1adfa26f7edd0",
+    "line": 1,
+    "message": "SQLite-specific insert import has no complete PostgreSQL counterpart and explicit sqlite/postgresql dialect dispatch in this module.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  }
+]

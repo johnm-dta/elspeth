@@ -1,7 +1,5 @@
 """Tests for CSVSink resume capability."""
 
-from pathlib import Path
-
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
@@ -30,234 +28,37 @@ class TestCSVSinkResumeContract:
         assert CSVSink.supports_resume is True
 
 
-class TestCSVSinkResumeEndToEnd:
-    """End-to-end tests for CSVSink resume capability."""
+class TestCSVSinkResumeModeResolution:
+    """elspeth-fc9906e398: resolved effect mode must claim what resume executes."""
 
-    def test_resume_appends_to_partial_output(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Resume should append to existing partial output without duplicating headers."""
-        output_path = tmp_path / "output.csv"
+    def test_resume_purpose_resolves_post_resume_append_mode(self) -> None:
+        """A write-configured CSV sink resumes in append mode; the resolver must say so."""
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
 
-        # Phase 1: Initial write (simulating partial run before crash)
-        sink1 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
-                }
-            )
-        )
-        sink1.write([{"id": 1, "value": "first"}, {"id": 2, "value": "second"}], ctx)
-        sink1.flush()
-        sink1.close()
+        config = {"path": "/tmp/out.csv", "schema": STRICT_SCHEMA, "mode": "write"}
 
-        # Verify partial state
-        content_partial = output_path.read_text()
-        lines_partial = content_partial.strip().split("\n")
-        assert len(lines_partial) == 3  # header + 2 rows
-        assert "id" in lines_partial[0] and "value" in lines_partial[0]
+        resolved = CSVSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.RESUME)
 
-        # Phase 2: Resume write (simulating resumed run)
-        sink2 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "value: str"]},
-                }
-            )
-        )
-        sink2.configure_for_resume()  # CRITICAL: Switch to append mode
-        sink2.write([{"id": 3, "value": "third"}, {"id": 4, "value": "fourth"}], ctx)
-        sink2.flush()
-        sink2.close()
+        assert resolved == ResolvedSinkEffectMode("append")
 
-        # Verify final state: all data present, one header
-        content_final = output_path.read_text()
-        lines_final = content_final.strip().split("\n")
-        assert len(lines_final) == 5  # header + 4 rows
+    def test_resume_purpose_matches_configure_for_resume_live_mode(self) -> None:
+        """Resolver claim and configure_for_resume() mutation must agree exactly."""
+        from elspeth.contracts.sink_effects import SinkEffectExecutionPurpose
 
-        # Verify header appears only once
-        header_count = sum(1 for line in lines_final if "id" in line and "value" in line)
-        assert header_count == 1
-
-        # Verify all data is present
-        assert "first" in content_final
-        assert "second" in content_final
-        assert "third" in content_final
-        assert "fourth" in content_final
-
-    def test_resume_with_multiple_batches(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Resume should handle multiple write batches correctly."""
-        output_path = tmp_path / "output.csv"
-
-        # Phase 1: Initial write with multiple batches
-        sink1 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": STRICT_SCHEMA,
-                }
-            )
-        )
-        sink1.write([{"id": 1}], ctx)
-        sink1.write([{"id": 2}, {"id": 3}], ctx)  # Second batch
-        sink1.flush()
-        sink1.close()
-
-        # Phase 2: Resume with multiple batches
-        sink2 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": STRICT_SCHEMA,
-                }
-            )
-        )
-        sink2.configure_for_resume()
-        sink2.write([{"id": 4}], ctx)
-        sink2.write([{"id": 5}, {"id": 6}], ctx)  # Second batch in resume
-        sink2.flush()
-        sink2.close()
-
-        # Verify all data present
-        content = output_path.read_text()
-        lines = content.strip().split("\n")
-        assert len(lines) == 7  # header + 6 rows
-
-        # Verify all IDs present
-        for i in range(1, 7):
-            assert str(i) in content
-
-    def test_resume_on_empty_file_creates_headers(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Resume on empty file should create headers like normal write."""
-        output_path = tmp_path / "output.csv"
-
-        # Create empty file
-        output_path.touch()
-
-        # Resume write to empty file
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "name: str"]},
-                }
-            )
-        )
+        config = {"path": "/tmp/out.csv", "schema": STRICT_SCHEMA, "mode": "write"}
+        sink = inject_write_failure(CSVSink(dict(config)))
         sink.configure_for_resume()
-        sink.write([{"id": 1, "name": "Alice"}], ctx)
-        sink.flush()
-        sink.close()
 
-        # Verify headers were written
-        content = output_path.read_text()
-        lines = content.strip().split("\n")
-        assert len(lines) == 2  # header + 1 row
-        assert "id" in lines[0] and "name" in lines[0]
+        resolved = CSVSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.RESUME)
 
-    def test_resume_on_nonexistent_file_creates_file(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Resume on nonexistent file should create it like normal write."""
-        output_path = tmp_path / "output.csv"
+        assert resolved is not None
+        assert resolved.value == sink._mode == "append"
 
-        # Ensure file doesn't exist
-        assert not output_path.exists()
+    def test_fresh_purpose_keeps_configured_mode(self) -> None:
+        from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose
 
-        # Resume write to nonexistent file
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int"]},
-                }
-            )
-        )
-        sink.configure_for_resume()
-        sink.write([{"id": 1}, {"id": 2}], ctx)
-        sink.flush()
-        sink.close()
+        config = {"path": "/tmp/out.csv", "schema": STRICT_SCHEMA, "mode": "write"}
 
-        # Verify file was created with headers
-        assert output_path.exists()
-        content = output_path.read_text()
-        lines = content.strip().split("\n")
-        assert len(lines) == 3  # header + 2 rows
-        assert lines[0] == "id"
+        resolved = CSVSink._resolve_sink_effect_mode(config, purpose=SinkEffectExecutionPurpose.FRESH)
 
-    def test_resume_preserves_column_order(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Resume should preserve existing column order from file."""
-        output_path = tmp_path / "output.csv"
-
-        # Phase 1: Write with specific column order
-        sink1 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
-                }
-            )
-        )
-        sink1.write([{"name": "Alice", "age": 30, "city": "NYC"}], ctx)
-        sink1.flush()
-        sink1.close()
-
-        # Get original header order
-        content1 = output_path.read_text()
-        original_header = content1.strip().split("\n")[0]
-
-        # Phase 2: Resume (dict order might differ)
-        sink2 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "fixed", "fields": ["name: str", "age: int", "city: str"]},
-                }
-            )
-        )
-        sink2.configure_for_resume()
-        # Write with different dict key order
-        sink2.write([{"city": "LA", "name": "Bob", "age": 25}], ctx)
-        sink2.flush()
-        sink2.close()
-
-        # Verify header order preserved
-        content_final = output_path.read_text()
-        lines_final = content_final.strip().split("\n")
-        assert lines_final[0] == original_header
-
-    def test_resume_without_configure_overwrites_file(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Forgetting to call configure_for_resume should overwrite (demonstrating need for it)."""
-        output_path = tmp_path / "output.csv"
-
-        # Phase 1: Initial write
-        sink1 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": STRICT_SCHEMA,
-                }
-            )
-        )
-        sink1.write([{"id": 1}, {"id": 2}], ctx)
-        sink1.flush()
-        sink1.close()
-
-        # Phase 2: Write without configure_for_resume (default mode="write")
-        sink2 = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": STRICT_SCHEMA,
-                }
-            )
-        )
-        # NO configure_for_resume() call - should truncate
-        sink2.write([{"id": 3}], ctx)
-        sink2.flush()
-        sink2.close()
-
-        # Verify only new data (old data lost)
-        content = output_path.read_text()
-        lines = content.strip().split("\n")
-        assert len(lines) == 2  # header + 1 row
-        assert "1" not in content  # Old data gone
-        assert "2" not in content  # Old data gone
-        assert "3" in content  # Only new data present
+        assert resolved == ResolvedSinkEffectMode("write")

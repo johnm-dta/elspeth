@@ -1,0 +1,53 @@
+{
+  "class": "linear_transform",
+  "intent": "Build a pipeline that reads a CSV of records, passes every row through a single ordered transform, and writes the transformed rows to one JSON output, preserving the upstream fields end to end.",
+  "canonical_arguments": {
+    "source": {
+      "plugin": "csv",
+      "on_success": "rows",
+      "options": {"path": "input.csv", "schema": {"mode": "observed"}},
+      "on_validation_failure": "discard"
+    },
+    "nodes": [
+      {
+        "id": "normalize",
+        "node_type": "transform",
+        "plugin": "passthrough",
+        "input": "rows",
+        "on_success": "processed",
+        "on_error": "discard",
+        "options": {"schema": {"mode": "observed"}}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "processed",
+        "plugin": "json",
+        "options": {
+          "path": "outputs/processed.json",
+          "format": "json",
+          "schema": {"mode": "observed"},
+          "mode": "write",
+          "collision_policy": "auto_increment"
+        },
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "linear-transform", "description": "Source to transform to sink."}
+  },
+  "semantic_expectations": {
+    "source": {"plugin": "csv", "on_success": "rows"},
+    "nodes": [
+      {"id": "normalize", "node_type": "transform", "plugin": "passthrough", "input": "rows", "on_success": "processed"}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "processed", "plugin": "json"}],
+    "topology": "source -> normalize(transform) -> processed(sink)"
+  },
+  "runtime_assertions": [
+    "Every source row reaches the single transform node exactly once.",
+    "The transform propagates all upstream fields to the JSON sink (no field loss).",
+    "Exactly one output sink is written and it consumes the transform's on_success connection."
+  ]
+}

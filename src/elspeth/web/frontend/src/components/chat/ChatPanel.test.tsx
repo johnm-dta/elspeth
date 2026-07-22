@@ -32,6 +32,7 @@ import type {
   Session,
 } from "@/types/api";
 import type {
+  GuidedProposalReviewState,
   GuidedSession,
   SingleSelectPayload,
   TerminalState,
@@ -128,21 +129,6 @@ vi.mock("./ChatInput", () => ({
   ),
 }));
 
-vi.mock("./TemplateCards", () => ({
-  TemplateCards: ({
-    onSelectTemplate: _onSelectTemplate,
-  }: {
-    onSelectTemplate: (
-      seedPrompt: string,
-      recommendedStartingPoint: "dynamic_source_from_chat" | "csv_upload" | "api_source",
-    ) => void;
-  }) => (
-    <div data-testid="template-cards">
-      Template cards
-    </div>
-  ),
-}));
-
 vi.mock("@/components/blobs/BlobManager", () => ({
   BlobManager: () => <div data-testid="blob-manager" />,
 }));
@@ -202,6 +188,10 @@ describe("ChatPanel", () => {
     render(<ChatPanel />);
 
     expect(screen.getByText("The model requested plugin schemas.")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Checking available source, transform, and sink tools."),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("Checking available source, transform, and sink tools.")).toBeInTheDocument();
     expect(screen.queryByText("Working on: convert HTML into JSON")).not.toBeInTheDocument();
   });
@@ -246,7 +236,7 @@ describe("ChatPanel", () => {
     expect(screen.getByText("Revise the request and send it again.")).toBeInTheDocument();
   });
 
-  it("renders template cards as a static gallery without sending a template prompt", () => {
+  it("shows the quiet introduction in an empty freeform session", () => {
     const sendMessage = vi.fn();
     const session: Session = {
       id: "session-templates",
@@ -268,10 +258,18 @@ describe("ChatPanel", () => {
       sessions: [session],
       messages: [],
     });
+    usePreferencesStore.setState({
+      loaded: true,
+      freeformIntroDismissedAt: null,
+    });
 
     render(<ChatPanel />);
 
-    expect(screen.getByTestId("template-cards")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "How pipelines work" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Don’t show this again" })).toBeVisible();
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -410,6 +408,11 @@ describe("ChatPanel mode discriminator", () => {
     // Slice C: the verification-panel tests seed validationResult; reset the
     // execution store so a seeded result does not leak into sibling tests.
     resetStore(useExecutionStore);
+    // Post-boot: the backend wall clock has landed, so the compose-timeout
+    // readiness gate is open and guided sends (sendGuidedChat →
+    // runComposeWithTimeout) proceed. resetStore clears it to the fail-closed
+    // false default; the per-test setState calls merge over this.
+    useSessionStore.setState({ composeTimeoutReady: true });
     (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
       sendMessage: vi.fn(),
       retryMessage: vi.fn(),
@@ -446,8 +449,155 @@ describe("ChatPanel mode discriminator", () => {
       ],
       allow_custom: false,
     };
-    return { type: "single_select", step_index: 0, payload };
+    return { type: "single_select", step_index: 0, turn_token: "a".repeat(64), payload };
   }
+
+  const proposalId = "00000000-0000-4000-8000-000000000701";
+  const proposalHash = "f".repeat(64);
+
+  function proposalTurn(supersedesDraftHash: string | null = null): TurnPayload {
+    const sourceId = "00000000-0000-4000-8000-000000000702";
+    const outputId = "00000000-0000-4000-8000-000000000703";
+    return {
+      type: "propose_pipeline",
+      step_index: 2,
+      turn_token: "f".repeat(64),
+      payload: {
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        supersedes_draft_hash: supersedesDraftHash,
+        summary: "guided.proposal.summary.full_graph.v1",
+        rationale: "guided.proposal.rationale.review_required.v1",
+        component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+        blockers: [],
+        graph: {
+          sources: [{
+            stable_id: sourceId,
+            label: "orders-source",
+            plugin: { kind: "source", id: "csv" },
+          }],
+          edges: [
+            {
+              stable_id: "00000000-0000-4000-8000-000000000704",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "output", stable_id: outputId },
+              flow: { kind: "source_success", branch: null },
+            },
+            {
+              stable_id: "00000000-0000-4000-8000-000000000705",
+              from_endpoint: { kind: "source", stable_id: sourceId },
+              to_endpoint: { kind: "discard" },
+              flow: { kind: "source_validation_failure" },
+            },
+          ],
+        },
+        nodes: [],
+        outputs: [{
+          stable_id: outputId,
+          label: "orders-output",
+          plugin: { kind: "sink", id: "json" },
+        }],
+        edit_targets: [{ kind: "source", stable_id: sourceId }],
+      },
+    };
+  }
+
+  function proposalReview(
+    status: GuidedProposalReviewState["status"],
+  ): GuidedProposalReviewState {
+    if (status === "error") {
+      return {
+        status,
+        proposal_id: proposalId,
+        draft_hash: proposalHash,
+        message: "The proposal response was not received. Retry the same action.",
+        retryable: true,
+        retry_action: { kind: "review_wiring" },
+      };
+    }
+    return { status, proposal_id: proposalId, draft_hash: proposalHash };
+  }
+
+  it.each([
+    ["active", null, false],
+    ["reloading", /reloading the authoritative proposal/i, true],
+    ["stale", /proposal is stale/i, true],
+    ["error", /response was not received/i, false],
+  ] as const)(
+    "renders the proposal review lifecycle state %s in the guided chat surface",
+    (status, statusMessage, acceptDisabled) => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+        guidedNextTurn: proposalTurn(),
+        guidedProposalReview: proposalReview(status),
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+      const review = screen.getByRole("button", { name: "Review wiring" });
+      if (acceptDisabled) expect(review).toBeDisabled();
+      else expect(review).toBeEnabled();
+      if (statusMessage !== null) expect(screen.getByText(statusMessage)).toBeVisible();
+    },
+  );
+
+  it("keeps the live Review wiring primary on the tutorial revision proposal review", () => {
+    // The tutorial proposal is a REAL planner proposal (no canned exhibit
+    // exists post-7.1); the learner advances by accepting it, so the primary
+    // must stay live while the off-script reject/revise stay withheld. The
+    // primary is live only on the frozen-prompt REVISION proposal
+    // (supersedes_draft_hash set) — the pre-Send auto-proposal withholds it.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: proposalTurn("e".repeat(64)),
+      guidedProposalReview: proposalReview("active"),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+    expect(screen.getByText("orders-source · csv")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+  });
+
+  it("withholds the tutorial Review wiring primary on the pre-Send auto-proposal", () => {
+    // Tutorial run 18: accepting the transition auto-proposal (planned before
+    // the frozen transforms prompt is sent) commits a source→sink
+    // passthrough. The null supersedes_draft_hash identifies it; the learner
+    // is directed to Send instead.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: proposalTurn(),
+      guidedProposalReview: proposalReview("active"),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.getByText(/press Send/i)).toBeVisible();
+    // The withheld primary must leave a live path forward: the docked
+    // composer's Send is the ONLY advance on this turn (it re-plans the
+    // proposal as the frozen-prompt revision) — without it this turn is a
+    // dead end, strictly worse than the wrong-completion it prevents.
+    // ChatInput is mocked in this suite; its stub mirrors the live enabled
+    // state via data-disabled, and the region landmark is the same one the
+    // staging drivers target for the Send.
+    expect(screen.getByRole("region", { name: "Describe what you want" })).toBeVisible();
+    expect(screen.getByTestId("chat-input")).toHaveAttribute("data-disabled", "false");
+  });
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {
     useSessionStore.setState({
@@ -564,7 +714,7 @@ describe("ChatPanel mode discriminator", () => {
 
   it("renders the chat box at step_3 with NO proposal (per-stage transforms entry, not a panel-less fall-through)", () => {
     // STEP_3 begins with no server turn: the per-stage transforms prompt drives
-    // the build via /guided/chat (cold-start). The guided surface — crucially the
+    // the build via /guided/start (durable-root cold start). The guided surface — crucially the
     // chat box — MUST render so the operator can describe the transforms; a
     // missing turn must NOT fall through to the freeform body / loading flash.
     useSessionStore.setState({
@@ -655,6 +805,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+      assistant_message_kind: null,
+      synthetic_failure_reason: null,
           },
         ],
       },
@@ -785,6 +937,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "t",
+            assistant_message_kind: "assistant",
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -963,6 +1117,7 @@ describe("ChatPanel mode discriminator", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 1,
+        turn_token: "b".repeat(64),
         payload: {
           question: "Which output plugin should we use?",
           options: [{ id: "json", label: "JSON", hint: null }],
@@ -1226,24 +1381,6 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
-  it("renders the per-step placeholder for STEP_2_5_RECIPE_MATCH", () => {
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      // The placeholder keys on guidedSession.step (not the turn type), so
-      // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
-      guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
-      guidedNextTurn: singleSelectTurn(),
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Describe how this recipe should change, or accept it as proposed…",
-    );
-  });
-
   it("renders the per-step placeholder for STEP_3_TRANSFORMS", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -1338,6 +1475,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1766,6 +1905,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1817,6 +1958,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -1841,6 +1984,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -1891,6 +2036,8 @@ describe("ChatPanel mode discriminator", () => {
               seq: 2,
               step: "step_1_source",
               ts_iso: "2026-05-12T10:00:01Z",
+              assistant_message_kind: "assistant",
+              synthetic_failure_reason: null,
             },
           ],
         },
@@ -1935,8 +2082,9 @@ describe("ChatPanel mode discriminator", () => {
       screen.getByRole("list", { name: /guided workflow/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-validation-summary")).toBeInTheDocument();
     // Tutorial completion suppresses the freeform handoff (concern B).
     expect(
       screen.queryByRole("button", { name: "Open freeform editor" }),
@@ -1966,7 +2114,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(media900![0]).toContain("order: -1;");
   });
 
-  it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
+  it("delegates guided ChatInput sends to the retry-safe store action", async () => {
     const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -1993,6 +2141,32 @@ describe("ChatPanel mode discriminator", () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it("does not invoke chatGuided while the readiness gate is closed (bootstrap race)", async () => {
+    // ChatPanel must thread composeTimeoutReady into the shared
+    // runComposeWithTimeout so the guided path is gated exactly like freeform:
+    // before the backend wall clock lands, no guided send may schedule an
+    // abort from the stale default ceiling. Override the beforeEach post-boot
+    // default to reproduce the boot window.
+    const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      chatGuided: chatGuidedSpy,
+      composeTimeoutReady: false,
+    });
+
+    render(<ChatPanel />);
+
+    await act(async () => {
+      screen.getByTestId("chat-input").click();
+    });
+
+    expect(chatGuidedSpy).not.toHaveBeenCalled();
   });
 
   it("decision card offers Explain — one click sends the canned question down the chat path", async () => {
@@ -2038,6 +2212,52 @@ describe("ChatPanel mode discriminator", () => {
     ).toBe(true);
   });
 
+  it("Explain is disabled until the compose timeout is ready (bootstrap race)", () => {
+    // A guided decision restores from server state on reload; if the Explain
+    // button renders before App.checkHealth latches readiness, a click would
+    // route sendGuidedChat -> runComposeWithTimeout(ready=false) and silently
+    // no-op — a dead button. Gate it, same as the primary Send. Override the
+    // mode-discriminator beforeEach post-boot seed to reproduce the boot window.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      composeTimeoutReady: false,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      (screen.getByRole("button", { name: "Explain this step" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("Explain's disabled reason switches to the unavailable diagnostic in the stuck state", () => {
+    // Backend up but no compose timeout: the Explain title must match the main
+    // Send ("Composer unavailable…"), not say "Connecting…" forever.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      composeTimeoutReady: false,
+      composerTimeoutUnavailable: true,
+    });
+
+    render(<ChatPanel />);
+
+    const btn = screen.getByRole("button", { name: "Explain this step" });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute(
+      "title",
+      "Composer unavailable — the server did not report a compose timeout.",
+    );
+  });
+
   it("no Explain without a current decision (nothing on screen to explain)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -2063,14 +2283,15 @@ describe("ChatPanel mode discriminator", () => {
         history: [],
         terminal: null,
         chat_history: [
-          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t" },
+          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
           {
             role: "assistant",
             content: "I'm unavailable right now; you can still use the wizard controls.",
             seq: 2,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 2,
@@ -2157,7 +2378,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 0,
             step: "step_1_source",
             ts_iso: "t",
-            assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+            synthetic_failure_reason: "unavailable",
           },
         ],
         chat_turn_seq: 0,
@@ -2197,6 +2419,25 @@ describe("ChatPanel mode discriminator", () => {
 
       expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
     });
+
+    it("Retry is disabled until the compose timeout is ready (bootstrap race)", () => {
+      // The synthetic-failure turn lives in server-authoritative chat_history,
+      // so it restores on reload and its Retry can render before readiness
+      // latches. A click would route sendGuidedChat ->
+      // runComposeWithTimeout(ready=false) and silently no-op; gate it.
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+        composeTimeoutReady: false,
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    });
   });
 
   it("tutorial: an Explain send does NOT count as the step's prompt (locked box must not flip to 'Sent')", () => {
@@ -2217,6 +2458,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-07-03T00:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2237,11 +2480,13 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeNull();
   });
 
-  it("swaps the ChatInput for the pending strip with Stop while a guided chat is in flight", () => {
-    // Pending swap (elspeth-6a9673ecd3): the input is UNMOUNTED — not
-    // disabled — while /guided/chat is in flight; the working strip carries
-    // the abort affordance. The landmark section must survive the swap (AT
-    // navigation + staging e2e locators find the composer by region name).
+  it("keeps the ChatInput mounted (disabled) and shows the pending strip with Stop while a guided chat is in flight", () => {
+    // Operator pass 2026-07-23: the strip no longer replaces the input (the
+    // old swap read as a large panel occluding the typing area). The input
+    // stays mounted with its ordinary disabled state; the strip — still
+    // carrying the abort affordance — rides in the conversation flow. The
+    // landmark section survives untouched (AT navigation + staging e2e
+    // locators find the composer by region name).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2253,7 +2498,8 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    expect(screen.queryByTestId("chat-input")).toBeNull();
+    const input = screen.getByTestId("chat-input");
+    expect(input.dataset.disabled).toBe("true");
     expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
     expect(
       screen.getByRole("button", { name: "Stop composing" }),
@@ -2261,6 +2507,150 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.getByRole("region", { name: "Describe what you want" }),
     ).toBeInTheDocument();
+  });
+
+  it("mounts the chat-pending indicator in the conversation flow, never over the message input", () => {
+    // Placement parity with the decision-submit indicator (operator
+    // 2026-07-23): every guided pending indicator renders inline in the
+    // conversation region — the provisional reply slot — and never inside
+    // the composer section where it would cover the typing area.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const strip = container.querySelector(".guided-pending-strip");
+    expect(strip).not.toBeNull();
+    const scroll = container.querySelector(".guided-workspace-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll!.contains(strip)).toBe(true);
+    const composer = screen.getByRole("region", {
+      name: "Describe what you want",
+    });
+    expect(composer.contains(strip)).toBe(false);
+  });
+
+  it("tutorial step 2: shows guided-chat substep progress while composition is pending", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: {
+        session_id: "session-guided",
+        request_id: "req-1",
+        phase: "using_tools",
+        headline: "Choosing a JSON output shape",
+        evidence: ["Inspecting sink schemas."],
+        likely_next: "Prepare the output fields.",
+        reason: null,
+        updated_at: "2026-07-03T00:00:00Z",
+      },
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    const progress = screen.getByRole("list", {
+      name: "Tutorial step progress",
+    });
+    expect(progress).toHaveTextContent("Read output request");
+    expect(progress).toHaveTextContent("Choose sink shape");
+    expect(progress).toHaveTextContent("Prepare JSON file");
+    expect(screen.getByText("Choose sink shape")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
+  it("tutorial step 2: marks the first substep before composer progress is available", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: null,
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    expect(screen.getByText("Read output request")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+  });
+
+  it("tutorial step 2: 'calling_model' also marks 'Choose sink shape' current (elspeth-a8eeebb3aa remap)", () => {
+    // Regression guard for the backward-jump the original mapping produced:
+    // the real backend (maybe_resolve_step_2_sink_chat) re-emits
+    // calling_model before EVERY provider round, including the round right
+    // after a discovery tool call — so calling_model must map to the SAME
+    // substep as using_tools (1), not substep 0. Folding both into substep 1
+    // also means the indicator advances even for a single-shot resolve with
+    // no discovery tool call at all, which is the tutorial's actual traffic
+    // shape ("Save the pipeline's results to a JSON file." resolves `json`
+    // directly without needing list_sinks/get_plugin_schema).
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+      composerProgress: {
+        session_id: "session-guided",
+        request_id: "req-1",
+        phase: "calling_model",
+        headline: "I'm asking the model to choose the next safe pipeline update.",
+        evidence: [],
+        likely_next: null,
+        reason: null,
+        updated_at: "2026-07-03T00:00:00Z",
+      },
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    expect(screen.getByText("Choose sink shape")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("Read output request")).not.toHaveAttribute(
+      "aria-current",
+    );
   });
 
   it("does NOT swap (and offers no Stop) while only a turn-respond is pending", () => {
@@ -2286,10 +2676,38 @@ describe("ChatPanel mode discriminator", () => {
     expect(input.dataset.hasCancel).toBe("false");
   });
 
+  it("anchors the saving-decision status in the decision-card footer with an elapsed timer", () => {
+    // Operator-reported: "Saving decision..." rendered as bare floating text
+    // and could front a multi-minute planner run with zero motion, while
+    // "Explain this step" floated bottom-right in empty space. Both anchor
+    // into the card's footer; the pending status reuses the chat Send pending
+    // idiom (pulse + headline + elapsed readout) and keeps role="status".
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+      guidedResponsePending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const footer = container.querySelector(".guided-current-decision-footer");
+    expect(footer).not.toBeNull();
+    const status = footer?.querySelector('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(status?.textContent).toContain("Saving decision...");
+    expect(status?.querySelector(".composing-elapsed")).not.toBeNull();
+    // The Explain affordance lives in the same footer, not floating alone.
+    expect(footer?.querySelector(".guided-explain-btn")).not.toBeNull();
+  });
+
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
-    // Regression: a transient chain-solve failure at step_3 appends a user turn
-    // but returns next_turn=null. The 'Sent' line must NOT replace the box, or
-    // the passive learner is stranded with no widget and no exit.
+    // Regression: a transient step-3 chat failure appends a user turn but
+    // returns next_turn=null. The 'Sent' line must NOT replace the box, or the
+    // passive learner is stranded with no widget and no exit.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2304,6 +2722,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_3_transforms",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2343,6 +2763,8 @@ describe("ChatPanel mode discriminator", () => {
             seq: 1,
             step: "step_1_source",
             ts_iso: "2026-05-12T10:00:00Z",
+            assistant_message_kind: null,
+            synthetic_failure_reason: null,
           },
         ],
       },
@@ -2380,11 +2802,14 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input").dataset.maxLength).toBe("4096");
   });
 
-  it("unmounts the guided ChatInput while guidedChatPending=true (409-race pin)", () => {
-    // Regression pin (sits next to the guided-resend 409 fix): with the
-    // pending swap, no input is mounted while the build is in flight, so a
-    // second send cannot race it AT ALL — stronger than the old disabled
-    // gate, whose textarea never actually received `disabled`.
+  it("disables the guided ChatInput while guidedChatPending=true (409-race pin)", () => {
+    // Regression pin (sits next to the guided-resend 409 fix): the input
+    // stays mounted while the build is in flight but its disabled prop gates
+    // handleSend (ChatInput returns early), and sendGuidedChat's own
+    // admission gate (guidedChatPending || guidedResponsePending) rejects a
+    // request that somehow slips past — two layers where the old unmount
+    // swap was one. The swap itself is gone: it read as a panel occluding
+    // the typing area (operator 2026-07-23).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2396,7 +2821,7 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
     // Silent-compute affordance: the lean working strip is the busy signal
     // (the old detached ComposingIndicator card is gone from guided).
     expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
@@ -2419,12 +2844,14 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
   });
 
-  it("pending-swap focus contract: strip wrapper takes focus in, composer section takes it back out", () => {
-    // Unmounting the focused composer content would strand focus at <body>
-    // (WCAG 2.4.3). Into pending: focus moves to the strip's tabIndex=-1
-    // wrapper — never the Stop button (double-Enter would abort the request
-    // just sent). Out of pending: focus returns into the composer (under the
-    // ChatInput mock inputRef never attaches, so the section is the landing).
+  it("pending focus contract: focus stays in the composer into pending and restores out of it", () => {
+    // With the swap gone the input never unmounts on the pending flip, so
+    // focus simply STAYS where the user left it (WCAG 2.4.3 without any
+    // programmatic move — the strip in the conversation flow must not steal
+    // it). Out of pending: the restore lands back inside the composer (under
+    // the ChatInput mock inputRef never attaches, so the section is the
+    // landing; the tutorial's "Sent" line replacing the input rides the same
+    // branch).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2443,9 +2870,8 @@ describe("ChatPanel mode discriminator", () => {
     act(() => {
       useSessionStore.setState({ guidedChatPending: true });
     });
-    const strip = container.querySelector(".guided-pending-strip");
-    expect(strip).not.toBeNull();
-    expect(document.activeElement).toBe(strip);
+    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("chat-input"));
 
     act(() => {
       useSessionStore.setState({ guidedChatPending: false });
@@ -2530,7 +2956,7 @@ describe("ChatPanel mode discriminator", () => {
       screen.getByRole("button", { name: "Open freeform editor" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Validate pipeline" }),
@@ -2544,6 +2970,111 @@ describe("ChatPanel mode discriminator", () => {
     // Freeform surface suppressed.
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
+  });
+
+  it("renders pending interpretation Accept cards on the completed surface", () => {
+    // The guided wire-confirm commit surfaces interpretation events AFTER the
+    // terminal lands (f3db92c00 — the writer boundary needs the committed
+    // nodes), so the completion surface is the first place the Accept cards
+    // can render. Without the stack here the events are orphaned: no surface
+    // offers resolution, and the run gate (tutorial auto-run, freeform-style
+    // execute) fails closed forever (session e1332b5a). Applies to tutorial
+    // AND plain guided completion alike.
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedTerminal: terminal,
+    });
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "session-guided": {
+          "event-1": {
+            id: "event-1",
+            session_id: "session-guided",
+            composition_state_id: "22222222-2222-2222-2222-222222222222",
+            affected_node_id: "summarize_page",
+            tool_call_id: "backend_auto_surface:1",
+            user_term: "llm_prompt_template:summarize_page",
+            kind: "llm_prompt_template",
+            llm_draft: "Summarise {{ row.page_content }}",
+            accepted_value: null,
+            choice: "pending",
+            created_at: "2026-07-22T00:00:00Z",
+            resolved_at: null,
+            actor: "composer-llm",
+            interpretation_source: "user_approved",
+            model_identifier: "planner-model",
+            model_version: "planner-model",
+            provider: "test",
+            composer_skill_hash: "0".repeat(64),
+            arguments_hash: null,
+            hash_domain_version: null,
+            runtime_model_identifier_at_resolve: null,
+            runtime_model_version_at_resolve: null,
+            resolved_prompt_template_hash: null,
+          },
+        },
+      },
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("acknowledgement-card")).toBeInTheDocument();
+  });
+
+  it("tutorial completed: renders validation feedback on the reset tutorial shell", () => {
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_4_wire",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedTerminal: terminal,
+      compositionState: sourceLlmCsvComposition(),
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByTestId("pipeline-validation-summary")).toBeInTheDocument();
+    // Multiple role="status" elements exist on the completed surface (the
+    // validation summary plus the always-mounted acknowledgement live
+    // region) — assert the validation one specifically.
+    const statuses = screen.getAllByRole("status");
+    expect(statuses.some((el) => /looks good/i.test(el.textContent ?? ""))).toBe(true);
   });
 
   it("does not render ExitToFreeformButton on the completed surface (regression pin for elspeth-obs-0a1002de6d)", () => {
@@ -2663,70 +3194,6 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.queryByRole("button", { name: "Open freeform editor" }),
     ).toBeNull();
-  });
-
-  // C-4b (composer first-principles review 2026-07-04): "Switch to guided"
-  // must not silently no-op on a permanently-terminal guided session.
-  it("disables 'Switch to guided' with an explanation when guided ended via solver_exhausted", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "solver_exhausted",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    const button = screen.getByRole("button", { name: "Switch to guided" });
-    expect(button).toBeDisabled();
-    expect(
-      screen.getByText(
-        "Guided ended for this session — start a new session to use guided.",
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("disables 'Switch to guided' with an explanation when guided ended via protocol_violation", () => {
-    const terminal: TerminalState = {
-      kind: "exited_to_freeform",
-      reason: "protocol_violation",
-      pipeline_yaml: null,
-    };
-
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: {
-        step: "step_1_source",
-        history: [],
-        terminal,
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
-      guidedNextTurn: null,
-      guidedTerminal: terminal,
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByRole("button", { name: "Switch to guided" })).toBeDisabled();
   });
 
   it("keeps 'Switch to guided' enabled (reenterable) when the terminal reason is user_pressed_exit", () => {
@@ -2948,7 +3415,13 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.queryByTestId("chat-input")).toBeNull();
   });
 
-  it("renders a guided placeholder (not the freeform body) when isTutorial and terminal is exited_to_freeform (concern B defensive)", () => {
+  it("routes an exited_to_freeform terminal to the freeform body, not the placeholder (elspeth-61591e64bb)", () => {
+    // The wire-stage "Exit to freeform" button IS reachable in tutorial mode
+    // and produces a real exited_to_freeform terminal. The old "defensive"
+    // placeholder made that terminal a permanent "Preparing your guided
+    // pipeline…" dead-end: nothing ever cleared it. The exit terminal now
+    // falls through to the freeform body — the tutorial shell's onExited
+    // hand-off persists the opt-out and unmounts the shell moments later.
     const terminal: TerminalState = {
       kind: "exited_to_freeform",
       reason: "user_pressed_exit",
@@ -2972,17 +3445,8 @@ describe("ChatPanel mode discriminator", () => {
 
     render(<ChatPanel isTutorial />);
 
-    expect(screen.getByTestId("tutorial-guided-loading")).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-input")).toBeNull();
-    // The placeholder rail reflects the ACTUAL session step, not a hardcoded
-    // step_1 (GuidedWorkflowStepper marks the current step with
-    // aria-current="step", ChatPanel.tsx:1759). The transform-step rail item
-    // must be the current one.
-    const current = screen
-      .getByTestId("tutorial-guided-loading")
-      .querySelector('[aria-current="step"]');
-    expect(current).not.toBeNull();
-    expect(current).toHaveTextContent(/transform/i);
+    expect(screen.queryByTestId("tutorial-guided-loading")).toBeNull();
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
   });
 });
 
@@ -3041,7 +3505,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
       options,
       allow_custom: false,
     };
-    return { type: "single_select", step_index: stepIndex, payload };
+    return { type: "single_select", step_index: stepIndex, turn_token: "a".repeat(64), payload };
   }
 
   it("moves focus to the first button in chat-panel-guided-log when the turn first renders (step 0)", async () => {
@@ -3143,7 +3607,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
     // The composer now docks at the BOTTOM for every session (tutorial
     // included). A same-step `/guided/chat` Send replaces the turn with a
     // different TYPE without advancing the step (single_select → schema_form at
-    // step 1; null → propose_chain at step 3). The just-built decision lands
+    // step 1; null at a server-owned later stage). The just-built decision lands
     // ABOVE the box the user Sent from, so the focus effect must re-fire on the
     // type change and bring it into view — otherwise the passive learner is left
     // looking at the docked box with the decision off-screen above it. This is
@@ -3171,6 +3635,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
         guidedNextTurn: {
           type: "schema_form",
           step_index: 0,
+          turn_token: "b".repeat(64),
           payload: {
             mode: "plugin_options",
             plugin: "csv",
@@ -4831,6 +5296,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       guidedNextTurn: {
         type: "single_select",
         step_index: 0,
+        turn_token: "a".repeat(64),
         payload: {
           question: "Pick one",
           options: [{ id: "a", label: "A", hint: null }],
@@ -5133,10 +5599,13 @@ describe("ChatPanel chat presentation (ux-review-2026-07-02)", () => {
     expect(log).not.toBeNull();
     expect(indicator).not.toBeNull();
     // Structural fix for the nested-live-region finding: the indicator's
-    // role="status" must be a SIBLING of the log container, never nested
-    // inside it where both live regions could announce the same change.
+    // role="status" summary must be a SIBLING of the log container, never
+    // nested inside it where both live regions could announce the same change.
     expect(log?.contains(indicator)).toBe(false);
-    expect(indicator?.getAttribute("role")).toBe("status");
+    const status = indicator?.querySelector<HTMLElement>('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(log?.contains(status ?? null)).toBe(false);
+    expect(status?.querySelector("button")).toBeNull();
   });
 
   it("shows the composer model chip in the chat header (elspeth-e9f7678de8)", async () => {

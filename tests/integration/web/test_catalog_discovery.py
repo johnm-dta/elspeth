@@ -96,3 +96,39 @@ def test_catalog_has_no_unhinted_builtin_plugins(catalog: CatalogServiceImpl) ->
             if not summary.composer_hints:
                 missing.append(f"{plugin_type}/{name}")
     assert missing == []
+
+
+def test_live_catalog_advertises_typed_structured_query_contract(catalog: CatalogServiceImpl) -> None:
+    """End-to-end: the real catalog surface advertises the typed structured-query contract.
+
+    Drives the same ``get_schema`` path the web app and the MCP
+    ``get_plugin_schema`` tool exercise. Both discovery surfaces must expose the
+    typed query structure: the ``json_schema`` ``$defs`` (for a JSON-Schema
+    consumer) and the lowered ``knob_schema`` ``item_schema`` (for the one-knob
+    composer form) — never a generic ``json-value``.
+    """
+    pytest.importorskip(
+        "litellm",
+        reason="LLM transform requires the [llm] extra; catalog discovery skips it otherwise.",
+    )
+    schema = catalog.get_schema(plugin_type="transform", name="llm")
+    assert isinstance(schema, PluginSchemaInfo)
+
+    defs = schema.json_schema["$defs"]
+    assert {"name", "input_fields", "template", "response_format", "output_fields"} <= set(defs["QueryDefinition"]["properties"])
+    assert {"suffix", "type"} <= set(defs["OutputFieldConfig"]["properties"])
+
+    queries_knobs = [field for field in schema.knob_schema["fields"] if field["name"] == "queries"]
+    assert queries_knobs
+    for queries in queries_knobs:
+        assert queries["kind"] != "json-value"
+        nested = {field["name"]: field for field in queries["item_schema"]["fields"]}
+        assert {"name", "input_fields", "response_format", "output_fields"} <= set(nested)
+        # The nested ``output_fields`` knob recurses to the typed
+        # ``OutputFieldConfig`` field set (suffix/type/values). Its inherited
+        # ``PluginConfig.schema_config`` (JSON-Schema alias "schema") is
+        # composer_hidden, so the lowered output-field knob set must NOT carry a
+        # spurious editable "schema" knob.
+        output_nested = {field["name"] for field in nested["output_fields"]["item_schema"]["fields"]}
+        assert {"suffix", "type"} <= output_nested
+        assert "schema" not in output_nested

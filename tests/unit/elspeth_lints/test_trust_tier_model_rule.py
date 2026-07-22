@@ -390,7 +390,6 @@ class TestR1SourceRegressions:
 
         target_contexts = {
             ("CSVSink", "validate_output_target"),
-            ("CSVSink", "_open_file"),
             ("CSVSink", "_get_field_names_and_display"),
             ("JSONSink", "validate_output_target"),
         }

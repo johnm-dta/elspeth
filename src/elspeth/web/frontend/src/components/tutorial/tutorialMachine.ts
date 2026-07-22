@@ -16,7 +16,7 @@ export const CANONICAL_TUTORIAL_PROMPT =
 
 // Per-stage prelocked prompts — each phase gets ONLY its stage's intent so the
 // light composer model can focus on one task. Verified live against the
-// per-stage solvers (resolve_source / resolve_sink / solve_chain). The SOURCE
+// per-stage source and sink resolution. The SOURCE
 // prompt names the `url` column so the source declares it as a guaranteed field
 // (surface-or-record); the runtime-resolved sample URLs are appended to it.
 export const TUTORIAL_SOURCE_PROMPT =

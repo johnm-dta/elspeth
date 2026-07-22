@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import yaml
 
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.composer.guided.resolved import SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
@@ -14,6 +19,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_public_pipeline_dict, generate_public_yaml, generate_yaml
+from elspeth.web.composer.yaml_importer import composition_state_from_runtime_yaml
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
@@ -541,6 +547,331 @@ class TestGenerateYaml:
         assert "/data/blobs/session/20b944e3_input.txt" not in public_yaml
         assert generate_pipeline_dict(state)["sources"]["source"]["options"]["path"] == "/data/blobs/session/20b944e3_input.txt"
 
+    def test_public_yaml_strips_guided_blob_storage_path_without_committed_blob_ref(self) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/20b944e3_project_pages.json"
+        blob_ref = "20b944e3-fd46-434f-b9a2-4fb508db30f0"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=("11111111-1111-4111-8111-111111111111",),
+            reviewed_sources={
+                "11111111-1111-4111-8111-111111111111": SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={
+                        "path": blob_path,
+                        "blob_ref": blob_ref,
+                        "schema": {"mode": "observed"},
+                    },
+                    observed_columns=("title", "url"),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path, "schema": {"mode": "observed"}},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        public_yaml = generate_public_yaml(state)
+        public_options = yaml.safe_load(public_yaml)["sources"]["source"]["options"]
+
+        assert "path" not in public_options
+        assert "blob_ref" not in public_options
+        assert public_options["schema"] == {"mode": "observed"}
+        assert blob_path not in public_yaml
+
+    def test_public_yaml_fails_closed_when_reviewed_name_drifts_onto_live_blob_path(self) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/renamed.json"
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="original",
+                    plugin="json",
+                    options={"path": blob_path, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "renamed": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+            generate_public_yaml(state)
+
+    @pytest.mark.parametrize(
+        "invalid_blob_ref",
+        [None, "", 123, "98B1357D-5AAB-4FB3-85B4-5AD643912E84"],
+        ids=["none", "empty", "wrong_type", "noncanonical_uuid"],
+    )
+    def test_public_yaml_rejects_present_invalid_reviewed_blob_ref(self, invalid_blob_ref: object) -> None:
+        blob_path = "/home/john/elspeth/data/blobs/session/source.json"
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"path": blob_path, "blob_ref": invalid_blob_ref},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": blob_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="canonical UUID"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": blob_path}
+
+    @pytest.mark.parametrize(
+        "invalid_carriers",
+        [
+            {"path": ""},
+            {"file": ""},
+            {"path": None},
+            {"file": 123},
+            {"path": "/home/john/elspeth/data/blobs/foreign/source.json", "file": None},
+            {"path": "/home/john/elspeth/data/blobs/foreign/so\x00urce.json"},
+        ],
+        ids=["empty_path", "empty_file", "none_path", "wrong_type_file", "valid_path_invalid_file", "nul_path"],
+    )
+    def test_public_yaml_rejects_invalid_reviewed_path_carriers(self, invalid_carriers: dict[str, object]) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        live_path = "/home/john/elspeth/data/blobs/foreign/source.json"
+        snapshot_options = {**invalid_carriers, "blob_ref": stable_id}
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options=snapshot_options,
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": live_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="path carrier"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": live_path}
+
+    def test_public_yaml_accepts_two_valid_reviewed_path_carriers(self) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        path = "/home/john/elspeth/data/blobs/source.json"
+        file = "/home/john/elspeth/data/blobs/source-alias.json"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"path": path, "file": file, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": path, "file": file},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        public_source = yaml.safe_load(generate_public_yaml(state))["sources"]["source"]
+
+        assert "path" not in public_source.get("options", {})
+        assert "file" not in public_source.get("options", {})
+
+    @pytest.mark.parametrize(
+        ("reviewed_carriers", "live_options"),
+        [
+            (
+                {"path": " /home/john/elspeth/data/blobs/bogus.json "},
+                {"path": "/home/john/elspeth/data/blobs/live.json"},
+            ),
+            ({"path": " /home/john/elspeth/data/blobs/bogus.json "}, {"schema": {"mode": "observed"}}),
+            (
+                {"path": "/home/john/elspeth/data/blobs/source.json"},
+                {
+                    "path": "/home/john/elspeth/data/blobs/source.json",
+                    "file": "/home/john/elspeth/data/blobs/secret.json",
+                },
+            ),
+            (
+                {
+                    "path": "/home/john/elspeth/data/blobs/source.json",
+                    "file": "/home/john/elspeth/data/blobs/source-alias.json",
+                },
+                {"path": "/home/john/elspeth/data/blobs/source.json"},
+            ),
+        ],
+        ids=["mismatched_path", "missing_live_carrier", "extra_live_carrier", "missing_live_reviewed_carrier"],
+    )
+    def test_public_yaml_rejects_same_name_without_exact_reviewed_path(
+        self,
+        reviewed_carriers: dict[str, object],
+        live_options: dict[str, object],
+    ) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={**reviewed_carriers, "blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options=live_options,
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == live_options
+
+    def test_public_yaml_rejects_reviewed_blob_ref_without_string_path_carrier(self) -> None:
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        live_path = "/home/john/elspeth/data/blobs/foreign/source.json"
+        guided_session = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="json",
+                    options={"blob_ref": stable_id},
+                    observed_columns=("value",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        state = CompositionState(
+            sources={
+                "source": SourceSpec(
+                    plugin="json",
+                    on_success="out",
+                    options={"path": live_path},
+                    on_validation_failure="discard",
+                )
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+            guided_session=guided_session,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="string path carrier"):
+            generate_public_yaml(state)
+
+        assert state.sources["source"].options == {"path": live_path}
+
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
         config and must survive into the YAML — the strip only fires for the
@@ -811,3 +1142,161 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
         # Empty state should produce an empty YAML doc (no source, no sinks)
         assert parsed is None or parsed == {}
+
+
+def _queue_node(*, description: str | None = None) -> NodeSpec:
+    """Canonical structural queue NodeSpec (elspeth-a5b86149d4)."""
+    return NodeSpec(
+        id="inbound",
+        node_type="queue",
+        plugin=None,
+        input="inbound",
+        on_success=None,
+        on_error=None,
+        options={} if description is None else {"description": description},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _make_queue_pipeline(*, description: str | None = None) -> CompositionState:
+    """Two sources fan into one queue, which feeds a single passthrough sink chain."""
+    return CompositionState(
+        source=None,
+        sources={
+            "orders": SourceSpec(
+                plugin="csv",
+                on_success="inbound",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "refunds": SourceSpec(
+                plugin="csv",
+                on_success="inbound",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+        },
+        nodes=(
+            _queue_node(description=description),
+            NodeSpec(
+                id="normalize",
+                node_type="transform",
+                plugin="passthrough",
+                input="inbound",
+                on_success="combined",
+                on_error="discard",
+                options={"schema": {"mode": "observed"}},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="combined", plugin="json", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+class TestGenerateQueueYaml:
+    def test_queue_without_description_generates_empty_mapping(self) -> None:
+        state = _make_queue_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["queues"] == {"inbound": {}}
+        assert parsed["queues"]["inbound"] == {}
+
+    def test_queue_description_round_trips(self) -> None:
+        state = _make_queue_pipeline(description="Orders and refunds interleave here")
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert parsed["queues"] == {"inbound": {"description": "Orders and refunds interleave here"}}
+
+    def test_queue_appears_only_under_top_level_queues_never_transforms(self) -> None:
+        state = _make_queue_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "inbound" in parsed["queues"]
+        transform_names = {t["name"] for t in parsed.get("transforms", [])}
+        assert "inbound" not in transform_names
+        # The queue is not smuggled into any executable node list.
+        for section in ("transforms", "gates", "aggregations", "coalesce"):
+            entries = parsed.get(section, [])
+            assert all(entry.get("name") != "inbound" for entry in entries)
+
+    def test_generate_pipeline_dict_places_queues_after_sources_before_transforms(self) -> None:
+        state = _make_queue_pipeline()
+        keys = list(generate_pipeline_dict(state))
+
+        assert keys.index("sources") < keys.index("queues") < keys.index("transforms")
+
+    def test_queue_free_snapshot_is_unchanged(self) -> None:
+        """A queue-free pipeline emits no top-level ``queues`` key."""
+        state = _make_linear_pipeline()
+        parsed = yaml.safe_load(generate_yaml(state))
+
+        assert "queues" not in parsed
+
+    def test_generate_pipeline_dict_rejects_malformed_internal_queue(self) -> None:
+        """The generator defends the canonical queue shape (single source of
+        truth: queue_node_contract_error) rather than emitting a broken queue."""
+        state = _make_queue_pipeline()
+        broken_queue = replace(state.nodes[0], plugin="passthrough")
+        state = state.with_node(broken_queue)
+
+        with pytest.raises(ValueError, match="does not accept field"):
+            generate_pipeline_dict(state)
+
+    def test_import_generate_import_preserves_queue_state(self) -> None:
+        """Export -> re-import is the queue contract's round-trip guarantee."""
+        original = composition_state_from_runtime_yaml(
+            """
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+  refunds:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+queues:
+  inbound:
+    description: interleave point
+transforms:
+- name: normalize
+  plugin: passthrough
+  input: inbound
+  on_success: combined
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+sinks:
+  combined:
+    plugin: json
+    options:
+      path: outputs/combined.jsonl
+    on_write_failure: discard
+"""
+        )
+        reimported = composition_state_from_runtime_yaml(generate_yaml(original))
+
+        original_queue = next(n for n in original.nodes if n.node_type == "queue")
+        reimported_queue = next(n for n in reimported.nodes if n.node_type == "queue")
+        assert reimported_queue.id == original_queue.id == "inbound"
+        assert dict(reimported_queue.options) == {"description": "interleave point"}
+        assert dict(reimported_queue.options) == dict(original_queue.options)
+        assert [source.on_success for source in reimported.sources.values()] == ["inbound", "inbound"]

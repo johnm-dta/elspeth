@@ -11,6 +11,7 @@ from elspeth.contracts import (
     NodeStateStatus,
     NodeType,
     RoutingMode,
+    RoutingSpec,
     TerminalOutcome,
     TerminalPath,
 )
@@ -458,7 +459,7 @@ class TestGetRowDataReprFallback:
 
         from elspeth.core.landscape.schema import rows_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(update(rows_table).where(rows_table.c.row_id == "row-1").values(source_data_ref=ref))
 
         ops = DatabaseOps(db)
@@ -501,7 +502,7 @@ class TestGetRowDataReprFallback:
 
         from elspeth.core.landscape.schema import rows_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(update(rows_table).where(rows_table.c.row_id == "row-1").values(source_data_ref=ref))
 
         ops = DatabaseOps(db)
@@ -689,17 +690,12 @@ class TestGetRoutingEvents:
             schema_config=_DYNAMIC_SCHEMA,
         )
         factory.data_flow.register_edge("run-1", "transform-1", "sink-0", "route_to_sink", RoutingMode.MOVE, edge_id="edge-2")
-        factory.execution.record_routing_event(
-            state_id="state-1",
-            edge_id="edge-1",
-            mode=RoutingMode.MOVE,
-            ordinal=1,
-        )
-        factory.execution.record_routing_event(
-            state_id="state-1",
-            edge_id="edge-2",
-            mode=RoutingMode.MOVE,
-            ordinal=0,
+        factory.execution.record_routing_events(
+            "state-1",
+            [
+                RoutingSpec(edge_id="edge-2", mode=RoutingMode.MOVE),
+                RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE),
+            ],
         )
 
         events = factory.query.get_routing_events("state-1")

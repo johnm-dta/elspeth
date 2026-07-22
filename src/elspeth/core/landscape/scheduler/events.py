@@ -91,16 +91,18 @@ class SchedulerEventStore:
             "context_json": context_json,
         }
         try:
-            result = conn.execute(scheduler_events_table.insert().values(**values))
+            inserted_event_id = conn.execute(
+                scheduler_events_table.insert().values(**values).returning(scheduler_events_table.c.event_id)
+            ).scalar_one()
         except SQLAlchemyError as exc:
             raise LandscapeRecordError(
                 f"Scheduler event {event_type.value!r} failed for run_id={run_id!r} "
                 f"work_item_id={work_item_id!r} — database rejected audit write: {type(exc).__name__}"
             ) from exc
-        if result.rowcount != 1:
+        if inserted_event_id != event_id:
             raise LandscapeRecordError(
-                f"Scheduler event {event_type.value!r} affected {result.rowcount} rows for "
-                f"run_id={run_id!r} work_item_id={work_item_id!r}; expected exactly one audit row."
+                f"Scheduler event {event_type.value!r} returned unexpected event_id={inserted_event_id!r} for "
+                f"run_id={run_id!r} work_item_id={work_item_id!r}; expected {event_id!r}."
             )
 
     @staticmethod

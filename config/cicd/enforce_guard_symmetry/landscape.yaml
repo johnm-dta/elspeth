@@ -17,13 +17,16 @@ per_file_rules:
   - pattern: "core/landscape/model_loaders.py"
     rules: [GS1]
     reason: >-
-      11 loaders where __post_init__ validation fires during load(),
+      17 loaders where __post_init__ validation fires during load(),
       providing read-side coverage without explicit AuditIntegrityError.
       Lifecycle: RunLoader delegates the explicit AuditIntegrityError guard
       to validate_run_lifecycle_row().
       Int-only: RowLoader, TokenLoader, TokenParentLoader, ArtifactLoader,
       BatchMemberLoader. Enum+int: EdgeLoader, BatchLoader, RoutingEventLoader,
       SchedulerEventLoader.
+      Effect ledger: SinkEffectStreamLoader, SinkEffectLoader,
+      SinkEffectMemberLoader, AuditExportSnapshotChunkLoader,
+      SinkEffectExportSnapshotAssociationLoader, SinkEffectAttemptLoader.
       Plugin: ValidationErrorLoader (pairs with validation.py, not audit.py).
     expires: null
-    max_hits: 11
+    max_hits: 17

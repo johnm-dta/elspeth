@@ -9,7 +9,7 @@
 // - Fuzzy search across plugin names, descriptions, usage prose, and tags
 // - Per-tab filter chips for capability tags and audit characteristics
 // - Tab-based filtering by plugin type with counts
-// - Schema details fetched on demand and cached
+// - Principal/fingerprint-isolated list and schema caches
 // - Sources tab pins an InlineChatSourceEntry as the first row — a
 //   synthetic affordance that is unaffected by filters or search and is
 //   always visible alongside the empty-state message when filters
@@ -19,8 +19,8 @@
 // so an active capability filter on Sources does NOT silently hide every
 // plugin on Transforms when the user switches tabs.
 //
-// Data is fetched once on first open and cached in component state for the
-// lifetime of the drawer instance.
+// Data is owned by the plugin catalog store; component lifetime is not a
+// cache boundary.
 // ============================================================================
 
 import {
@@ -31,14 +31,8 @@ import {
   useMemo,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
-import {
-  listSources,
-  listTransforms,
-  listSinks,
-  getPluginSchema,
-} from "@/api/client";
-import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
-import { PluginCard } from "./PluginCard";
+import type { PluginPolicyFinding, PluginSummary } from "@/types/index";
+import { PluginCard, PREFILL_CHAT_INPUT_EVENT } from "./PluginCard";
 import { FilterChipStrip, type CatalogFilters } from "./FilterChipStrip";
 import { InlineChatSourceEntry } from "./InlineChatSourceEntry";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -48,9 +42,13 @@ import {
   fuzzyMatch,
 } from "@/utils/fuzzyScore";
 import { pluginDisplayName } from "./pluginDisplayName";
+import { useAuthStore } from "@/stores/authStore";
+import { usePluginCatalogStore } from "@/stores/pluginCatalogStore";
+import { useSessionStore } from "@/stores/sessionStore";
 
 type CatalogTab = "sources" | "transforms" | "sinks";
 const CATALOG_TABS: readonly CatalogTab[] = ["sources", "transforms", "sinks"];
+const EMPTY_POLICY_FINDINGS: PluginPolicyFinding[] = [];
 
 function catalogTabLabel(tab: CatalogTab): string {
   return tab === "sources" ? "Sources" : tab === "transforms" ? "Transforms" : "Sinks";
@@ -132,6 +130,22 @@ function emptyFiltersByTab(): Record<CatalogTab, CatalogFilters> {
   };
 }
 
+function unavailableReasonLabel(reason: PluginPolicyFinding["reason_code"]): string {
+  return {
+    plugin_not_enabled: "Not enabled",
+    plugin_not_installed: "Not installed",
+    plugin_unavailable: "Unavailable",
+    credential_unavailable: "Credential unavailable",
+    profile_unavailable: "Profile unavailable",
+  }[reason];
+}
+
+function repairTab(pluginId: string): CatalogTab {
+  if (pluginId.startsWith("source:")) return "sources";
+  if (pluginId.startsWith("sink:")) return "sinks";
+  return "transforms";
+}
+
 interface CatalogDrawerProps {
   isOpen: boolean;
   onClose: () => void;
@@ -139,16 +153,29 @@ interface CatalogDrawerProps {
 
 export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   const [activeTab, setActiveTab] = useState<CatalogTab>("sources");
-  const [sources, setSources] = useState<PluginSummary[] | null>(null);
-  const [transforms, setTransforms] = useState<PluginSummary[] | null>(null);
-  const [sinks, setSinks] = useState<PluginSummary[] | null>(null);
-  const [schemaCache, setSchemaCache] = useState<Map<string, PluginSchemaInfo>>(
-    new Map(),
+  const principal = useAuthStore((state) => state.user?.user_id ?? null);
+  const sources = usePluginCatalogStore((state) => state.sources);
+  const transforms = usePluginCatalogStore((state) => state.transforms);
+  const sinks = usePluginCatalogStore((state) => state.sinks);
+  const schemaCache = usePluginCatalogStore((state) => state.schemas);
+  const schemaErrors = usePluginCatalogStore((state) => state.schemaErrors);
+  const fetchError = usePluginCatalogStore((state) => state.error);
+  const isFetching = usePluginCatalogStore((state) => state.isLoading);
+  const catalogFingerprint = usePluginCatalogStore((state) => state.fingerprint);
+  const load = usePluginCatalogStore((state) => state.load);
+  const loadSchema = usePluginCatalogStore((state) => state.loadSchema);
+  const storedPolicyFindings = useSessionStore(
+    (state) => state.compositionState?.plugin_policy_findings ?? EMPTY_POLICY_FINDINGS,
   );
-  const [loadingSchemas, setLoadingSchemas] = useState<Set<string>>(new Set());
-  const [schemaErrors, setSchemaErrors] = useState<Set<string>>(new Set());
-  const [fetchError, setFetchError] = useState(false);
-  const [isFetching, setIsFetching] = useState(false);
+  const policyFindings = useMemo(
+    () =>
+      catalogFingerprint === null
+        ? EMPTY_POLICY_FINDINGS
+        : storedPolicyFindings.filter(
+            (finding) => finding.snapshot_fingerprint === catalogFingerprint,
+          ),
+    [catalogFingerprint, storedPolicyFindings],
+  );
   const [searchQuery, setSearchQuery] = useState("");
   // Per-tab filter state — switching tabs reveals the user's filter set
   // for that tab. Avoids the "active capability filter on Sources hides
@@ -193,43 +220,22 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
   );
 
   const loadCatalog = useCallback(() => {
-    if (isFetching) return;
-
-    setFetchError(false);
-    setIsFetching(true);
-    Promise.all([listSources(), listTransforms(), listSinks()])
-      .then(([src, xfm, snk]) => {
-        setSources(src);
-        setTransforms(xfm);
-        setSinks(snk);
-      })
-      .catch((err: unknown) => {
-        // The user-visible chip ("Failed to load.") collapses every failure
-        // mode (5xx, network drop, auth, schema drift) into one opaque
-        // string. Surface the rejection through console.error so an
-        // operator inspecting DevTools can distinguish causes without
-        // having to reproduce the failure server-side.
-        console.error("[CatalogDrawer] failed to load plugin catalog:", err);
-        setFetchError(true);
-      })
-      .finally(() => {
-        setIsFetching(false);
-      });
-  }, [isFetching]);
+    if (principal === null || isFetching) return;
+    void load({ principal, force: fetchError !== null });
+  }, [fetchError, isFetching, load, principal]);
 
   // Fetch all three lists in parallel on first open.
   useEffect(() => {
-    if (!isOpen || sources !== null || isFetching || fetchError) return;
+    if (
+      !isOpen ||
+      principal === null ||
+      sources !== null ||
+      isFetching ||
+      fetchError !== null
+    ) return;
 
     loadCatalog();
-  }, [isOpen, sources, isFetching, fetchError, loadCatalog]);
-
-  // Clear error on close so next open retries
-  useEffect(() => {
-    if (!isOpen && fetchError) {
-      setFetchError(false);
-    }
-  }, [isOpen, fetchError]);
+  }, [isOpen, principal, sources, isFetching, fetchError, loadCatalog]);
 
   // Keyboard: Escape closes, / focuses search
   useEffect(() => {
@@ -276,45 +282,28 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
 
   const handleExpand = useCallback(
     (plugin: PluginSummary) => {
-      const cacheKey = `${plugin.plugin_type}:${plugin.name}`;
-      if (schemaCache.has(cacheKey) || loadingSchemas.has(cacheKey)) return;
-      // Clear previous error on retry
-      setSchemaErrors((prev) => {
-        if (!prev.has(cacheKey)) return prev;
-        const next = new Set(prev);
-        next.delete(cacheKey);
-        return next;
-      });
-
-      setLoadingSchemas((prev) => new Set(prev).add(cacheKey));
-
-      getPluginSchema(plugin.plugin_type, plugin.name)
-        .then((info) => {
-          setSchemaCache((prev) => {
-            const next = new Map(prev);
-            next.set(cacheKey, info);
-            return next;
-          });
-          setSchemaErrors((prev) => {
-            if (!prev.has(cacheKey)) return prev;
-            const next = new Set(prev);
-            next.delete(cacheKey);
-            return next;
-          });
-        })
-        .catch(() => {
-          setSchemaErrors((prev) => new Set(prev).add(cacheKey));
-        })
-        .finally(() => {
-          setLoadingSchemas((prev) => {
-            const next = new Set(prev);
-            next.delete(cacheKey);
-            return next;
-          });
-        });
+      void loadSchema(plugin.plugin_type, plugin.name);
     },
-    [schemaCache, loadingSchemas],
+    [loadSchema],
   );
+
+  const handleRemoveDisabled = useCallback(
+    (finding: PluginPolicyFinding) => {
+      window.dispatchEvent(
+        new CustomEvent(PREFILL_CHAT_INPUT_EVENT, {
+          detail: `Remove disabled component ${finding.component_id} (${finding.plugin_id}) from this pipeline.`,
+        }),
+      );
+      onClose();
+    },
+    [onClose],
+  );
+
+  const handleReplaceDisabled = useCallback((finding: PluginPolicyFinding) => {
+    setActiveTab(repairTab(finding.plugin_id));
+    setSearchQuery("");
+    queueMicrotask(() => searchInputRef.current?.focus());
+  }, []);
 
   // Get plugins for current tab — used as the input for both the
   // filter-chip strip (which derives chip values from this set) and the
@@ -425,6 +414,57 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           </button>
         </div>
 
+        {policyFindings.length > 0 && (
+          <section
+            role="region"
+            aria-labelledby="catalog-disabled-components-title"
+            className="validation-banner validation-banner-fail"
+          >
+            <div
+              id="catalog-disabled-components-title"
+              className="validation-banner-fail-title"
+            >
+              Unavailable saved components
+            </div>
+            <p>
+              These historical components remain visible, but must be removed
+              or replaced before the pipeline can run.
+            </p>
+            <ul className="validation-banner-fail-list">
+              {policyFindings.map((finding) => (
+                <li
+                  key={`${finding.component_id}:${finding.plugin_id}`}
+                  className="validation-banner-error-item"
+                >
+                  <div>
+                    <strong>{finding.component_id}</strong>{" "}
+                    <code>{finding.plugin_id}</code> —{" "}
+                    {unavailableReasonLabel(finding.reason_code)}
+                  </div>
+                  <div className="import-yaml-actions">
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      aria-label={`Remove disabled component ${finding.component_id} (${finding.plugin_id})`}
+                      onClick={() => handleRemoveDisabled(finding)}
+                    >
+                      Remove
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      aria-label={`Replace disabled component ${finding.component_id} (${finding.plugin_id}) with an available ${repairTab(finding.plugin_id).slice(0, -1)}`}
+                      onClick={() => handleReplaceDisabled(finding)}
+                    >
+                      Replace
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {/* Search input */}
         <div className="catalog-search-wrapper">
           <div className="catalog-search-container">
@@ -512,7 +552,7 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
             <InlineChatSourceEntry onCloseDrawer={onClose} />
           )}
 
-          {fetchError ? (
+          {fetchError !== null ? (
             // role="alert" so the load failure is announced assertively the
             // moment it appears (WCAG 4.1.3) — the loading branch below is
             // polite, but an error the user did not initiate is urgent.
@@ -565,8 +605,8 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
               <div role="list" className="catalog-plugin-list">
                 {pluginList.map((plugin) => {
                   const cacheKey = `${plugin.plugin_type}:${plugin.name}`;
-                  const schema = schemaCache.get(cacheKey) ?? null;
-                  const hasSchemaError = schemaErrors.has(cacheKey);
+                  const schema = schemaCache[cacheKey] ?? null;
+                  const hasSchemaError = schemaErrors[cacheKey] === true;
                   return (
                     <div role="listitem" key={cacheKey}>
                       <PluginCard

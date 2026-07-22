@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "catalog_id": "elspeth-state-engine-v1",
+  "criteria_ref": "docs/architecture/state_engine/completeness-criteria.md",
+  "architecture_ref": "docs/architecture/state_engine/architecture.md",
+  "dimensions": [
+    "production_entry",
+    "precondition_image",
+    "success_effects",
+    "guard_refusal",
+    "zero_mutation_rollback",
+    "concurrency",
+    "crash_restart",
+    "boundary_composition",
+    "read_model_truth_table",
+    "maintenance"
+  ],
+  "execution_profiles": {
+    "state_store": [
+      {
+        "id": "sqlite-wal",
+        "required": true,
+        "contract_ref": "docs/architecture/adr/030-multi-worker-deployment-shape.md",
+        "scope": "The durable scheduler and run-coordination state use one SQLite WAL database. PostgreSQL is not an advertised state-engine store in v1."
+      }
+    ],
+    "deployments": [
+      "single-process-leader",
+      "same-host-leader-plus-claim-only-followers",
+      "web-hosted-leader-plus-same-host-cli-followers"
+    ],
+    "lifecycle_modes": [
+      "fresh",
+      "resume",
+      "follower",
+      "partial-start-failure",
+      "normal-teardown",
+      "exceptional-teardown",
+      "leader-takeover"
+    ],
+    "first_party_plugins": {
+      "sources": ["aws_s3", "azure_blob", "csv", "dataverse", "json", "null", "text"],
+      "transforms": ["aws_bedrock_content_safety", "aws_bedrock_prompt_shield", "azure_content_safety", "azure_document_intelligence", "azure_prompt_shield", "batch_classifier_metrics", "batch_data_quality_report", "batch_distribution_profile", "batch_drift_compare", "batch_effect_size", "batch_experiment_compare", "batch_outlier_annotator", "batch_paired_preference", "batch_replicate", "batch_stats", "batch_threshold_summary", "batch_top_k", "blob_csv_expand", "blob_fetch", "field_mapper", "json_explode", "keyword_filter", "line_explode", "llm", "passthrough", "rag_retrieval", "report_assemble", "truncate", "type_coerce", "value_transform", "web_scrape"],
+      "sinks": ["aws_s3", "azure_blob", "chroma_sink", "csv", "database", "dataverse", "json", "text"],
+      "inventory_rule": "The list is the literal class-level plugin name inventory under src/elspeth/plugins at the assessed commit; a catalog revision is required when it changes."
+    }
+  },
+  "applicability_profiles": {
+    "all-required-v1": {
+      "default_case_id": "leg-contract",
+      "production_entry": "required",
+      "precondition_image": "required",
+      "success_effects": "required",
+      "guard_refusal": "required",
+      "zero_mutation_rollback": "required",
+      "concurrency": "required",
+      "crash_restart": "required",
+      "boundary_composition": "required",
+      "read_model_truth_table": "required",
+      "maintenance": "required"
+    }
+  },
+  "family_dimension_acceptance": {
+    "transition": {
+      "production_entry": "A real scheduler caller reaches the exact transition.",
+      "precondition_image": "Every status, subtype, identity, owner, fence, and payload discriminator is asserted before the write.",
+      "success_effects": "The exact work row, event, outcome, loss, coordination, and emitted-work image is asserted.",
+      "guard_refusal": "Every wrong status, subtype, identity, owner, membership, epoch, and incomplete bundle is refused.",
+      "zero_mutation_rollback": "Refusal and injected component failure preserve or roll back every affected durable plane.",
+      "concurrency": "Independent connections or processes prove the winner, loser, generation, and ABA behavior.",
+      "crash_restart": "A fresh process converges at every boundary before and after the transition commit.",
+      "boundary_composition": "The real source, traversal, barrier, sink, follower, or repair caller preserves the transition contract.",
+      "read_model_truth_table": "Every downstream decision includes or excludes the transition's before/after subtypes correctly.",
+      "maintenance": "Exact executable selectors remain collected and the residual gap has coherent live ownership when actionable."
+    },
+    "auxiliary": {
+      "production_entry": "A real scheduler or orchestration caller reaches the auxiliary mutation or loss decision.",
+      "precondition_image": "Owner, membership, epoch, expiry, adoption, and durable identity inputs are exact.",
+      "success_effects": "Expiry, adoption, membership, evidence, and identity changes are exact and no unrelated event is fabricated.",
+      "guard_refusal": "Stale, foreign, inactive, ineligible, or already-adopted callers fail closed.",
+      "zero_mutation_rollback": "Loss, refusal, or injected failure leaves every scheduler and coordination plane exact.",
+      "concurrency": "Independent contenders demonstrate one effective authority and a bounded loser outcome.",
+      "crash_restart": "Fresh-process recovery reconstructs the auxiliary state without duplicate authority or lost work.",
+      "boundary_composition": "The production drain, intake, heartbeat, or recovery caller reacts correctly.",
+      "read_model_truth_table": "Expiry, owner, membership, and adoption changes drive each consumer correctly.",
+      "maintenance": "Exact selectors and any coherent actionable gap remain maintained."
+    },
+    "run_coordination": {
+      "production_entry": "Leader, join, heartbeat, shutdown, or eviction orchestration reaches the exact coordination verb.",
+      "precondition_image": "Run, worker, role, seat owner, epoch, heartbeat window, and membership state are exact.",
+      "success_effects": "Seat, registry, epoch, heartbeat, and coordination-event images commit exactly.",
+      "guard_refusal": "Duplicate, stale, live-seat, wrong-role, departed, evicted, or foreign-run callers fail closed.",
+      "zero_mutation_rollback": "Refusal and component failure preserve seat, registry, and coordination-event planes.",
+      "concurrency": "Independent processes prove one seat/admission/eviction winner and deterministic loser state.",
+      "crash_restart": "Fresh processes safely resume or take over at registration, heartbeat, release, admission, departure, and eviction seams.",
+      "boundary_composition": "Fresh/resume/follower/takeover/shutdown orchestration preserves coordination authority.",
+      "read_model_truth_table": "Live-leader and dead-worker selectors reflect every seat/member/expiry arm.",
+      "maintenance": "Exact coordination selectors and actionable residual ownership remain maintained."
+    },
+    "production_boundary": {
+      "production_entry": "The real supported plugin or orchestration entry reaches the boundary.",
+      "precondition_image": "Runtime composition, durable authority, input identity, lifecycle, and resource state are exact.",
+      "success_effects": "Plugin-visible, scheduler, audit, outcome, artifact, and external-effect images are exact.",
+      "guard_refusal": "Unsupported lifecycle, stale authority, bad result, or ambiguous external state fails closed.",
+      "zero_mutation_rollback": "Raised, refused, or interrupted boundaries preserve or reconcile every durable and external plane.",
+      "concurrency": "The supported deployment profile proves winner/loser/order behavior at the boundary.",
+      "crash_restart": "Fresh-process execution converges at every listed cross-transaction seam.",
+      "boundary_composition": "Every first-party plugin or lifecycle class named by the execution profile preserves the contract.",
+      "read_model_truth_table": "Drain, flush, resume, follower, and teardown decisions observe every boundary-created state correctly.",
+      "maintenance": "Representative production selectors and coherent actionable ownership remain maintained."
+    },
+    "read_model": {
+      "production_entry": "The real orchestration decision calls the exact read model.",
+      "precondition_image": "Every status, subtype, owner, run, expiry equality, duplicate, and ordering input is seeded.",
+      "success_effects": "The returned set/count/decision and its downstream orchestration action are exact.",
+      "guard_refusal": "Foreign run, malformed identity, stale snapshot, or invalid scope is rejected or excluded as contracted.",
+      "zero_mutation_rollback": "The read and its consumer perform no uncontracted durable mutation on refusal or failure.",
+      "concurrency": "Independent writers/readers prove snapshot and boundary behavior under supported storage semantics.",
+      "crash_restart": "A fresh object/process against the same store returns the same decision for the same durable image.",
+      "boundary_composition": "The real drain, resume, relinquish, eviction, flush, or completion consumer acts on the result correctly.",
+      "read_model_truth_table": "Every positive and negative truth-table arm, exact boundary, deduplication, and order is asserted.",
+      "maintenance": "The whole truth table and production consumer selectors remain maintained."
+    },
+    "forbidden": {
+      "production_entry": "Every production surface that could attempt the forbidden path is exercised or bounded by explicit reachability evidence.",
+      "precondition_image": "The exact illegal state, subtype, owner, epoch, membership, or identity is constructed.",
+      "success_effects": "Success means the contracted refusal or deliberate absence is observed; no illegal transition succeeds.",
+      "guard_refusal": "The precise guard and error category reject the path before mutation.",
+      "zero_mutation_rollback": "Every durable and external before/after image is identical on refusal.",
+      "concurrency": "Contention cannot bypass the refusal or make the deliberately absent path reachable.",
+      "crash_restart": "Fresh-process state and recovery do not re-enable the forbidden path.",
+      "boundary_composition": "Real source, scheduler, barrier, coordination, plugin, or restore boundaries preserve the refusal.",
+      "read_model_truth_table": "No read decision fabricates or enables the forbidden state/path.",
+      "maintenance": "Refusal/reachability selectors and the deliberate-absence decision remain maintained."
+    }
+  },
+  "hard_gates": [
+    {"id": "HG-01-invalid-subtype", "title": "Malformed state/subtype bundles are never admitted"},
+    {"id": "HG-02-authority-downgrade", "title": "Missing authority never selects a weaker production write"},
+    {"id": "HG-03-double-winner", "title": "Contention cannot produce two effective winners"},
+    {"id": "HG-04-refusal-mutation", "title": "Refusal preserves the complete durable image"},
+    {"id": "HG-05-state-evidence-atomicity", "title": "State and mandatory evidence commit or roll back together"},
+    {"id": "HG-06-restart-loss-or-duplicate", "title": "Restart loses or duplicates neither work nor external effect"},
+    {"id": "HG-07-read-model-unproved-arm", "title": "Orchestration decisions have no unproved state/subtype arm"},
+    {"id": "HG-08-plugin-lifecycle-durability", "title": "Supported plugin lifecycle paths preserve the durable contract"},
+    {"id": "HG-09-mandatory-leg-unresolved", "title": "Every mandatory catalog case is resolved"},
+    {"id": "HG-10-normative-contract-drift", "title": "Source, architecture, catalog, assessment, and tracker agree"}
+  ],
+  "required_leg_ids": [
+    "TS-00", "TS-01", "TS-02", "TS-03", "TS-04", "TS-05", "TS-06", "TS-07", "TS-08", "TS-09",
+    "TS-10", "TS-11", "TS-12", "TS-13", "TS-14", "TS-15", "TS-16", "TS-17", "TS-18",
+    "AUX-01", "AUX-02", "AUX-03", "AUX-04", "AUX-05", "AUX-06", "AUX-07",
+    "RC-01", "RC-02", "RC-03", "RC-04", "RC-05", "RC-06", "RC-07",
+    "PB-01", "PB-02", "PB-03", "PB-04", "PB-05", "PB-06", "PB-07", "PB-08", "PB-09",
+    "RM-01", "RM-02", "RM-03", "RM-04", "RM-05", "RM-06", "RM-07", "RM-08", "RM-09", "RM-10", "RM-11", "RM-12", "RM-13",
+    "F-01", "F-02", "F-03", "F-04", "F-05", "F-06", "F-07", "F-08", "F-09", "F-10", "F-11", "F-12", "F-13"
+  ],
+  "legs": [
+    {"id": "TS-00", "family": "transition", "title": "Enqueue absent work as READY", "contract": "Insert the complete resume cursor; exact replay is idempotent and incompatible replay refuses.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-01", "family": "transition", "title": "Compose enqueue and initial READY claim", "contract": "New-row enqueue and claim or exact existing-READY reconciliation commit atomically.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-02", "family": "transition", "title": "Ingest row token source completion and initial lease", "contract": "Row, token, exact step-0 source COMPLETED witness, work item, lease, events, and leader fence share one transaction.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-03", "family": "transition", "title": "Claim READY work", "contract": "One available READY row becomes LEASED with one effective owner and unchanged attempt identity.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-04", "family": "transition", "title": "Claim complete PENDING_SINK work", "contract": "Only a complete pending-sink bundle becomes a sink-redrive lease; the bundle remains exact.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-05", "family": "transition", "title": "Recover expired transform lease", "contract": "Eligible expired transform work returns READY with attempt bump and deterministic identity rotation.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-06", "family": "transition", "title": "Recover expired sink-redrive lease", "contract": "Eligible sink-redrive work returns PENDING_SINK without losing or changing its bundle identity.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-07", "family": "transition", "title": "Mark claimed transform work BLOCKED", "contract": "The exact transform lease becomes a legal barrier/queue hold with release evidence and no lease.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-08", "family": "transition", "title": "Mark claimed transform work TERMINAL", "contract": "The exact transform lease terminalizes, scrubs payload, and atomically records optional branch loss and event.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-09", "family": "transition", "title": "Mark claimed transform work FAILED", "contract": "The exact transform lease fails, scrubs payload, and atomically records optional branch loss and event.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-10", "family": "transition", "title": "Park claimed transform work PENDING_SINK", "contract": "The exact transform lease becomes attributed sink debt with a complete bundle and optional branch loss.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-11", "family": "transition", "title": "Terminalize attributed pending-sink work", "contract": "Durably outcomed attributed PENDING_SINK rows terminalize under strict ownership and authority.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-12", "family": "transition", "title": "Terminalize claimed sink-redrive work", "contract": "Durably outcomed sink-redrive leases terminalize under strict ownership and authority.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-13", "family": "transition", "title": "Bulk terminalize sink debt", "contract": "The complete requested token set validates before all rows and per-row events commit atomically.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-14", "family": "transition", "title": "Repair pending sink from terminal outcome witness", "contract": "Resume terminalizes only rows with durable terminal outcomes and never republishes the sink effect.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-15", "family": "transition", "title": "Consume exact BLOCKED barrier snapshot", "contract": "Exact blocked inputs, payload scrub, evidence, losses, and optional outputs share one fenced transaction.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-16", "family": "transition", "title": "Convert BLOCKED passthrough to PENDING_SINK", "contract": "Barrier consumption and passthrough sink bundle replacement are atomic.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-17", "family": "transition", "title": "Emit new PENDING_SINK from barrier", "contract": "Barrier consume and terminal-lane sink debt insertion are atomic with complete identity.", "applicability_profile": "all-required-v1"},
+    {"id": "TS-18", "family": "transition", "title": "Emit new READY continuation from barrier", "contract": "Barrier consume and continuation insertion are atomic with complete cursor and references.", "applicability_profile": "all-required-v1"},
+
+    {"id": "AUX-01", "family": "auxiliary", "title": "Heartbeat active lease", "contract": "The exact owner extends expiry without changing state identity attempt or scheduler events.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-02", "family": "auxiliary", "title": "Observe heartbeat lease loss", "contract": "The loser records lease loss and abandons result/disposition with zero scheduler mutation.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-03", "family": "auxiliary", "title": "Adopt BLOCKED barrier item", "contract": "Leader-fenced adoption and required membership/outcome evidence commit atomically.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-04", "family": "auxiliary", "title": "Reset holdless coalesce adoption", "contract": "Only eligible adopted-but-holdless BLOCKED coalesce work resets for restore.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-05", "family": "auxiliary", "title": "Adopt branch-loss replay cursor", "contract": "Leader-fenced branch-loss adoption is idempotent and does not fabricate scheduler events.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-06", "family": "auxiliary", "title": "Enforce worker membership", "contract": "Registered claim enqueue and disposition paths refuse absent departed or evicted workers.", "applicability_profile": "all-required-v1"},
+    {"id": "AUX-07", "family": "auxiliary", "title": "Enforce leader epoch", "contract": "Every strict leader-owned mutation verifies and extends the exact run leader and epoch first.", "applicability_profile": "all-required-v1"},
+
+    {"id": "RC-01", "family": "run_coordination", "title": "Register initial run leader", "contract": "Create epoch-1 leader seat, active leader membership, and coordination evidence atomically for a new run.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-02", "family": "run_coordination", "title": "Acquire or take over run leadership", "contract": "Only an empty or expired seat admits one active worker, increments the epoch, and fences the prior leader.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-03", "family": "run_coordination", "title": "Heartbeat registered worker and leader seat", "contract": "An active worker extends its membership window and, only when it owns the seat, the exact leader epoch window.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-04", "family": "run_coordination", "title": "Release run leader seat and membership", "contract": "Only the exact run leader and epoch atomically clear the seat and move that run-scoped active membership to DEPARTED; a stale foreign or losing release mutates neither plane.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-05", "family": "run_coordination", "title": "Admit follower worker", "contract": "A live leader seat admits one active claim-only follower with exact run membership and evidence.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-06", "family": "run_coordination", "title": "Depart registered worker", "contract": "Only an active member becomes departed with one durable timestamp and cannot regain authority by heartbeat.", "applicability_profile": "all-required-v1"},
+    {"id": "RC-07", "family": "run_coordination", "title": "Evict dead non-leader worker", "contract": "The current leader and repository predicate fence eviction to an eligible expired non-leader in the same run and record the exact terminal membership image.", "applicability_profile": "all-required-v1"},
+
+    {"id": "PB-01", "family": "production_boundary", "title": "Source ingress", "contract": "Accepted rows enter TS-02 with source completion; before plugin execution resume repairs only an exact pre-fix missing-witness image and fails closed on ambiguity, while pre-row failures and quarantine exclusions create no scheduler work.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-02", "family": "production_boundary", "title": "Transform execution", "contract": "Real transform outcomes and audit evidence compose with the correct scheduler disposition.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-03", "family": "production_boundary", "title": "Declarative gate execution", "contract": "Real gate outcomes and route/loss evidence compose with the correct scheduler disposition.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-04", "family": "production_boundary", "title": "Aggregation barrier", "contract": "Adoption plugin execution consume and continuation recover without loss duplicate or orphaned authority.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-05", "family": "production_boundary", "title": "Coalesce barrier", "contract": "Durable merge decision parent finalization and barrier continuation converge across replay.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-06", "family": "production_boundary", "title": "Sink effect publication", "contract": "Every production sink effect reserves claims preparation plans leases reconciles or commits and finalizes exactly once by contract.", "applicability_profile": "all-required-v1", "required_cases": ["reserve-pipeline-members", "reserve-audit-export-snapshot", "predecessor-wait-and-stream-advance", "claim-preparation-generation", "inspect-or-typed-no-inspection", "prepare-immutable-plan", "expired-preparation-claim-takeover", "death-after-preparation-claim-before-plan", "acquire-generation-fenced-lease", "heartbeat-effect-lease", "expired-generation-takeover", "reconcile-not-applied-commit-once", "reconcile-applied-finalize-without-commit", "reconcile-unknown-blocks", "returned-result-finalization", "finalized-winner-reuse", "zero-publication-inherited-or-virtual", "per-member-partial-progress", "primary-diversion-failsink-ordering", "legacy-write-flush-unreachable"]},
+    {"id": "PB-07", "family": "production_boundary", "title": "Post-sink restart and scheduler repair", "contract": "Every sink interruption seam converges and TS-14 repairs scheduler debt without republication.", "applicability_profile": "all-required-v1", "required_cases": ["before-reservation", "after-reservation", "after-inspection", "after-plan-cas", "after-publication-before-response", "after-response-before-finalization", "after-finalization-before-response", "scheduler-ts14-repair-without-republication"]},
+    {"id": "PB-08", "family": "production_boundary", "title": "Follower worker", "contract": "A real follower builds starts traverses dispositions and tears down without assuming leader authority.", "applicability_profile": "all-required-v1"},
+    {"id": "PB-09", "family": "production_boundary", "title": "Plugin lifecycle", "contract": "Fresh resume follower partial-start normal and exceptional teardown honor supported lifecycle ordering.", "applicability_profile": "all-required-v1"},
+
+    {"id": "RM-01", "family": "read_model", "title": "Unresolved producer work", "contract": "Counts exactly READY BLOCKED and transform leases while excluding sink debt and final states.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-02", "family": "read_model", "title": "Unquiesced barrier-producing work", "contract": "Counts exactly work that can still create a new barrier arrival.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-03", "family": "read_model", "title": "Active run backstop", "contract": "Counts every non-final scheduler state and excludes TERMINAL and FAILED.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-04", "family": "read_model", "title": "Peer-owned work", "contract": "Distinguishes other-owner active leases and attributed pending-sink work from self ownerless and other states.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-05", "family": "read_model", "title": "Continuation relinquishment", "contract": "Relinquishes only when pending IDs have no READY or FAILED work and a peer owns continuation authority.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-06", "family": "read_model", "title": "Active peer lease resume guard", "contract": "Includes only other-owner leases with expiry strictly after now and preserves deterministic ordering.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-07", "family": "read_model", "title": "Occupied run-leader seat snapshot", "contract": "Returns every occupied seat with exact owner epoch expiry and derived seat_live; missing or vacant seats return none and expiry equal to now is live.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-08", "family": "read_model", "title": "Dead non-leader workers", "contract": "Returns exactly active non-leader members in the run whose heartbeat expiry is strictly before now minus the requested grace interval with deterministic ordering.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-09", "family": "read_model", "title": "Active source-row scheduler identities", "contract": "Returns the exact row identities with non-final scheduler work that drive mixed scheduler/source resume refusal.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-10", "family": "read_model", "title": "Blocked barrier token identities", "contract": "Returns the exact distinct token identities represented by barrier-backed BLOCKED work so buffered tokens are excluded from redrive.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-11", "family": "read_model", "title": "Blocked barrier work count", "contract": "Counts exactly barrier-backed BLOCKED work for completion and resume-preflight decisions without including queue-only or non-blocked rows.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-12", "family": "read_model", "title": "Blocked barrier work listing", "contract": "Lists the complete deterministic barrier-backed BLOCKED work image needed to restore the barrier journal.", "applicability_profile": "all-required-v1"},
+    {"id": "RM-13", "family": "read_model", "title": "Pending barrier-adoption listing", "contract": "Lists exactly barrier-backed BLOCKED work still pending durable intake or adoption for the leader coordination loop.", "applicability_profile": "all-required-v1"},
+
+    {"id": "F-01", "family": "forbidden", "title": "READY cannot jump to TERMINAL", "contract": "Disposition requires an exact transform lease.", "applicability_profile": "all-required-v1"},
+    {"id": "F-02", "family": "forbidden", "title": "Final states are final", "contract": "No production verb accepts TERMINAL or FAILED as a transition source.", "applicability_profile": "all-required-v1"},
+    {"id": "F-03", "family": "forbidden", "title": "Foreign barrier cannot release BLOCKED work", "contract": "Barrier identity is part of every consume predicate.", "applicability_profile": "all-required-v1"},
+    {"id": "F-04", "family": "forbidden", "title": "Wrong owner cannot disposition a lease", "contract": "Exact owner and active membership fences refuse the caller with zero mutation.", "applicability_profile": "all-required-v1"},
+    {"id": "F-05", "family": "forbidden", "title": "BLOCKED requires a release key", "contract": "A claimed disposition cannot create an unreleaseable hold.", "applicability_profile": "all-required-v1"},
+    {"id": "F-06", "family": "forbidden", "title": "Inactive registered worker cannot claim", "contract": "Absent departed and evicted registered workers are refused.", "applicability_profile": "all-required-v1"},
+    {"id": "F-07", "family": "forbidden", "title": "Ineligible lease cannot be recovered", "contract": "Own live fresh or not-yet-expired work is excluded from strict recovery.", "applicability_profile": "all-required-v1"},
+    {"id": "F-08", "family": "forbidden", "title": "Partial sink batch cannot terminalize", "contract": "Bulk close validates unique complete owner-matched membership before mutation.", "applicability_profile": "all-required-v1"},
+    {"id": "F-09", "family": "forbidden", "title": "Non-exhaustive barrier completion is refused", "contract": "Duplicates overlap missing foreign uncovered or incomplete output identity fail closed.", "applicability_profile": "all-required-v1"},
+    {"id": "F-10", "family": "forbidden", "title": "Stale leader cannot mutate strict state", "contract": "Required leader-fenced verbs refuse the stale identity or epoch before payload writes.", "applicability_profile": "all-required-v1"},
+    {"id": "F-11", "family": "forbidden", "title": "Source boundary failure cannot enter queue", "contract": "Boundary failure records audit evidence and deliberately creates no scheduler row.", "applicability_profile": "all-required-v1"},
+    {"id": "F-12", "family": "forbidden", "title": "WAITING state remains deleted", "contract": "No state vocabulary writer reader or release path reintroduces WAITING.", "applicability_profile": "all-required-v1"},
+    {"id": "F-13", "family": "forbidden", "title": "General queue-only hold release is absent", "contract": "Reachability and refusal prevent dormant queue-only holds from becoming stranded production work.", "applicability_profile": "all-required-v1"}
+  ]
+}

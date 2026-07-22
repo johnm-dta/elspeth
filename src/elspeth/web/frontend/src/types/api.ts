@@ -22,6 +22,9 @@ export type {
   MessageWithStateResponse,
   ProposalLifecycleStatus,
   PluginSummary,
+  PluginPolicyFinding,
+  PluginPolicyResponse,
+  PluginPolicyUnavailableReason,
   ValidationCheck,
   ValidationResult,
   ValidationError,
@@ -87,6 +90,7 @@ export type PersistedTutorialStage = "guided" | "run" | "audit" | "graduation";
 export interface UserComposerPreferencesPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
+  freeform_intro_dismissed_at: string | null;
   tutorial_completed_at: string | null;
   // In-progress tutorial resume state; all four null when no tutorial is
   // in progress. run_id/source_data_hash are recorded once the tutorial
@@ -106,6 +110,7 @@ export interface UserComposerPreferencesPayload {
 export interface UpdateUserComposerPreferencesPayload {
   default_mode?: ComposerMode;
   banner_dismissed_at?: string | null;
+  freeform_intro_dismissed_at?: string | null;
   tutorial_completed_at?: string | null;
   // Absent = unchanged; explicit null = clear. Setting (or clearing)
   // tutorial_completed_at also clears any resume field not supplied in
@@ -114,6 +119,10 @@ export interface UpdateUserComposerPreferencesPayload {
   tutorial_session_id?: string | null;
   tutorial_run_id?: string | null;
   tutorial_source_data_hash?: string | null;
+  // Request-only telemetry discriminator: marks a completion write as an
+  // explicit in-tutorial exit (elspeth-61591e64bb). Only valid alongside a
+  // non-null tutorial_completed_at in the same PATCH; never echoed back.
+  tutorial_completed_via?: "exit";
 }
 
 // ── First-run tutorial (Phase 4) ───────────────────────────────────────────

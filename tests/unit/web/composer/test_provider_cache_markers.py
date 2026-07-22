@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from elspeth.core.canonical import stable_hash
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     supports_anthropic_prompt_cache_markers,
@@ -222,7 +223,7 @@ class TestToolListOrderIsCacheKeyContract:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
 
         defn_names = [d["name"] for d in get_tool_definitions()]
         tool_names = [t["function"]["name"] for t in service._get_litellm_tools()]
@@ -294,7 +295,7 @@ class TestCacheMarkersWiredAtCallSite:
 
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-sonnet-4.5")
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         # Bypass availability check (no real Anthropic API key needed).
         service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
@@ -311,7 +312,7 @@ class TestCacheMarkersWiredAtCallSite:
             "elspeth.web.composer.service._litellm_acompletion",
             new=fake_acompletion,
         ):
-            await service.compose("Build a CSV pipeline.", [], state)
+            result = await service.compose("Build a CSV pipeline.", [], state)
 
         # The stable system prompt MUST carry cache_control after the transform.
         sent_messages = captured["messages"]
@@ -332,6 +333,12 @@ class TestCacheMarkersWiredAtCallSite:
         # Other tools are NOT marked (Anthropic caches up to and including the marker).
         for non_trailing in sent_tools[:-1]:
             assert "cache_control" not in non_trailing
+
+        transmitted_names = tuple(tool["function"]["name"] for tool in sent_tools)
+        call = result.llm_calls[0]
+        assert "splice_transform" in transmitted_names
+        assert call.declared_tool_names == transmitted_names
+        assert call.tools_spec_hash == stable_hash(sent_tools)
 
     @pytest.mark.asyncio
     async def test_openai_model_does_not_emit_cache_control(self) -> None:
@@ -365,7 +372,7 @@ class TestCacheMarkersWiredAtCallSite:
         catalog = _mock_catalog()
         # Default _make_settings model is gpt-5.5 (OpenAI-shape).
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         service._availability = ComposerAvailability(available=True, model=service._model, provider="test")
         state = _empty_state()
         captured: dict[str, Any] = {}

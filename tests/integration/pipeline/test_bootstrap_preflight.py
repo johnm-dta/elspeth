@@ -11,6 +11,7 @@ tests/unit/engine/test_bootstrap_preflight.py.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,13 @@ from elspeth.core.dependency_config import (
     CommencementGateConfig,
 )
 from elspeth.plugins.infrastructure.runtime_factory import PluginBundle
+
+
+@pytest.fixture(autouse=True)
+def _raw_sink_effect_preflight_boundary() -> Iterator[None]:
+    """These dispatch tests use a synthetic non-existent settings path."""
+    with patch("elspeth.cli._preflight_raw_settings_sink_effects"):
+        yield
 
 
 class _GraphStub:
@@ -82,6 +90,7 @@ def _make_plugin_bundle() -> PluginBundle:
         transforms=[],
         sinks={},
         aggregations={},
+        sink_effect_bindings={},
     )
 
 
@@ -283,6 +292,7 @@ class TestBootstrapProgrammaticExecution:
             sources={"source": source},
             source_settings_map={},
             sinks={"out": object()},
+            sink_effect_modes={},
         )
         mock_db = _CloseableDouble()
 
@@ -319,6 +329,7 @@ class TestBootstrapProgrammaticExecution:
             aggregations={},
             sources={"orders": first_source, "refunds": second_source},
             sinks={"out": object()},
+            sink_effect_modes={},
         )
         mock_db = _CloseableDouble()
 

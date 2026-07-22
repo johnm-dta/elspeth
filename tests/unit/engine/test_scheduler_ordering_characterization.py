@@ -289,15 +289,15 @@ def test_live_lease_is_not_reclaimable_and_expired_lease_recovers_exactly_once()
 
     # Live lease: not claimable by a peer, not recoverable by anyone.
     assert repo.claim_ready(run_id=RUN_ID, lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=1)) is None
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=now + timedelta(seconds=10), caller_owner="worker-b") == 0
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=now + timedelta(seconds=10), caller_owner="worker-b") == 0
 
     # Expired lease: the holder's own recovery sweep must NOT reap it (self-steal guard).
     expired_at = now + timedelta(seconds=31)
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=expired_at, caller_owner="worker-a") == 0
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=expired_at, caller_owner="worker-a") == 0
 
     # A peer recovers it exactly once.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 0
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 1
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=expired_at, caller_owner="worker-b") == 0
 
     reclaimed = repo.claim_ready(run_id=RUN_ID, lease_owner="worker-b", lease_seconds=30, now=expired_at)
     assert reclaimed is not None
@@ -354,7 +354,7 @@ def test_pending_sink_parked_token_does_not_block_later_tokens_and_drains_afterw
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=2),

@@ -12,6 +12,10 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useBlobStore } from "@/stores/blobStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
+import {
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
+} from "@/config/composer";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -101,6 +105,22 @@ export function ChatInput({
   const setTextRef = useRef(setText);
   setTextRef.current = setText;
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  // Compose-timeout bootstrap gate (elspeth bootstrap race). FALSE until
+  // App.checkHealth has applied the backend wall clock; sending before then
+  // would schedule a compose-abort timer from the stale default ceiling and
+  // could abort a healthy turn before the backend's structured 422. Send is
+  // held closed until readiness with a visible reason (dead-button doctrine —
+  // a silently inert Send reads as a bug). Both freeform and guided render
+  // this input, so this one gate covers both paths.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  // Set when the backend is reachable but reported no usable compose timeout,
+  // so readiness can never latch. Distinguishes "up but misconfigured" (show a
+  // distinct, alerting diagnostic) from the transient boot window (show the
+  // soft "Connecting…").
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
+  const awaitingComposeTimeout = !composeTimeoutReady;
   // Phase 5a Task 1 — empty-state placeholder primes the user to type data
   // directly into chat (URL / a few rows / a short brief).  Reads two
   // singleton fields on sessionStore (verified: sessionStore.ts:154-155):
@@ -170,7 +190,9 @@ export function ChatInput({
 
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
+    // awaitingComposeTimeout gates the Enter-key path too, not just the
+    // button: no send may start before a known-good abort ceiling exists.
+    if (!trimmed || disabled || awaitingComposeTimeout) return;
     onSend(trimmed);
     // Clear input after send
     if (isControlled) {
@@ -178,7 +200,14 @@ export function ChatInput({
     } else {
       setInternalText("");
     }
-  }, [text, disabled, onSend, isControlled, controlledOnChange]);
+  }, [
+    text,
+    disabled,
+    awaitingComposeTimeout,
+    onSend,
+    isControlled,
+    controlledOnChange,
+  ]);
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -215,7 +244,7 @@ export function ChatInput({
     }
   }
 
-  const canSend = !disabled && text.trim().length > 0;
+  const canSend = !disabled && !awaitingComposeTimeout && text.trim().length > 0;
 
   // Read-only (tutorial locked prompt) content is static and multi-line (the
   // worked-example prompt + the sample URLs). A fixed 2-row box clipped it; size
@@ -261,6 +290,34 @@ export function ChatInput({
           {uploadStatus}
         </div>
       )}
+      {/* Bootstrap gate reason. Two states share this slot (both keep Send
+          disabled, both hidden while composing so neither collides with Stop):
+          - transient boot window: role=status (polite) soft "Connecting…"
+            during the (usually sub-second) wait for GET /api/system/status.
+          - backend up but no usable compose timeout: role=alert, a distinct
+            stuck-state diagnostic so it never reads as a perpetual connect. */}
+      {awaitingComposeTimeout &&
+        !disabled &&
+        (composerTimeoutUnavailable ? (
+          // Distinct `key` per branch: force React to unmount the polite status
+          // and mount a fresh assertive alert on the Connecting→Unavailable
+          // flip, rather than mutate role in place (which SRs may not re-announce).
+          <div
+            key="unavailable"
+            role="alert"
+            className="chat-input-composer-unavailable"
+          >
+            {COMPOSE_UNAVAILABLE_MESSAGE}
+          </div>
+        ) : (
+          <div
+            key="connecting"
+            role="status"
+            className="chat-input-bootstrapping"
+          >
+            {COMPOSE_CONNECTING_MESSAGE}
+          </div>
+        ))}
       <div className="chat-input-row" role="group" aria-label="Message composition">
         <textarea
           ref={inputRef}

@@ -56,13 +56,27 @@ def merge_coalesce_schema(
     branch_order: Sequence[str] | None = None,
     select_branch: str | None = None,
     coalesce_id: str | None = None,
+    guarantee_branch_schemas: Mapping[str, SchemaConfig] | None = None,
 ) -> SchemaConfig:
     """Build the final build-time schema for a coalesce node.
 
     This is the strategy boundary used by the DAG builder. It owns policy-aware
     guarantee merging, audit-field union for union merges, and the schema shapes
     for select and nested strategies.
+
+    ``guarantee_branch_schemas`` (union strategy only) supplies the per-branch
+    schemas used SOLELY for the ``guaranteed_fields`` merge, decoupled from the
+    ``branch_schemas`` used for the typed-field / mode / audit merge. The DAG
+    builder passes each branch producer's PROPAGATION-WALKED effective
+    guarantee here (skipping non-participating branches), so fields a
+    pass-through branch inherits from upstream survive the union — the raw
+    per-branch ``guaranteed_fields`` omits them, which under-computed the
+    coalesce guarantee and made ``validate_edge_compatibility`` reject runnable
+    fork→pass-through→coalesce pipelines (elspeth-0b14977817). When ``None``
+    (direct/test callers), the guarantee merge falls back to ``branch_schemas``,
+    preserving the previous behaviour.
     """
+    guarantee_source = guarantee_branch_schemas if guarantee_branch_schemas is not None else branch_schemas
     if merge_strategy == "union":
         return merge_union_fields(
             branch_schemas,
@@ -70,7 +84,7 @@ def merge_coalesce_schema(
             collision_policy=collision_policy,
             branch_order=branch_order,
             coalesce_id=coalesce_id,
-            guaranteed_fields=merge_guaranteed_fields(branch_schemas, require_all=require_all),
+            guaranteed_fields=merge_guaranteed_fields(guarantee_source, require_all=require_all),
             audit_fields=_merge_audit_fields(branch_schemas),
         )
 

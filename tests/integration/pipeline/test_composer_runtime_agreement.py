@@ -91,6 +91,19 @@ where the architectural fix landed:
   effective producer schema and are skipped), mirroring the runtime
   observed/dynamic bypass at ``graph.py:1392-1403``. Pinned by
   ``TestComposerRuntimeFixedModeImplicitRequiredAgreement``.
+* Shape 11 — structural queue fan-in round-trip (``elspeth-a5b86149d4`` /
+  ``elspeth-6421ffa028``). The composer models a runtime ``queues.<name>``
+  fan-in point as a canonical structural queue NodeSpec (id == input,
+  plugin=None, description-only options). Import must preserve it, validate must
+  accept the two-source → queue → transform topology, and export must round-trip
+  it so ``load_settings_from_yaml_string`` rebuilds a graph with exactly one
+  ``NodeType.QUEUE`` (both sources fan in, one ordinary consumer out).
+  Previously the composer had no queue node type, so a pasted ``queues:``
+  section was dropped and undeclared two-source fan-in was the only expressible
+  form (validate green / runtime red: ``GraphValidationError`` "fan-in from
+  multiple producers without a queue"). Pinned by
+  ``TestComposerRuntimeQueueAgreement`` with a manual negative control proving
+  the queue-free topology still reproduces the runtime rejection.
 
 Adding a new shape: file the eval-finding issue, land the structural fix,
 then extend this docstring with the shape's number, the originating eval
@@ -168,7 +181,7 @@ from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.progress import BroadcastResult
 from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.service import ExecutionServiceImpl
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
@@ -1649,7 +1662,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         """Run validate_pipeline on a CompositionState and return the
         route_target_resolution check detail. Asserts the failure happened on
         that specific check (not graph_structure, not schema_compatibility)."""
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             TestComposerRuntimeRouteTargetAgreement._validation_settings(data_dir),
             composer_yaml_generator,
@@ -1842,7 +1855,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_error_sink" in composer_messages
@@ -1969,7 +1982,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_failsink" in composer_messages
@@ -2057,7 +2070,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_route_sink" in composer_messages
@@ -2147,7 +2160,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -2358,7 +2371,7 @@ class TestComposerRuntimeSecretRefAgreement:
             version=1,
         )
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3033,7 +3046,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
 
         state = self._build_state(csv_path, sink_path)
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3059,7 +3072,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         assert not sink_path.exists()
 
         state = self._build_state(csv_path, sink_path)
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3336,6 +3349,8 @@ sinks:
     on_write_failure: discard
     options:
       path: output.jsonl
+      schema:
+        mode: observed
 """
 
     @staticmethod
@@ -3353,7 +3368,7 @@ sinks:
         # exercise the hash/audit-ordering assertions they actually target.
         session_service = _FakeSessionService(run=_RunSnapshot(session_id=uuid4()))
 
-        service = ExecutionServiceImpl(
+        service = ExecutionServiceImpl.for_trained_operator(
             loop=loop,
             broadcaster=cast(Any, _FakeProgressBroadcaster()),
             settings=settings,
@@ -3372,7 +3387,7 @@ sinks:
         blob_id = uuid4()
         state = self._state_with_inline_prompt(tmp_path, blob_id, "a" * 64)
 
-        result = validate_pipeline(
+        result = validate_pipeline_for_trained_operator(
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
@@ -3387,7 +3402,7 @@ sinks:
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
         self,
@@ -3421,7 +3436,7 @@ sinks:
         mock_orch_cls.assert_not_called()
 
     @patch("elspeth.web.execution.service.load_settings_from_config_dict")
-    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.open_landscape_db")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_runtime_records_audit_hash_before_settings_load(
         self,
@@ -4095,3 +4110,112 @@ class TestComposerRuntimeGateRouteParityAgreement:
             condition='row["x"] > 0',
             routes={"true": "main", "false": "main"},
         )
+
+
+class TestComposerRuntimeQueueAgreement:
+    """Shape 11 — structural queue fan-in round-trips composer <-> runtime.
+
+    The shipped ``examples/multi_source_queue/settings.yaml`` fans two sources
+    into one declared ``queues.inbound`` and then a single passthrough. The
+    composer must import it (preserving the queue), validate it green, export it
+    back to runtime YAML, and the runtime must build a graph containing exactly
+    one ``NodeType.QUEUE`` with both sources leading into it and one ordinary
+    downstream consumer leading out — matching the engine's own fan-in contract
+    (ADR-025 / elspeth-a5b86149d4, elspeth-6421ffa028).
+
+    Bug-verification protocol (mandatory per this file's header): the shape is
+    pinned on the generator's queue-emission assignment in
+    ``web/composer/yaml_generator._generate_pipeline_dict`` — the
+    ``doc["queues"] = queues_doc`` line. Manually replacing that line with
+    ``pass`` makes ``generate_yaml`` omit the ``queues:`` section entirely, so
+    ``load_settings_from_yaml_string`` rebuilds settings with no queue and
+    ``test_queue_round_trips_composer_import_export_and_runtime_graph`` fails at
+    its first queue-dependent assertion with
+    ``AssertionError: assert set() == {'inbound'}`` (``set(settings.queues) ==
+    {"inbound"}``). Verified by manual revert on 2026-07-12; restored. Had the
+    queue survived import but not the runtime fan-in contract, the same
+    two-source topology without a queue is rejected at graph build with
+    ``GraphValidationError("Duplicate producer for connection 'inbound' ...")``,
+    which the negative control below asserts directly by deleting the emitted
+    ``queues:`` section.
+    """
+
+    def _example_yaml(self) -> str:
+        example = Path(__file__).resolve().parents[3] / "examples" / "multi_source_queue" / "settings.yaml"
+        return example.read_text(encoding="utf-8")
+
+    def _build_runtime_graph_for_settings(self, settings: ElspethSettings) -> ExecutionGraph:
+        bundle = instantiate_plugins_from_config(settings, preflight_mode=True)
+        return ExecutionGraph.from_plugin_instances(
+            sources=bundle.sources,
+            source_settings_map=bundle.source_settings_map,
+            transforms=bundle.transforms,
+            sinks=bundle.sinks,
+            aggregations=bundle.aggregations,
+            gates=list(settings.gates),
+            queues=settings.queues,
+        )
+
+    def test_queue_round_trips_composer_import_export_and_runtime_graph(self) -> None:
+        from elspeth.contracts import NodeType
+        from elspeth.core.config import load_settings_from_yaml_string
+        from elspeth.web.composer.yaml_importer import composition_state_from_runtime_yaml
+
+        state = composition_state_from_runtime_yaml(self._example_yaml())
+        composer_result = state.validate()
+        assert composer_result.is_valid, [e.message for e in composer_result.errors]
+
+        generated_yaml = composer_yaml_generator.generate_yaml(state)
+        settings = load_settings_from_yaml_string(generated_yaml)
+        assert set(settings.queues) == {"inbound"}
+
+        graph = self._build_runtime_graph_for_settings(settings)
+        graph.validate()
+
+        queue_nodes = [node for node in graph.get_nodes() if node.node_type == NodeType.QUEUE]
+        assert len(queue_nodes) == 1
+        queue_info = queue_nodes[0]
+        # The runtime keys queues by a hashed queue_<name>_<hash> node id; the raw
+        # queue name lives in config["name"], not the node id.
+        assert queue_info.config["name"] == "inbound"
+        assert queue_info.node_id != "inbound"
+        assert queue_info.output_schema_config is not None
+        assert queue_info.output_schema_config.mode == "observed"
+
+        queue_id = queue_info.node_id
+        source_predecessors = {
+            edge.from_node
+            for edge in graph.get_incoming_edges(queue_id)
+            if graph.get_node_info(edge.from_node).node_type == NodeType.SOURCE
+        }
+        assert len(source_predecessors) == 2, "both sources must fan into the queue"
+
+        outgoing = [edge for edge in graph.get_edges() if edge.from_node == queue_id]
+        assert len(outgoing) == 1, "queue feeds exactly one ordinary downstream consumer"
+        downstream = graph.get_node_info(outgoing[0].to_node)
+        assert downstream.node_type == NodeType.TRANSFORM
+        assert downstream.plugin_name == "passthrough"
+
+    def test_deleting_generated_queues_section_reproduces_fan_in_rejection(self) -> None:
+        """Manual negative control: without the emitted queue, the same two-source
+        fan-in is exactly the topology the runtime rejects."""
+        import yaml
+
+        from elspeth.core.config import load_settings_from_yaml_string
+        from elspeth.web.composer.yaml_importer import composition_state_from_runtime_yaml
+
+        state = composition_state_from_runtime_yaml(self._example_yaml())
+        generated_yaml = composer_yaml_generator.generate_yaml(state)
+
+        doc = yaml.safe_load(generated_yaml)
+        assert "queues" in doc, "sanity: the generator emitted the queue section"
+        del doc["queues"]
+        no_queue_yaml = yaml.dump(doc, sort_keys=False)
+
+        settings = load_settings_from_yaml_string(no_queue_yaml)
+        assert not settings.queues
+
+        # With no queue, the two sources publishing 'inbound' are an undeclared
+        # duplicate producer; the runtime rejects this at graph build time.
+        with pytest.raises(GraphValidationError, match="Duplicate producer for connection 'inbound'"):
+            self._build_runtime_graph_for_settings(settings)

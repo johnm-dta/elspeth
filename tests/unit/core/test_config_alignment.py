@@ -253,7 +253,26 @@ class TestLandscapeSettingsAlignment:
         # These are all accessed in orchestrator export logic
         # (include_raw_error_rows: read by export_landscape and threaded into
         # LandscapeExporter — elspeth-384184c6ab).
-        expected_fields = {"enabled", "sink", "format", "sign", "include_raw_error_rows"}
+        expected_fields = {
+            "enabled",
+            "sink",
+            "format",
+            "signing_mode",
+            "signer_key_id",
+            "signing_secret_ref",
+            "signer_rotation_policy",
+            "exporter_version",
+            "serialization_version",
+            "chunking_algorithm_version",
+            "include_raw_error_rows",
+            "total_record_limit",
+            "total_byte_limit",
+            "chunk_limit",
+            "per_chunk_record_limit",
+            "per_chunk_byte_limit",
+            "spool_root",
+            "content_store",
+        }
         actual_fields = set(LandscapeExportSettings.model_fields.keys())
 
         assert actual_fields == expected_fields, (

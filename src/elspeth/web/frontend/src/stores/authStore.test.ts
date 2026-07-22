@@ -4,15 +4,22 @@ import { useBlobStore } from "./blobStore";
 import { usePreferencesStore } from "./preferencesStore";
 import { useSecretsStore } from "./secretsStore";
 import { useShareableReviewStore } from "./shareableReviewStore";
+import { usePluginCatalogStore } from "./pluginCatalogStore";
 import * as shareableReviewsApi from "../api/shareableReviews";
 import * as apiClient from "@/api/client";
 import { resetStore } from "@/test/store-helpers";
+import { GUIDED_RETRY_STORAGE_KEY } from "./guidedOperationRetry";
 
 vi.mock("@/api/client", () => ({
   fetchCurrentUser: vi.fn(),
   login: vi.fn(),
   fetchUserComposerPreferences: vi.fn(),
   updateUserComposerPreferences: vi.fn(),
+  fetchPluginPolicy: vi.fn(),
+  listSources: vi.fn(),
+  listTransforms: vi.fn(),
+  listSinks: vi.fn(),
+  getPluginSchema: vi.fn(),
 }));
 
 describe("authStore interactive login", () => {
@@ -21,6 +28,7 @@ describe("authStore interactive login", () => {
     // Simulate a completed boot: loadFromStorage has already resolved.
     useAuthStore.setState({ isLoading: false });
     localStorage.clear();
+    sessionStorage.clear();
     vi.clearAllMocks();
   });
 
@@ -78,12 +86,14 @@ describe("authStore account-scoped store reset", () => {
     resetStore(useBlobStore);
     resetStore(usePreferencesStore);
     resetStore(useSecretsStore);
+    usePluginCatalogStore.getState().clear();
     useShareableReviewStore.getState().reset();
     localStorage.clear();
     vi.clearAllMocks();
   });
 
   it("logout clears account-scoped cached stores before another account can reuse them", async () => {
+    sessionStorage.setItem(GUIDED_RETRY_STORAGE_KEY, "stale-retry-custody");
     useAuthStore.setState({
       token: "token-for-alice",
       user: {
@@ -139,8 +149,18 @@ describe("authStore account-scoped store reset", () => {
       ],
       error: "old secret error",
     });
+    usePluginCatalogStore.setState({
+      key: "local:alice:alice-snapshot",
+      principal: "local:alice",
+      fingerprint: "alice-snapshot",
+      sources: [],
+      transforms: [],
+      sinks: [],
+    });
 
     await useAuthStore.getState().logout();
+
+    expect(sessionStorage.getItem(GUIDED_RETRY_STORAGE_KEY)).toBeNull();
 
     expect(useBlobStore.getState()).toMatchObject({
       blobs: [],
@@ -160,6 +180,14 @@ describe("authStore account-scoped store reset", () => {
       secrets: [],
       isLoading: false,
       error: null,
+    });
+    expect(usePluginCatalogStore.getState()).toMatchObject({
+      key: null,
+      principal: null,
+      fingerprint: null,
+      sources: null,
+      transforms: null,
+      sinks: null,
     });
     expect(useShareableReviewStore.getState()).toMatchObject({
       dialogOpen: false,

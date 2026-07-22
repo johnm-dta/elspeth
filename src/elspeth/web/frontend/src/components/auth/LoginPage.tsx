@@ -16,9 +16,9 @@ import { Button, Input, AlertBanner, WordMark } from "../ui";
  *   redirects to config.authorization_endpoint (resolved from OIDC
  *   discovery by the backend)
  *
- * On return from an OIDC redirect, extracts the token from the URL
- * fragment or query parameter and calls loginWithToken(). On return from
- * email verification, consumes ?verify_token=... and adopts the returned JWT.
+ * OIDC/Entra uses authorization code + S256 PKCE. On return, the callback
+ * query and its single-use transaction are consumed before any decision or
+ * network request. Email verification remains a separate local-auth path.
  *
  * Failed sign-in attempts keep the username and clear only the
  * password (WCAG 3.3.7 Redundant Entry, elspeth-d49f8ad511); the
@@ -30,6 +30,180 @@ import { Button, Input, AlertBanner, WordMark } from "../ui";
 const LOGIN_ERROR_ID = "login-error";
 /** id linking the registration error banner to its targeted fields. */
 const REGISTER_ERROR_ID = "register-error";
+const OIDC_TRANSACTION_KEY = "oidc_transaction";
+const OIDC_TRANSACTION_VERSION = 1;
+const OIDC_TRANSACTION_MAX_AGE_MS = 5 * 60 * 1000;
+const OIDC_TRANSACTION_FUTURE_SKEW_MS = 30 * 1000;
+const CALLBACK_MAX_BYTES = 64 * 1024;
+const ACCESS_TOKEN_MAX_BYTES = 16 * 1024;
+const PKCE_VALUE = /^[A-Za-z0-9._~-]{43,128}$/;
+
+interface OidcTransaction {
+  version: 1;
+  state: string;
+  verifier: string;
+  created_at: number;
+}
+
+interface CallbackCapture {
+  kind: "oidc" | "verify";
+  params: URLSearchParams;
+  transactionJson: string | null;
+  started: boolean;
+}
+
+// React StrictMode constructs the component twice. The callback must be
+// scrubbed during the first render, while the second render must receive the
+// same bounded in-memory capture rather than rereading URL/storage secrets.
+let pendingCallbackCapture: CallbackCapture | null = null;
+
+function scrubCallbackUrl(): void {
+  window.history.replaceState(null, "", window.location.pathname);
+}
+
+function captureCallback(): CallbackCapture | null {
+  if (pendingCallbackCapture !== null && !pendingCallbackCapture.started) {
+    return pendingCallbackCapture;
+  }
+
+  const rawSearch = window.location.search;
+  const oversizedCallback =
+    new TextEncoder().encode(rawSearch).byteLength > CALLBACK_MAX_BYTES;
+  const params = new URLSearchParams(
+    oversizedCallback ? "?malformed=1" : rawSearch,
+  );
+  const oidcKeys = ["code", "state", "error", "error_description", "token"];
+  const sharedInspectionRoute = window.location.hash.startsWith("#/shared/");
+  const hasOidcSignal =
+    oversizedCallback ||
+    oidcKeys.some((key) => params.has(key)) ||
+    (window.location.hash.length > 0 && !sharedInspectionRoute);
+  const verificationOnly = params.has("verify_token") && !hasOidcSignal;
+
+  if (!hasOidcSignal && !verificationOnly) return null;
+
+  if (verificationOnly) {
+    const capture: CallbackCapture = {
+      kind: "verify",
+      params,
+      transactionJson: null,
+      started: false,
+    };
+    scrubCallbackUrl();
+    pendingCallbackCapture = capture;
+    return capture;
+  }
+
+  let transactionJson = sessionStorage.getItem(OIDC_TRANSACTION_KEY);
+  sessionStorage.removeItem(OIDC_TRANSACTION_KEY);
+  if (
+    transactionJson !== null &&
+    new TextEncoder().encode(transactionJson).byteLength > CALLBACK_MAX_BYTES
+  ) {
+    transactionJson = null;
+  }
+  const capture: CallbackCapture = {
+    kind: "oidc",
+    params,
+    transactionJson,
+    started: false,
+  };
+  scrubCallbackUrl();
+  pendingCallbackCapture = capture;
+  return capture;
+}
+
+function parseOidcTransaction(raw: string | null, now: number): OidcTransaction | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const record = parsed as Record<string, unknown>;
+    if (
+      Object.keys(record).sort().join(",") !== "created_at,state,verifier,version" ||
+      record.version !== OIDC_TRANSACTION_VERSION ||
+      typeof record.state !== "string" ||
+      !/^[A-Za-z0-9._~-]{8,256}$/.test(record.state) ||
+      typeof record.verifier !== "string" ||
+      !PKCE_VALUE.test(record.verifier) ||
+      typeof record.created_at !== "number" ||
+      !Number.isSafeInteger(record.created_at) ||
+      now - record.created_at > OIDC_TRANSACTION_MAX_AGE_MS ||
+      record.created_at - now > OIDC_TRANSACTION_FUTURE_SKEW_MS
+    ) {
+      return null;
+    }
+    return record as unknown as OidcTransaction;
+  } catch {
+    return null;
+  }
+}
+
+function randomBase64Url(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function readBoundedTokenResponse(response: Response): Promise<string> {
+  if (!response.ok || response.redirected || response.type === "opaqueredirect") {
+    throw new Error("token response failed status check");
+  }
+  const contentType = response.headers.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase();
+  if (contentType !== "application/json") {
+    throw new Error("token response failed media-type check");
+  }
+  const contentLength = response.headers.get("Content-Length");
+  if (contentLength !== null && /^\d+$/.test(contentLength) && Number(contentLength) > CALLBACK_MAX_BYTES) {
+    throw new Error("token response failed size check");
+  }
+
+  const reader = response.body?.getReader();
+  if (reader === undefined) throw new Error("token response failed body check");
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value !== undefined) {
+      total += value.byteLength;
+      if (total > CALLBACK_MAX_BYTES) {
+        await reader.cancel();
+        throw new Error("token response failed size check");
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const decoded: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+    throw new Error("token response failed shape check");
+  }
+  const token = decoded as Record<string, unknown>;
+  if (
+    typeof token.token_type !== "string" ||
+    token.token_type.toLowerCase() !== "bearer" ||
+    typeof token.access_token !== "string" ||
+    token.access_token.trim().length === 0 ||
+    new TextEncoder().encode(token.access_token).byteLength > ACCESS_TOKEN_MAX_BYTES
+  ) {
+    throw new Error("token response failed bearer-token check");
+  }
+  return token.access_token;
+}
 
 /** Which registration fields the current registration error is about. */
 interface RegisterErrorTargets {
@@ -60,6 +234,7 @@ const linkButtonStyle: CSSProperties = {
 };
 
 export function LoginPage() {
+  const [callbackCapture] = useState(captureCallback);
   const { login, loginWithToken, loginError } = useAuth();
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -68,6 +243,7 @@ export function LoginPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
+  const [configFailed, setConfigFailed] = useState(false);
   const [view, setView] = useState<"signin" | "register">("signin");
   const [registerError, setRegisterError] = useState<string | null>(null);
   const [registerNotice, setRegisterNotice] = useState<string | null>(null);
@@ -95,23 +271,30 @@ export function LoginPage() {
           oidc_issuer: null,
           oidc_client_id: null,
           authorization_endpoint: null,
+          token_endpoint: null,
         });
+        setConfigFailed(true);
         setConfigLoading(false);
       });
   }, []);
 
-  // Handle auth callbacks: email verification token first, then OIDC token.
-  // OIDC verifies the state nonce to prevent CSRF / session-fixation attacks.
+  // Process the already-consumed callback. The capture happens synchronously
+  // during render, before this or the config-fetch effect can start network IO.
   useEffect(() => {
-    const savedState = sessionStorage.getItem("oidc_state");
-    sessionStorage.removeItem("oidc_state");
+    if (callbackCapture === null || callbackCapture.started) return;
 
-    const hash = window.location.hash;
-    const params = new URLSearchParams(window.location.search);
-    const verificationToken = params.get("verify_token");
-
-    if (verificationToken) {
-      window.history.replaceState(null, "", window.location.pathname);
+    if (callbackCapture.kind === "verify") {
+      callbackCapture.started = true;
+      const verificationTokens = callbackCapture.params.getAll("verify_token");
+      const verificationToken = verificationTokens.length === 1 ? verificationTokens[0] : "";
+      pendingCallbackCapture = null;
+      if (
+        !verificationToken ||
+        new TextEncoder().encode(verificationToken).byteLength > ACCESS_TOKEN_MAX_BYTES
+      ) {
+        setVerificationError("Email verification failed. Please request a new link.");
+        return;
+      }
       api
         .verifyEmail(verificationToken)
         .then(({ access_token }) => loginWithToken(access_token))
@@ -123,31 +306,63 @@ export function LoginPage() {
       return;
     }
 
-    // Check URL fragment first (implicit flow: #access_token=...)
-    if (hash) {
-      const fragmentParams = new URLSearchParams(hash.substring(1));
-      const token = fragmentParams.get("access_token");
-      const callbackState = fragmentParams.get("state");
-      if (token) {
-        // Clean the URL before processing
-        window.history.replaceState(null, "", window.location.pathname);
-        if (savedState && callbackState === savedState) {
-          loginWithToken(token);
-        }
-        return;
-      }
+    if (configLoading) return;
+    callbackCapture.started = true;
+    const fail = () => setVerificationError("Single sign-on failed. Please try again.");
+    const finish = () => {
+      pendingCallbackCapture = null;
+    };
+
+    const codeValues = callbackCapture.params.getAll("code");
+    const stateValues = callbackCapture.params.getAll("state");
+    const errorValues = callbackCapture.params.getAll("error");
+    const descriptionValues = callbackCapture.params.getAll("error_description");
+    const transaction = parseOidcTransaction(callbackCapture.transactionJson, Date.now());
+    const callbackValid =
+      !configFailed &&
+      authConfig !== null &&
+      (authConfig.provider === "oidc" || authConfig.provider === "entra") &&
+      typeof authConfig.token_endpoint === "string" &&
+      typeof authConfig.oidc_client_id === "string" &&
+      codeValues.length === 1 &&
+      stateValues.length === 1 &&
+      errorValues.length === 0 &&
+      descriptionValues.length === 0 &&
+      !callbackCapture.params.has("token") &&
+      !callbackCapture.params.has("verify_token") &&
+      transaction !== null &&
+      codeValues[0].length > 0 &&
+      new TextEncoder().encode(codeValues[0]).byteLength <= ACCESS_TOKEN_MAX_BYTES &&
+      stateValues[0] === transaction.state;
+
+    if (!callbackValid || transaction === null || authConfig?.token_endpoint == null || authConfig.oidc_client_id == null) {
+      fail();
+      finish();
+      return;
     }
 
-    // Check query parameter (authorization code flow: ?token=...)
-    const callbackToken = params.get("token");
-    const callbackState = params.get("state");
-    if (callbackToken) {
-      window.history.replaceState(null, "", window.location.pathname);
-      if (savedState && callbackState === savedState) {
-        loginWithToken(callbackToken);
-      }
-    }
-  }, [loginWithToken]);
+    const redirectUri = new URL(window.location.pathname, window.location.origin).toString();
+    const form = new URLSearchParams();
+    form.set("grant_type", "authorization_code");
+    form.set("code", codeValues[0]);
+    form.set("client_id", authConfig.oidc_client_id);
+    form.set("redirect_uri", redirectUri);
+    form.set("code_verifier", transaction.verifier);
+
+    void fetch(authConfig.token_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+      credentials: "omit",
+      redirect: "error",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+    })
+      .then(readBoundedTokenResponse)
+      .then((accessToken) => loginWithToken(accessToken))
+      .catch(fail)
+      .finally(finish);
+  }, [authConfig, callbackCapture, configFailed, configLoading, loginWithToken]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -247,22 +462,39 @@ export function LoginPage() {
     setRegisterErrorTargets(NO_REGISTER_TARGETS);
   }
 
-  function handleSsoRedirect() {
-    if (!authConfig?.authorization_endpoint || !authConfig?.oidc_client_id) return;
+  async function handleSsoRedirect() {
+    if (!authConfig?.authorization_endpoint || !authConfig?.token_endpoint || !authConfig?.oidc_client_id) return;
 
-    // Generate OIDC state nonce for CSRF protection (H2)
-    const state = crypto.randomUUID();
-    sessionStorage.setItem("oidc_state", state);
+    try {
+      const state = randomBase64Url();
+      const verifier = randomBase64Url();
+      const challenge = await pkceChallenge(verifier);
+      const transaction: OidcTransaction = {
+        version: OIDC_TRANSACTION_VERSION,
+        state,
+        verifier,
+        created_at: Date.now(),
+      };
+      sessionStorage.setItem(OIDC_TRANSACTION_KEY, JSON.stringify(transaction));
 
-    const url =
-      `${authConfig.authorization_endpoint}` +
-      `?client_id=${encodeURIComponent(authConfig.oidc_client_id)}` +
-      `&response_type=token` +
-      `&redirect_uri=${encodeURIComponent(window.location.origin)}` +
-      `&scope=openid profile email` +
-      `&state=${encodeURIComponent(state)}` +
-      `&nonce=${crypto.randomUUID()}`;
-    window.location.href = url;
+      const redirectUri = new URL(window.location.pathname, window.location.origin).toString();
+      const url = new URL(authConfig.authorization_endpoint);
+      url.searchParams.set("client_id", authConfig.oidc_client_id);
+      url.searchParams.set("response_type", "code");
+      url.searchParams.set("redirect_uri", redirectUri);
+      url.searchParams.set("scope", "openid profile email");
+      url.searchParams.set("state", state);
+      url.searchParams.set("code_challenge", challenge);
+      url.searchParams.set("code_challenge_method", "S256");
+
+      const anchor = document.createElement("a");
+      anchor.href = url.toString();
+      anchor.rel = "noreferrer";
+      anchor.click();
+    } catch {
+      sessionStorage.removeItem(OIDC_TRANSACTION_KEY);
+      setVerificationError("Single sign-on failed. Please try again.");
+    }
   }
 
   if (configLoading) {
@@ -333,6 +565,9 @@ export function LoginPage() {
         {isOidc ? (
           <>
             {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
+            {verificationError && (
+              <AlertBanner tone="error">{verificationError}</AlertBanner>
+            )}
             {/* OIDC / Entra SSO: single "Sign in with SSO" button */}
             <Button
               variant="primary"

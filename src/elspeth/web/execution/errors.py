@@ -243,7 +243,6 @@ class BlobSourcePathMismatchError(Exception):
     structured error citing the divergence rather than a downstream
     ``FileNotFoundError`` from the source plugin.
 
-    See elspeth-07089fbaa3 for the original defect that motivated the guard.
     """
 
     def __init__(
@@ -265,5 +264,5 @@ class BlobSourcePathMismatchError(Exception):
             f"Expected canonical shape "
             f"<data_dir>/blobs/<session_id>/<blob_id>_<filename>. "
             f"This indicates a bug in composer persistence, not user input "
-            f"to coerce. See elspeth-07089fbaa3."
+            f"to coerce."
         )

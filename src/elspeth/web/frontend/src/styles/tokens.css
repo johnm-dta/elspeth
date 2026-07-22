@@ -73,11 +73,14 @@
   --color-badge-gate:        #c390f9;
   --color-badge-sink:        #e07040;
   --color-badge-aggregation: #61daff;
-  /* Coalesce shifted from #14b0ae to break the byte-identical collision with
-     --color-success — previously a "completed" badge next to a coalesce node
-     was indistinguishable. The cyan-leaning teal sits clearly off the success
-     hue while staying in the same chromatic family. */
+  /* Coalesce stays in the cyan/teal family while success/completed now uses
+     a greener semantic token, so a completed badge next to a coalesce node
+     no longer collapses into one hue. */
   --color-badge-coalesce:    #18c2c0;
+  /* Queue — pink, outside every other badge family so structural fan-in reads
+     as its own primitive. Shares one reviewed palette with the website
+     hand-mirror; #ff91c8 on #4a2238 is ~6.43:1 (clears the 3:1 badge gate). */
+  --color-badge-queue:       #ff91c8;
 
   /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
   --color-badge-source-bg:   #184244;
@@ -86,6 +89,7 @@
   --color-badge-sink-bg:     #2e3737;
   --color-badge-aggregation-bg: #1b4753;
   --color-badge-coalesce-bg: #10434a;
+  --color-badge-queue-bg:    #4a2238;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(77, 184, 154, 0.3);
@@ -94,17 +98,18 @@
   --color-badge-sink-border:        rgba(224, 112, 64, 0.3);
   --color-badge-aggregation-border: rgba(97, 218, 255, 0.3);
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
+  --color-badge-queue-border:       rgba(255, 145, 200, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
-  --color-success:           #16bab8;
+  --color-success:           #63d487;
   --color-error:             #ef8784;
   --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
   /* ── Semantic backgrounds — for inline alert/banner components ────────────── */
-  --color-success-bg:        rgba(20, 176, 174, 0.12);
-  --color-success-border:    rgba(20, 176, 174, 0.30);
+  --color-success-bg:        rgba(99, 212, 135, 0.12);
+  --color-success-border:    rgba(99, 212, 135, 0.30);
   --color-error-bg:          rgba(232, 86, 83, 0.12);
   --color-error-border:      rgba(232, 86, 83, 0.30);
   --color-warning-bg:        rgba(227, 132, 68, 0.14);
@@ -113,7 +118,7 @@
   --color-info-border:       rgba(97, 218, 255, 0.25);
 
   /* Per-node validation indicator borders */
-  --color-node-valid: #14b0ae;
+  --color-node-valid: #63d487;
   --color-node-warning: #e38444;
   --color-node-invalid: #e85653;
   --color-node-unchecked: var(--color-border-strong);
@@ -132,14 +137,14 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #16bab8;
+  --color-status-completed:  #63d487;
   --color-status-failed:     #ef8784;
   --color-status-cancelled:  #e79761;
   /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
      darker than --color-status-pending so the two non-success-but-clean
-     statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
-     reuses --color-status-completed (teal) and signals "with caveats"
-     via the warning glyph rather than a different colour. */
+     statuses are visually distinguishable. COMPLETED_WITH_FAILURES
+     reuses --color-status-completed and signals "with caveats" via the
+     warning glyph rather than a different colour. */
   --color-status-empty:      #a4a4a4;
 
   /* ── Surface variants ─────────────────────────────────────────────────── */
@@ -350,6 +355,9 @@
   /* Coalesce shifted cyan-ward to break the proximity to --color-success
      (#0d8a88) on light mode; sits between aggregation and success. */
   --color-badge-coalesce:    #0e8090;
+  /* Queue — deep pink, mirror of the dark #ff91c8; #a13770 on #f3e1eb is
+     ~5.09:1 (clears the 3:1 badge gate). */
+  --color-badge-queue:       #a13770;
 
   /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
   --color-badge-source-bg:   #dcebe9;
@@ -358,6 +366,7 @@
   --color-badge-sink-bg:     #ede4e1;
   --color-badge-aggregation-bg: #dcecf1;
   --color-badge-coalesce-bg: #d8eaec;
+  --color-badge-queue-bg:    #f3e1eb;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(42, 138, 112, 0.35);
@@ -366,6 +375,7 @@
   --color-badge-sink-border:        rgba(184, 85, 48, 0.35);
   --color-badge-aggregation-border: rgba(40, 144, 184, 0.35);
   --color-badge-coalesce-border:    rgba(14, 128, 144, 0.35);
+  --color-badge-queue-border:       rgba(161, 55, 112, 0.35);
 
   /* Per-node validation indicator borders */
   --color-node-valid: #0d8a88;

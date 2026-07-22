@@ -1,14 +1,7 @@
-"""Shared discovery-loop primitives for the guided per-phase solvers.
+"""Shared discovery-loop primitives for guided per-phase chat solvers.
 
-Both the sink solver (``chat_solver.maybe_resolve_step_2_sink_chat``) and the
-transform-chain solver (``chain_solver.solve_chain``) expose the freeform MCP
-discovery tools (``list_*`` / ``get_plugin_schema`` / ``list_models``) to the
-composer model so it can look up real plugins and their option schemas before it
-commits a stage. The two solvers differ only in their *terminal* tool
-(``resolve_sink`` vs ``emit_turn``/``propose_chain``) and their terminal parse;
-the provider-protocol plumbing — re-materialising the assistant tool-call turn
-and dispatching one read-only discovery call with its audit row — is identical
-and lives here so a fix to either lands in both.
+The source and sink chat solvers expose read-only discovery tools to the
+composer model so it can inspect real plugin schemas before resolving a stage.
 
 These functions carry NO solver-specific policy: the *caller* owns the
 execution-side safety gate (proving a call is an allowed discovery tool before
@@ -23,12 +16,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_success
 from elspeth.web.composer.discovery_cache import serialize_tool_result
-from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import execute_tool
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _assistant_tool_calls_message(message: Any, tool_calls: Any) -> dict[str, Any]:
@@ -58,7 +52,8 @@ def _execute_discovery_call(
     *,
     tool_call: Any,
     state: CompositionState,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     secret_service: WebSecretResolver | None,
     user_id: str | None,
     actor: str,
@@ -80,19 +75,24 @@ def _execute_discovery_call(
     name = function.name
     raw_arguments = function.arguments
     # Malformed tool-call arguments are an LLM RESPONSE-SHAPE failure, not a
-    # server/client bug: route them through ``ChainSolverResponseShapeError`` so
-    # the solver's ``solve_chain_with_auto_drop`` wrapper auto-drops to freeform
-    # (same bucket as a malformed ``emit_turn``). A bare ``ValueError`` /
-    # ``JSONDecodeError`` here would escape that wrapper (it deliberately excludes
-    # ``ValueError`` to preserve client-payload-bug routing) and surface as a 500.
+    # server/client bug: route them through the typed model-response failure so
+    # step chat can emit its closed synthetic-unavailable response.
     try:
         parsed = json.loads(raw_arguments) if isinstance(raw_arguments, str) and raw_arguments.strip() else {}
     except json.JSONDecodeError as exc:
-        raise ChainSolverResponseShapeError(f"{name} arguments are not valid JSON: {exc}") from exc
+        raise GuidedSolverResponseShapeError(f"{name} arguments are not valid JSON: {exc}") from exc
     if not isinstance(parsed, Mapping):
-        raise ChainSolverResponseShapeError(f"{name} arguments must decode to an object; got {type(parsed).__name__}")
+        raise GuidedSolverResponseShapeError(f"{name} arguments must decode to an object; got {type(parsed).__name__}")
     arguments = dict(parsed)
-    result = execute_tool(name, arguments, state, catalog, secret_service=secret_service, user_id=user_id)
+    result = execute_tool(
+        name,
+        arguments,
+        state,
+        catalog,
+        plugin_snapshot=plugin_snapshot,
+        secret_service=secret_service,
+        user_id=user_id,
+    )
     if recorder is not None:
         audit = begin_dispatch(tool_call.id, name, arguments, version_before=state.version, actor=actor)
         invocation = finish_success(audit, result_payload=result.to_dict(), version_after=state.version)

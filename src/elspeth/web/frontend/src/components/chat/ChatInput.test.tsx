@@ -10,6 +10,8 @@
 // directly; this test fires the event AFTER a parent re-render to catch that.
 // ============================================================================
 
+import { readFileSync } from "node:fs";
+
 import { useRef, useState, type RefObject } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
@@ -22,6 +24,7 @@ import { resetStore } from "@/test/store-helpers";
 import { PREFILL_CHAT_INPUT_EVENT } from "@/components/catalog/PluginCard";
 import type { ChatMessage, CompositionState } from "@/types";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 describe("ChatInput — controlled-mode prefill listener", () => {
   beforeEach(() => {
@@ -212,6 +215,7 @@ describe("ChatInput empty-state placeholder", () => {
   function makeCompositionState(version: number): CompositionState {
     return {
       id: "comp-1",
+      ...compositionStateAuthorityFields,
       version,
       sources: {},
       nodes: [],
@@ -314,6 +318,56 @@ describe("ChatInput max length", () => {
       "maxlength",
       "4096",
     );
+  });
+});
+
+describe("ChatInput mobile density CSS", () => {
+  const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+
+  // chat.css has FOUR separate `@media (max-width: 760px)` blocks (inline
+  // run-results, this composer-density block, inline-source-fallback, and
+  // responsive CSS blocks). A plain indexOf lands on whichever comes first in
+  // the file — not necessarily the composer-density block these tests mean
+  // to pin — and then over-reads to the next top-level comment, which
+  // happens to swallow the intended block too, so the assertions passed by
+  // accident (elspeth-05d5caa717). Bound each candidate block to its OWN
+  // closing brace (mirrors Layout.test.tsx's regex idiom: nested rules
+  // close on an indented `}`, the media block itself closes on an
+  // unindented `\n}`) and disambiguate among same-breakpoint blocks by a
+  // selector marker unique to the one under test.
+  function mediaBlock(maxWidth: number, marker: string): string {
+    const pattern = new RegExp(
+      `@media \\(max-width: ${maxWidth}px\\)\\s*\\{([\\s\\S]*?)\\n\\}`,
+      "g",
+    );
+    for (const match of chatCss.matchAll(pattern)) {
+      if (match[1].includes(marker)) {
+        return match[1];
+      }
+    }
+    throw new Error(
+      `No max-width ${maxWidth}px media block in chat.css contains "${marker}"`,
+    );
+  }
+
+  it("compacts the composer chrome on phones without shrinking the textarea out of view", () => {
+    const block = mediaBlock(760, ".chat-input-textarea");
+
+    expect(block).toContain(".chat-input {");
+    expect(block).toContain("padding: var(--space-xs) var(--space-sm)");
+    expect(block).toContain("min-height: 54px");
+    expect(block).toContain("max-height: 28vh");
+    expect(block).toContain(".chat-input-icon-btn");
+    expect(block).toContain("min-width: 44px");
+    expect(block).toContain("min-height: var(--size-control)");
+    expect(block).toContain(".chat-input-send-btn");
+  });
+
+  it("gives composer controls overflow-safe labels on narrow screens", () => {
+    const block = mediaBlock(760, ".chat-input-textarea");
+
+    expect(block).toContain("min-width: 0");
+    expect(block).toContain("overflow-wrap: anywhere");
   });
 });
 
@@ -475,6 +529,9 @@ describe("ChatInput — tutorial readOnly lock (prepopulated + locked prompt)", 
     resetStore(useSessionStore);
     resetStore(useBlobStore);
     resetStore(useInterpretationEventsStore);
+    // Post-boot: the backend wall clock has landed, so the readiness gate is
+    // open and the learner can press Send on the locked prompt.
+    useSessionStore.setState({ composeTimeoutReady: true });
   });
 
   const LOCKED = "Scrape these three synthetic project-brief pages.";
@@ -518,5 +575,63 @@ describe("ChatInput — tutorial readOnly lock (prepopulated + locked prompt)", 
     render(<LockedHarness onSend={(c) => sent.push(c)} />);
     await userEvent.click(screen.getByLabelText(/send message/i));
     expect(sent).toEqual([LOCKED]);
+  });
+});
+
+describe("ChatInput — compose timeout readiness gate (bootstrap race)", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  function renderInput(onSend: (c: string) => void) {
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+    render(<ChatInput onSend={onSend} disabled={false} inputRef={inputRef} />);
+  }
+
+  it("gates Send behind a visible connecting reason until the timeout is ready", async () => {
+    // composeTimeoutReady defaults false (boot). No send may schedule a
+    // compose-abort timer from the stale default ceiling; the disabled Send
+    // is not a dead button — a visible status says why (dead-button doctrine).
+    const onSend = vi.fn();
+    renderInput(onSend);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/message input/i), "build a pipeline");
+
+    expect(screen.getByLabelText(/send message/i)).toBeDisabled();
+    expect(
+      screen.getByText(/connecting to the composer/i),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("enables Send once the backend wall clock has landed", async () => {
+    useSessionStore.setState({ composeTimeoutReady: true });
+    const onSend = vi.fn();
+    renderInput(onSend);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/message input/i), "build a pipeline");
+
+    expect(screen.getByLabelText(/send message/i)).toBeEnabled();
+    expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+
+    await user.keyboard("{Enter}");
+    expect(onSend).toHaveBeenCalledWith("build a pipeline");
+  });
+
+  it("shows a distinct unavailable alert (not 'Connecting…') when the backend reports no compose timeout", () => {
+    // Backend up but no usable timeout: readiness never latches, so surface a
+    // stuck-state diagnostic instead of a perpetual soft "Connecting…".
+    useSessionStore.setState({ composerTimeoutUnavailable: true });
+    renderInput(vi.fn());
+
+    expect(
+      screen.getByText(/server did not report a compose timeout/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/connecting to the composer/i)).toBeNull();
+    expect(screen.getByLabelText(/send message/i)).toBeDisabled();
   });
 });

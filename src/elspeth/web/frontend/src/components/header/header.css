@@ -3,7 +3,7 @@
    .header-session-switcher* + .header-session-switcher-rename-form.
    Tenants (execution-domain rules, co-located here by historical source order;
    rendered from RunsHistoryDrawer.tsx, mounted via InlineRunResults.tsx):
-     .runs-history-item-summary, .run-diagnostics*, .run-failure-detail*.
+     .runs-history-*, .run-diagnostics*, .run-failure-detail*.
    Cleanly extractable to execution.css as a follow-up — no specificity contests. */
 
 /* ---------------------------------------------------------------------------
@@ -369,10 +369,64 @@
 }
 
 .runs-history-item-summary {
-  display: grid;
-  grid-template-columns: minmax(90px, 1fr) auto auto;
+  display: flex;
   gap: var(--space-sm);
   align-items: center;
+  justify-content: space-between;
+}
+
+.runs-history-drawer-header h2 {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.runs-history-close {
+  min-width: var(--size-control-compact);
+  padding-inline: var(--space-sm);
+  font-size: var(--font-size-lg);
+  line-height: 1;
+}
+
+.runs-history-item-identity {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.runs-history-item-label {
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.runs-history-item-id {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-history-item-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+@media (max-width: 640px) {
+  .runs-history-item-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runs-history-item-actions {
+    flex-wrap: wrap;
+  }
 }
 
 .run-diagnostics-panel {

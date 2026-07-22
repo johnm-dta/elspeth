@@ -323,6 +323,8 @@ class NodeDetailPanel:
             lines.append(f"  Completed: {detail['completed']}")
             if "state_id" in detail:
                 lines.append(f"  State ID: {detail['state_id']}")
+            if "sink_effect_id" in detail:
+                lines.append(f"  Sink effect ID: {detail['sink_effect_id']}")
             if "token_id" in detail:
                 lines.append(f"  Token ID: {detail['token_id']}")
             if "row_id" in detail:
@@ -343,6 +345,11 @@ class NodeDetailPanel:
                     lines.append(f"  Hash: {detail['artifact_hash']}")
                 if "artifact_size_bytes" in detail:
                     lines.append(f"  Size: {self._format_size(detail['artifact_size_bytes'])}")
+                if "artifact_producer_kind" in detail:
+                    lines.append(f"  Producer: {detail['artifact_producer_kind']}")
+                if "artifact_publication_performed" in detail and "artifact_publication_evidence_kind" in detail:
+                    publication = "performed" if detail["artifact_publication_performed"] else "not performed"
+                    lines.append(f"  Publication: {publication} ({detail['artifact_publication_evidence_kind']})")
         elif detail_kind == "status":
             lines.append("Status:")
             if "run_id" in detail:

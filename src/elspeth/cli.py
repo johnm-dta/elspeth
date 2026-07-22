@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,11 +35,14 @@ from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.security.config_secrets import SecretLoadError, load_secrets_from_config
+from elspeth.engine.orchestrator.preflight import SinkEffectCapabilityError
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.run_result import RunResult
+    from elspeth.core.config import SecretsConfig
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine import Orchestrator, PipelineConfig
     from elspeth.engine.orchestrator import RowPlugin
@@ -57,8 +60,123 @@ app = typer.Typer(
 )
 composer_app = typer.Typer(help="Composer web UI commands.")
 composer_users_app = typer.Typer(help="Local composer user management commands.")
+doctor_app = typer.Typer(help="Deployment readiness checks.")
 app.add_typer(composer_app, name="composer")
 composer_app.add_typer(composer_users_app, name="users")
+app.add_typer(doctor_app, name="doctor")
+
+
+def _preflight_follower_sink_effects(
+    sinks: Mapping[str, SinkProtocol],
+    configured_modes: Mapping[str, str],
+) -> object:
+    """Fail closed over resolved follower sinks before any startup work."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+
+    return validate_pipeline_sink_effect_capabilities(
+        sinks,
+        configured_modes=configured_modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+
+
+def _start_follower_plugin_lifecycle(
+    *,
+    transforms: Collection[RowPlugin],
+    sinks: Mapping[str, SinkProtocol],
+    configured_modes: Mapping[str, str],
+    admission: object,
+    ctx: PluginContext,
+) -> None:
+    """Consume exact follower admission immediately before plugin startup."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
+
+    require_sink_effect_admission(
+        sinks,
+        configured_modes=configured_modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        admission=admission,
+    )
+    for transform in transforms:
+        transform.on_start(ctx)
+    for sink in sinks.values():
+        sink.on_start(ctx)
+
+
+def _instantiate_plugins_for_runtime_preflight(
+    settings: ElspethSettings,
+    *,
+    purpose: object | None = None,
+) -> PluginBundle:
+    """Construct runtime plugins under the constructor-safe preflight posture."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
+
+    resolved_purpose = SinkEffectExecutionPurpose.FRESH if purpose is None else purpose
+    if not isinstance(resolved_purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Runtime preflight purpose must be exact SinkEffectExecutionPurpose")
+    return instantiate_plugins_from_config(
+        settings,
+        preflight_mode=True,
+        sink_effect_purpose=resolved_purpose,
+    )
+
+
+def _join_after_follower_sink_preflight(
+    orchestrator: Orchestrator,
+    run_id: str,
+    settings: ElspethSettings,
+) -> tuple[str, PluginBundle, Mapping[str, SinkProtocol], Mapping[str, str], object]:
+    """Join only after the exact follower execution sinks earn admission."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    plugins = _instantiate_plugins_for_runtime_preflight(settings, purpose=SinkEffectExecutionPurpose.FOLLOWER)
+    execution_sinks, execution_sink_modes, admission = _preflight_execution_sinks(
+        settings,
+        plugins,
+        purpose=SinkEffectExecutionPurpose.FOLLOWER,
+    )
+    worker_id = orchestrator.join_run(run_id, settings)
+    return worker_id, plugins, execution_sinks, execution_sink_modes, admission
+
+
+@doctor_app.command("aws-ecs")
+def doctor_aws_ecs(
+    init_schema: bool = typer.Option(
+        False,
+        "--init-schema",
+        help="Initialize only eligible missing or repairable PostgreSQL schemas.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit a bare ordered JSON check list."),
+) -> None:
+    """Check whether this environment satisfies the AWS ECS contract."""
+    from dataclasses import asdict
+
+    from elspeth.web.config import settings_from_env
+    from elspeth.web.deployment_contract import ContractCheck
+    from elspeth.web.doctor import collect_checks, sanitize_error
+
+    try:
+        settings = settings_from_env()
+    except Exception as exc:
+        checks = [ContractCheck("settings_load", False, sanitize_error("web settings could not be loaded", exc))]
+    else:
+        try:
+            checks = collect_checks(settings, init_schema=init_schema)
+        except Exception as exc:
+            checks = [ContractCheck("doctor_internal_error", False, sanitize_error("doctor collection failed", exc))]
+
+    if json_output:
+        typer.echo(json.dumps([asdict(check) for check in checks]))
+    else:
+        for check in checks:
+            status = "OK" if check.ok else "FAIL"
+            typer.echo(f"{status} {check.name}: {check.detail}")
+
+    if not all(check.ok for check in checks):
+        raise typer.Exit(1)
 
 
 def version_callback(value: bool) -> None:
@@ -178,7 +296,11 @@ def main(
         )
 
 
-def _ensure_output_directories(config: ElspethSettings) -> list[str]:
+def _ensure_output_directories(
+    config: ElspethSettings,
+    *,
+    execution_sink_names: Collection[str] | None = None,
+) -> list[str]:
     """Ensure required output directories exist, creating them if needed.
 
     Creates directories BEFORE attempting to create databases or files,
@@ -241,6 +363,8 @@ def _ensure_output_directories(config: ElspethSettings) -> list[str]:
 
     # 3. Ensure sink output directories exist (for file-based sinks)
     for sink_name, sink_config in config.sinks.items():
+        if execution_sink_names is not None and sink_name not in execution_sink_names:
+            continue
         # SinkSettings.options is always dict[str, Any]; "path" key present for file-based sinks
         sink_path = sink_config.options.get("path")
         if sink_path:
@@ -329,6 +453,25 @@ def _load_raw_yaml(config_path: Path) -> dict[str, Any]:
     return raw_config
 
 
+def _parse_raw_secrets_config(raw_config: Mapping[str, Any]) -> SecretsConfig:
+    """Extract and validate the literal ``secrets`` block from raw (unexpanded) YAML.
+
+    Shared by the raw sink-effect preflight and the settings loader so both
+    read one authoritative interpretation of which environment variables the
+    secret-loading phase will populate.
+    """
+    from elspeth.core.config import SecretsConfig
+
+    secrets_obj = raw_config.get("secrets", {})
+    if secrets_obj is None:
+        secrets_dict: dict[str, Any] = {}
+    else:
+        if not isinstance(secrets_obj, Mapping):
+            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
+        secrets_dict = dict(secrets_obj)
+    return SecretsConfig(**secrets_dict)
+
+
 def _load_settings_with_secrets(
     settings_path: Path,
 ) -> tuple[ElspethSettings, list[SecretResolutionInput]]:
@@ -358,21 +501,12 @@ def _load_settings_with_secrets(
         ValidationError: Pydantic validation error (secrets config or full config)
         SecretLoadError: Key Vault secret loading failed
     """
-    from elspeth.core.config import SecretsConfig
-
     # Phase 1: Parse YAML to extract secrets config (no ${VAR} resolution yet)
     # NOTE: vault_url must be literal per design - ${VAR} not supported
     raw_config = _load_raw_yaml(settings_path)
 
     # Extract and validate secrets config
-    secrets_obj = raw_config.get("secrets", {})
-    if secrets_obj is None:
-        secrets_dict: dict[str, Any] = {}
-    else:
-        if not isinstance(secrets_obj, Mapping):
-            raise ValueError(f"'secrets' must be a mapping/object, got {type(secrets_obj).__name__}")
-        secrets_dict = dict(secrets_obj)
-    secrets_config = SecretsConfig(**secrets_dict)
+    secrets_config = _parse_raw_secrets_config(raw_config)
 
     # Phase 2: Load secrets from Key Vault if configured
     # Returns resolution records for later audit recording
@@ -389,11 +523,103 @@ def _execution_sinks_for_graph(
     config: ElspethSettings,
     sinks: Mapping[str, SinkProtocol],
 ) -> Mapping[str, SinkProtocol]:
-    """Return only sinks that participate in row-flow graph validation/execution."""
-    if config.landscape.export.enabled and config.landscape.export.sink:
-        export_sink_name = config.landscape.export.sink
-        return {name: sink for name, sink in sinks.items() if name != export_sink_name}
-    return sinks
+    """Return the canonical pipeline-execution sink projection."""
+    from elspeth.engine.orchestrator.preflight import execution_sinks_for_runtime
+
+    return execution_sinks_for_runtime(config, sinks)
+
+
+def _preflight_execution_sinks(
+    config: ElspethSettings,
+    plugins: PluginBundle,
+    *,
+    purpose: object | None = None,
+) -> tuple[Mapping[str, SinkProtocol], Mapping[str, str], object]:
+    """Validate the one executable pipeline sink lane and return its receipt."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        SinkEffectExecutionPurpose,
+        execution_sink_bindings_for_runtime,
+        execution_sinks_for_runtime,
+        sink_effect_modes_from_runtime_bindings,
+        validate_pipeline_sink_effect_capabilities,
+    )
+
+    resolved_purpose = SinkEffectExecutionPurpose.FRESH if purpose is None else purpose
+    if not isinstance(resolved_purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
+    sinks = execution_sinks_for_runtime(config, plugins.sinks)
+    bindings = execution_sink_bindings_for_runtime(config, plugins.sink_effect_bindings)
+    modes = sink_effect_modes_from_runtime_bindings(
+        sinks,
+        bindings,
+        purpose=resolved_purpose,
+        configured_options={name: config.sinks[name].options for name in sinks},
+    )
+    admission = validate_pipeline_sink_effect_capabilities(
+        sinks,
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+    )
+    return sinks, modes, admission
+
+
+def _configure_execution_sinks_for_resume(execution_sinks: Mapping[str, SinkProtocol]) -> None:
+    """Switch live execution sinks to their resume (append) mode.
+
+    Must run BEFORE sink-effect admission is issued so the admission receipt
+    and the durable effect identity bind the mode resume actually executes
+    (elspeth-fc9906e398). Uses the polymorphic resume capability: each sink
+    self-configures via configure_for_resume().
+    """
+    for sink_name, sink in execution_sinks.items():
+        if not sink.supports_resume:
+            typer.echo(
+                f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
+                f"This sink does not support resume/append mode.\n"
+                f"Hint: Use a different sink type or start a new run.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        try:
+            sink.configure_for_resume()
+        except NotImplementedError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1) from None
+
+
+def _preflight_raw_settings_sink_effects(settings_path: Path, *, purpose: object) -> None:
+    """Run adapter-class eligibility before secrets or other startup work."""
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+    from elspeth.plugins.infrastructure.runtime_factory import (
+        validate_landscape_export_settings_from_raw_config,
+        validate_sink_effect_eligibility_from_raw_config,
+    )
+
+    if not isinstance(purpose, SinkEffectExecutionPurpose):
+        raise TypeError("Raw sink effect preflight purpose must be exact SinkEffectExecutionPurpose")
+    raw_config = _load_raw_yaml(settings_path)
+    # Supported ${VAR} expansion must complete before configuration-dependent
+    # mode/URL/dialect resolution (elspeth-19f2382cf4). Key Vault-mapped
+    # variables are only populated by the later secret-loading phase, so sinks
+    # referencing them are deferred to the post-expansion admission gates.
+    secrets_config = _parse_raw_secrets_config(raw_config)
+    deferrable_env_vars = frozenset(secrets_config.mapping) if secrets_config.source == "keyvault" else frozenset()
+    validate_sink_effect_eligibility_from_raw_config(
+        raw_config,
+        purpose=purpose,
+        expand_env_placeholders=True,
+        deferrable_env_vars=deferrable_env_vars,
+    )
+    if purpose is SinkEffectExecutionPurpose.FRESH:
+        export_settings = validate_landscape_export_settings_from_raw_config(raw_config)
+        if export_settings.enabled:
+            validate_sink_effect_eligibility_from_raw_config(
+                raw_config,
+                purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+                expand_env_placeholders=True,
+                deferrable_env_vars=deferrable_env_vars,
+            )
 
 
 @app.command()
@@ -434,12 +660,14 @@ def run(
     Requires --execute flag to actually run (safety feature).
     Use --dry-run to validate configuration without executing.
     """
-    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
     settings_path = Path(settings).expanduser()
 
     # Load and validate config with Key Vault secrets (same flow as other commands)
     try:
+        if execute and not dry_run:
+            from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+            _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
         config, secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings}", err=True)
@@ -456,6 +684,9 @@ def run(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
@@ -465,7 +696,7 @@ def run(
 
     # Instantiate plugins before graph construction
     try:
-        plugins = instantiate_plugins_from_config(config)
+        plugins = _instantiate_plugins_for_runtime_preflight(config)
     except contract_errors.TIER_1_ERRORS:
         raise  # Tier 1 errors must crash with full traceback, not Exit(1)
     except Exception as e:
@@ -522,10 +753,21 @@ def run(
         if dry_run or not execute:
             raise typer.Exit(1)
 
+    # Executable admission: validate the projected pipeline sinks before any
+    # output/payload/database directory can be created. Dry-run/configuration
+    # assembly above intentionally remains side-effect and capability-gate free.
+    try:
+        execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(config, plugins)
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
+
     # Ensure output directories exist BEFORE attempting to create resources
     # Creates directories automatically, only errors if creation fails
     # NOTE: Only when actually executing (not dry-run or validation-only)
-    dir_errors = _ensure_output_directories(config)
+    dir_errors = _ensure_output_directories(config, execution_sink_names=execution_sinks)
     if dir_errors:
         typer.echo("Output directory errors:", err=True)
         for dir_error in dir_errors:
@@ -581,6 +823,8 @@ def run(
             secret_resolutions=secret_resolutions,
             passphrase=passphrase,
             preflight_results=preflight,
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         )
     except GracefulShutdownError as e:
         if output_format == "json":
@@ -979,6 +1223,8 @@ def _orchestrator_context(
     formatter_prefix: str = "Run",
     output_format: Literal["console", "json", "none"] = "console",
     checkpoint_always: bool = False,
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> Iterator[_OrchestratorContext]:
     """Shared orchestrator setup and teardown for run/resume CLI paths.
 
@@ -1018,10 +1264,13 @@ def _orchestrator_context(
     from elspeth.core.rate_limit import RateLimitRegistry
     from elspeth.engine import Orchestrator as _Orchestrator
     from elspeth.engine import PipelineConfig as _PipelineConfig
+    from elspeth.engine.orchestrator.preflight import execution_sink_modes_for_runtime
     from elspeth.telemetry import create_telemetry_manager
 
     # Unpack pre-instantiated plugins
-    sinks: Mapping[str, SinkProtocol] = plugins.sinks
+    sinks: Mapping[str, SinkProtocol] = _execution_sinks_for_graph(config, plugins.sinks)
+    configured_sink_effect_modes = plugins.sink_effect_modes if sink_effect_modes is None else sink_effect_modes
+    effective_sink_effect_modes = execution_sink_modes_for_runtime(config, configured_sink_effect_modes)
 
     # Build transforms list: row_plugins + aggregations (with node_id)
     transforms: list[RowPlugin] = [wired.plugin for wired in plugins.transforms]
@@ -1044,6 +1293,8 @@ def _orchestrator_context(
         gates=list(config.gates),
         aggregation_settings=aggregation_settings,
         coalesce_settings=(list(config.coalesce) if config.coalesce else []),
+        sink_effect_modes=effective_sink_effect_modes,
+        sink_effect_admission=sink_effect_admission,
     )
 
     # EventBus + formatters. Programmatic dependency execution uses the
@@ -1104,6 +1355,8 @@ def _execute_pipeline_with_instances(
     secret_resolutions: list[SecretResolutionInput] | None = None,
     passphrase: str | None = None,
     preflight_results: PreflightResult | None = None,
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> ExecutionResult:
     """Execute pipeline using pre-instantiated plugin instances.
 
@@ -1158,6 +1411,14 @@ def _execute_pipeline_with_instances(
         raise typer.Exit(1)
     payload_store = FilesystemPayloadStore(config.payload_store.base_path)
 
+    audit_export_content_store = None
+    audit_export_content_store_resolver = None
+    export_settings = getattr(config.landscape, "export", None)
+    if export_settings is not None and export_settings.enabled:
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(export_settings)
+
     try:
         if verbose:
             typer.echo("Starting pipeline execution...")
@@ -1169,6 +1430,8 @@ def _execute_pipeline_with_instances(
             db=db,
             formatter_prefix="Run",
             output_format=output_format,
+            sink_effect_modes=sink_effect_modes,
+            sink_effect_admission=sink_effect_admission,
         ) as ctx:
             from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
             from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
@@ -1184,6 +1447,8 @@ def _execute_pipeline_with_instances(
                 graph=graph,
                 settings=config,
                 payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
                 secret_resolutions=secret_resolutions,
                 preflight_results=preflight_results,
                 sink_factory=make_sink_factory(config),
@@ -1213,13 +1478,15 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     from elspeth.core.landscape import LandscapeDB
     from elspeth.core.payload_store import FilesystemPayloadStore
     from elspeth.engine.bootstrap import resolve_preflight
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
     from elspeth.plugins.infrastructure.probe_factory import build_collection_probes
-    from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config, make_sink_factory
+    from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
 
+    _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FRESH)
     config, secret_resolutions = _load_settings_with_secrets(settings_path)
 
-    plugins = instantiate_plugins_from_config(config)
-    execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
+    plugins = _instantiate_plugins_for_runtime_preflight(config)
+    execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(config, plugins)
 
     graph = ExecutionGraph.from_plugin_instances(
         sources=plugins.sources,
@@ -1233,7 +1500,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     )
     graph.validate()
 
-    dir_errors = _ensure_output_directories(config)
+    dir_errors = _ensure_output_directories(config, execution_sink_names=execution_sinks)
     if dir_errors:
         raise ValueError(f"Failed to create output directories: {'; '.join(dir_errors)}")
 
@@ -1267,6 +1534,13 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
         raise ValueError(f"Unsupported payload store backend '{config.payload_store.backend}'. Only 'filesystem' is currently supported.")
     payload_store = FilesystemPayloadStore(config.payload_store.base_path)
 
+    audit_export_content_store = None
+    audit_export_content_store_resolver = None
+    if config.landscape.export.enabled:
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(config.landscape.export)
+
     try:
         with _orchestrator_context(
             config,
@@ -1274,6 +1548,8 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
             plugins,
             db=db,
             output_format="none",
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         ) as ctx:
             from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
 
@@ -1283,6 +1559,8 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
                 graph=graph,
                 settings=config,
                 payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
                 preflight_results=preflight,
                 secret_resolutions=secret_resolutions,
                 sink_factory=make_sink_factory(config),
@@ -1864,6 +2142,8 @@ def _execute_resume_with_instances(
     payload_store: PayloadStore | None,
     db: LandscapeDB,
     output_format: Literal["console", "json"] = "console",
+    sink_effect_modes: Mapping[str, str] | None = None,
+    sink_effect_admission: object | None = None,
 ) -> Any:  # Returns RunResult from orchestrator.resume()
     """Execute resume using pre-instantiated plugins.
 
@@ -1890,6 +2170,8 @@ def _execute_resume_with_instances(
         formatter_prefix="Resume",
         output_format=output_format,
         checkpoint_always=True,
+        sink_effect_modes=sink_effect_modes,
+        sink_effect_admission=sink_effect_admission,
     ) as ctx:
         return ctx.orchestrator.resume(
             resume_point=resume_point,
@@ -1920,11 +2202,12 @@ def _build_resume_graphs(
     # hash and source node IDs computed during the original run. The runtime
     # PluginBundle is swapped to NullSource separately before execution; graph
     # identity must not change just because resume does not reopen sources.
+    execution_sinks = _execution_sinks_for_graph(settings_config, plugins.sinks)
     validation_graph = ExecutionGraph.from_plugin_instances(
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
-        sinks=plugins.sinks,
+        sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
@@ -1936,7 +2219,7 @@ def _build_resume_graphs(
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
-        sinks=plugins.sinks,
+        sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
@@ -2058,6 +2341,10 @@ def resume(
     # Load settings with Key Vault secrets (same flow as 'run' command)
     # This ensures ${VAR} placeholders are resolved correctly for keyvault-backed configs
     try:
+        if execute:
+            from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+            _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.RESUME)
         settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
@@ -2071,6 +2358,9 @@ def resume(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
@@ -2080,6 +2370,37 @@ def resume(
 
     # NOTE: _secret_resolutions captured but not used for resume
     # Resume inherits the original run's secret resolution audit records
+
+    from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+    try:
+        plugins = _instantiate_plugins_for_runtime_preflight(
+            settings_config,
+            purpose=SinkEffectExecutionPurpose.RESUME,
+        )
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if execute:
+        # Resume executes sinks in their post-resume live mode. Switch the
+        # live instances BEFORE admission is issued so the admission receipt
+        # and the durable effect identity bind the mode resume actually uses
+        # (elspeth-fc9906e398).
+        _configure_execution_sinks_for_resume(_execution_sinks_for_graph(settings_config, plugins.sinks))
+        try:
+            execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+                settings_config,
+                plugins,
+                purpose=SinkEffectExecutionPurpose.RESUME,
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
+            raise typer.Exit(1) from None
 
     # Resolve database URL
     if database:
@@ -2144,17 +2465,6 @@ def resume(
     try:
         checkpoint_manager = CheckpointManager(db)
         recovery_manager = RecoveryManager(db, checkpoint_manager)
-
-        # Instantiate plugins once — reused for validation graph, execution graph, and sink checks
-        from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
-        try:
-            plugins = instantiate_plugins_from_config(settings_config)
-        except contract_errors.TIER_1_ERRORS:
-            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
-        except Exception as e:
-            typer.echo(f"Error instantiating plugins: {e}", err=True)
-            raise typer.Exit(1) from None
 
         # Build both graphs from the same plugin instances
         try:
@@ -2244,30 +2554,16 @@ def resume(
 
         payload_store = FilesystemPayloadStore(payload_path)
 
-        # CRITICAL: Validate and configure sinks for resume mode
-        # Uses the already-instantiated sinks from plugins dict
+        # CRITICAL: Validate sink output targets for resume mode.
+        # The sinks were already switched to their resume (append) mode by
+        # _configure_execution_sinks_for_resume BEFORE admission was issued,
+        # so the admission receipt binds the live post-resume mode
+        # (elspeth-fc9906e398).
         from elspeth.plugins.sources.null_source import NullSource
 
         resume_sinks = {}
 
-        for sink_name, sink in plugins.sinks.items():
-            # Check if sink supports resume
-            if not sink.supports_resume:
-                typer.echo(
-                    f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
-                    f"This sink does not support resume/append mode.\n"
-                    f"Hint: Use a different sink type or start a new run.",
-                    err=True,
-                )
-                raise typer.Exit(1)
-
-            # Configure sink for resume (switches to append mode)
-            try:
-                sink.configure_for_resume()
-            except NotImplementedError as e:
-                typer.echo(f"Error: {e}", err=True)
-                raise typer.Exit(1) from None
-
+        for sink_name, sink in execution_sinks.items():
             # For sinks with headers: original, provide field resolution
             # mapping BEFORE validation so they can correctly compare display names
             if sink.needs_resume_field_resolution:
@@ -2350,6 +2646,8 @@ def resume(
                 payload_store=payload_store,
                 db=db,
                 output_format=output_format,
+                sink_effect_modes=execution_sink_modes,
+                sink_effect_admission=sink_effect_admission,
             )
         except GracefulShutdownError as e:
             if output_format == "json":
@@ -2485,6 +2783,235 @@ def resume(
         _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
+@app.command("export-resume")
+def export_resume(
+    run_id: str = typer.Argument(..., help="Finalized run whose audit export should be resumed."),
+    database: str | None = typer.Option(
+        None,
+        "--database",
+        "-d",
+        help="Path to Landscape database file (SQLite).",
+    ),
+    settings_file: str | None = typer.Option(
+        None,
+        "--settings",
+        "-s",
+        help="Path to settings YAML file (default: settings.yaml).",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        "-x",
+        help="Actually execute the export resume (default is dry-run).",
+    ),
+    output_format: Literal["console", "json"] = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: 'console' (human-readable) or 'json' (structured JSON).",
+    ),
+) -> None:
+    """Resume a finalized run's unfinished audit export.
+
+    Production recovery path for the window after run finalization where a
+    crash or transient sink failure left the run's export PENDING/FAILED and
+    its durable sink effect PREPARED/IN_FLIGHT. The immutable snapshot winner
+    is reused (never re-derived) and the durable effect is reconciled, so
+    publication happens exactly once.
+
+    By default, shows eligibility (dry run). Use --execute to actually
+    resume the export.
+
+    Examples:
+
+        # Dry run - show export status and eligibility
+        elspeth export-resume run-abc123
+
+        # Actually resume the export
+        elspeth export-resume run-abc123 --execute
+    """
+    from elspeth.core.landscape import LandscapeDB
+    from elspeth.engine.orchestrator.export import audit_export_resume_refusal, resume_audit_export
+
+    settings_path = Path(settings_file).expanduser() if settings_file else Path("settings.yaml")
+    if not settings_path.exists():
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
+    except FileNotFoundError:
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        raise typer.Exit(1) from None
+    except yaml.YAMLError as e:
+        typer.echo(f"YAML syntax error in {settings_path}: {e}", err=True)
+        raise typer.Exit(1) from None
+    except ValidationError as e:
+        typer.echo("Configuration errors:", err=True)
+        for error in e.errors():
+            loc = ".".join(str(x) for x in error["loc"])
+            typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as e:
+        typer.echo(f"Configuration error: {e}", err=True)
+        raise typer.Exit(1) from None
+    except SecretLoadError as e:
+        typer.echo(f"Error loading secrets: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    export_settings = settings_config.landscape.export
+    if not export_settings.enabled:
+        typer.echo(
+            "Error: landscape.export is not enabled in settings; there is no audit export to resume.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Resolve database URL (same discipline as `resume`)
+    if database:
+        db_path = Path(database).expanduser().resolve()
+        if not db_path.exists():
+            typer.echo(f"Error: Database file not found: {db_path}", err=True)
+            raise typer.Exit(1) from None
+        db_url = f"sqlite:///{db_path}"
+    else:
+        db_url = settings_config.landscape.url
+        _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
+
+    from elspeth.cli_helpers import resolve_audit_passphrase
+
+    try:
+        passphrase = resolve_audit_passphrase(settings_config.landscape)
+    except RuntimeError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        db = LandscapeDB.from_url(db_url, passphrase=passphrase, create_tables=False)
+    except Exception as e:
+        typer.echo(f"Error connecting to database: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        from sqlalchemy import inspect as sa_inspect
+
+        try:
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+        except Exception as e:
+            typer.echo(f"Error inspecting database schema: {e}", err=True)
+            raise typer.Exit(1) from None
+        if "runs" not in existing_tables:
+            typer.echo(
+                "Error: Database exists but is not a Landscape database (missing table: runs). Check the database path.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        from elspeth.core.landscape.factory import RecorderFactory
+
+        run = RecorderFactory(db).run_lifecycle.get_run(run_id)
+        refusal = audit_export_resume_refusal(run, run_id)
+
+        export_info: dict[str, Any] = {
+            "run_id": run_id,
+            "run_status": run.status.value if run is not None else None,
+            "export_status": (run.export_status.value if run is not None and run.export_status is not None else None),
+            "export_error": run.export_error if run is not None else None,
+            "eligible": refusal is None,
+            "reason": refusal,
+        }
+
+        if output_format != "json":
+            typer.echo(f"Run status: {export_info['run_status']}")
+            typer.echo(f"Export status: {export_info['export_status']}")
+            if export_info["export_error"]:
+                typer.echo(f"Export error: {export_info['export_error']}")
+
+        if refusal is not None:
+            if output_format == "json":
+                import json as json_module
+
+                typer.echo(json_module.dumps(export_info, indent=2))
+            else:
+                typer.echo(f"Cannot resume export for run {run_id}: {refusal}", err=True)
+            raise typer.Exit(1)
+
+        if not execute:
+            if output_format == "json":
+                import json as json_module
+
+                export_info["dry_run"] = True
+                typer.echo(json_module.dumps(export_info, indent=2))
+            else:
+                typer.echo(f"Run {run_id} export can be resumed.")
+                typer.echo("\nDry run - use --execute to actually resume the export.")
+            return
+
+        # Build the same export resources the run path uses.
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        if settings_config.payload_store.backend != "filesystem":
+            typer.echo(
+                f"Error: Unsupported payload store backend '{settings_config.payload_store.backend}'. "
+                f"Only 'filesystem' is currently supported.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        payload_path = settings_config.payload_store.base_path
+        if not payload_path.exists():
+            typer.echo(f"Error: Payload directory not found: {payload_path}", err=True)
+            raise typer.Exit(1)
+        payload_store = FilesystemPayloadStore(payload_path)
+
+        from elspeth.contracts.coordination import mint_worker_id
+        from elspeth.core.audit_export_content_store import create_audit_export_content_store
+        from elspeth.plugins.infrastructure.runtime_factory import make_sink_factory
+
+        audit_export_content_store, audit_export_content_store_resolver = create_audit_export_content_store(export_settings)
+
+        if output_format != "json":
+            typer.echo(f"\nResuming audit export for run {run_id}...")
+
+        try:
+            resume_audit_export(
+                db,
+                run_id,
+                settings_config,
+                make_sink_factory(settings_config),
+                payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
+                worker_id=mint_worker_id(run_id),
+            )
+        except contract_errors.TIER_1_ERRORS:
+            raise  # Tier 1 errors must crash with full traceback, not Exit(1)
+        except Exception as e:
+            if output_format == "json":
+                import json as json_module
+
+                typer.echo(
+                    json_module.dumps({**export_info, "event": "error", "error": str(e), "error_type": type(e).__name__}),
+                    err=True,
+                )
+            else:
+                typer.echo(f"Error during export resume: {e}", err=True)
+            raise typer.Exit(1) from e
+
+        if output_format == "json":
+            import json as json_module
+
+            typer.echo(json_module.dumps({**export_info, "export_status": "completed", "resumed": True}, indent=2))
+        else:
+            typer.echo(f"Export resumed successfully for run {run_id}: export status is now 'completed'.")
+    finally:
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
+
+
 @app.command()
 def join(
     run_id: str = typer.Argument(..., help="Run ID to join as a follower worker."),
@@ -2540,6 +3067,9 @@ def join(
 
     # Load settings with Key Vault secrets (same flow as 'run' and 'resume' commands).
     try:
+        from elspeth.engine.orchestrator.preflight import SinkEffectExecutionPurpose
+
+        _preflight_raw_settings_sink_effects(settings_path, purpose=SinkEffectExecutionPurpose.FOLLOWER)
         settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
     except FileNotFoundError:
         typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
@@ -2553,11 +3083,30 @@ def join(
             loc = ".".join(str(x) for x in error["loc"])
             typer.echo(f"  - {loc}: {error['msg']}", err=True)
         raise typer.Exit(1) from None
+    except SinkEffectCapabilityError as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
+        raise typer.Exit(1) from None
     except ValueError as e:
         typer.echo(f"Configuration error: {e}", err=True)
         raise typer.Exit(1) from None
     except SecretLoadError as e:
         typer.echo(f"Error loading secrets: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    try:
+        plugins = _instantiate_plugins_for_runtime_preflight(
+            settings_config,
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
+        )
+        execution_sinks, execution_sink_modes, sink_effect_admission = _preflight_execution_sinks(
+            settings_config,
+            plugins,
+            purpose=SinkEffectExecutionPurpose.FOLLOWER,
+        )
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as e:
+        typer.echo(f"Sink effect preflight failed: {e}", err=True)
         raise typer.Exit(1) from None
 
     # Resolve database URL.
@@ -2642,6 +3191,11 @@ def join(
             else:
                 typer.echo(f"Cannot join run {run_id}: {e.reason}", err=True)
             raise typer.Exit(1) from None
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Sink effect preflight failed: {e}", err=True)
+            raise typer.Exit(1) from None
 
         # Derive the per-worker hex suffix from the minted worker_id
         # (format: worker:{run_id}:{HEX}).
@@ -2666,16 +3220,6 @@ def join(
 
         # Build the execution graph for the follower (needed to recognise
         # barrier / sink nodes for hand-off routing).
-        try:
-            from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
-
-            plugins = instantiate_plugins_from_config(settings_config)
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as e:
-            typer.echo(f"Error instantiating plugins: {e}", err=True)
-            raise typer.Exit(1) from None
-
         try:
             _validation_graph, execution_graph = _build_resume_graphs(settings_config, plugins)
         except contract_errors.TIER_1_ERRORS:
@@ -2751,10 +3295,12 @@ def join(
             config=resolve_config(settings_config),
             sources=plugins.sources,
             transforms=follower_transforms,
-            sinks=plugins.sinks,
+            sinks=execution_sinks,
             gates=list(settings_config.gates),
             aggregation_settings=follower_agg_settings,
             coalesce_settings=(list(settings_config.coalesce) if settings_config.coalesce else []),
+            sink_effect_modes=execution_sink_modes,
+            sink_effect_admission=sink_effect_admission,
         )
 
         follower_proc = build_follower_processor(
@@ -2779,10 +3325,13 @@ def join(
         # on the first process() call.
         follower_run_entered = False
         try:
-            for _follower_transform in follower_transforms:
-                _follower_transform.on_start(ctx)
-            for _follower_sink in plugins.sinks.values():
-                _follower_sink.on_start(ctx)
+            _start_follower_plugin_lifecycle(
+                transforms=follower_transforms,
+                sinks=execution_sinks,
+                configured_modes=execution_sink_modes,
+                admission=sink_effect_admission,
+                ctx=ctx,
+            )
 
             follower_run_entered = True
             follower_proc.run(ctx)
@@ -3255,7 +3804,7 @@ def web(
 
     # Bridge CLI args to create_app() via environment variables.
     # uvicorn's factory protocol calls create_app() with no arguments,
-    # so we set ELSPETH_WEB__* env vars that _settings_from_env() reads.
+    # so we set ELSPETH_WEB__* env vars that settings_from_env() reads.
     os.environ["ELSPETH_WEB__HOST"] = host
     os.environ["ELSPETH_WEB__PORT"] = str(port)
     os.environ["ELSPETH_WEB__AUTH_PROVIDER"] = auth
@@ -3266,6 +3815,7 @@ def web(
         port=port,
         reload=reload,
         factory=True,
+        access_log=False,
     )
 
 

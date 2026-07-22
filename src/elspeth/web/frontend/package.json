@@ -3,16 +3,23 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "packageManager": "npm@11.6.2",
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
-    "typecheck": "tsc -p tsconfig.app.json --noEmit",
-    "lint": "eslint src vite.config.ts",
+    "postbuild": "node scripts/prune-stale-assets.mjs",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.oidc.json --noEmit",
+    "lint": "eslint src vite.config.ts playwright.oidc.config.ts tests/e2e/aws-ecs-oidc.staging.spec.ts tests/e2e/harness/oidc-*.ts",
     "lint:css": "stylelint 'src/**/*.css'",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:oidc": "playwright test --config=playwright.oidc.config.ts",
     "test:e2e:staging": "playwright test --config=playwright.staging.config.ts tutorial-reliability.staging",
     "test:e2e:staging:smoke": "playwright test --config=playwright.staging.config.ts release-smoke.staging",
     "test:e2e:ui": "playwright test --ui",
@@ -32,6 +39,7 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "yaml": "^2.9.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -42,7 +50,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/dompurify": "^3.0.5",
     "@types/jest-axe": "^3.5.9",
-    "@types/node": "^22.19.17",
+    "@types/node": "^24.13.3",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",

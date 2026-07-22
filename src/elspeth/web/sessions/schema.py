@@ -8,23 +8,31 @@ schema; stale local/runtime files should be deleted and recreated.
 
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping
-from typing import Any, NoReturn, cast
+from threading import Lock
+from typing import Any, NoReturn
 
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Connection, Engine, inspect, text
 from sqlalchemy.engine.reflection import Inspector
-from sqlalchemy.schema import CheckConstraint, ForeignKeyConstraint, Table, UniqueConstraint
 
+from elspeth.core.schema_identity import (
+    SCHEMA_IDENTITY_TABLE_NAME,
+    insert_schema_identity,
+    read_schema_identities,
+    schema_identity_mismatch,
+)
+from elspeth.core.schema_shape import collect_metadata_shape_issues
 from elspeth.web.sessions.models import (
     SESSION_DB_APPLICATION_ID,
     SESSION_SCHEMA_EPOCH,
     metadata,
+    schema_identity_table,
 )
 
 _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
+_SESSION_METADATA_CREATE_LOCK = Lock()
 
-# Required SQLite triggers. These triggers enforce audit invariants
+# Required audit triggers. Both supported database dialects install these
+# stable trigger names to enforce invariants
 # that cannot be expressed as table CHECK constraints:
 #
 # * ``trg_interpretation_events_immutable_resolved`` — resolved
@@ -47,13 +55,25 @@ _SQLITE_INTERNAL_TABLES: frozenset[str] = frozenset({"sqlite_sequence"})
 #   lineage walk. Whole-session archival remains the bounded lifecycle
 #   purge path and is implemented by deleting the owning ``sessions`` row,
 #   allowing schema-owned cascades to remove session-scoped children.
+# * ``trg_guided_operations_terminal_immutable`` — a reservation may renew or
+#   settle while in progress, but a completed/failed replay result cannot be
+#   changed after the terminal transition.
+# * ``trg_guided_operation_events_no_update`` / ``no_delete`` — lease,
+#   takeover, and settlement evidence is append-only; only the owning-session
+#   lifecycle cascade may remove it.
+# * ``trg_guided_operation_admission_blocks_no_update`` / ``no_delete`` — a
+#   negative admission decision is append-only; only the owning-session
+#   lifecycle cascade may remove it.
+# * the admission coexistence triggers reject either insertion order, plus an
+#   operation identity update, so a block and operation can never share one
+#   session-scoped operation id.
 #
 # The validator catches the case where schema bootstrap succeeded but the
 # trigger DDL failed silently (e.g., if the DDL event listener was removed
-# or reordered). Live validation against ``sqlite_master`` so a dropped
-# trigger on an existing DB is caught at startup, not at the first attempt
-# to mutate the protected rows.
-_REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
+# or reordered). Live validation against each dialect's system catalogue
+# means a dropped or disabled trigger is caught at startup, not at the first
+# attempt to mutate the protected rows.
+_REQUIRED_AUDIT_TRIGGERS: frozenset[str] = frozenset(
     {
         "trg_interpretation_events_immutable_resolved",
         "trg_interpretation_events_no_delete_resolved",
@@ -61,6 +81,14 @@ _REQUIRED_SQLITE_TRIGGERS: frozenset[str] = frozenset(
         "trg_composer_completion_events_no_delete",
         "trg_chat_messages_immutable_content",
         "trg_chat_messages_no_delete",
+        "trg_guided_operations_terminal_immutable",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
     }
 )
 
@@ -71,6 +99,37 @@ class SessionSchemaError(RuntimeError):
     Actionable instruction is always the same: delete the session DB file and
     restart. Pre-release ELSPETH has no migration pathway for session DBs.
     """
+
+
+def _create_session_tables(bind: Engine | Connection, *, checkfirst: bool = True) -> None:
+    """Create session tables without leaking SQLAlchemy's dialect-local state.
+
+    PostgreSQL breaks the session metadata's foreign-key cycles with ALTER
+    statements and temporarily annotates those constraints via the private
+    ``_create_rule`` attribute. SQLAlchemy leaves those annotations on the
+    shared metadata object after ``create_all``; a later SQLite bootstrap in
+    the same process would then omit the affected inline foreign keys.
+
+    Snapshotting and restoring the exact prior values keeps the module-level
+    metadata reusable across database dialects without weakening either
+    schema.
+    """
+    with _SESSION_METADATA_CREATE_LOCK:
+        missing = object()
+        create_rules: list[tuple[Any, object]] = []
+        for table in metadata.tables.values():
+            for constraint in table.constraints:
+                create_rules.append((constraint, getattr(constraint, "_create_rule", missing)))
+
+        try:
+            metadata.create_all(bind=bind, checkfirst=checkfirst)
+        finally:
+            for constraint, create_rule in create_rules:
+                if create_rule is missing:
+                    if hasattr(constraint, "_create_rule"):
+                        del constraint._create_rule
+                else:
+                    constraint._create_rule = create_rule
 
 
 def initialize_session_schema(engine: Engine) -> None:
@@ -91,7 +150,7 @@ def initialize_session_schema(engine: Engine) -> None:
         # that claims the current epoch but has no tables. Stamping after
         # ``create_all`` succeeds binds the sentinel to "schema actually
         # present at this epoch."
-        metadata.create_all(engine)
+        _create_session_tables(engine)
         _stamp_schema_sentinels(engine)
         _validate_current_schema(engine)
         return
@@ -107,24 +166,51 @@ def initialize_session_schema(engine: Engine) -> None:
     _validate_current_schema(engine)
 
 
-def _stamp_schema_sentinels(engine: Engine) -> None:
-    """Write SESSION_DB_APPLICATION_ID and SESSION_SCHEMA_EPOCH onto a
-    freshly-created session DB.
+def probe_current_schema(bind: Engine | Connection) -> bool:
+    """Return whether ``bind`` already carries the current session schema.
 
-    Both PRAGMAs are persistent attributes of the SQLite file (stored in
-    the header), not per-connection settings, so they only need to be
-    written once at create time. The startup validator reads them back
-    on every subsequent open.
+    This is a read-only probe: it neither creates objects nor stamps schema
+    sentinels.  A supplied ``Connection`` is used directly, so callers holding
+    the only connection in a bounded pool cannot deadlock on a second checkout.
     """
-    if engine.dialect.name != "sqlite":
-        return
-    with engine.connect() as conn:
-        conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
-        conn.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
-        conn.commit()
+
+    supplied_connection = bind if isinstance(bind, Connection) else None
+    supplied_connection_was_idle = supplied_connection is not None and not supplied_connection.in_transaction()
+    try:
+        _assert_schema_sentinels(bind)
+        _validate_current_schema(bind)
+    except SessionSchemaError:
+        return False
+    finally:
+        if supplied_connection_was_idle and supplied_connection is not None and supplied_connection.in_transaction():
+            supplied_connection.rollback()
+    return True
 
 
-def _assert_schema_sentinels(engine: Engine) -> None:
+def _stamp_schema_sentinels(bind: Engine | Connection) -> None:
+    """Write the SQLite PRAGMAs and cross-dialect identity row after creation.
+
+    The identity insert is intentionally not an upsert: this function is for a
+    freshly-created schema, and any pre-existing row is evidence that creation
+    ordering or target selection is wrong.
+    """
+    if isinstance(bind, Connection):
+        _stamp_schema_sentinels_on_connection(bind)
+    else:
+        with bind.begin() as connection:
+            _stamp_schema_sentinels_on_connection(connection)
+
+
+def _stamp_schema_sentinels_on_connection(connection: Connection) -> None:
+    if SCHEMA_IDENTITY_TABLE_NAME not in _user_tables(inspect(connection)):
+        raise SessionSchemaError("Session database initialization did not produce the current schema.")
+    if connection.dialect.name == "sqlite":
+        connection.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
+        connection.execute(text(f"PRAGMA user_version = {SESSION_SCHEMA_EPOCH}"))
+    insert_schema_identity(connection, schema_identity_table, store_kind="session", schema_epoch=SESSION_SCHEMA_EPOCH)
+
+
+def _assert_schema_sentinels(bind: Engine | Connection) -> None:
     """Crash with an actionable message if the session DB schema-version
     sentinels do not match the values this build expects.
 
@@ -134,58 +220,110 @@ def _assert_schema_sentinels(engine: Engine) -> None:
     exist. With it, the operator gets a precise instruction to delete
     the DB file and restart.
 
-    Two failure modes are distinguished:
+    SQLite keeps its header-level ``application_id`` / ``user_version`` proof.
+    Both SQLite and PostgreSQL additionally require exactly one
+    ``elspeth_schema_identity`` row with the expected application, store kind,
+    and epoch. This catches semantic-only schema bumps on PostgreSQL, where no
+    PRAGMA equivalent exists.
 
-    - Wrong ``application_id`` (non-zero, non-ELSP): the configured DB
+    - Wrong SQLite ``application_id`` (non-zero, non-ELSP): the configured DB
       file belongs to some other application entirely. We refuse to
       touch it.
-    - Wrong ``user_version`` (non-zero, not the current epoch): the
+    - Wrong SQLite ``user_version`` (non-zero, not the current epoch): the
       file is ours but predates this release's schema. The operator
       must delete it (pre-release ELSPETH has no migration pathway).
+    - Missing, malformed, or mismatched identity rows fail closed on either
+      dialect.
 
     The zero values are accepted in both cases because a brand-new
     SQLite file starts with ``application_id=0`` and ``user_version=0``;
     that state is indistinguishable from "empty DB about to be
     initialised" and is handled by the fresh-DB branch upstream.
     """
-    if engine.dialect.name != "sqlite":
+    if isinstance(bind, Connection):
+        _assert_schema_sentinels_on_connection(bind)
+    else:
+        with bind.connect() as connection:
+            _assert_schema_sentinels_on_connection(connection)
+
+
+def _assert_schema_sentinels_on_connection(connection: Connection) -> None:
+    inspector = inspect(connection)
+    tables = _user_tables(inspector)
+
+    if connection.dialect.name == "sqlite":
+        app_id = connection.execute(text("PRAGMA application_id")).scalar_one()
+        user_ver = connection.execute(text("PRAGMA user_version")).scalar_one()
+        if app_id not in {0, SESSION_DB_APPLICATION_ID}:
+            raise SessionSchemaError(
+                f"Session DB has unexpected application_id={app_id:#010x}. "
+                f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 (new database). "
+                f"This SQLite file does not belong to ELSPETH. "
+                f"Delete the session DB file and restart."
+            )
+        if user_ver not in {0, SESSION_SCHEMA_EPOCH}:
+            raise SessionSchemaError(
+                f"Session DB schema version {user_ver} does not match "
+                f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+                f"does not migrate session databases. "
+                f"Delete the session DB file and restart."
+            )
+
+    if SCHEMA_IDENTITY_TABLE_NAME not in tables:
+        if tables:
+            raise SessionSchemaError(
+                f"Session DB is missing {SCHEMA_IDENTITY_TABLE_NAME} for "
+                f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+                "does not migrate session databases. Delete the session DB file and restart."
+            )
         return
-    with engine.connect() as conn:
-        app_id = conn.execute(text("PRAGMA application_id")).scalar_one()
-        user_ver = conn.execute(text("PRAGMA user_version")).scalar_one()
-    if app_id != 0 and app_id != SESSION_DB_APPLICATION_ID:
+
+    # Validate the live identity-table shape BEFORE selecting from it:
+    # ``read_schema_identities`` selects the declared model columns, so a
+    # missing or renamed column would otherwise leak a raw SQLAlchemy
+    # OperationalError instead of the actionable delete-and-restart error
+    # (elspeth-5cf1ca2852). Column presence is all the read requires; type
+    # drift is classified by ``read_schema_identities`` itself and full-shape
+    # drift by the downstream schema validator.
+    live_identity_columns = {column["name"] for column in inspector.get_columns(SCHEMA_IDENTITY_TABLE_NAME)}
+    missing_identity_columns = {column.name for column in schema_identity_table.columns} - live_identity_columns
+    if missing_identity_columns:
         raise SessionSchemaError(
-            f"Session DB has unexpected application_id={app_id:#010x}. "
-            f"Expected {SESSION_DB_APPLICATION_ID:#010x} (ELSP) or 0 (new database). "
-            f"This SQLite file does not belong to ELSPETH. "
-            f"Delete the session DB file and restart."
-        )
-    if user_ver != 0 and user_ver != SESSION_SCHEMA_EPOCH:
-        raise SessionSchemaError(
-            f"Session DB schema version {user_ver} does not match "
+            f"Session DB {SCHEMA_IDENTITY_TABLE_NAME} table is missing column(s) "
+            f"{', '.join(sorted(missing_identity_columns))} for "
             f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
-            f"does not migrate session databases. "
-            f"Delete the session DB file and restart."
+            "does not migrate session databases. Delete the session DB file and restart."
+        )
+
+    rows = read_schema_identities(connection, schema_identity_table)
+    mismatch = schema_identity_mismatch(rows, store_kind="session", schema_epoch=SESSION_SCHEMA_EPOCH)
+    if mismatch is not None:
+        raise SessionSchemaError(
+            f"Session DB schema identity mismatch ({mismatch}) for "
+            f"SESSION_SCHEMA_EPOCH={SESSION_SCHEMA_EPOCH}. Pre-release ELSPETH "
+            "does not migrate session databases. Delete the session DB file and restart."
         )
 
 
 def _user_tables(inspector: Inspector) -> frozenset[str]:
-    return frozenset(name for name in inspector.get_table_names() if name not in _SQLITE_INTERNAL_TABLES)
+    tables = frozenset(inspector.get_table_names())
+    if inspector.bind.dialect.name == "sqlite":
+        return tables - _SQLITE_INTERNAL_TABLES
+    return tables
 
 
-def _validate_current_schema(engine: Engine) -> None:
+def _validate_current_schema(bind: Engine | Connection) -> None:
     # Static partial-index symmetry check fires before any inspector-driven
     # validation. Catches the elspeth-obs-2ef48619d5 drift class at app-
     # start time (or import time when called from a hot-reload loop), which
     # is strictly better than waiting for a per-test fresh-DB creation.
-    # Runtime cross-dialect text comparison was considered and rejected:
-    # the inspector's reported WHERE text diverges from the model's
-    # compiled SQL (different key prefixes, qualified vs unqualified
-    # column refs, TextClause vs BinaryExpression). The static guard
-    # below is the load-bearing defense.
+    # This remains a distinct model-layer guard even though the shared
+    # collector now also compares each live index predicate: a one-sided
+    # sqlite_where/postgresql_where declaration cannot be discovered by
+    # inspecting only the current runtime dialect.
     _validate_partial_index_dialect_symmetry()
 
-    inspector = inspect(engine)
+    inspector = inspect(bind)
     expected_tables = frozenset(metadata.tables)
     actual_tables = _user_tables(inspector)
     if actual_tables != expected_tables:
@@ -195,18 +333,21 @@ def _validate_current_schema(engine: Engine) -> None:
             actual=sorted(actual_tables),
         )
 
-    for table_name, table in metadata.tables.items():
-        _validate_columns(inspector, table_name, table)
-        _validate_foreign_keys(inspector, table_name, table)
-        _validate_named_checks(inspector, table_name, table, dialect=engine.dialect)
-        _validate_named_unique_constraints(inspector, table_name, table)
-        _validate_named_indexes(inspector, table_name, table)
+    issues = collect_metadata_shape_issues(
+        inspector,
+        metadata,
+        dialect=bind.dialect,
+        present_tables=actual_tables,
+    )
+    if issues:
+        first = issues[0]
+        _schema_error(first.subject, expected=first.expected, actual=first.actual)
 
-    _validate_required_triggers(engine)
+    _validate_required_triggers(bind)
 
 
-def _validate_required_triggers(engine: Engine) -> None:
-    """Confirm the required SQLite triggers are present in the live DB.
+def _validate_required_triggers(bind: Engine | Connection) -> None:
+    """Confirm the required audit triggers are present in the live DB.
 
     Catches the case where ``metadata.create_all`` succeeded but a trigger
     listener was bypassed or removed, OR where a trigger on an existing DB
@@ -216,269 +357,67 @@ def _validate_required_triggers(engine: Engine) -> None:
     otherwise only surface the next time someone tried to mutate a
     protected row (which may be never on a quiescent DB).
     """
-    if engine.dialect.name != "sqlite":
-        return
-    with engine.connect() as conn:
-        present = {str(row[0]) for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
-    missing = _REQUIRED_SQLITE_TRIGGERS - present
+    if bind.dialect.name == "sqlite":
+        query = text("SELECT name FROM sqlite_master WHERE type='trigger'")
+    elif bind.dialect.name == "postgresql":
+        query = text(
+            """
+            SELECT trigger.tgname
+            FROM pg_catalog.pg_trigger AS trigger
+            JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+            JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+            WHERE NOT trigger.tgisinternal
+              AND trigger.tgenabled IN ('O', 'A')
+              AND namespace.nspname = current_schema()
+              AND (
+                (relation.relname = 'interpretation_events' AND trigger.tgname IN (
+                  'trg_interpretation_events_immutable_resolved',
+                  'trg_interpretation_events_no_delete_resolved'
+                ))
+                OR (relation.relname = 'composer_completion_events' AND trigger.tgname IN (
+                  'trg_composer_completion_events_no_update',
+                  'trg_composer_completion_events_no_delete'
+                ))
+                OR (relation.relname = 'chat_messages' AND trigger.tgname IN (
+                  'trg_chat_messages_immutable_content',
+                  'trg_chat_messages_no_delete'
+                ))
+                OR (relation.relname = 'guided_operation_events' AND trigger.tgname IN (
+                  'trg_guided_operation_events_no_update',
+                  'trg_guided_operation_events_no_delete'
+                ))
+                OR (relation.relname = 'guided_operation_admission_blocks' AND trigger.tgname IN (
+                  'trg_guided_operation_admission_blocks_no_update',
+                  'trg_guided_operation_admission_blocks_no_delete',
+                  'trg_guided_operation_admission_blocks_reject_existing_operation'
+                ))
+                OR (relation.relname = 'guided_operations' AND trigger.tgname IN (
+                  'trg_guided_operations_terminal_immutable',
+                  'trg_guided_operations_reject_admission_block_insert',
+                  'trg_guided_operations_reject_admission_block_update'
+                ))
+              )
+            """
+        )
+    else:
+        _schema_error(
+            "audit trigger validation unsupported dialect",
+            expected=["postgresql", "sqlite"],
+            actual=[bind.dialect.name],
+        )
+
+    if isinstance(bind, Connection):
+        present = {str(row[0]) for row in bind.execute(query)}
+    else:
+        with bind.connect() as connection:
+            present = {str(row[0]) for row in connection.execute(query)}
+    missing = _REQUIRED_AUDIT_TRIGGERS - present
     if missing:
         _schema_error(
-            "missing SQLite trigger(s)",
-            expected=sorted(_REQUIRED_SQLITE_TRIGGERS),
+            "missing audit trigger(s)",
+            expected=sorted(_REQUIRED_AUDIT_TRIGGERS),
             actual=sorted(present),
         )
-
-
-def _validate_columns(inspector: Inspector, table_name: str, table: Table) -> None:
-    inspected_columns = inspector.get_columns(table_name)
-    primary_key_columns = {str(column_name) for column_name in inspector.get_pk_constraint(table_name)["constrained_columns"]}
-    expected_names = tuple(column.name for column in table.columns)
-    actual_names = tuple(str(column["name"]) for column in inspected_columns)
-    if actual_names != expected_names:
-        _schema_error(
-            f"{table_name} column mismatch",
-            expected=list(expected_names),
-            actual=list(actual_names),
-        )
-
-    columns_by_name = {str(column["name"]): column for column in inspected_columns}
-    for column in table.columns:
-        actual_column = columns_by_name[column.name]
-        actual_primary_key = column.name in primary_key_columns
-        if actual_primary_key != bool(column.primary_key):
-            _schema_error(
-                f"{table_name}.{column.name} primary-key mismatch",
-                expected=bool(column.primary_key),
-                actual=actual_primary_key,
-            )
-
-        if not column.primary_key:
-            actual_nullable = bool(actual_column["nullable"])
-            if actual_nullable != bool(column.nullable):
-                _schema_error(
-                    f"{table_name}.{column.name} nullable mismatch",
-                    expected=bool(column.nullable),
-                    actual=actual_nullable,
-                )
-
-
-def _validate_foreign_keys(inspector: Inspector, table_name: str, table: Table) -> None:
-    expected = {_expected_foreign_key_shape(constraint) for constraint in table.foreign_key_constraints}
-    actual = {_actual_foreign_key_shape(fk) for fk in inspector.get_foreign_keys(table_name)}
-    if actual != expected:
-        _schema_error(
-            f"{table_name} foreign-key mismatch",
-            expected=sorted(expected),
-            actual=sorted(actual),
-        )
-
-
-def _expected_foreign_key_shape(
-    constraint: ForeignKeyConstraint,
-) -> tuple[tuple[str, ...], str, tuple[str, ...], str | None]:
-    elements = tuple(constraint.elements)
-    if not elements:
-        _schema_error(f"{constraint.name or '<unnamed>'} has no foreign-key elements")
-
-    referred_table = elements[0].column.table.name
-    constrained_columns = tuple(element.parent.name for element in elements)
-    referred_columns = tuple(element.column.name for element in elements)
-    ondelete = elements[0].ondelete
-    return constrained_columns, referred_table, referred_columns, ondelete.lower() if ondelete is not None else None
-
-
-def _actual_foreign_key_shape(fk: Mapping[str, Any]) -> tuple[tuple[str, ...], str, tuple[str, ...], str | None]:
-    raw_options = fk["options"] if "options" in fk else {}
-    options = cast("Mapping[str, Any]", raw_options)
-    raw_ondelete = options["ondelete"] if "ondelete" in options else None
-    ondelete = str(raw_ondelete).lower() if raw_ondelete is not None else None
-    return (
-        tuple(str(column) for column in fk["constrained_columns"]),
-        str(fk["referred_table"]),
-        tuple(str(column) for column in fk["referred_columns"]),
-        ondelete,
-    )
-
-
-def _validate_named_checks(inspector: Inspector, table_name: str, table: Table, *, dialect: Any) -> None:
-    expected_sql: dict[str, set[str]] = {}
-    for constraint in table.constraints:
-        if (
-            type(constraint) is CheckConstraint
-            and constraint.name is not None
-            and _ddl_constraint_applies_to_dialect(constraint, dialect.name)
-        ):
-            expected_sql.setdefault(str(constraint.name), set()).add(
-                _normalize_check_sql(
-                    str(
-                        constraint.sqltext.compile(
-                            dialect=dialect,
-                            compile_kwargs={"literal_binds": True},
-                        )
-                    )
-                )
-            )
-
-    actual_sql: dict[str, set[str]] = {}
-    for reflected_check in inspector.get_check_constraints(table_name):
-        if reflected_check["name"] is not None:
-            actual_sql.setdefault(str(reflected_check["name"]), set()).add(_normalize_check_sql(str(reflected_check["sqltext"])))
-
-    expected = set(expected_sql)
-    actual = set(actual_sql)
-    if actual != expected:
-        _schema_error(
-            f"{table_name} CHECK constraint mismatch",
-            expected=sorted(expected),
-            actual=sorted(actual),
-        )
-
-    for name in sorted(expected & actual):
-        if expected_sql[name] != actual_sql[name]:
-            _schema_error(
-                f"{table_name}.{name} CHECK constraint SQL mismatch",
-                expected=sorted(expected_sql[name]),
-                actual=sorted(actual_sql[name]),
-            )
-
-
-def _ddl_constraint_applies_to_dialect(constraint: CheckConstraint, dialect_name: str) -> bool:
-    """Return whether a dialect-filtered constraint is active for this engine."""
-
-    ddl_if = getattr(constraint, "_ddl_if", None)
-    if ddl_if is None:
-        return True
-    # ``ddl_if`` is non-None here, so it is SQLAlchemy's ``DDLIf`` NamedTuple,
-    # whose ``dialect`` field always exists (``Optional[str]``). Access it
-    # directly: a missing ``dialect`` attribute would mean ``_ddl_if`` drifted
-    # to a non-``DDLIf`` shape (library-contract drift), and this Tier-1 schema
-    # validator must crash loudly on that rather than silently treating the
-    # constraint as applying to every dialect. ``dialect is None`` remains the
-    # legitimate callable-only-filter case and still applies to all dialects.
-    target = ddl_if.dialect
-    if target is None:
-        return True
-    if isinstance(target, str):
-        return target == dialect_name
-    return dialect_name in target
-
-
-def _normalize_check_sql(sqltext: str) -> str:
-    return re.sub(r"\s+", " ", sqltext.strip())
-
-
-def _validate_named_unique_constraints(inspector: Inspector, table_name: str, table: Table) -> None:
-    """Validate the table's UNIQUE-constraint surface.
-
-    The expected set unions two model-side shapes: ``UniqueConstraint``
-    declarations on ``table.constraints`` AND ``Index(name=..., unique=True)``
-    declarations on ``table.indexes``. Both are semantically unique
-    constraints; SQLAlchemy's choice of declaration shape is purely
-    convenience (an ``Index(unique=True)`` accepts ``sqlite_where=`` /
-    ``postgresql_where=`` for partial-index predicates while a
-    ``UniqueConstraint`` does not). Per elspeth-obs-3ac0c829c5, the
-    pre-fix validator only iterated ``table.constraints`` for
-    ``UniqueConstraint`` and would silently leave a future
-    ``Index(name=..., unique=True)`` unvalidated.
-
-    Symmetric on the actual side: ``inspector.get_unique_constraints``
-    surfaces only "true" unique constraints on SQLite (not Index-backed
-    uniques), but Postgres surfaces unique-backed indexes in BOTH
-    ``get_unique_constraints`` and ``get_indexes``. Unioning
-    ``get_indexes`` entries where ``index['unique']`` is set covers the
-    SQLite case; ``_validate_named_indexes`` strips the same names from
-    its check to avoid double-counting.
-    """
-    # Column names are narrowed to non-None: the session schema uses only plain
-    # column indexes (no expression indexes), where SQLAlchemy/inspector report
-    # str names. Filtering None keeps the frozenset[str] type honest without
-    # masking real drift for this schema.
-    expected_cols: dict[str, frozenset[str]] = {}
-    for constraint in table.constraints:
-        if type(constraint) is UniqueConstraint and constraint.name is not None:
-            expected_cols[str(constraint.name)] = frozenset(c.name for c in constraint.columns if c.name is not None)
-    for index in table.indexes:
-        if index.unique and index.name is not None:
-            expected_cols[str(index.name)] = frozenset(c.name for c in index.columns if c.name is not None)
-
-    actual_cols: dict[str, frozenset[str]] = {}
-    for uc in inspector.get_unique_constraints(table_name):
-        if uc["name"] is not None:
-            actual_cols[str(uc["name"])] = frozenset(c for c in uc["column_names"] if c is not None)
-    for idx in inspector.get_indexes(table_name):
-        if idx["unique"] and idx["name"] is not None:
-            actual_cols[str(idx["name"])] = frozenset(c for c in idx["column_names"] if c is not None)
-
-    expected = set(expected_cols)
-    actual = set(actual_cols)
-    if actual != expected:
-        _schema_error(
-            f"{table_name} UNIQUE constraint mismatch",
-            expected=sorted(expected),
-            actual=sorted(actual),
-        )
-
-    # Same-named entries must also constrain the same column SET. Comparing
-    # column sets (not ordered lists) is semantically correct for uniqueness —
-    # which is order-independent — and robust against inspector column-ordering
-    # quirks. Name-only comparison silently accepted a same-named index recreated
-    # on a different column set (e.g. uq_chat_messages_tool_call_id recreated on
-    # (session_id) alone), over-restricting the intended invariant
-    # (elspeth-97bedcd9c4). Partial-index WHERE predicates remain a model-layer
-    # static check (_validate_partial_index_dialect_symmetry): the inspector's
-    # reported WHERE text diverges from the model's compiled SQL across dialects,
-    # so a runtime comparison would be brittle.
-    for name in sorted(expected & actual):
-        if expected_cols[name] != actual_cols[name]:
-            _schema_error(
-                f"{table_name}.{name} UNIQUE constraint column mismatch",
-                expected=sorted(expected_cols[name]),
-                actual=sorted(actual_cols[name]),
-            )
-
-
-def _validate_named_indexes(inspector: Inspector, table_name: str, table: Table) -> None:
-    # Names already validated as UNIQUE constraints (via UniqueConstraint
-    # declaration OR Index(unique=True)) are excluded from the index check
-    # so we don't double-count. _validate_named_unique_constraints unions
-    # both shapes; _validate_named_indexes is the residual non-unique
-    # index validator.
-    expected_unique = {
-        str(constraint.name) for constraint in table.constraints if type(constraint) is UniqueConstraint and constraint.name is not None
-    } | {str(index.name) for index in table.indexes if index.unique and index.name is not None}
-    actual_unique = {
-        str(constraint["name"]) for constraint in inspector.get_unique_constraints(table_name) if constraint["name"] is not None
-    } | {str(index["name"]) for index in inspector.get_indexes(table_name) if index["unique"] and index["name"] is not None}
-    expected_cols = {
-        str(index.name): frozenset(c.name for c in index.columns if c.name is not None)
-        for index in table.indexes
-        if index.name is not None and not index.unique and str(index.name) not in expected_unique
-    }
-    actual_cols = {
-        str(index["name"]): frozenset(c for c in index["column_names"] if c is not None)
-        for index in inspector.get_indexes(table_name)
-        if index["name"] is not None and not index["unique"] and str(index["name"]) not in actual_unique
-    }
-    expected = set(expected_cols)
-    actual = set(actual_cols)
-    if actual != expected:
-        _schema_error(
-            f"{table_name} index mismatch",
-            expected=sorted(expected),
-            actual=sorted(actual),
-        )
-
-    # Same-named residual (non-unique) indexes must also cover the same column
-    # set; name-only comparison missed a same-named index recreated on different
-    # columns (elspeth-97bedcd9c4). Column SET (not order) keeps this robust
-    # against inspector column-ordering quirks while still catching shape drift.
-    for name in sorted(expected & actual):
-        if expected_cols[name] != actual_cols[name]:
-            _schema_error(
-                f"{table_name}.{name} index column mismatch",
-                expected=sorted(expected_cols[name]),
-                actual=sorted(actual_cols[name]),
-            )
 
 
 def _validate_partial_index_dialect_symmetry() -> None:
@@ -498,15 +437,9 @@ def _validate_partial_index_dialect_symmetry() -> None:
     became a non-partial unique index — over-restricting "at most one
     ACTIVE run per session" to "at most one run per session ever."
 
-    Static (model-import-time) check rather than runtime inspector
-    comparison: the inspector's reported WHERE text diverges from the
-    model's compiled SQL across dialects (different key prefixes,
-    qualified vs unqualified column refs, TextClause vs BinaryExpression),
-    so a runtime cross-dialect text comparison would be brittle without
-    proportionate signal. The drift class this guards against is a
-    model-side mistake catchable at import time, where a structured
-    crash is materially more informative than a per-test fresh-DB
-    failure.
+    This static model check complements the shared runtime shape collector:
+    each runtime can validate its live predicate, while only this check can
+    prove both dialect declarations remain paired before either DDL is emitted.
     """
     from sqlalchemy.dialects import postgresql, sqlite
 

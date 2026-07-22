@@ -165,7 +165,7 @@ def _parked_pending_sink(crashed: _CrashedRun, *, ingest_sequence: int, claim_ba
         ),
         sink_name="output",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=crashed.clock.now_utc(),
@@ -627,9 +627,7 @@ class TestSuspendedWinnerFences:
 
         with pytest.raises(RunLeadershipLostError):
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=WORKER_OLD,
                 coordination_token=token_old,
             )
 
@@ -643,9 +641,7 @@ class TestSuspendedWinnerFences:
         # Positive control: the current leader's sweep recovers it.
         assert (
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=USURPER,
                 coordination_token=current,
             )
             == 1
@@ -718,7 +714,7 @@ class TestSuspendedWinnerFences:
                     run_id=crashed.run_id,
                     token_id=token_id,
                     outcome="success",
-                    path="completed",
+                    path="default_flow",
                     completed=1,
                     recorded_at=crashed.clock.now_utc(),
                     sink_name="output",

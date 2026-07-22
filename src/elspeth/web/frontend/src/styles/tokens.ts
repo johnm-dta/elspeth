@@ -15,6 +15,7 @@ export const BADGE_COLORS = {
   gate: "var(--color-badge-gate)",
   aggregation: "var(--color-badge-aggregation)",
   coalesce: "var(--color-badge-coalesce)",
+  queue: "var(--color-badge-queue)",
   sink: "var(--color-badge-sink)",
 } as const;
 
@@ -24,6 +25,7 @@ export const BADGE_BACKGROUNDS = {
   gate: "var(--color-badge-gate-bg)",
   aggregation: "var(--color-badge-aggregation-bg)",
   coalesce: "var(--color-badge-coalesce-bg)",
+  queue: "var(--color-badge-queue-bg)",
   sink: "var(--color-badge-sink-bg)",
 } as const;
 

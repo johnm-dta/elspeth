@@ -22,22 +22,69 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.pool import StaticPool
 
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.blobs.service import content_hash as _content_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import execute_tool
+from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.interpretation_state import prompt_shield_recommendation_warning_pairs
+from elspeth.web.plugin_policy.availability import build_plugin_snapshot
+from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 _BASE_SLOTS = {
-    "model": "anthropic/claude-sonnet-4.6",
-    "api_key_secret": "OPENROUTER_API_KEY",
+    "profile": "tutorial-default",
     "abuse_contact": "web-scrape-contact@dta.gov.au",
     "scraping_reason": "Tutorial exercise: fetch public pages for rating",
     "output_path": "outputs/ratings.jsonl",
 }
+
+
+class _NoSecrets:
+    def has_server_ref(self, name: str) -> bool:
+        return False
+
+    def has_user_ref(self, principal: str, name: str) -> bool:
+        return False
+
+    def has_ref(self, principal: str, name: str) -> bool:
+        return False
+
+
+def _policy_context() -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    settings = WebSettings(
+        composer_max_composition_turns=4,
+        composer_max_discovery_turns=4,
+        composer_timeout_seconds=60,
+        composer_rate_limit_per_minute=20,
+        shareable_link_signing_key=b"0123456789abcdef0123456789abcdef",
+        llm_profiles={
+            "tutorial-default": {
+                "provider": "bedrock",
+                "model": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+            }
+        },
+        tutorial_llm_profile="tutorial-default",
+    )
+    runtime = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime)
+    catalog = create_catalog_service()
+    snapshot = build_plugin_snapshot(
+        policy=policy,
+        catalog=catalog,
+        profiles=profiles,
+        principal_scope="local:test-user",
+        secret_inventory=_NoSecrets(),
+        generation_key=b"web-scrape-recipe-test-generation-key",
+    )
+    return PolicyCatalogView(catalog, snapshot, profiles), snapshot
 
 
 def _seed_blob(tmp_path, *, filename: str, mime_type: str, body: bytes):
@@ -117,6 +164,7 @@ def _empty_state() -> CompositionState:
 
 def test_apply_web_scrape_recipe_json_preserves_shield_advisory(_seeded_url_blob_json) -> None:
     engine, session_id, blob_id = _seeded_url_blob_json
+    catalog, snapshot = _policy_context()
     result = execute_tool(
         "apply_pipeline_recipe",
         {
@@ -128,7 +176,8 @@ def test_apply_web_scrape_recipe_json_preserves_shield_advisory(_seeded_url_blob
             },
         },
         _empty_state(),
-        create_catalog_service(),
+        catalog,
+        plugin_snapshot=snapshot,
         session_engine=engine,
         session_id=session_id,
     )
@@ -144,6 +193,7 @@ def test_apply_web_scrape_recipe_json_preserves_shield_advisory(_seeded_url_blob
 
 def test_apply_web_scrape_recipe_csv_preserves_shield_advisory(_seeded_url_blob_csv) -> None:
     engine, session_id, blob_id = _seeded_url_blob_csv
+    catalog, snapshot = _policy_context()
     result = execute_tool(
         "apply_pipeline_recipe",
         {
@@ -155,7 +205,8 @@ def test_apply_web_scrape_recipe_csv_preserves_shield_advisory(_seeded_url_blob_
             },
         },
         _empty_state(),
-        create_catalog_service(),
+        catalog,
+        plugin_snapshot=snapshot,
         session_engine=engine,
         session_id=session_id,
     )

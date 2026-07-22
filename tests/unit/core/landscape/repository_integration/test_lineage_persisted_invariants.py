@@ -16,6 +16,23 @@ from elspeth.core.landscape.schema import token_parents_table
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 
 
+def _forge_cross_run_parent(*, setup: RecorderSetup, child_token_id: str, parent_token_id: str) -> None:
+    """Manufacture a legacy cross-run edge with SQLite FK enforcement disabled."""
+    raw = setup.db.engine.raw_connection()
+    try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        cursor.execute(
+            "INSERT INTO token_parents (token_id, parent_token_id, run_id, ordinal) VALUES (?, ?, ?, ?)",
+            (child_token_id, parent_token_id, setup.run_id, 0),
+        )
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        assert cursor.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        raw.close()
+
+
 def _register_source_run(setup: RecorderSetup, *, run_id: str, source_node_id: str) -> str:
     setup.run_lifecycle.begin_run(run_id=run_id, config={}, canonical_version="v1")
     source = setup.data_flow.register_node(
@@ -176,11 +193,12 @@ def test_explain_rejects_parent_relationship_without_group_id_from_corruption() 
     # Corruption boundary: production fork/coalesce/expand APIs write both the group
     # marker and token_parents row atomically, so this one-sided parent relationship
     # must be manufactured directly in the audit database.
-    with setup.db.connection() as conn:
+    with setup.db.write_connection() as conn:
         conn.execute(
             token_parents_table.insert().values(
                 token_id=child.token_id,
                 parent_token_id=parent.token_id,
+                run_id=setup.run_id,
                 ordinal=0,
             )
         )
@@ -219,14 +237,11 @@ def test_explain_rejects_cross_run_parent_relationship_from_corruption() -> None
 
     # Corruption boundary: production fork_token validates parent run ownership.
     # A cross-run parent can only appear here by directly corrupting token_parents.
-    with setup.db.connection() as conn:
-        conn.execute(
-            token_parents_table.insert().values(
-                token_id=child.token_id,
-                parent_token_id=other_parent.token_id,
-                ordinal=0,
-            )
-        )
+    _forge_cross_run_parent(
+        setup=setup,
+        child_token_id=child.token_id,
+        parent_token_id=other_parent.token_id,
+    )
 
     with pytest.raises(AuditIntegrityError, match="belongs to run 'run-lineage-cross-parent-other'"):
         explain(setup.query, setup.data_flow, setup.run_id, token_id=child.token_id)

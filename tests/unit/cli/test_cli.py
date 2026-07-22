@@ -110,6 +110,7 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
       on_success: default
 sinks:
   default:
@@ -117,6 +118,7 @@ sinks:
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 """
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text(settings_content)
@@ -146,6 +148,7 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
       on_success: default
 sinks:
   default:
@@ -153,6 +156,7 @@ sinks:
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 """
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text(settings_content)
@@ -192,12 +196,14 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
 sinks:
   default:
     plugin: json
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 landscape:
   url: "sqlite:///{nonexistent_db}"
 """
@@ -236,12 +242,14 @@ sources:
     options:
       path: input.csv
       on_validation_failure: discard
+      schema: {{mode: observed}}
 sinks:
   default:
     plugin: json
     on_write_failure: discard
     options:
       path: output.json
+      schema: {{mode: observed}}
 landscape:
   url: "sqlite:///{empty_db}"
 """
@@ -251,8 +259,8 @@ landscape:
         result = runner.invoke(app, ["resume", "fake-run-id", "-s", str(settings_file)])
 
         assert result.exit_code == 1, f"Expected exit code 1, got {result.exit_code}. Output: {result.output}"
-        assert "does not appear to be an ELSPETH audit database" in result.output, (
-            f"Expected clear error about missing tables, got: {result.output}"
+        assert "contains foreign tables and cannot be opened as an ELSPETH audit database" in result.output, (
+            f"Expected clear error about foreign tables, got: {result.output}"
         )
         # Must NOT have crashed with a traceback
         assert "Traceback" not in result.output, f"Should not show traceback: {result.output}"
@@ -999,7 +1007,10 @@ sinks:
     plugin: json
     on_write_failure: discard
     options:
-      path: {tmp_path / "output.json"}
+      # JSONL: resume-capable, so the resume-mode switch (which now precedes
+      # payload-store checks, elspeth-fc9906e398) passes and each test still
+      # reaches the error path it targets.
+      path: {tmp_path / "output.jsonl"}
       schema:
         mode: observed
 landscape:
@@ -1187,8 +1198,7 @@ sinks:
         from elspeth.contracts.errors import IncompleteSourceResumeError
 
         settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
-        settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
-        (tmp_path / "payloads").mkdir()
+        (tmp_path / "payloads").mkdir(mode=0o700)
 
         run_id = "run-source-not-exhausted-50cec0a02a"
         mock_resume_point = MagicMock(spec=ResumePoint)
@@ -1283,7 +1293,10 @@ sinks:
     plugin: json
     on_write_failure: discard
     options:
-      path: output.json
+      # JSONL: resume-capable, so the resume-mode switch (which now precedes
+      # payload-store checks, elspeth-fc9906e398) passes and the unsupported
+      # backend error path is still reached.
+      path: output.jsonl
       schema:
         mode: observed
 landscape:

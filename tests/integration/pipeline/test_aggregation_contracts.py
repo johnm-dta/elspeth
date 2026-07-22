@@ -183,7 +183,10 @@ class TestAggregationOutputContracts:
             },
         )
 
-        # Sink requires subset of what aggregation guarantees
+        # Sink requires subset of what aggregation guarantees. Sink
+        # requirements are enforced from declared_required_fields (the
+        # builder invariant: populated from SinkProtocol), not the raw
+        # config schema — mirror both, as the builder does.
         graph.add_node(
             "sink_1",
             node_type=NodeType.SINK,
@@ -191,6 +194,7 @@ class TestAggregationOutputContracts:
             config={
                 "schema": {"mode": "observed", "required_fields": ["count", "sum"]},
             },
+            declared_required_fields=frozenset({"count", "sum"}),
         )
 
         graph.add_edge("source_1", "agg_1", label="continue")
@@ -226,7 +230,57 @@ class TestAggregationOutputContracts:
             },
         )
 
-        # Sink requires 'median' which aggregation doesn't guarantee
+        # Sink requires 'median' which aggregation doesn't guarantee. As in
+        # the positive test above, the enforced requirement set is
+        # declared_required_fields (builder invariant), and the rejection
+        # comes from validate_sink_required_fields — the single owner of
+        # sink required-field checks (elspeth-3283f2eaec).
+        graph.add_node(
+            "sink_1",
+            node_type=NodeType.SINK,
+            plugin_name="csv",
+            config={
+                "schema": {"mode": "observed", "required_fields": ["count", "median"]},
+            },
+            declared_required_fields=frozenset({"count", "median"}),
+        )
+
+        graph.add_edge("source_1", "agg_1", label="continue")
+        graph.add_edge("agg_1", "sink_1", label="continue")
+
+        with pytest.raises(ValueError) as exc_info:
+            graph.validate_edge_compatibility()
+
+        error = str(exc_info.value)
+        assert "median" in error
+        assert "does not guarantee" in error
+
+    def test_direct_sink_config_required_fields_without_declared_argument_still_fail(self) -> None:
+        """Direct graph sink config requirements are still enforced."""
+        graph = ExecutionGraph()
+
+        graph.add_node(
+            "source_1",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+            config={"schema": {"mode": "observed", "guaranteed_fields": ["value"]}},
+        )
+
+        graph.add_node(
+            "agg_1",
+            node_type=NodeType.AGGREGATION,
+            plugin_name="batch_stats",
+            config={
+                "trigger": {"count": 1},
+                "output_mode": "transform",
+                "schema": {"mode": "observed", "guaranteed_fields": ["count", "sum"]},
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": ["value"],
+                },
+            },
+        )
+
         graph.add_node(
             "sink_1",
             node_type=NodeType.SINK,
@@ -244,7 +298,7 @@ class TestAggregationOutputContracts:
 
         error = str(exc_info.value)
         assert "median" in error
-        assert "Missing fields" in error
+        assert "does not guarantee" in error
 
 
 class TestAggregationChainValidation:

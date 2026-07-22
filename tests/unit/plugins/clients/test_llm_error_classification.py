@@ -185,7 +185,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is True
-        assert "429" in str(exc_info.value)
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "429" in str(exc_info.value.__cause__)
 
     def test_non_rate_substring_error_raises_non_retryable_llm_client_error(
         self,
@@ -211,7 +212,8 @@ class TestLLMClientExceptionTypes:
 
         assert type(exc_info.value) is LLMClientError
         assert exc_info.value.retryable is False
-        assert "enumerate" in str(exc_info.value)
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "enumerate" in str(exc_info.value.__cause__)
 
         mock_execution.record_call.assert_called_once()
         call_args = mock_execution.record_call.call_args
@@ -241,7 +243,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is True
-        assert "503" in str(exc_info.value)
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "503" in str(exc_info.value.__cause__)
 
     def test_network_error_raises_network_error(
         self,
@@ -266,7 +269,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is True
-        assert "timeout" in str(exc_info.value).lower()
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "timeout" in str(exc_info.value.__cause__).lower()
 
     def test_content_policy_raises_content_policy_error(
         self,
@@ -291,7 +295,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is False
-        assert "safety system" in str(exc_info.value).lower()
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "safety system" in str(exc_info.value.__cause__).lower()
 
     def test_context_length_raises_context_length_error(
         self,
@@ -316,7 +321,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is False
-        assert "context length" in str(exc_info.value).lower()
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "context length" in str(exc_info.value.__cause__).lower()
 
     def test_client_error_raises_llm_client_error_non_retryable(
         self,
@@ -341,7 +347,8 @@ class TestLLMClientExceptionTypes:
             )
 
         assert exc_info.value.retryable is False
-        assert "401" in str(exc_info.value)
+        assert str(exc_info.value) == "LLM provider request failed"
+        assert "401" in str(exc_info.value.__cause__)
 
     def test_audit_trail_records_retryable_flag(
         self,
@@ -408,3 +415,38 @@ class TestAzureSpecificCodes:
 
         for error in azure_errors:
             assert (_classify_llm_error(error) in _RETRYABLE_CLASSES) is True, f"Failed for: {error}"
+
+
+class _StatusCodeError(Exception):
+    def __init__(self, message: str, status_code: object) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _RaisingStatusCodeError(Exception):
+    @property
+    def status_code(self) -> int:
+        raise AssertionError("status_code property must not be invoked")
+
+
+class TestBedrockSpecificShapes:
+    """Pin LiteLLM's real Bedrock wrapper text and status metadata."""
+
+    def test_bedrock_context_window_wrapper_is_context_length(self) -> None:
+        error = Exception("BedrockException: Context Window Error - Input is too long for requested model.")
+
+        assert _classify_llm_error(error) == "context_length"
+
+    def test_bedrock_service_unavailable_hardcoded_503_is_server(self) -> None:
+        error = _StatusCodeError("BedrockException - Internal server error", status_code=503)
+
+        assert _classify_llm_error(error) == "server"
+
+    @pytest.mark.parametrize("status_code", [None, True, "503", [], {}])
+    def test_non_exact_int_status_metadata_is_not_server(self, status_code: object) -> None:
+        error = _StatusCodeError("BedrockException - Internal server error", status_code=status_code)
+
+        assert _classify_llm_error(error) == "unknown"
+
+    def test_status_code_property_is_not_invoked(self) -> None:
+        assert _classify_llm_error(_RaisingStatusCodeError("BedrockException - Internal server error")) == "unknown"

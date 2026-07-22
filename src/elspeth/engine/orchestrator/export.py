@@ -18,22 +18,19 @@ LandscapeDB is typed but imported conditionally to avoid circular imports.
 
 from __future__ import annotations
 
-import csv
 import os
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from pathlib import Path
-from tempfile import TemporaryFile
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
+    from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
     from elspeth.core.landscape import LandscapeDB
 
 from elspeth.contracts import Determinism
-from elspeth.contracts.plugin_context import PluginContext
-from elspeth.core.operations import track_operation
 from elspeth.engine.orchestrator.schema_reconstruction import (
     _create_schema_model as _create_schema_model,
 )
@@ -47,243 +44,96 @@ from elspeth.engine.orchestrator.schema_reconstruction import (
     reconstruct_schema_from_json as reconstruct_schema_from_json,
 )
 
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
-_CSV_FORMULA_ESCAPE_PREFIX = "'"
-_JSON_EXPORT_BATCH_SIZE = 1000
-_PATH_TYPE = type(Path())
+
+def prepare_audit_export_binding(
+    settings: ElspethSettings,
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+) -> tuple[SinkEffectRuntimeBinding, object]:
+    """Construct and admit the exact delayed sink before export mutations."""
+    from elspeth.contracts.sink_effects import AuditExportFormat, SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import (
+        validate_audit_export_sink_type_capability,
+        validate_pipeline_sink_effect_capabilities,
+    )
+
+    sink_name = settings.landscape.export.sink
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
+    binding = sink_factory(sink_name)
+    sink_name, sink, modes = _validate_audit_export_binding_provenance(settings, binding)
+    admission = validate_pipeline_sink_effect_capabilities(
+        {sink_name: sink},
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+    )
+    export_format = AuditExportFormat(settings.landscape.export.format)
+    validate_audit_export_sink_type_capability(type(sink), export_format)
+    return binding, admission
 
 
-class _FlushableFile(Protocol):
-    def flush(self) -> None: ...
-
-    def fileno(self) -> int: ...
-
-    def close(self) -> None: ...
-
-
-class _FilesystemJsonlExportSink(Protocol):
-    _path: Path
-    _file: _FlushableFile | None
-
-    def _claim_write_target(self) -> None: ...
-
-
-def _neutralize_csv_formula_cell(value: Any) -> Any:
-    """Prefix spreadsheet-formula-looking string cells for CSV audit exports."""
-    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
-        return f"{_CSV_FORMULA_ESCAPE_PREFIX}{value}"
-    return value
-
-
-def _neutralize_csv_formula_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy with spreadsheet-executable string cells neutralized."""
-    return {key: _neutralize_csv_formula_cell(value) for key, value in record.items()}
-
-
-class _CsvRecordTypeSpool:
-    """Bounded-memory spool for one CSV record type."""
-
-    def __init__(self) -> None:
-        self._file = TemporaryFile("w+", newline="", encoding="utf-8")  # noqa: SIM115 - spool owns and closes this file
-        self._writer = csv.writer(self._file)
-        self.fieldnames: set[str] = set()
-        self.count = 0
-
-    def append(self, record: dict[str, Any]) -> None:
-        self.fieldnames.update(record.keys())
-        self._writer.writerow([len(record)])
-        for key, value in record.items():
-            self._writer.writerow([key, value])
-        self.count += 1
-
-    def iter_records(self) -> Iterator[dict[str, Any]]:
-        self._file.seek(0)
-        reader = csv.reader(self._file)
-        while True:
-            try:
-                size_row = next(reader)
-            except StopIteration:
-                return
-            if len(size_row) != 1:
-                raise ValueError("CSV export spool is corrupt: record size row must have one column")
-            field_count = int(size_row[0])
-            record: dict[str, Any] = {}
-            for _ in range(field_count):
-                try:
-                    key, value = next(reader)
-                except StopIteration as exc:
-                    raise ValueError("CSV export spool is corrupt: record ended early") from exc
-                record[key] = value
-            yield record
-
-    def close(self) -> None:
-        self._file.close()
-
-
-class _FileSystemCsvAuditExportWriter:
-    """Filesystem-backed writer for the multi-file CSV audit export capability."""
-
-    def __init__(self, artifact_path: str) -> None:
-        self._artifact_path = artifact_path
-
-    @classmethod
-    def from_sink(cls, *, sink_name: str, sink: SinkProtocol) -> _FileSystemCsvAuditExportWriter:
-        artifact_path = sink.config.get("path")
-        if not isinstance(artifact_path, str) or not artifact_path:
-            raise ValueError(f"CSV export requires file-based sink with 'path' in config, but sink '{sink_name}' has no path configured")
-        return cls(artifact_path)
-
-    def write(self, *, exporter: Any, run_id: str, sign: bool) -> None:
-        _export_csv_multifile(
-            exporter=exporter,
-            run_id=run_id,
-            artifact_path=self._artifact_path,
-            sign=sign,
-        )
-
-
-def _write_json_export_batches(
+def _probe_audit_export_publication(
+    settings: ElspethSettings,
     *,
+    sink_name: str,
     sink: SinkProtocol,
-    ctx: PluginContext,
-    records: Iterable[dict[str, Any]],
-    batch_size: int = _JSON_EXPORT_BATCH_SIZE,
-) -> tuple[int, int]:
-    """Write JSON export records, batching only for sinks that publish incrementally."""
-    if batch_size < 1:
-        raise ValueError("JSON export batch size must be at least 1")
+) -> None:
+    """Run the sole bounded non-declarative export probe before snapshot I/O."""
+    from pathlib import Path
 
-    if not _sink_supports_incremental_json_export_writes(sink):
-        all_records = list(records)
-        if not all_records:
-            return 0, 0
-        sink.write(all_records, ctx)
-        return len(all_records), 1
+    from elspeth.contracts.errors import SinkEffectCapabilityError
+    from elspeth.contracts.sink_effects import AuditExportFormat
+    from elspeth.engine.orchestrator.preflight import validate_audit_export_sink_type_capability
 
-    record_count = 0
-    batches_written = 0
-    batch: list[dict[str, Any]] = []
-
-    with _jsonl_export_staging_target(sink):
-        for record in records:
-            batch.append(record)
-            record_count += 1
-            if len(batch) < batch_size:
-                continue
-            sink.write(batch, ctx)
-            batches_written += 1
-            batch = []
-
-        if batch:
-            sink.write(batch, ctx)
-            batches_written += 1
-
-    return record_count, batches_written
-
-
-@contextmanager
-def _jsonl_export_staging_target(sink: SinkProtocol) -> Iterator[None]:
-    """Stage write-mode filesystem JSONL exports and publish only after full success."""
-    final_path = _jsonl_filesystem_sink_path(sink)
-    if final_path is None:
-        yield
+    export_format = AuditExportFormat(settings.landscape.export.format)
+    validate_audit_export_sink_type_capability(type(sink), export_format)
+    if export_format is not AuditExportFormat.CSV:
         return
+    raw_path = settings.sinks[sink_name].options.get("path")
+    if type(raw_path) is not str or not raw_path.strip():
+        raise SinkEffectCapabilityError("CSV audit export requires an explicit local bundle target path")
+    from elspeth.plugins.sinks._audit_export_bundle_effects import preflight_audit_export_bundle
 
-    filesystem_sink = cast("_FilesystemJsonlExportSink", sink)
-    filesystem_sink._claim_write_target()
-    final_path = _jsonl_filesystem_sink_path(sink)
-    if final_path is None:
-        yield
-        return
-
-    temp_path = final_path.with_suffix(final_path.suffix + ".tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-
-    filesystem_sink._path = temp_path
-    try:
-        yield
-        _close_sink_file_if_open(sink)
-        if temp_path.exists():
-            os.replace(temp_path, final_path)
-            _fsync_parent_directory(final_path)
-    except BaseException:
-        _close_sink_file_if_open(sink)
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
-    finally:
-        filesystem_sink._path = final_path
+    preflight_audit_export_bundle(Path(raw_path))
 
 
-def _jsonl_filesystem_sink_path(sink: SinkProtocol) -> Path | None:
-    if not _sink_supports_incremental_json_export_writes(sink):
-        return None
-    sink_attrs = vars(sink)
-    if "_mode" in sink_attrs and sink_attrs["_mode"] == "append":
-        return None
-    if "_path" not in sink_attrs:
-        return None
-    path = sink_attrs["_path"]
-    if type(path) is not _PATH_TYPE:
-        return None
-    return path
+def _validate_audit_export_binding_provenance(
+    settings: ElspethSettings,
+    binding: SinkEffectRuntimeBinding,
+) -> tuple[str, SinkProtocol, Mapping[str, str]]:
+    """Bind one delayed-export runtime binding to its exact settings authority."""
+    from elspeth.engine.orchestrator.preflight import (
+        SinkEffectExecutionPurpose,
+        SinkEffectRuntimeBinding,
+        sink_effect_modes_from_runtime_bindings,
+    )
 
-
-def _close_sink_file_if_open(sink: SinkProtocol) -> None:
-    sink_attrs = vars(sink)
-    if "_file" not in sink_attrs:
-        return
-    file_obj = sink_attrs["_file"]
-    if file_obj is None:
-        return
-    open_file = cast("_FlushableFile", file_obj)
-    open_file.flush()
-    os.fsync(open_file.fileno())
-    open_file.close()
-    cast("_FilesystemJsonlExportSink", sink)._file = None
-
-
-def _fsync_parent_directory(path: Path) -> None:
-    dir_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _sink_supports_incremental_json_export_writes(sink: SinkProtocol) -> bool:
-    """Return whether a JSON export sink can publish incrementally without rewriting cumulative content."""
-    sink_attrs = vars(sink)
-    if "_format" in sink_attrs:
-        sink_format = sink_attrs["_format"]
-        if type(sink_format) is not str:
-            return False
-        return sink_format == "jsonl"
-
-    config = sink.config
-    if type(config) is not dict:
-        return False
-
-    if "format" in config:
-        configured_format = config["format"]
-        if type(configured_format) is not str:
-            return False
-        return configured_format == "jsonl"
-
-    if "path" not in config:
-        return False
-    path = config["path"]
-    if type(path) is not str:
-        return False
-    return Path(path).suffix == ".jsonl"
+    sink_name = settings.landscape.export.sink
+    if sink_name is None:
+        raise ValueError("Export sink name is None")
+    if type(binding) is not SinkEffectRuntimeBinding:
+        raise TypeError("Audit export sink factory must return an exact SinkEffectRuntimeBinding")
+    sink = cast("SinkProtocol", binding.sink)
+    modes = sink_effect_modes_from_runtime_bindings(
+        {sink_name: sink},
+        {sink_name: binding},
+        purpose=SinkEffectExecutionPurpose.AUDIT_EXPORT,
+        configured_options={sink_name: settings.sinks[sink_name].options},
+    )
+    return sink_name, sink, modes
 
 
 def export_landscape(
     db: LandscapeDB,
     run_id: str,
     settings: ElspethSettings,
-    sink_factory: Callable[[str], SinkProtocol],
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+    *,
+    payload_store: PayloadStore,
+    audit_export_content_store: AuditExportContentStore,
+    audit_export_content_store_resolver: AuditExportContentStoreResolver,
+    worker_id: str,
+    prepared_binding: SinkEffectRuntimeBinding | None = None,
+    sink_effect_admission: object | None = None,
 ) -> None:
     """Export audit trail to configured sink after run completion.
 
@@ -305,148 +155,205 @@ def export_landscape(
         ValueError: If signing requested but ELSPETH_SIGNING_KEY not set,
                    or if sink_factory raises for the configured sink name
     """
-    from elspeth.core.landscape.exporter import LandscapeExporter
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
+    from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.engine.orchestrator.audit_export_effects import execute_audit_export_effect, prepare_audit_export_snapshot
 
     export_config = settings.landscape.export
+
+    if type(worker_id) is not str or not worker_id.strip():
+        raise ValueError("audit export worker_id must be a non-empty exact string")
+
+    if not isinstance(audit_export_content_store, AuditExportContentStore):
+        raise TypeError("audit_export_content_store must implement AuditExportContentStore")
+    if not audit_export_content_store.is_durable():
+        raise ValueError("audit_export_content_store must prove durability")
+    if type(audit_export_content_store_resolver) is not AuditExportContentStoreResolver:
+        raise TypeError("audit_export_content_store_resolver must be exact AuditExportContentStoreResolver")
+    audit_export_content_store_resolver.register(audit_export_content_store)
+    configured_store = export_config.content_store
+    if configured_store is None:
+        raise ValueError("audit export requires an explicit durable content_store policy")
+    if audit_export_content_store.content_store_id != configured_store.content_store_id:
+        raise ValueError("resolved audit_export_content_store ID does not match configured content_store_id")
+    if audit_export_content_store.namespace != configured_store.namespace:
+        raise ValueError("resolved audit_export_content_store namespace does not match configured namespace")
+
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
+
+    if prepared_binding is None:
+        prepared_binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
+    sink_name, sink, modes = _validate_audit_export_binding_provenance(settings, prepared_binding)
+    require_sink_effect_admission(
+        {sink_name: sink},
+        configured_modes=modes,
+        required_input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        admission=sink_effect_admission,
+    )
+    _probe_audit_export_publication(settings, sink_name=sink_name, sink=sink)
 
     # Get signing key from environment if signing enabled
     signing_key: bytes | None = None
     if export_config.sign:
+        signing_secret_ref = export_config.signing_secret_ref
+        if signing_secret_ref is None:
+            raise ValueError("hmac_sha256 export requires an explicit signing_secret_ref")
         try:
-            key_str = os.environ["ELSPETH_SIGNING_KEY"]
+            key_str = os.environ[signing_secret_ref]
         except KeyError as exc:
-            raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export") from exc
+            raise ValueError(f"{signing_secret_ref} environment variable required for signed export") from exc
         if not key_str.strip():
-            raise ValueError("ELSPETH_SIGNING_KEY environment variable required for signed export")
+            raise ValueError(f"{signing_secret_ref} environment variable required for signed export")
         signing_key = key_str.encode("utf-8")
 
-    # Create exporter
-    exporter = LandscapeExporter(
+    snapshot = prepare_audit_export_snapshot(
         db,
+        run_id=run_id,
+        config=export_config,
         signing_key=signing_key,
-        include_raw_error_rows=export_config.include_raw_error_rows,
+        content_store=audit_export_content_store,
+        content_store_resolver=audit_export_content_store_resolver,
     )
 
-    sink_name = export_config.sink
-    if sink_name is None:
-        raise ValueError("Export sink name is None")
-    sink = sink_factory(sink_name)
     sink.node_id = f"export:{sink_name}"
 
     from elspeth.contracts import NodeType
+    from elspeth.contracts.errors import AuditIntegrityError
     from elspeth.contracts.schema import SchemaConfig
-    from elspeth.core.landscape.factory import RecorderFactory
 
-    factory = RecorderFactory(db)
-    ctx = PluginContext(
-        run_id=run_id, config={}, landscape=factory.plugin_audit_writer(), payload_store=factory.payload_store, node_id=sink.node_id
-    )
-
-    # Register the export sink as a node so the FK constraint in `operations` is satisfied.
-    # The export sink writes post-run audit data and is not part of the execution graph,
-    # so it must be registered here before begin_operation() is called.
-    factory.data_flow.register_node(
-        run_id=run_id,
-        node_id=sink.node_id,
-        plugin_name=sink.name,
-        node_type=NodeType.SINK,
-        plugin_version=sink.plugin_version,
-        config=dict(sink.config),
-        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
-        determinism=Determinism.IO_WRITE,
-        source_file_hash=sink.source_file_hash,
-    )
-
-    if export_config.format == "csv":
-        csv_writer = _FileSystemCsvAuditExportWriter.from_sink(sink_name=sink_name, sink=sink)
-        sink.on_start(ctx)
-        try:
-            with track_operation(
-                factory.execution,
-                run_id,
-                sink.node_id,
-                "sink_write",
-                ctx,
-                input_data={"export_format": "csv"},
-            ):
-                csv_writer.write(exporter=exporter, run_id=run_id, sign=export_config.sign)
-                sink.flush()
-        finally:
-            sink.on_complete(ctx)
-            sink.close()
-    else:
-        sink.on_start(ctx)
-        try:
-            with track_operation(
-                factory.execution,
-                run_id,
-                sink.node_id,
-                "sink_write",
-                ctx,
-                input_data={"export_format": "json"},
-            ) as operation:
-                record_count, batches_written = _write_json_export_batches(
-                    sink=sink,
-                    ctx=ctx,
-                    records=exporter.export_run(run_id, sign=export_config.sign),
-                )
-                operation.output_data = {"record_count": record_count, "batches_written": batches_written}
-                sink.flush()
-        finally:
-            sink.on_complete(ctx)
-            sink.close()
-
-
-def _export_csv_multifile(
-    exporter: Any,  # LandscapeExporter (avoid circular import in type hint)
-    run_id: str,
-    artifact_path: str,
-    sign: bool,
-) -> None:
-    """Export audit trail as multiple CSV files (one per record type).
-
-    Creates a directory at the artifact path, then writes
-    separate CSV files for each record type (run.csv, nodes.csv, etc.).
-
-    Args:
-        exporter: LandscapeExporter instance
-        run_id: The completed run ID
-        artifact_path: Path from sink config (validated by caller)
-        sign: Whether to sign records
-    """
-    from elspeth.core.landscape.formatters import CSVFormatter
-
-    export_dir = Path(artifact_path)
-    if export_dir.suffix:
-        # Remove file extension if present, treat as directory
-        export_dir = export_dir.with_suffix("")
-
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    formatter = CSVFormatter()
-    spools: dict[str, _CsvRecordTypeSpool] = {}
-
+    # Snapshot first: export audit rows can never recurse into their own bytes.
+    factory = RecorderFactory(db, payload_store=payload_store)
+    # Export-node registration is idempotent (elspeth-08350558e6): the node id
+    # is deterministic (``export:<sink>``), so a retry after a failed or lost
+    # publication response finds the row a prior attempt registered. Reuse it
+    # so the retry reaches SinkEffectCoordinator reconciliation of the durable
+    # effect instead of crashing on the nodes composite primary key. Fail
+    # closed if the registered identity is not the audit-export sink node this
+    # attempt would register.
+    existing_node = factory.data_flow.get_node(sink.node_id, run_id)
+    if existing_node is None:
+        factory.data_flow.register_node(
+            run_id=run_id,
+            node_id=sink.node_id,
+            plugin_name=sink.name,
+            node_type=NodeType.SINK,
+            plugin_version=sink.plugin_version,
+            config=dict(sink.config),
+            schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+            determinism=Determinism.IO_WRITE,
+            source_file_hash=sink.source_file_hash,
+        )
+    elif existing_node.node_type is not NodeType.SINK or existing_node.plugin_name != sink.name:
+        raise AuditIntegrityError(
+            f"audit export node {sink.node_id!r} for run {run_id!r} is already registered "
+            f"with divergent identity ({existing_node.node_type.value!r}/{existing_node.plugin_name!r}); "
+            f"refusing to reuse it for export sink {sink.name!r}"
+        )
     try:
-        for record_type, record in exporter.iter_run_records_by_type(run_id, sign=sign):
-            spool = spools.get(record_type)
-            if spool is None:
-                spool = _CsvRecordTypeSpool()
-                spools[record_type] = spool
-            spool.append(_neutralize_csv_formula_record(formatter.format(record)))
-
-        # Write each record type to its own CSV file.
-        for record_type, spool in spools.items():
-            if spool.count == 0:
-                continue
-
-            csv_path = export_dir / f"{record_type}.csv"
-            fieldnames = sorted(spool.fieldnames)  # Sorted for determinism
-
-            with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                for rec in spool.iter_records():
-                    writer.writerow(rec)
+        execute_audit_export_effect(
+            factory=factory,
+            snapshot=snapshot,
+            sink=sink,
+            sink_node_id=sink.node_id,
+            target_config=dict(settings.sinks[sink_name].options),
+            worker_id=worker_id,
+        )
     finally:
-        for spool in spools.values():
-            spool.close()
+        sink.close()
+
+
+def audit_export_resume_refusal(run: object | None, run_id: str) -> str | None:
+    """Return why ``run`` cannot have its audit export resumed, or None if it can.
+
+    Fail-closed eligibility gate shared by :func:`resume_audit_export` and its
+    production drivers (elspeth-8fd1f415b9): resume applies only to runs that
+    are immutable export-terminal and whose export has not already completed.
+    """
+    from elspeth.contracts import ExportStatus
+    from elspeth.core.landscape.export_read_model import _EXPORT_TERMINAL
+
+    if run is None:
+        return f"run {run_id!r} not found in the audit database"
+    status = run.status  # type: ignore[attr-defined]
+    if status not in _EXPORT_TERMINAL:
+        return f"run {run_id!r} has status {status.value!r}, which is not export-terminal; audit export resume requires a finalized run"
+    if run.export_status is ExportStatus.COMPLETED:  # type: ignore[attr-defined]
+        return f"run {run_id!r} audit export already completed; refusing to re-run publication"
+    return None
+
+
+def resume_audit_export(
+    db: LandscapeDB,
+    run_id: str,
+    settings: ElspethSettings,
+    sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+    *,
+    payload_store: PayloadStore,
+    audit_export_content_store: AuditExportContentStore,
+    audit_export_content_store_resolver: AuditExportContentStoreResolver,
+    worker_id: str,
+) -> None:
+    """Resume audit-export recovery for a finalized run (elspeth-8fd1f415b9).
+
+    Production driver for the window after run finalization where a crash or
+    transient target failure left the run's export PENDING/FAILED (or unset)
+    and its durable sink effect PREPARED/IN_FLIGHT. Re-drives the export
+    pipeline: the immutable snapshot winner is reused (never re-derived), the
+    deterministic export node registration is idempotent, and
+    SinkEffectCoordinator reconciles the durable effect so publication happens
+    exactly once.
+
+    Mirrors ``RunLifecycleCoordinator.execute_export_phase`` status semantics:
+    export status transitions PENDING -> COMPLETED on success and
+    PENDING -> FAILED (with the error recorded) on failure.
+
+    Raises:
+        ValueError: If export is not enabled, the run does not exist, the run
+            is not export-terminal, or its export already completed.
+        Exception: Re-raises any export failure after recording FAILED status.
+    """
+    from elspeth.contracts import ExportStatus
+    from elspeth.core.landscape.factory import RecorderFactory
+    from elspeth.engine._best_effort import best_effort
+
+    export_config = settings.landscape.export
+    if not export_config.enabled:
+        raise ValueError("audit export is not enabled in settings; nothing to resume")
+
+    factory = RecorderFactory(db, payload_store=payload_store)
+    run = factory.run_lifecycle.get_run(run_id)
+    refusal = audit_export_resume_refusal(run, run_id)
+    if refusal is not None:
+        raise ValueError(refusal)
+
+    factory.run_lifecycle.set_export_status(
+        run_id,
+        status=ExportStatus.PENDING,
+        export_format=export_config.format,
+        export_sink=export_config.sink,
+    )
+    try:
+        export_landscape(
+            db,
+            run_id,
+            settings,
+            sink_factory,
+            payload_store=payload_store,
+            audit_export_content_store=audit_export_content_store,
+            audit_export_content_store_resolver=audit_export_content_store_resolver,
+            worker_id=worker_id,
+        )
+    except Exception as export_error:
+        with best_effort(
+            "Export status FAILED recording on resume",
+            run_id=run_id,
+            original_error=type(export_error).__name__,
+        ):
+            factory.run_lifecycle.set_export_status(
+                run_id,
+                status=ExportStatus.FAILED,
+                error=str(export_error),
+            )
+        raise
+    factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)

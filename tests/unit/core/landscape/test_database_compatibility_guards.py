@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.engine import Engine
 from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, token_work_items_table
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, runs_table, schema_identity_table, token_work_items_table
+from elspeth.core.schema_identity import insert_schema_identity
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -25,6 +28,16 @@ def _make_instance(url: str) -> LandscapeDB:
     instance._engine = create_engine(url, echo=False)
     instance._require_existing_schema = False
     return instance
+
+
+def _stamp_current_landscape_identity(engine: Engine) -> None:
+    with engine.begin() as connection:
+        insert_schema_identity(
+            connection,
+            schema_identity_table,
+            store_kind="landscape",
+            schema_epoch=SQLITE_SCHEMA_EPOCH,
+        )
 
 
 class _InspectorFake:
@@ -77,7 +90,7 @@ class _CreateEngineFake:
         assert self.calls == [(args, kwargs)]
 
 
-class TestSyncSchemaEpochDirectionalGuard:
+class TestSyncSchemaEpochFutureGuard:
     """Coverage for _sync_sqlite_schema_epoch directional guard."""
 
     def test_sync_rejects_future_epoch(self, tmp_path: Path) -> None:
@@ -105,6 +118,104 @@ class TestSyncSchemaEpochDirectionalGuard:
         assert epoch == SQLITE_SCHEMA_EPOCH + 1
         instance.close()
 
+
+class TestExplicitEngineKwargs:
+    """Both Landscape construction paths must preserve explicit pool sizing."""
+
+    def test_raw_constructor_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_tables", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_create_additive_indexes", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_sync_schema_identity", lambda self: None)
+        monkeypatch.setattr(LandscapeDB, "_sync_sqlite_schema_epoch", lambda self: None)
+
+        LandscapeDB(
+            "postgresql+psycopg://db.example/audit",
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_from_url_forwards_engine_kwargs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _CreateEngineFake()
+        monkeypatch.setattr(database_module, "create_engine", fake)
+        monkeypatch.setattr(LandscapeDB, "_validate_schema", lambda self: None)
+
+        LandscapeDB.from_url(
+            "postgresql+psycopg://db.example/audit",
+            create_tables=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+        fake.assert_called_once_with(
+            "postgresql+psycopg://db.example/audit",
+            echo=False,
+            pool_size=3,
+            max_overflow=2,
+            pool_pre_ping=True,
+        )
+
+    def test_sqlcipher_rejects_engine_kwargs(self) -> None:
+        with pytest.raises(ValueError, match="engine kwargs"):
+            LandscapeDB("sqlite:///audit.db", passphrase="fake", pool_size=3)
+
+
+class TestSyncSchemaEpochDirectionalGuard:
+    def test_populated_epoch_22_is_refused_before_create_all_and_left_unchanged(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db_path = tmp_path / "epoch_22_populated.db"
+        url = f"sqlite:///{db_path}"
+        engine = create_engine(url)
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE run_web_plugin_policy")
+            conn.execute(
+                runs_table.insert().values(
+                    run_id="legacy-run",
+                    started_at=datetime(2026, 7, 14, tzinfo=UTC),
+                    config_hash="a" * 64,
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status="completed",
+                    seeded_from_cache=False,
+                    openrouter_catalog_sha256="b" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            conn.exec_driver_sql("PRAGMA user_version = 22")
+        engine.dispose()
+
+        def unexpected_create_all(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("metadata.create_all must not mutate a populated epoch-22 database")
+
+        monkeypatch.setattr(metadata, "create_all", unexpected_create_all)
+        with pytest.raises(SchemaCompatibilityError, match=r"epoch|outdated"):
+            LandscapeDB(url)
+
+        check = create_engine(url)
+        try:
+            assert "run_web_plugin_policy" not in inspect(check).get_table_names()
+            with check.connect() as conn:
+                assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == 22
+                assert conn.execute(text("SELECT count(*) FROM runs")).scalar_one() == 1
+        finally:
+            check.dispose()
+
     def test_sync_upgrades_epoch_zero(self, tmp_path: Path) -> None:
         """_sync_sqlite_schema_epoch upgrades unstamped databases (epoch 0)."""
         db_path = tmp_path / "unstamped.db"
@@ -125,6 +236,7 @@ class TestSyncSchemaEpochDirectionalGuard:
         db_path = tmp_path / "current_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
@@ -161,6 +273,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "stale_openrouter_catalog_check.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE runs")
             conn.execute(
@@ -356,7 +469,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "token_work_items.branch_name" in msg
         assert "Landscape database schema is outdated" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     @pytest.mark.parametrize("column_name", ["token_id", "row_id", "ingest_sequence", "attempt"])
@@ -370,6 +483,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / f"missing_scheduler_{column_name}.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP TABLE token_work_items"))
@@ -419,6 +533,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_terminal_scheduler_identity_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP INDEX uq_token_work_items_terminal_identity"))
@@ -439,6 +554,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_scheduler_recovery_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.execute(text("DROP INDEX ix_token_work_items_recovery"))
@@ -489,6 +605,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_barrier_adopted_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
             conn.exec_driver_sql("ALTER TABLE token_work_items DROP COLUMN barrier_adopted_epoch")
@@ -600,7 +717,7 @@ class TestSchemaCompatibilityGuards:
         instance.close()
 
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
-        """Stamped SQLite schema epochs provide an explicit future migration seam."""
+        """Stamped SQLite schema epochs enforce the pre-1.0 recreate boundary."""
         db_path = tmp_path / "wrong_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
@@ -618,6 +735,46 @@ class TestSchemaCompatibilityGuards:
         assert f"Database epoch: {SQLITE_SCHEMA_EPOCH + 1}" in msg
         assert f"Current epoch: {SQLITE_SCHEMA_EPOCH}" in msg
         instance.close()
+
+    def test_schema_managing_open_never_invokes_in_place_migration(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Before 1.0, startup creates fresh schemas but never transforms old ones."""
+
+        def forbidden_migration(_self: LandscapeDB) -> None:
+            raise AssertionError("pre-1.0 startup invoked an in-place schema migration")
+
+        monkeypatch.setattr(LandscapeDB, "_migrate_sqlite_schema", forbidden_migration, raising=False)
+
+        db = LandscapeDB(f"sqlite:///{tmp_path / 'fresh-only.db'}")
+        db.close()
+
+    def test_older_epoch_is_rejected_without_mutation(self, tmp_path: Path) -> None:
+        """The only supported pre-1.0 upgrade is delete/recreate and reinstall."""
+        db_path = tmp_path / "recreate-boundary.db"
+        db = LandscapeDB(f"sqlite:///{db_path}")
+        db.close()
+
+        predecessor_epoch = SQLITE_SCHEMA_EPOCH - 1
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {predecessor_epoch}")
+            conn.exec_driver_sql(
+                "UPDATE elspeth_schema_identity SET schema_epoch = :epoch WHERE singleton_id = 1",
+                {"epoch": predecessor_epoch},
+            )
+        engine.dispose()
+
+        with pytest.raises(SchemaCompatibilityError, match=r"schema epoch is incompatible|predates.*one-way schema boundary"):
+            LandscapeDB(f"sqlite:///{db_path}")
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.connect() as conn:
+            assert conn.exec_driver_sql("PRAGMA user_version").scalar_one() == predecessor_epoch
+            assert conn.exec_driver_sql("SELECT schema_epoch FROM elspeth_schema_identity").scalar_one() == predecessor_epoch
+        engine.dispose()
 
     def test_validate_schema_rejects_adr018_token_outcomes_shape(self, tmp_path: Path) -> None:
         """ADR-018 token_outcomes stores must fail with ADR-019 remediation text."""
@@ -855,9 +1012,9 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Landscape database schema is outdated." in msg
         assert "Missing tables:" in msg
-        assert "To fix this, either:" in msg
-        assert "Delete the database file and let ELSPETH recreate it" in msg
-        assert "elspeth landscape migrate" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
+        assert "delete/recreate the database" in msg
+        assert "reinstall this ELSPETH version" in msg
         assert f"Database: sqlite:///{db_path}" in msg
         instance.close()
 
@@ -866,7 +1023,7 @@ class TestSchemaCompatibilityGuards:
         import sqlalchemy
 
         instance = _make_instance(f"sqlite:///{tmp_path / 'safe_descriptor_shape.db'}")
-        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"
+        instance.connection_string = "postgresql://user:rawsecret@db.internal/audit?password=querysecret&sslmode=require"  # secret-scan: allow-this-line -- fake redaction-test sentinels
 
         inspector = _InspectorFake(
             table_names=["runs"],
@@ -953,7 +1110,7 @@ class TestSchemaCompatibilityGuards:
 
         msg = str(exc_info.value)
         assert "Missing columns: tokens.expand_group_id" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_reports_missing_required_foreign_keys(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -976,7 +1133,7 @@ class TestSchemaCompatibilityGuards:
         assert "Missing foreign keys:" in msg
         assert "transform_errors.token_id" in msg
         assert "tokens" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_rejects_stale_single_column_foreign_keys_for_run_scoped_error_tables(
@@ -1125,6 +1282,7 @@ class TestSchemaCompatibilityGuards:
         db_path = tmp_path / "missing_check.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         engine.dispose()
 
         instance = _make_instance(f"sqlite:///{db_path}")
@@ -1140,7 +1298,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Missing check constraints:" in msg
         assert "runs.ck_nonexistent_constraint" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_missing_index_raises_compatibility_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1163,7 +1321,7 @@ class TestSchemaCompatibilityGuards:
         msg = str(exc_info.value)
         assert "Missing indexes:" in msg
         assert "runs.ix_nonexistent_index" in msg
-        assert "To fix this, either:" in msg
+        assert "Pre-1.0 schemas are not migrated in place" in msg
         instance.close()
 
     def test_validate_schema_rejects_stale_preflight_results_shape(self, tmp_path: Path) -> None:
@@ -1333,6 +1491,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_tokens_run_id_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1355,6 +1514,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_missing_tokens_run_id_index.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP INDEX ix_tokens_run_id")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1377,6 +1537,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE auth_events")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1394,18 +1555,19 @@ class TestJournalPathGuards:
         assert "auth_events" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_auth_events_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive auth-events table absence."""
         db_path = tmp_path / "readonly_missing_auth_events_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE auth_events")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())
@@ -1421,6 +1583,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE run_attributions")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
@@ -1438,18 +1601,19 @@ class TestJournalPathGuards:
         assert "run_attributions" in tables
         assert epoch == SQLITE_SCHEMA_EPOCH
 
-    def test_from_url_create_tables_false_allows_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
+    def test_from_url_create_tables_false_rejects_missing_run_attributions_without_mutation(self, tmp_path: Path) -> None:
         """Read-only opens tolerate the additive run-attributions table absence."""
         db_path = tmp_path / "readonly_missing_run_attributions_table.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         with engine.begin() as conn:
             conn.exec_driver_sql("DROP TABLE run_attributions")
             conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
         engine.dispose()
 
-        db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
-        db.close()
+        with pytest.raises(SchemaCompatibilityError):
+            LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = set(inspect(engine).get_table_names())
@@ -1461,7 +1625,7 @@ class TestJournalPathGuards:
         assert epoch == SQLITE_SCHEMA_EPOCH
 
     def test_from_url_stamps_schema_epoch_for_compatible_sqlite_db(self, tmp_path: Path) -> None:
-        """Compatible SQLite databases should be stamped for future migrations."""
+        """Compatible unstamped SQLite databases receive the current epoch."""
         db_path = tmp_path / "epoch_stamp.db"
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}")
@@ -1479,6 +1643,7 @@ class TestJournalPathGuards:
         db_path = tmp_path / "readonly_epoch.db"
         engine = create_engine(f"sqlite:///{db_path}")
         metadata.create_all(engine)
+        _stamp_current_landscape_identity(engine)
         engine.dispose()
 
         db = LandscapeDB.from_url(f"sqlite:///{db_path}", create_tables=False)

@@ -6,6 +6,7 @@ for that invariant.  These tests verify all four methods against a real
 in-memory SQLite database; no mocks.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordNotFoundError
+from elspeth.core.landscape.schema import auth_events_table
 
 
 @pytest.fixture
@@ -113,20 +115,30 @@ class TestExecuteFetchall:
         """Multi-query reads on file-backed read-only handles must be snapshot-consistent."""
         db_path = tmp_path / "test.db"
         writable = LandscapeDB.from_url(f"sqlite:///{db_path}")
-        metadata = sa.MetaData()
-        table = sa.Table(
-            "snapshot_rows",
-            metadata,
-            sa.Column("id", sa.String, primary_key=True),
-            sa.Column("value", sa.String),
-        )
-        metadata.create_all(writable.engine)
+        table = auth_events_table
+        now = datetime.now(UTC)
         with writable.write_connection() as conn:
             conn.execute(
                 table.insert(),
                 [
-                    {"id": "first", "value": "first"},
-                    {"id": "second", "value": "before"},
+                    {
+                        "event_id": "first",
+                        "occurred_at": now,
+                        "event_type": "login",
+                        "outcome": "success",
+                        "provider": "local",
+                        "username": "first",
+                        "metadata_json": "{}",
+                    },
+                    {
+                        "event_id": "second",
+                        "occurred_at": now,
+                        "event_type": "login",
+                        "outcome": "success",
+                        "provider": "local",
+                        "username": "before",
+                        "metadata_json": "{}",
+                    },
                 ],
             )
 
@@ -136,17 +148,17 @@ class TestExecuteFetchall:
         @event.listens_for(read_only.engine, "after_cursor_execute")
         def _mutate_after_first_select(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
             nonlocal mutation_count
-            if mutation_count or "snapshot_rows" not in statement:
+            if mutation_count or "auth_events" not in statement:
                 return
             mutation_count += 1
             with writable.write_connection() as write_conn:
-                write_conn.execute(table.update().where(table.c.id == "second").values(value="after"))
+                write_conn.execute(table.update().where(table.c.event_id == "second").values(username="after"))
 
         try:
             rows_by_query = ReadOnlyDatabaseOps(read_only).execute_fetchall_many(
                 [
-                    table.select().where(table.c.id == "first"),
-                    table.select().where(table.c.id == "second"),
+                    table.select().where(table.c.event_id == "first"),
+                    table.select().where(table.c.event_id == "second"),
                 ]
             )
         finally:
@@ -154,10 +166,10 @@ class TestExecuteFetchall:
             read_only.close()
 
         assert mutation_count == 1
-        assert rows_by_query[0][0].value == "first"
-        assert rows_by_query[1][0].value == "before"
+        assert rows_by_query[0][0].username == "first"
+        assert rows_by_query[1][0].username == "before"
         with writable.read_only_connection() as conn:
-            assert conn.execute(table.select().where(table.c.id == "second")).one().value == "after"
+            assert conn.execute(table.select().where(table.c.event_id == "second")).one().username == "after"
         writable.close()
 
     def test_fetchall_many_requires_read_only_flag_on_provider(self, ldb: LandscapeDB, test_table: sa.Table) -> None:

@@ -20,6 +20,7 @@ import {
   type RunProgress,
   type RunStatus,
 } from "@/types/index";
+import { plural } from "@/utils/plural";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 
 function statusLabel(status: RunStatus | null): string {
@@ -66,10 +67,6 @@ function runSummaryParts(
     parts.push(`${discardTotal} discarded`);
   }
   return parts;
-}
-
-function pluralRows(count: number): string {
-  return `${count} ${count === 1 ? "row" : "rows"}`;
 }
 
 function sourceValidationFallbackStage(summary: DiscardSummary): DiscardStageSummary | null {
@@ -146,7 +143,7 @@ function DiscardSummaryWarning({ run }: { run: Run | null }): JSX.Element | null
   return (
     <div role="alert" className="discard-summary-warning">
       <strong>
-        {pluralRows(stage.count)} discarded at {discardStageLabel(stage)}
+        {plural(stage.count, "row")} discarded at {discardStageLabel(stage)}
         {nodeSuffix}. {terminalNote}
       </strong>
       <span>{discardCauseText(stage)} View diagnostics for the first failed row's error message.</span>
@@ -188,15 +185,15 @@ export function InlineRunResults(): JSX.Element | null {
     : null;
   const mostRecentRun = !activeRunId ? (visibleRuns[0] ?? null) : null;
   const displayRun = activeRun ?? mostRecentRun;
-  // Drawer contents: terminal runs other than the one already displayed,
+  // Drawer contents: all terminal runs, including the one already displayed,
   // PLUS any live (pending/running) run this tab is NOT attached to. An
   // attached live run already exposes Cancel through ProgressView; an
   // unattached one (reload where rehydration raced, run started from
   // another tab) must reach the drawer so its REST-backed Cancel is the
   // guaranteed fallback (elspeth-90db33baac).
-  const historyRuns = visibleRuns.filter((run) => {
+  const drawerRuns = visibleRuns.filter((run) => {
     if (isTerminalRunStatus(run.status)) {
-      return run.id !== displayRun?.id;
+      return true;
     }
     const attachedToThisTab =
       activeRunId !== null && progress !== null && run.id === activeRunId;
@@ -211,14 +208,14 @@ export function InlineRunResults(): JSX.Element | null {
       : displayRun && displayStatus && isTerminalRunStatus(displayStatus)
         ? displayRun.id
         : null;
-  const hasHistory = historyRuns.length > 0;
+  const hasDrawerRuns = drawerRuns.length > 0;
   const summaryParts = runSummaryParts(
     displayStatus,
     progressBelongsToActiveRun ? progress : null,
     displayRun,
   );
 
-  if (!showProgress && !outputRunId && !hasHistory) {
+  if (!showProgress && !outputRunId && !hasDrawerRuns) {
     return null;
   }
 
@@ -246,13 +243,13 @@ export function InlineRunResults(): JSX.Element | null {
           >
             <span aria-hidden="true">{isCollapsed ? "\u25B2" : "\u25BC"}</span>
           </button>
-          {hasHistory && (
+          {hasDrawerRuns && (
             <button
               type="button"
               onClick={() => setShowHistory(true)}
               className="btn-compact inline-run-results-history-btn"
             >
-              Past runs ({historyRuns.length})
+              Runs ({drawerRuns.length})
             </button>
           )}
         </div>
@@ -265,7 +262,7 @@ export function InlineRunResults(): JSX.Element | null {
       {showHistory && (
         <RunsHistoryDrawer
           onClose={() => setShowHistory(false)}
-          runsOverride={historyRuns}
+          runsOverride={drawerRuns}
         />
       )}
     </section>

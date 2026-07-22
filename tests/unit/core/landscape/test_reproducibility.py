@@ -178,7 +178,7 @@ class TestComputeGrade:
 
 def _set_grade(db: LandscapeDB, run_id: str, grade: ReproducibilityGrade) -> None:
     """Set reproducibility grade via direct SQL (test helper)."""
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(reproducibility_grade=grade.value))
 
 
@@ -204,7 +204,7 @@ def _create_nondeterministic_call(
         schema_config=_DYNAMIC_SCHEMA,
         determinism=determinism,
     )
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         # Row and token are needed for node_state FK
         conn.execute(
             rows_table.insert().values(
@@ -282,7 +282,7 @@ def _create_nondeterministic_operation_call(
         schema_config=_DYNAMIC_SCHEMA,
         determinism=determinism,
     )
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             operations_table.insert().values(
                 operation_id=operation_id,
@@ -331,7 +331,7 @@ def _create_source_row(
         schema_config=_DYNAMIC_SCHEMA,
         determinism=determinism,
     )
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             rows_table.insert().values(
                 row_id=f"row-{node_id}",
@@ -477,7 +477,7 @@ class TestUpdateGradeAfterPurge:
         )
         _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 nodes_table.update()
                 .where(nodes_table.c.run_id == "run-1")
@@ -500,7 +500,7 @@ class TestUpdateGradeAfterPurge:
         )
         _set_grade(db, "run-1", ReproducibilityGrade.FULL_REPRODUCIBLE)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 nodes_table.update()
                 .where(nodes_table.c.run_id == "run-1")

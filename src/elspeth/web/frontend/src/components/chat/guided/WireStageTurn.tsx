@@ -1,7 +1,8 @@
-import { useId } from "react";
-import type { WireStageData } from "@/types/guided";
+import { useId, useState } from "react";
+import type { GuidedEditTarget, ProposalFlow, ProposalNodeBehavior, WireRowCardinality, WireStageData } from "@/types/guided";
 import { focusAcknowledgementCard } from "../AcknowledgementCard";
 import { stepLabelForPlugin } from "../interpretationStepLabel";
+import { WireReviewList } from "./WireReviewList";
 
 /**
  * One named blocker behind a disabled "Confirm wiring" — a pending
@@ -17,109 +18,46 @@ export interface WireBlockerLink {
 }
 
 export interface WireEdge {
+  stable_id: string;
   from: string;
   to: string;
   label: string;
+  flow: ProposalFlow;
   satisfied: boolean | null;
   missing_fields: string[];
 }
 
-function pairKey(from: string, to: string): string {
-  return `${from}\u0000${to}`;
-}
-
-function branchConnectionLabels(
-  branches: string[] | Record<string, string> | null,
-): string[] {
-  if (branches === null) return [];
-  if (Array.isArray(branches)) return branches;
-  return Object.values(branches);
-}
-
 export function reconstructWireEdges(data: WireStageData): WireEdge[] {
-  const consumerByLabel = new Map<string, string>();
-  for (const node of data.topology.nodes) {
-    if (node.node_type === "coalesce") {
-      for (const label of branchConnectionLabels(node.branches)) {
-        consumerByLabel.set(label, node.id);
-      }
-    } else if (node.input !== null) {
-      consumerByLabel.set(node.input, node.id);
-    }
-  }
-  for (const output of data.topology.outputs) {
-    consumerByLabel.set(output.sink_name, output.id);
-  }
-
-  const contractByPair = new Map(
-    data.edge_contracts.map((contract) => [
-      pairKey(contract.from, contract.to),
-      contract,
-    ]),
-  );
-
-  const edges: WireEdge[] = [];
-  const pushEdge = (from: string, label: string | null) => {
-    if (label === null) return;
-    const to = consumerByLabel.get(label);
-    if (to === undefined) return;
-    const contract = contractByPair.get(pairKey(from, to));
-    edges.push({
-      from,
-      to,
-      label,
-      satisfied: contract?.satisfied ?? null,
-      missing_fields: contract?.missing_fields ?? [],
-    });
-  };
-
-  for (const source of Object.values(data.topology.sources)) {
-    pushEdge(source.id, source.on_success);
-    pushEdge(source.id, source.on_validation_failure);
-  }
-  for (const node of data.topology.nodes) {
-    pushEdge(node.id, node.on_success);
-    pushEdge(node.id, node.on_error);
-    for (const label of Object.values(node.routes ?? {})) {
-      pushEdge(node.id, label);
-    }
-    for (const label of node.fork_to ?? []) {
-      pushEdge(node.id, label);
-    }
-  }
-  for (const output of data.topology.outputs) {
-    pushEdge(output.id, output.on_write_failure);
-  }
-
-  return edges;
+  return data.connections.map((connection) => ({
+    stable_id: connection.stable_id,
+    from: connection.from_endpoint.stable_id,
+    to: connection.to_endpoint.kind === "discard" ? "discard" : connection.to_endpoint.stable_id,
+    label: connection.flow.kind,
+    flow: connection.flow,
+    satisfied: connection.schema_contract?.satisfied ?? null,
+    missing_fields: connection.schema_contract?.missing_fields ?? [],
+  }));
 }
 
 export interface WireStageTurnProps {
   data: WireStageData;
   onConfirm: () => void;
   confirmDisabled: boolean;
-  /** Explicit "Ask advisor" re-ask. Spends one sign-off pass; rendered only on
-   *  the REVISE outcome (a FLAG with budget remaining). */
-  onAskAdvisor?: () => void;
-  /** Exit to freeform — the always-available escape on every flag/block/unknown
-   *  outcome so the wire stage is never a dead-end. */
+  /** Exit to freeform remains available without changing proposal authority. */
   onExitToFreeform?: () => void;
-  /** Complete WITHOUT sign-off. The server honours this ONLY when the outcome is
-   *  escape_unavailable (advisor unreachable + budget exhausted), so it is
-   *  rendered nowhere else — a FLAG can never be acknowledged into a bypass. */
-  onCompleteWithoutSignoff?: () => void;
   /** Pending acknowledgements blocking this confirm. Each renders as a named
    *  jump link under the disabled button (scrolls to + focuses the card). */
   pendingAcknowledgements?: WireBlockerLink[];
   /** Client-known validation blockers (the persisted composition is invalid).
    *  Non-empty DISABLES confirm — a confirm the server must reject is never
    *  offered as a live button (elspeth-3b35abf148 variant 3, client side). */
-  invalidChainIssues?: string[];
+  validationIssues?: string[];
+  onCorrect?: (target: GuidedEditTarget, feedback: string) => void;
 }
 
 /**
  * Human names for every topology entity, keyed by its internal id
- * (elspeth-016f463ff0: `guided_xform_0` / `output:main` must not reach
+ * (elspeth-016f463ff0: internal node and output identifiers must not reach
  * first-run copy). Transforms reuse the acknowledgement cards' step-label
  * mapping (stepLabelForPlugin, e.g. llm → "Summarise") so the wiring list and
  * the cards name a step identically; a plugin-less structural node falls back
@@ -129,19 +67,16 @@ export interface WireStageTurnProps {
  */
 export function buildEntityNames(data: WireStageData): Map<string, string> {
   const names = new Map<string, string>();
-  const sourceEntries = Object.entries(data.topology.sources);
-  for (const [name, source] of sourceEntries) {
-    names.set(
-      source.id,
-      sourceEntries.length === 1 ? "Source" : `${name} source`,
-    );
+  for (const source of data.sources) {
+    names.set(source.stable_id, source.label);
   }
-  for (const node of data.topology.nodes) {
-    names.set(node.id, `${stepLabelForPlugin(node.plugin ?? node.node_type)} step`);
+  for (const node of data.nodes) {
+    names.set(node.stable_id, `${node.label} (${stepLabelForPlugin(node.plugin ?? node.node_type)})`);
   }
-  for (const output of data.topology.outputs) {
-    names.set(output.id, `${output.sink_name} output`);
+  for (const output of data.outputs) {
+    names.set(output.stable_id, output.label);
   }
+  names.set("discard", "Discard");
   return names;
 }
 
@@ -151,6 +86,98 @@ function edgeStatus(edge: WireEdge): string {
   if (edge.satisfied === true) return "connected";
   if (edge.satisfied === false) return "not connected correctly";
   return "not yet checked";
+}
+
+/** Chip variant for a route's contract state (WireReviewList status). */
+function edgeStatusKind(edge: WireEdge): "connected" | "warning" | "unchecked" {
+  if (edge.satisfied === true) return "connected";
+  if (edge.satisfied === false) return "warning";
+  return "unchecked";
+}
+
+/**
+ * One-line route roll-up ("9 routes — 2 connected, 7 not yet checked") so the
+ * list's overall state reads once, instead of every row trailing the same
+ * "— not yet checked" clause (the operator-reported debug-dump read).
+ * Zero-count categories are elided.
+ */
+export function routesSummaryText(edges: WireEdge[]): string {
+  const connected = edges.filter((edge) => edge.satisfied === true).length;
+  const broken = edges.filter((edge) => edge.satisfied === false).length;
+  const unchecked = edges.length - connected - broken;
+  const parts = [
+    ...(connected > 0 ? [`${connected} connected`] : []),
+    ...(broken > 0 ? [`${broken} not connected correctly`] : []),
+    ...(unchecked > 0 ? [`${unchecked} not yet checked`] : []),
+  ];
+  const heading = edges.length === 1 ? "1 route" : `${edges.length} routes`;
+  return parts.length > 0 ? `${heading} — ${parts.join(", ")}` : heading;
+}
+
+function humanToken(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
+function cardinalityText(cardinality: WireRowCardinality): string {
+  const expected = cardinality.expected_output_count === null
+    ? ""
+    : ` (expected ${cardinality.expected_output_count})`;
+  return `Cardinality: ${humanToken(cardinality.input)} → ${humanToken(cardinality.output)}${expected}`;
+}
+
+function fieldsText(label: "Required" | "Guaranteed", fields: string[]): string {
+  return `${label} fields: ${fields.length > 0 ? fields.join(", ") : "none"}`;
+}
+
+function flowText(flow: ProposalFlow): string {
+  switch (flow.kind) {
+    case "source_success":
+      return flow.branch === null ? "Source success" : `Source success on ${flow.branch}`;
+    case "source_validation_failure":
+      return "Source validation failure";
+    case "node_success":
+      return flow.branch === null ? "Node success" : `Node success on ${flow.branch}`;
+    case "node_error":
+      return "Node failure";
+    case "gate_route":
+      return flow.branch === null ? `Gate route ${flow.route}` : `Gate route ${flow.route} on ${flow.branch}`;
+    case "gate_fork":
+      return `Gate fork ${flow.routes.join(", ")} as ${flow.branch}`;
+    case "queue_continue":
+      return flow.branch === null ? "Queue continuation" : `Queue continuation on ${flow.branch}`;
+    case "coalesce_success":
+      return flow.branch === null ? "Coalesce success" : `Coalesce success on ${flow.branch}`;
+    case "output_write_failure":
+      return "Output write failure";
+  }
+}
+
+function behaviorDetails(behavior: ProposalNodeBehavior): string[] {
+  switch (behavior.kind) {
+    case "transform":
+      return ["Policy: transform each input row"];
+    case "queue":
+      return ["Policy: continue queued items individually"];
+    case "gate":
+      return [
+        `Routes: ${behavior.route_aliases.join(", ")}`,
+        ...behavior.fork_branches.map((fork) => `Fork branch ${fork.branch}: ${fork.routes.join(", ")}`),
+      ];
+    case "aggregation":
+      return [
+        `Triggers: ${behavior.trigger_kinds.join(", ")}`,
+        ...(behavior.count === null ? [] : [`Count: ${behavior.count}`]),
+        ...(behavior.timeout_seconds === null ? [] : [`Timeout: ${behavior.timeout_seconds} seconds`]),
+        `Output mode: ${humanToken(behavior.output_mode)}`,
+        ...(behavior.expected_output_count === null ? [] : [`Expected output count: ${behavior.expected_output_count}`]),
+      ];
+    case "coalesce":
+      return [
+        `Branches: ${behavior.branch_aliases.join(", ")}`,
+        `Policy: ${humanToken(behavior.policy)}`,
+        `Merge: ${humanToken(behavior.merge)}`,
+      ];
+  }
 }
 
 /** The verbatim engineer-grade row, preserved behind the Technical details
@@ -166,7 +193,7 @@ function rawEdgeRow(edge: WireEdge): string {
     edge.missing_fields.length > 0
       ? ` Missing fields: ${edge.missing_fields.join(", ")}`
       : "";
-  return `${edge.from} -> ${edge.to} via ${edge.label} ${status}${missing}`;
+  return `[${edge.stable_id}] ${edge.from} -> ${edge.to} via ${flowText(edge.flow)} ${status}${missing}`;
 }
 
 function warningText(warning: Record<string, unknown>): string {
@@ -175,43 +202,45 @@ function warningText(warning: Record<string, unknown>): string {
   return JSON.stringify(warning);
 }
 
-// Short in-context guidance for the outcomes whose advisor_findings alone do not
-// tell the user what to do next. The findings block carries the "why"; these
-// lines carry the "what now". Public-service register, no marketing.
-const BLOCKED_UNAVAILABLE_COPY =
-  "Advisor sign-off could not run, so this pipeline cannot be completed here. Exit to freeform to finish it manually.";
-const ESCAPE_UNAVAILABLE_COPY =
-  "The advisor is unreachable and the review budget is exhausted. You can complete without sign-off (recorded as advisor-unreachable) or exit to freeform.";
-const UNKNOWN_OUTCOME_COPY =
-  "This wiring review returned a status this version does not recognise. Exit to freeform to continue.";
-
 export function WireStageTurn({
   data,
   onConfirm,
   confirmDisabled,
-  onAskAdvisor,
   onExitToFreeform,
-  onCompleteWithoutSignoff,
   pendingAcknowledgements,
-  invalidChainIssues,
+  validationIssues,
+  onCorrect,
 }: WireStageTurnProps) {
   const edges = reconstructWireEdges(data);
   const entityNames = buildEntityNames(data);
   const nameFor = (id: string): string => entityNames.get(id) ?? id;
-  const outcome = data.signoff_outcome;
-  const passesRemaining = data.passes_remaining;
   const blockersId = useId();
+  const routesHeadingId = useId();
+  const correctionSelectId = useId();
+  const correctionFeedbackId = useId();
+  const correctionTargets: Array<{ target: GuidedEditTarget; label: string }> = [
+    ...data.sources.map((source) => ({ target: { kind: "source" as const, stable_id: source.stable_id }, label: source.label })),
+    ...data.nodes.map((node) => ({ target: { kind: "node" as const, stable_id: node.stable_id }, label: node.label })),
+    ...data.connections.map((connection, index) => ({
+      target: { kind: "edge" as const, stable_id: connection.stable_id },
+      label: `Route ${index + 1}`,
+    })),
+    ...data.outputs.map((output) => ({ target: { kind: "output" as const, stable_id: output.stable_id }, label: output.label })),
+  ];
+  const [correctionTarget, setCorrectionTarget] = useState(correctionTargets[0]?.target.stable_id ?? "");
+  const [correctionFeedback, setCorrectionFeedback] = useState("");
 
   const acknowledgements = pendingAcknowledgements ?? [];
-  const chainIssues = invalidChainIssues ?? [];
-  const hasBlockers = acknowledgements.length > 0 || chainIssues.length > 0;
+  const blockingValidationIssues = validationIssues ?? [];
+  const hasBlockers =
+    acknowledgements.length > 0 || blockingValidationIssues.length > 0 || data.blockers.length > 0;
 
   const confirmButton = (
     <button
       type="button"
       className="guided-turn-primary"
       onClick={onConfirm}
-      disabled={confirmDisabled || chainIssues.length > 0}
+      disabled={confirmDisabled || !data.can_confirm || data.blockers.length > 0 || blockingValidationIssues.length > 0}
       aria-describedby={hasBlockers ? blockersId : undefined}
     >
       Confirm wiring
@@ -246,18 +275,23 @@ export function WireStageTurn({
           </ul>
         </>
       )}
-      {chainIssues.length > 0 && (
+      {blockingValidationIssues.length > 0 && (
         <>
           <p className="wire-stage__blockers-heading">
             The pipeline isn't ready to confirm:
           </p>
           <ul className="wire-stage__blockers-list wire-stage__blockers-list--issues">
-            {chainIssues.map((issue, index) => (
+            {blockingValidationIssues.map((issue, index) => (
               <li key={index}>{issue}</li>
             ))}
           </ul>
         </>
       )}
+      {data.blockers.length > 0 ? (
+        <ul className="wire-stage__blockers-list wire-stage__blockers-list--issues">
+          {data.blockers.map((blocker, index) => <li key={index}>{warningText(blocker)}</li>)}
+        </ul>
+      ) : null}
     </div>
   ) : null;
 
@@ -271,93 +305,6 @@ export function WireStageTurn({
     </button>
   );
 
-  // Action area gated on the sign-off outcome. Every branch is closed and the
-  // default is a safe escape (never an empty area, never a bypassing confirm on
-  // a flag/block). See the outcome -> affordance contract in the slice-B plan.
-  function renderActions() {
-    switch (outcome) {
-      // Initial turn (not yet checked) OR a re-emitted CLEAN verdict. The
-      // backend never auto-completes on a clean re-emit, so confirm stays the
-      // actionable finalize step — not a dead-end.
-      case undefined:
-      case "complete":
-        return (
-          <>
-            <div className="wire-stage__actions">
-              {confirmButton}
-              {chainIssues.length > 0 && onExitToFreeform !== undefined
-                ? exitButton
-                : null}
-            </div>
-            {blockersPanel}
-          </>
-        );
-
-      // FLAGGED, budget remains: re-ask (with disclosed cost) or exit. No bare
-      // confirm — that is the silent repeat-burn this slice removes.
-      case "revise": {
-        const costCopy =
-          passesRemaining !== undefined ? ` (spends 1 of ${passesRemaining})` : "";
-        return (
-          <div className="wire-stage__actions">
-            <button
-              type="button"
-              className="guided-turn-secondary"
-              onClick={() => onAskAdvisor?.()}
-              // Disable-at-0 is a defensive guard: REVISE is only emitted while
-              // budget remains, so 0 is live-unreachable here.
-              disabled={passesRemaining === 0}
-            >
-              {`Ask advisor${costCopy}`}
-            </button>
-            {exitButton}
-          </div>
-        );
-      }
-
-      // FLAGGED, exhausted: fail-closed terminal. No budget-burning button.
-      case "blocked_flagged":
-        return <div className="wire-stage__actions">{exitButton}</div>;
-
-      // Service/budget missing: explanation + exit.
-      case "blocked_unavailable":
-        return (
-          <>
-            <p className="wire-stage__guidance">{BLOCKED_UNAVAILABLE_COPY}</p>
-            <div className="wire-stage__actions">{exitButton}</div>
-          </>
-        );
-
-      // Advisor unreachable + exhausted: the ONLY outcome that offers
-      // complete-without-sign-off (server-enforced; defense-in-depth here).
-      case "escape_unavailable":
-        return (
-          <>
-            <p className="wire-stage__guidance">{ESCAPE_UNAVAILABLE_COPY}</p>
-            <div className="wire-stage__actions">
-              <button
-                type="button"
-                className="guided-turn-primary"
-                onClick={() => onCompleteWithoutSignoff?.()}
-              >
-                Complete without sign-off
-              </button>
-              {exitButton}
-            </div>
-          </>
-        );
-
-      // Any unknown/forward outcome: never a dead-end, never a bypassing confirm.
-      default:
-        return (
-          <>
-            <p className="wire-stage__guidance">{UNKNOWN_OUTCOME_COPY}</p>
-            <div className="wire-stage__actions">{exitButton}</div>
-          </>
-        );
-    }
-  }
-
   return (
     <div className="guided-turn wire-stage">
       <h3>Review wiring</h3>
@@ -370,43 +317,180 @@ export function WireStageTurn({
         </ul>
       ) : null}
 
+      <section className="wire-stage__components" aria-label="Reviewed components">
+        {data.sources.length > 0 ? (
+          <div>
+            <h4>Sources</h4>
+            <ul>
+              {data.sources.map((source) => (
+                <li key={source.stable_id}>
+                  <strong>{source.label}</strong> <span>({source.plugin})</span>
+                  <p>{cardinalityText(source.row_cardinality)}</p>
+                  <p>{fieldsText("Guaranteed", source.guaranteed_fields)}</p>
+                  <p>Validation failure: {humanToken(source.on_validation_failure)}</p>
+                  <details><summary>Stable ID</summary><code>{source.stable_id}</code></details>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {data.nodes.length > 0 ? (
+          <div>
+            <h4>Processing nodes</h4>
+            <ul>
+              {data.nodes.map((node) => (
+                <li key={node.stable_id}>
+                  <strong>{node.label}</strong> <span>({node.plugin ?? humanToken(node.node_type)})</span>
+                  <p>{cardinalityText(node.row_cardinality)}</p>
+                  <p>{fieldsText("Required", node.required_fields)}</p>
+                  <p>{fieldsText("Guaranteed", node.guaranteed_fields)}</p>
+                  {behaviorDetails(node.behavior).map((detail) => <p key={detail}>{detail}</p>)}
+                  {node.structured_output_fields.length > 0 ? (
+                    <ul aria-label={`${node.label} structured output fields`}>
+                      {node.structured_output_fields.map((field) => (
+                        <li key={`${field.query}:${field.field}`}>
+                          {`${field.field} (${field.type}) from ${field.query}${
+                            field.enum_values.length > 0 ? `; values: ${field.enum_values.join(", ")}` : ""
+                          }`}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <details><summary>Stable ID</summary><code>{node.stable_id}</code></details>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {data.outputs.length > 0 ? (
+          <div>
+            <h4>Outputs</h4>
+            <ul>
+              {data.outputs.map((output) => (
+                <li key={output.stable_id}>
+                  <strong>{output.label}</strong> <span>({output.plugin})</span>
+                  <p>{fieldsText("Required", output.required_fields)}</p>
+                  <p>Write failure: {humanToken(output.on_write_failure)}</p>
+                  <p>Schema mode: {humanToken(output.business_schema.mode)}</p>
+                  {output.business_schema.fields.length > 0 ? (
+                    <ul aria-label={`${output.label} business schema fields`}>
+                      {output.business_schema.fields.map((field) => (
+                        <li key={field.name}>
+                          {`${field.name}: ${field.type} — ${field.required ? "required" : "optional"}, ${
+                            field.nullable ? "nullable" : "non-null"
+                          }`}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <p>{fieldsText("Guaranteed", output.business_schema.guaranteed_fields)}</p>
+                  <p>{fieldsText("Required", output.business_schema.required_fields)}</p>
+                  <details><summary>Stable ID</summary><code>{output.stable_id}</code></details>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </section>
+
       {/* Human step names + plain-language connection state
-          (elspeth-016f463ff0). The raw ids / connection labels stay available
-          verbatim behind the Technical details expander below. */}
-      <ul className="wire-stage__edges">
-        {edges.map((edge) => (
-          <li
-            key={`${edge.from}\u0000${edge.label}\u0000${edge.to}`}
-            aria-label={`${nameFor(edge.from)} to ${nameFor(edge.to)}`}
-          >
-            <span>{nameFor(edge.from)}</span>
-            <span aria-hidden="true">{" → "}</span>
-            <span>{nameFor(edge.to)}</span>
-            <span aria-hidden="true">{" — "}</span>
-            <span>{edgeStatus(edge)}</span>
-            {edge.missing_fields.length > 0 ? (
-              <span> Missing fields: {edge.missing_fields.join(", ")}</span>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+          (elspeth-016f463ff0). Status renders as a per-row chip plus one
+          count roll-up (never per-row trailing "— …" prose) and is folded
+          into each row's accessible name — the li aria-label overrides its
+          text content, so a chip outside it is invisible to screen readers.
+          The raw ids / connection labels stay available verbatim behind the
+          Technical details expander. */}
       {edges.length > 0 ? (
-        <details className="wire-stage__raw">
-          <summary>Technical details</summary>
-          <pre className="wire-stage__raw-text">
-            {edges.map(rawEdgeRow).join("\n")}
-          </pre>
-        </details>
+        <section className="wire-stage__routes" aria-labelledby={routesHeadingId}>
+          <h4 id={routesHeadingId}>Routes</h4>
+          <p className="wire-stage__routes-summary">{routesSummaryText(edges)}</p>
+          <WireReviewList
+            className="wire-stage__edges"
+            ariaLabel="Wiring routes"
+            items={edges.map((edge) => ({
+              id: `${edge.from}\u0000${edge.label}\u0000${edge.to}`,
+              from: nameFor(edge.from),
+              to: nameFor(edge.to),
+              summary: flowText(edge.flow),
+              status: edgeStatusKind(edge),
+              detail:
+                edge.missing_fields.length > 0
+                  ? `Missing fields: ${edge.missing_fields.join(", ")}`
+                  : null,
+              ariaLabel: `${nameFor(edge.from)} to ${nameFor(edge.to)} — ${edgeStatus(edge)}`,
+            }))}
+          />
+          <details className="wire-stage__raw">
+            <summary>Technical details</summary>
+            <pre className="wire-stage__raw-text">
+              {edges.map(rawEdgeRow).join("\n")}
+            </pre>
+          </details>
+        </section>
       ) : null}
 
-      {data.advisor_findings !== undefined ? (
-        <div className="wire-stage__findings">
-          <h4>Advisor review</h4>
-          <p>{data.advisor_findings}</p>
-        </div>
+      {onCorrect !== undefined && correctionTargets.length > 0 ? (
+        <form
+          className="wire-stage__correction"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const selected = correctionTargets.find((item) => item.target.stable_id === correctionTarget);
+            if (selected !== undefined && correctionFeedback.trim().length > 0) {
+              onCorrect(selected.target, correctionFeedback.trim());
+            }
+          }}
+        >
+          {/* Proper form-group idiom (operator-reported soup: wrapping labels
+              overlapped the bare native select and the tiny off-baseline
+              textarea). Explicit for/id association + the schema form's field
+              classes; keep the accessible names verbatim ("Component" /
+              "What should change?"). */}
+          <h4>Request a wiring correction</h4>
+          <div className="guided-schema-field-row">
+            <label className="guided-schema-label" htmlFor={correctionSelectId}>
+              Component
+            </label>
+            <select
+              id={correctionSelectId}
+              className="guided-schema-select"
+              value={correctionTarget}
+              onChange={(event) => setCorrectionTarget(event.target.value)}
+            >
+              {correctionTargets.map((item) => (
+                <option key={`${item.target.kind}:${item.target.stable_id}`} value={item.target.stable_id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="guided-schema-field-row">
+            <label className="guided-schema-label" htmlFor={correctionFeedbackId}>
+              What should change?
+            </label>
+            <textarea
+              id={correctionFeedbackId}
+              className="wire-stage__correction-input"
+              rows={2}
+              value={correctionFeedback}
+              maxLength={4096}
+              onChange={(event) => setCorrectionFeedback(event.target.value)}
+            />
+          </div>
+          <div className="wire-stage__correction-actions">
+            <button type="submit" className="guided-turn-secondary" disabled={correctionFeedback.trim().length === 0}>
+              Re-plan wiring
+            </button>
+          </div>
+        </form>
       ) : null}
 
-      {renderActions()}
+      <div className="wire-stage__actions">
+        {confirmButton}
+        {onExitToFreeform !== undefined ? exitButton : null}
+      </div>
+      {blockersPanel}
     </div>
   );
 }

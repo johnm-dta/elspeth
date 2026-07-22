@@ -19,7 +19,7 @@
  *
  * Phase 8 will add a telemetry emit here for audit-row-click. No emit yet.
  */
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useMemo, useRef } from "react";
 
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useSessionStore } from "../../stores/sessionStore";
@@ -50,7 +50,9 @@ export function ReadinessRowDetail({ row, validationErrors, onClose }: Readiness
 
   // Shared with the rail strip: component_id → plain phrase, and the
   // acknowledgement-card step label (for the review-pending humaniser case).
-  const phraseFor = makePhraseFor(compositionState);
+  // Memoised (elspeth-40d6efac2b): avoids rebuilding + re-tokenising the
+  // phrase map on every render of this drawer.
+  const phraseFor = useMemo(() => makePhraseFor(compositionState), [compositionState]);
   const stepLabelFor = (componentId: string): string | null => {
     const plugin = resolveNodePlugin(compositionState, componentId);
     return plugin === null ? null : stepLabelForPlugin(plugin);

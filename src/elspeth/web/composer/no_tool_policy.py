@@ -97,12 +97,13 @@ _AugmentationBranch = Literal[
     "state_claim_grounding_correction",
     "orphaned_interpretation_review_augmentation",
     "advisor_signoff_blocked_augmentation",
+    "interpretation_review_handoff_augmentation",
 ]
 
 
 def state_is_structurally_empty(state: CompositionState) -> bool:
     """Return True when no composition tools have produced visible state."""
-    return not state.sources and not state.nodes and not state.outputs
+    return not state.sources and not state.nodes and not state.edges and not state.outputs
 
 
 def enforce_augmentation_prefix_invariant(

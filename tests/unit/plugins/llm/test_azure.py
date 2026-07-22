@@ -229,6 +229,21 @@ class TestAzureOpenAIConfig:
         assert config.api_key == "azure-api-key"
         assert config.prompt_template == "Analyze: {{ row.text }}"
 
+    def test_http_loopback_endpoint_is_available_for_local_compatible_servers(self) -> None:
+        config = AzureOpenAIConfig.from_dict(
+            {
+                "deployment_name": "local-compatible-server",
+                "endpoint": "http://127.0.0.1:8001",
+                "api_key": "local-test-key",
+                "model": "gpt-4",
+                "prompt_template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+            }
+        )
+
+        assert config.endpoint == "http://127.0.0.1:8001"
+
     def test_default_api_version(self) -> None:
         """Config has default api_version of 2024-10-21."""
         config = AzureOpenAIConfig.from_dict(
@@ -501,7 +516,10 @@ class TestLLMTransformAzurePipelining:
         assert result.status == "error"
         assert result.reason is not None
         assert result.reason["reason"] == "llm_call_failed"
-        assert "API Error" in result.reason["error"]
+        # Persisted error text is the audit-safe constant — raw provider text
+        # must not reach transform_errors.error_details_json (elspeth-5d17bcff15).
+        assert result.reason["error"] == "LLM provider request failed"
+        assert "API Error" not in result.reason["error"]
         assert result.retryable is False
 
     def test_rate_limit_error_propagates_for_engine_retry(
@@ -532,7 +550,8 @@ class TestLLMTransformAzurePipelining:
         # This allows the engine's RetryManager to retry the operation
         assert isinstance(result, ExceptionResult)
         assert isinstance(result.exception, RateLimitError)
-        assert "429" in str(result.exception)
+        assert str(result.exception) == "LLM provider request failed"
+        assert "429" in str(result.exception.__cause__)
 
     def test_missing_state_id_propagates_exception(
         self, audit_writer: _FakeAuditWriter, transform: LLMTransform, collector: CollectorOutputPort

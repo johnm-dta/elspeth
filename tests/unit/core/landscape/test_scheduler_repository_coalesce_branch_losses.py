@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, insert, select, update
 
-from elspeth.contracts import NodeType, RunStatus
+from elspeth.contracts import NodeType, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, RunLeadershipLostError
 from elspeth.contracts.scheduler import TokenWorkStatus
@@ -303,10 +303,10 @@ class TestDispositionComposition:
             work_item_id=work_item_id,
             row_payload_json=_payload_json(),
             sink_name="quarantine",
-            outcome="quarantined",
-            path="quarantined",
-            error_hash=None,
-            error_message=None,
+            outcome=TerminalOutcome.FAILURE.value,
+            path=TerminalPath.ON_ERROR_ROUTED.value,
+            error_hash="quarantined-error-hash",
+            error_message="quarantined",
             now=NOW,
             expected_lease_owner=WORKER,
             branch_loss=BranchLossSpec(

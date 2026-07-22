@@ -22,6 +22,7 @@ function makePayload(
   return {
     default_mode: "guided",
     banner_dismissed_at: null,
+    freeform_intro_dismissed_at: null,
     tutorial_completed_at: null,
     tutorial_stage: null,
     tutorial_session_id: null,

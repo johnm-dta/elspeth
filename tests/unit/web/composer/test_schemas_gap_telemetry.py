@@ -20,13 +20,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
-from elspeth.web.composer.prompts import build_context_string
+from elspeth.web.composer.prompts import build_context_string as _build_context_string
 from elspeth.web.composer.state import (
     CompositionState,
     PipelineMetadata,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 class _StubCatalog:
@@ -55,6 +57,21 @@ class _StubCatalog:
 def _stub_catalog() -> CatalogService:
     catalog: CatalogService = _StubCatalog()
     return catalog
+
+
+def build_context_string(
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> str:
+    """Exercise the prompt builder through its explicit policy pair."""
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _build_context_string(
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _empty_state() -> CompositionState:

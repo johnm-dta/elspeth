@@ -1,5 +1,5 @@
 """Walker tests for ``_CHECK_VALUE_SOURCE_COMPLIANCE`` step in
-``validate_pipeline``.
+``validate_pipeline_for_trained_operator``.
 
 The walker is also exercised at the L2 layer
 (``engine.orchestrator.preflight.validate_value_source_compliance``);
@@ -35,13 +35,15 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.validation import (
     _ALL_CHECKS,
     _CHECK_GRAPH,
     _CHECK_PLUGINS,
     _CHECK_VALUE_SOURCE_COMPLIANCE,
-    validate_pipeline,
+    validate_pipeline_for_trained_operator,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
 
 class TestAllChecksOrdering:
@@ -263,7 +265,7 @@ class TestWalkerL2Direct:
 
 
 class TestWalkerInValidatePipeline:
-    """End-to-end through ``validate_pipeline`` — the composer entry path.
+    """End-to-end through ``validate_pipeline_for_trained_operator`` — the composer entry path.
 
     Mocks at the same boundary as the surrounding tests in
     ``test_validation.py`` (load_settings, instantiate_runtime_plugins,
@@ -274,7 +276,7 @@ class TestWalkerInValidatePipeline:
 
     def test_value_source_failure_short_circuits_with_skipped_downstream(self) -> None:
         """When ``instantiate_runtime_plugins`` raises ``ValueSourceValidationError``
-        (the walker rejected a declared value), validate_pipeline reports
+        (the walker rejected a declared value), validate_pipeline_for_trained_operator reports
         PLUGINS as passed and VALUE_SOURCE as failed, with downstream checks
         skipped via cascade. The exception is raised from inside
         ``instantiate_plugins_from_config`` which is the single source of
@@ -300,7 +302,7 @@ class TestWalkerInValidatePipeline:
         state = _make_state()
         settings = _make_settings()
 
-        def raise_value_source_error(_settings: object, *, preflight_mode: bool = False) -> None:
+        def raise_value_source_error(_settings: object, *, plugin_snapshot: PluginAvailabilitySnapshot) -> None:
             raise injected_error
 
         with (
@@ -310,7 +312,7 @@ class TestWalkerInValidatePipeline:
                 new=raise_value_source_error,
             ),
         ):
-            result = validate_pipeline(state, settings, yaml_gen)
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is False
         check_by_name = {c.name: c for c in result.checks}
@@ -342,7 +344,7 @@ class TestWalkerInValidatePipeline:
             patch("elspeth.web.execution.validation.build_runtime_graph", new=_build_runtime_graph),
             patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", new=_assemble_and_validate_pipeline_config),
         ):
-            result = validate_pipeline(state, settings, yaml_gen)
+            result = validate_pipeline_for_trained_operator(state, settings, yaml_gen, plugin_snapshot=_value_source_test_snapshot())
 
         assert result.is_valid is True
         check_by_name = {c.name: c for c in result.checks}
@@ -437,7 +439,11 @@ def _load_settings_from_yaml_string(_yaml_content: str, *, expand_env_vars: bool
 
 
 def _runtime_plugins_returning(bundle: _RuntimePluginBundleStub):
-    def instantiate_runtime_plugins(_settings: object, *, preflight_mode: bool = False) -> _RuntimePluginBundleStub:
+    def instantiate_runtime_plugins(
+        _settings: object,
+        *,
+        plugin_snapshot: PluginAvailabilitySnapshot,
+    ) -> _RuntimePluginBundleStub:
         return bundle
 
     return instantiate_runtime_plugins
@@ -560,6 +566,20 @@ def _make_state() -> CompositionState:
         ),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def _value_source_test_snapshot() -> PluginAvailabilitySnapshot:
+    base = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    return PluginAvailabilitySnapshot.create(
+        policy_hash="value-source-test",
+        principal_scope="local:value-source-test",
+        available=base.available | {PluginId("transform", "openrouter_llm")},
+        unavailable=(),
+        selected=base.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="value-source-test",
     )
 
 

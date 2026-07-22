@@ -174,7 +174,123 @@ class SchedulerQueueRepository:
         coalesce_node_id: str | None = None,
         coalesce_name: str | None = None,
     ) -> TokenWorkItem:
-        """Persist a READY continuation and claim it in the same audit transaction."""
+        """Persist and claim READY work for an active registered worker.
+
+        ``lease_owner`` is also the durable ``run_workers`` identity.  The
+        membership fence runs before any payload mutation, then rides the
+        claim UPDATE CAS so eviction between the entry check and claim rolls
+        back the INSERT and both scheduler events.
+
+        Repository-only N=0/test callers must opt into the visibly unsafe
+        :meth:`enqueue_ready_claimed_legacy_unfenced` compatibility helper.
+        """
+        return self._enqueue_ready_claimed(
+            run_id=run_id,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=node_id,
+            step_index=step_index,
+            ingest_sequence=ingest_sequence,
+            row_payload_json=row_payload_json,
+            available_at=available_at,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            now=now,
+            attempt=attempt,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            on_success_sink=on_success_sink,
+            branch_name=branch_name,
+            fork_group_id=fork_group_id,
+            join_group_id=join_group_id,
+            expand_group_id=expand_group_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
+            worker_id=lease_owner,
+        )
+
+    def enqueue_ready_claimed_legacy_unfenced(
+        self,
+        *,
+        run_id: str,
+        token_id: str,
+        row_id: str,
+        node_id: str | None,
+        step_index: int,
+        ingest_sequence: int,
+        row_payload_json: str,
+        available_at: datetime,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+        attempt: int = 1,
+        queue_key: str | None = None,
+        barrier_key: str | None = None,
+        on_success_sink: str | None = None,
+        branch_name: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        coalesce_node_id: str | None = None,
+        coalesce_name: str | None = None,
+    ) -> TokenWorkItem:
+        """Compatibility enqueue-and-claim for N=0 fixtures with no registry.
+
+        This method is intentionally explicit and must not be used by a
+        production worker.  Coordinated leader ingest uses the separately
+        fenced :meth:`ingest_row_with_initial_claim` composition instead.
+        """
+        return self._enqueue_ready_claimed(
+            run_id=run_id,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=node_id,
+            step_index=step_index,
+            ingest_sequence=ingest_sequence,
+            row_payload_json=row_payload_json,
+            available_at=available_at,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            now=now,
+            attempt=attempt,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            on_success_sink=on_success_sink,
+            branch_name=branch_name,
+            fork_group_id=fork_group_id,
+            join_group_id=join_group_id,
+            expand_group_id=expand_group_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
+            worker_id=None,
+        )
+
+    def _enqueue_ready_claimed(
+        self,
+        *,
+        run_id: str,
+        token_id: str,
+        row_id: str,
+        node_id: str | None,
+        step_index: int,
+        ingest_sequence: int,
+        row_payload_json: str,
+        available_at: datetime,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+        attempt: int,
+        queue_key: str | None,
+        barrier_key: str | None,
+        on_success_sink: str | None,
+        branch_name: str | None,
+        fork_group_id: str | None,
+        join_group_id: str | None,
+        expand_group_id: str | None,
+        coalesce_node_id: str | None,
+        coalesce_name: str | None,
+        worker_id: str | None,
+    ) -> TokenWorkItem:
         with begin_write(self._engine) as conn:
             row = self.enqueue_ready_claimed_on(
                 conn,
@@ -199,6 +315,7 @@ class SchedulerQueueRepository:
                 expand_group_id=expand_group_id,
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
+                worker_id=worker_id,
             )
         return item_from_mapping(row)
 
@@ -227,13 +344,18 @@ class SchedulerQueueRepository:
         expand_group_id: str | None = None,
         coalesce_node_id: str | None = None,
         coalesce_name: str | None = None,
+        worker_id: str | None = None,
     ) -> RowMapping:
         """Connection-accepting enqueue-and-claim: composes into the caller's transaction.
 
         Extracted from :meth:`enqueue_ready_claimed` so the fenced ingest verb
         (:meth:`ingest_row_with_initial_claim`, ADR-030 §C.4 row 9) can
         compose the reference validation + idempotent insert + ENQUEUE/CLAIM
-        events onto ONE connection with the rows/tokens inserts.
+        events onto ONE connection with the rows/tokens inserts.  Standalone
+        production callers pass ``worker_id``; the strict membership check is
+        then the first database statement in this method and the claim UPDATE
+        rechecks membership.  ``None`` is reserved for the explicit legacy
+        helper and for ingest, whose leader-epoch CAS is the outer fence.
         """
         work_item_id = make_work_item_id(run_id, token_id, node_id, attempt)
         values = ready_work_item_values(
@@ -256,6 +378,10 @@ class SchedulerQueueRepository:
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
+        if worker_id is not None:
+            fence_holds = conn.execute(select(active_worker_fence_clause(worker_id=worker_id, run_id=run_id))).scalar()
+            if not fence_holds:
+                raise RunWorkerEvictedError(worker_id=worker_id, run_id=run_id)
         validate_work_item_references(
             conn,
             run_id=run_id,
@@ -291,6 +417,7 @@ class SchedulerQueueRepository:
                 lease_owner=lease_owner,
                 lease_seconds=lease_seconds,
                 now=now,
+                strict_membership_fenced=worker_id is not None,
             )
             if claimed is not None:
                 row = claimed

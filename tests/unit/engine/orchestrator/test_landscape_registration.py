@@ -2,22 +2,84 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import create_autospec, patch
 
 import pytest
 
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import Determinism, NodeType
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.payload_store import PayloadStore
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.types import NodeID, SinkName
+from elspeth.core.events import EventBusProtocol
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.engine.orchestrator.ceremony import RunCeremony
+from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.landscape_registration import (
     NodeAuditMetadata,
     register_nodes_with_landscape,
     resolve_node_audit_metadata,
     resolve_source_contracts_by_node_id,
 )
+from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+from elspeth.engine.spans import SpanFactory
 
 _SCHEMA_CONFIG = SchemaConfig(mode="observed", fields=None)
+
+
+def _policy_evidence() -> WebPluginPolicyEvidence:
+    return WebPluginPolicyEvidence(
+        schema_version=1,
+        policy_hash="a" * 64,
+        snapshot_hash="b" * 64,
+        authorized_plugin_ids=("sink:json", "source:csv"),
+        available_plugin_ids=("sink:json", "source:csv"),
+        control_modes=(("llm", "recommend"),),
+        selected_implementations=(("llm", None),),
+        selected_profile_aliases=(),
+        plugin_code_identities=(
+            ("sink:json", "1.0.0", "sha256:1111111111111111"),
+            ("source:csv", "1.0.0", "sha256:2222222222222222"),
+        ),
+        binding_generation_fingerprint="c" * 64,
+        decision_codes=("policy_allowed",),
+    )
+
+
+def test_web_policy_audit_failure_prevents_run_started_telemetry() -> None:
+    ceremony = create_autospec(RunCeremony, instance=True)
+    lifecycle = RunLifecycleCoordinator(
+        db=create_autospec(LandscapeDB, instance=True),
+        events=create_autospec(EventBusProtocol, instance=True),
+        ceremony=ceremony,
+        checkpoints=create_autospec(CheckpointCoordinator, instance=True),
+        span_factory=create_autospec(SpanFactory, instance=True),
+        canonical_version="v1",
+    )
+    run_lifecycle = create_autospec(RunLifecycleRepository, instance=True)
+    run_lifecycle.begin_run.side_effect = RuntimeError("policy audit insert failed")
+    factory = SimpleNamespace(run_lifecycle=run_lifecycle)
+    source = SimpleNamespace(name="csv", output_schema=SimpleNamespace(model_json_schema=lambda: {"type": "object"}))
+    config = SimpleNamespace(sources={"input": source}, config={})
+
+    with (
+        patch("elspeth.engine.orchestrator.run_lifecycle.RecorderFactory", return_value=factory),
+        pytest.raises(RuntimeError, match="policy audit insert failed"),
+    ):
+        lifecycle.initialize_database_phase(
+            config,
+            create_autospec(PayloadStore, instance=True),
+            None,
+            openrouter_catalog_sha256="d" * 64,
+            openrouter_catalog_source="bundled",
+            web_plugin_policy_evidence=_policy_evidence(),
+        )
+
+    ceremony.emit_telemetry.assert_not_called()
+    assert run_lifecycle.begin_run.call_args.kwargs["web_plugin_policy_evidence"] == _policy_evidence()
 
 
 class _Plugin:

@@ -13,7 +13,7 @@ from elspeth.composer_mcp.session import (
     SessionManager,
     SessionNotFoundError,
 )
-from elspeth.web.composer.state import SourceSpec
+from elspeth.web.composer.state import NodeSpec, SourceSpec
 
 
 class TestSessionManager:
@@ -55,6 +55,35 @@ class TestSessionManager:
         assert loaded.sources["source"].plugin == "csv"
         assert loaded.sources["source"].on_success == "source_out"
         assert loaded.version == state.version
+
+    def test_queue_node_round_trips_without_migration(self, manager: SessionManager) -> None:
+        """A canonical structural queue node persists and reloads verbatim
+        through composer MCP session storage (elspeth-a5b86149d4)."""
+        session_id, state = manager.new_session()
+        queue = NodeSpec(
+            id="inbound",
+            node_type="queue",
+            plugin=None,
+            input="inbound",
+            on_success=None,
+            on_error=None,
+            options={"description": "Orders and refunds interleave here"},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+        state = state.with_node(queue)
+        manager.save(session_id, state)
+        loaded = manager.load(session_id)
+        reloaded = next(n for n in loaded.nodes if n.id == "inbound")
+        assert reloaded.node_type == "queue"
+        assert reloaded.input == "inbound"
+        assert reloaded.plugin is None
+        assert reloaded.on_success is None
+        assert dict(reloaded.options) == {"description": "Orders and refunds interleave here"}
 
     def test_load_nonexistent_raises(self, manager: SessionManager) -> None:
         # 12 lowercase hex — valid shape, just not on disk. The shape check

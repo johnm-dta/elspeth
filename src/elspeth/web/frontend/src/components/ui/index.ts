@@ -29,3 +29,11 @@ export type { InputProps } from "./Input";
 
 export { WordMark } from "./WordMark";
 export type { WordMarkProps } from "./WordMark";
+
+export { Icon } from "./Icon";
+export type { IconName, IconProps } from "./Icon";
+
+export { StructuredJsonPreview } from "./StructuredJsonPreview";
+
+export { PreviewTable } from "./PreviewTable";
+export type { PreviewTableModel } from "./PreviewTable";

@@ -8,8 +8,10 @@ Pins the transaction-begin mechanism installed by
   ``BEGIN IMMEDIATE`` — the WAL write lock is taken AT BEGIN, so cross-process
   read-then-write transactions can never abort mid-flight with the
   non-retryable ``SQLITE_BUSY_SNAPSHOT``.
-- Plain transactions (``connection()`` and direct ``engine.begin()``) keep
+- Read transactions (``connection()``) and direct ``engine.begin()`` keep
   DEFERRED semantics: an explicit lock-free ``BEGIN``, never IMMEDIATE.
+  ``connection()`` additionally rejects DML; callers must use
+  ``write_connection()`` when they intend to write.
 - Read-only engines (``from_url(read_only=True)``) keep stock pysqlite
   autocommit-read behaviour and never emit any BEGIN at all (F10 closure:
   dashboard reads never contend for the write lock).
@@ -32,6 +34,7 @@ from typing import Any
 import pytest
 from sqlalchemy import event, insert, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -158,6 +161,14 @@ class TestBeginMode:
         finally:
             db.close()
 
+    def test_plain_connection_rejects_writes_on_writable_handle(self, tmp_path: Path) -> None:
+        db = _open_file_db(tmp_path)
+        try:
+            with pytest.raises(OperationalError, match="attempt to write a readonly database"), db.connection() as conn:
+                conn.execute(insert(runs_table).values(**_run_values()))
+        finally:
+            db.close()
+
     def test_begin_write_engine_helper_parity(self, tmp_path: Path) -> None:
         db = _open_file_db(tmp_path)
         try:
@@ -249,6 +260,7 @@ class TestBeginMode:
                 lease_owner="worker-1",
                 lease_seconds=30,
                 now=BASE,
+                membership_fenced=False,
             )
             assert "BEGIN IMMEDIATE" in _begin_statements(trace2)
         finally:
@@ -606,15 +618,12 @@ class TestReadOnlyEngine:
 
 
 class TestNoBehaviorChange:
-    def test_rollback_parity_write_connection_and_plain_connection(self, tmp_path: Path) -> None:
+    def test_write_connection_rolls_back_on_exception(self, tmp_path: Path) -> None:
         db = _open_file_db(tmp_path)
         try:
             with pytest.raises(RuntimeError, match="boom-write"), db.write_connection() as conn:
                 conn.execute(insert(runs_table).values(**_run_values("run-rollback-w")))
                 raise RuntimeError("boom-write")
-            with pytest.raises(RuntimeError, match="boom-plain"), db.connection() as conn:
-                conn.execute(insert(runs_table).values(**_run_values("run-rollback-p")))
-                raise RuntimeError("boom-plain")
             with db.connection() as conn:
                 rows = conn.execute(select(runs_table.c.run_id)).fetchall()
             assert rows == []

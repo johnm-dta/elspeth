@@ -15,6 +15,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { harnessCtx, resetToFirstRun, cleanSessions } from "./helpers/tutorial-harness";
 
 const SHOT_DIR =
+  process.env.TUTORIAL_PROBE_SHOT_DIR ??
   "/tmp/claude-1000/-home-john-elspeth/92b95b1e-c2e4-4139-98fe-f6d036587be2/scratchpad/tutorial-probe";
 let shotN = 0;
 async function shot(page: Page, label: string): Promise<void> {
@@ -110,10 +111,39 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   const runHeading = page.getByRole("heading", { name: /Running your pipeline/i });
   const acceptButtons = page.getByRole("button", { name: /^Accept /i });
   const promptRegions = page.getByRole("region", { name: "Prompt template review" });
+  // "Review wiring" carries a send-first guard (below): the step-2→step-3
+  // transition auto-plans a FIRST proposal from a fallback intent before the
+  // locked transforms prompt is sent; accepting it commits a source→sink
+  // passthrough the tutorial launch gate rejects (run 18). Honor the primary
+  // only after the Transforms-phase Send, mirroring tutorial-reliability.
+  const reviewWiring = page.getByRole("button", { name: "Review wiring", exact: true });
   const primaries = [
-    page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
+    // Pipeline proposal turn (propose_pipeline): the transforms phase yields a
+    // REAL planner proposal; accepting it (chosen ["review_wiring"]) is the
+    // only advance into the wire stage. Renders only on the proposal turn.
+    reviewWiring,
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Source inspection review (inspect_and_confirm): rendered after the
+    // chat-resolved inline source is materialized into a session blob and
+    // inspected — confirming the observed columns is the designed answer.
+    page.getByRole("button", { name: "Looks right", exact: true }),
+    // Component review turns: once the chat-resolved source/output lands as a
+    // reviewed component, the stage ends on its review turn — finishing it is
+    // the designed advance (mirrors composer-guided-live).
+    page.getByRole("button", { name: "Finish sources", exact: true }),
+    page.getByRole("button", { name: "Finish outputs", exact: true }),
+    // Transient provider failure on a step chat leaves a Retry affordance;
+    // pressing it is the designed recovery. Last in priority so it never
+    // preempts forward progress. Scoped to the provider-unavailable failure
+    // bubble on the transcript's LAST row (run 19: a recovered step-1
+    // failure's lingering Retry starved the pump at the sink stage —
+    // mirrors tutorial-reliability).
+    page
+      .locator(".message-row")
+      .last()
+      .filter({ hasText: "I'm unavailable right now; you can still use the wizard controls." })
+      .getByRole("button", { name: "Retry", exact: true }),
     // Output required-fields turn: the LLM-built sink is observed-mode, so the
     // designed answer is the escape, not ticking the source's column.
     page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),
@@ -121,7 +151,7 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
 
   // The tutorial prompt is prelocked at every phase; the learner drives each
   // LLM-built phase (Source/Output/Transforms) by pressing Send ONCE per phase
-  // (re-sending mid-build re-triggers the driver). Recipe + Wire are confirm-only.
+  // (re-sending mid-build re-triggers the driver). Wire is confirm-only.
   // Mirrors tutorial-reliability's driveGuidedWalk.
   const drivenPhases = new Set(["Source", "Output", "Transforms"]);
   const currentPhase = async (): Promise<string | null> => {
@@ -164,6 +194,9 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
     }
     if (!advanced) {
       for (const p of primaries) {
+        // Send-first guard: never accept a transforms proposal before the
+        // locked Transforms prompt has been sent this walk.
+        if (p === reviewWiring && lastDrivenPhase !== "Transforms") continue;
         if ((await p.count().catch(() => 0)) > 0 && (await p.isEnabled().catch(() => false))) {
           const label = (await p.textContent().catch(() => "")) ?? "";
           await p.click().catch(() => {});

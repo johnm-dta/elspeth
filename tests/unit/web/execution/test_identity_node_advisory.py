@@ -24,7 +24,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.execution.validation import (
     _CHECK_IDENTITY_NODE_ADVISORY,
     _find_identity_node_advisories,
-    validate_pipeline,
+    validate_pipeline_for_trained_operator,
 )
 
 # ── Fixture builders ────────────────────────────────────────────────────
@@ -276,6 +276,51 @@ def test_passthrough_downstream_of_gate_fork_is_not_flagged() -> None:
     )
 
 
+def test_passthrough_downstream_of_queue_is_not_flagged() -> None:
+    """A queue is a legitimate structural reason for a downstream passthrough.
+
+    The canonical upstream producer of the passthrough's input is the queue
+    (elspeth-a5b86149d4), not whichever source feeds the queue.  Because a
+    queue interleaves multiple producers with an observed/unknown schema, a
+    passthrough that consumes it is doing real structural work and must NOT be
+    flagged as dead weight.  The queue is fed by a real producer, so the
+    passthrough is not skipped for a dangling input.
+    """
+    source = SourceSpec(
+        plugin="csv",
+        on_success="inbound",
+        options={"path": "in.csv"},
+        on_validation_failure="discard",
+    )
+    queue = NodeSpec(
+        id="inbound",
+        node_type="queue",
+        plugin=None,
+        input="inbound",
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    passthrough = _make_passthrough_node(
+        node_id="forward_inbound",
+        input_field="inbound",
+        on_success="json_out",
+    )
+    state = _make_state_with(
+        nodes=(queue, passthrough),
+        outputs=(_make_observed_sink(),),
+        source=source,
+    )
+    findings = _find_identity_node_advisories(state)
+    assert findings == [], "Passthrough consuming a declared queue is legitimate structural fan-in and must not be flagged."
+
+
 def test_identity_passthrough_to_fixed_sink_is_flagged() -> None:
     """Sink schema mode is irrelevant — passthrough still adds no contract benefit."""
     fixed_sink = OutputSpec(
@@ -297,11 +342,11 @@ def test_identity_passthrough_to_fixed_sink_is_flagged() -> None:
     assert findings[0].sink_schema_mode == "fixed"
 
 
-# ── Integration — wired into validate_pipeline() ────────────────────────
+# ── Integration — wired into validate_pipeline_for_trained_operator() ────────────────────────
 
 
 def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
-    """WebSettings shaped to satisfy validate_pipeline()'s data_dir lookup."""
+    """WebSettings shaped to satisfy validate_pipeline_for_trained_operator()'s data_dir lookup."""
     return WebSettings(
         data_dir=Path(data_dir),
         composer_max_composition_turns=10,
@@ -371,7 +416,7 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
     mock_load: MagicMock,
     mock_assemble: MagicMock,
 ) -> None:
-    """End-to-end: helper output appears in validate_pipeline()'s ValidationResult.checks
+    """End-to-end: helper output appears in validate_pipeline_for_trained_operator()'s ValidationResult.checks
     when validation otherwise succeeds, with the expected detail-string content."""
     yaml_gen = _YamlGeneratorDouble()
     mock_load.return_value = object()
@@ -387,7 +432,7 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
         ),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline(state, _make_settings(), yaml_gen)
+    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen)
 
     assert result.is_valid is True, "Advisory must not block is_valid"
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
@@ -424,7 +469,7 @@ def test_validate_pipeline_emits_no_advisory_when_clean(
         nodes=(_make_real_transform_node(on_success="json_out"),),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline(state, _make_settings(), yaml_gen)
+    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen)
 
     assert result.is_valid is True
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
@@ -450,7 +495,7 @@ def test_validate_pipeline_suppresses_advisory_on_failure_path() -> None:
         outputs=(_make_observed_sink(),),
     )
     settings = _make_settings(data_dir="/tmp/test_data")
-    result = validate_pipeline(state, settings, _YamlGeneratorDouble())
+    result = validate_pipeline_for_trained_operator(state, settings, _YamlGeneratorDouble())
 
     assert result.is_valid is False, "path_allowlist must block this pipeline"
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]

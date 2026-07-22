@@ -3,8 +3,29 @@ import {
   MAX_STRUCTURAL_SUMMARY_CHARS,
   describeRowCount,
   describeStructuralSummary,
+  normalizeMimeType,
   summarizeContentStructure,
 } from "./contentStructure";
+
+describe("normalizeMimeType", () => {
+  it("returns '' for null and undefined", () => {
+    expect(normalizeMimeType(null)).toBe("");
+    expect(normalizeMimeType(undefined)).toBe("");
+  });
+
+  it("strips parameters, trims whitespace, and lowercases", () => {
+    expect(normalizeMimeType("TEXT/CSV; charset=utf-8")).toBe("text/csv");
+    expect(normalizeMimeType("  application/JSON ;boundary=x")).toBe("application/json");
+  });
+
+  it("leaves an already-normalised mime type unchanged", () => {
+    expect(normalizeMimeType("application/json")).toBe("application/json");
+  });
+
+  it("returns '' for an empty string", () => {
+    expect(normalizeMimeType("")).toBe("");
+  });
+});
 
 describe("describeRowCount", () => {
   it("renders 'unknown row count' for null", () => {

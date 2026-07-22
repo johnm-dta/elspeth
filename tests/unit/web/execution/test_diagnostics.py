@@ -211,13 +211,13 @@ def _seed_diagnostics_run(db: LandscapeDB, tmp_path, *, web_run_id: str = "web-r
     source_operation = factory.execution.begin_operation(web_run_id, "source", "source_load")
     factory.execution.complete_operation(source_operation.operation_id, "completed", duration_ms=15.0)
     factory.execution.register_artifact(
-        web_run_id,
-        first_state.state_id,
-        "json_out",
-        "json",
-        str(tmp_path / "out.json"),
-        "a" * 64,
-        42,
+        run_id=web_run_id,
+        state_id=first_state.state_id,
+        sink_node_id="json_out",
+        artifact_type="json",
+        path=str(tmp_path / "out.json"),
+        content_hash="a" * 64,
+        size_bytes=42,
         artifact_id="artifact-1",
     )
 
@@ -264,7 +264,7 @@ def test_diagnostics_rejects_corrupt_landscape_types(tmp_path) -> None:
         web_run_id = "web-run-1"
         _seed_diagnostics_run(db, tmp_path, web_run_id=web_run_id)
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(text("UPDATE node_states SET step_index = 1.5 WHERE state_id = 'state-token-0'"))
 
         with pytest.raises(ValidationError, match="step_index"):

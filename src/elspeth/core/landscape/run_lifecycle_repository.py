@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from functools import cache
 from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import select
@@ -34,8 +35,9 @@ from elspeth.contracts.coordination import (
 )
 from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError, RunLeadershipLostError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
 from elspeth.contracts.preflight import PreflightResult
-from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+from elspeth.contracts.runtime_val_manifest import _assert_runtime_val_registries_frozen, build_runtime_val_manifest
 from elspeth.contracts.scheduler import TokenWorkStatus
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.ids import generate_id
@@ -57,6 +59,7 @@ from elspeth.core.landscape.schema import (
     run_attributions_table,
     run_coordination_table,
     run_sources_table,
+    run_web_plugin_policy_table,
     run_workers_table,
     runs_table,
     secret_resolutions_table,
@@ -175,6 +178,24 @@ def _validate_openrouter_catalog_snapshot(*, sha256: str, source: str) -> None:
         raise AuditIntegrityError(f"openrouter_catalog_source must be one of {sorted(_OPENROUTER_CATALOG_SOURCES)!r}, got {source!r}")
 
 
+@cache
+def _cached_frozen_runtime_val_manifest_json() -> str:
+    """Serialize the process's frozen runtime-VAL registries once.
+
+    Building the manifest hashes source, bytecode, and transitive helper
+    dependencies. Those inputs cannot change after the registries are frozen
+    in a production worker, so recomputing them for every run adds latency
+    without adding evidence. The uncached builder remains authoritative for
+    direct drift probes that deliberately mutate code objects.
+    """
+    return canonical_json(build_runtime_val_manifest())
+
+
+def _frozen_runtime_val_manifest_json() -> str:
+    _assert_runtime_val_registries_frozen()
+    return _cached_frozen_runtime_val_manifest_json()
+
+
 class RunLifecycleRepository:
     """Run lifecycle operations for the Landscape audit trail.
 
@@ -212,6 +233,7 @@ class RunLifecycleRepository:
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
         leader_worker_id: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -242,6 +264,8 @@ class RunLifecycleRepository:
                 passes the identity it minted so it can construct the
                 epoch-1 :class:`~elspeth.contracts.coordination.CoordinationToken`
                 without a read-back.
+            web_plugin_policy_evidence: Optional sanitized web-policy decision.
+                Web execution supplies one row; CLI execution passes None.
 
         Returns:
             Run model with generated run_id
@@ -266,6 +290,8 @@ class RunLifecycleRepository:
             sha256=openrouter_catalog_sha256,
             source=openrouter_catalog_source,
         )
+        if web_plugin_policy_evidence is not None and not isinstance(web_plugin_policy_evidence, WebPluginPolicyEvidence):
+            raise AuditIntegrityError("web_plugin_policy_evidence must be a WebPluginPolicyEvidence value")
 
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
@@ -279,7 +305,7 @@ class RunLifecycleRepository:
         # orchestrator has frozen both registries; begin_run is called from
         # Orchestrator.run() which sequences prepare_for_run() (which
         # freezes) before this call.
-        runtime_val_manifest_json = canonical_json(build_runtime_val_manifest())
+        runtime_val_manifest_json = _frozen_runtime_val_manifest_json()
 
         run = Run(
             run_id=run_id,
@@ -332,6 +358,12 @@ class RunLifecycleRepository:
                             auth_provider_type=auth_provider_type,
                         )
                     )
+                if web_plugin_policy_evidence is not None:
+                    self._insert_web_plugin_policy_evidence(
+                        conn,
+                        run_id=run.run_id,
+                        evidence=web_plugin_policy_evidence,
+                    )
                 # Composes into THIS transaction (connection-accepting form):
                 # the runs row above satisfies the run_coordination FK.
                 coordination.register_run_leader_on(
@@ -349,6 +381,54 @@ class RunLifecycleRepository:
             raise LandscapeRecordError(f"begin_run — database rejected audit write: {type(exc).__name__}: {exc}") from exc
 
         return run
+
+    def _insert_web_plugin_policy_evidence(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        evidence: WebPluginPolicyEvidence,
+    ) -> None:
+        """Compose the optional epoch-23 evidence row into begin_run's transaction."""
+        conn.execute(
+            run_web_plugin_policy_table.insert().values(
+                run_id=run_id,
+                schema_version=evidence.schema_version,
+                policy_hash=evidence.policy_hash,
+                snapshot_hash=evidence.snapshot_hash,
+                authorized_plugin_ids_json=canonical_json(evidence.authorized_plugin_ids),
+                available_plugin_ids_json=canonical_json(evidence.available_plugin_ids),
+                control_modes_json=canonical_json(evidence.control_modes),
+                selected_implementations_json=canonical_json(evidence.selected_implementations),
+                selected_profile_aliases_json=canonical_json(evidence.selected_profile_aliases),
+                plugin_code_identities_json=canonical_json(evidence.plugin_code_identities),
+                binding_generation_fingerprint=evidence.binding_generation_fingerprint,
+                decision_codes_json=canonical_json(evidence.decision_codes),
+            )
+        )
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> WebPluginPolicyEvidence | None:
+        """Return the optional web-policy evidence row, failing on corrupt JSON."""
+        with self._db.read_only_connection() as conn:
+            row = conn.execute(select(run_web_plugin_policy_table).where(run_web_plugin_policy_table.c.run_id == run_id)).one_or_none()
+        if row is None:
+            return None
+        try:
+            return WebPluginPolicyEvidence(
+                schema_version=row.schema_version,
+                policy_hash=row.policy_hash,
+                snapshot_hash=row.snapshot_hash,
+                authorized_plugin_ids=tuple(json.loads(row.authorized_plugin_ids_json)),
+                available_plugin_ids=tuple(json.loads(row.available_plugin_ids_json)),
+                control_modes=tuple(tuple(item) for item in json.loads(row.control_modes_json)),
+                selected_implementations=tuple(tuple(item) for item in json.loads(row.selected_implementations_json)),
+                selected_profile_aliases=tuple(tuple(item) for item in json.loads(row.selected_profile_aliases_json)),
+                plugin_code_identities=tuple(tuple(item) for item in json.loads(row.plugin_code_identities_json)),
+                binding_generation_fingerprint=row.binding_generation_fingerprint,
+                decision_codes=tuple(json.loads(row.decision_codes_json)),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise AuditIntegrityError(f"Web plugin-policy evidence is corrupt for run {run_id}") from exc
 
     def complete_run(
         self,
@@ -1288,8 +1368,7 @@ class RunLifecycleRepository:
         Called by orchestrator after run is created. Pre-flight results were
         captured during bootstrap_and_run() before the run existed.
 
-        All inserts are batched in a single connection (db.connection() is a
-        transaction context manager).
+        All inserts are batched in one explicit write transaction.
 
         Args:
             run_id: The run ID to associate results with

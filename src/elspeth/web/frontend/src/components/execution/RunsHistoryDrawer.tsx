@@ -2,7 +2,7 @@
 // RunsHistoryDrawer
 //
 // Slide-over drawer listing every run for the current session. Opened from
-// InlineRunResults' "Past runs" button. Preserves audit-trail access to old
+// InlineRunResults' "Runs" button. Preserves audit-trail access to old
 // runs after the inspector Runs tab is removed.
 // ============================================================================
 
@@ -19,6 +19,53 @@ import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/ind
 interface RunsHistoryDrawerProps {
   onClose: () => void;
   runsOverride?: ReadonlyArray<Run>;
+}
+
+const RUN_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+interface NumberedRun {
+  run: Run;
+  ordinal: number;
+}
+
+function formatRunStart(startedAt: string): string {
+  const date = new Date(startedAt);
+  return Number.isNaN(date.getTime())
+    ? "Time unavailable"
+    : RUN_DATE_TIME_FORMATTER.format(date);
+}
+
+function labelRun(run: Run, ordinal: number): string {
+  return `Run ${ordinal} · ${formatRunStart(run.started_at)}`;
+}
+
+function numberRunsNewestFirst(runs: ReadonlyArray<Run>): NumberedRun[] {
+  // Run.started_at is required by the API contract. Retain input order for
+  // defensive/test fixtures that pre-date that field rather than inventing a
+  // chronology from UUIDs.
+  if (runs.some((run) => Number.isNaN(new Date(run.started_at).getTime()))) {
+    return runs.map((run, index) => ({ run, ordinal: index + 1 }));
+  }
+  const ascending = runs
+    .map((run, inputIndex) => ({ run, inputIndex }))
+    .sort((left, right) => {
+      const byStart = (left.run.started_at ?? "").localeCompare(
+        right.run.started_at ?? "",
+      );
+      if (byStart !== 0) return byStart;
+      const byId = left.run.id.localeCompare(right.run.id);
+      return byId !== 0 ? byId : left.inputIndex - right.inputIndex;
+    });
+
+  return ascending
+    .map(({ run }, index) => ({ run, ordinal: index + 1 }))
+    .reverse();
 }
 
 function counted(label: string, count: number): string {
@@ -84,6 +131,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [cancelTargetRunId, setCancelTargetRunId] = useState<string | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
+  const numberedRuns = numberRunsNewestFirst(runs);
 
   // M08 (WCAG 2.4.3): the shared focus trap moves focus to the Close button on
   // open, wraps Tab/Shift+Tab, and — unlike the previous bespoke trap —
@@ -107,13 +155,19 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
       ref={drawerRef}
       role="dialog"
       aria-modal="true"
-      aria-label="Past pipeline runs"
+      aria-label="Pipeline runs"
       className="runs-history-drawer"
     >
       <header className="runs-history-drawer-header">
-        <h2>Past runs</h2>
-        <Button aria-label="Close past runs" onClick={onClose}>
-          Close
+        <h2>Run history · {runs.length}</h2>
+        <Button
+          variant="ghost"
+          compact
+          className="runs-history-close"
+          aria-label="Close runs"
+          onClick={onClose}
+        >
+          <span aria-hidden="true">×</span>
         </Button>
       </header>
       <div className="runs-history-drawer-body">
@@ -124,10 +178,16 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
           </p>
         ) : (
           <ul className="runs-history-list">
-            {runs.map((run) => (
+            {numberedRuns.map(({ run, ordinal }) => {
+              const runLabel = labelRun(run, ordinal);
+              return (
               <li key={run.id} className="runs-history-item">
                 <div className="runs-history-item-summary">
-                  <span className="runs-history-item-id">{run.id}</span>
+                  <span className="runs-history-item-identity">
+                    <span className="runs-history-item-label">{runLabel}</span>
+                    <span className="runs-history-item-id">{run.id}</span>
+                  </span>
+                  <span className="runs-history-item-actions">
                   {/* ui/StatusBadge carries the a11y glyph map (⚠ / ∅) so
                       completed_with_failures and empty are not colour-only
                       distinctions (elspeth-e1c5ad0b53). */}
@@ -142,7 +202,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                     <Button
                       variant="danger"
                       className="btn-small"
-                      aria-label={`Cancel run ${run.id}`}
+                      aria-label={`Cancel run ${run.id}: ${runLabel}`}
                       disabled={run.cancel_requested === true}
                       onClick={() => setCancelTargetRunId(run.id)}
                     >
@@ -154,8 +214,8 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                     aria-controls={`run-history-diagnostics-${run.id}`}
                     aria-label={
                       expandedRunId === run.id
-                        ? `Hide detail for ${run.id}`
-                        : `Show detail for ${run.id}`
+                        ? `Hide detail for ${run.id}: ${runLabel}`
+                        : `Show detail for ${run.id}: ${runLabel}`
                     }
                     className="btn-small"
                     onClick={() => {
@@ -168,6 +228,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                   >
                     {expandedRunId === run.id ? "Hide detail" : "Show detail"}
                   </Button>
+                  </span>
                 </div>
                 <div
                   id={`run-history-diagnostics-${run.id}`}
@@ -182,6 +243,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                         explanation={diagnosticsExplanationByRunId[run.id] ?? null}
                         isEvaluating={diagnosticsEvaluatingByRunId[run.id] ?? false}
                         isLoading={diagnosticsLoadingByRunId[run.id] ?? false}
+                        runError={run.error ?? null}
                         workingView={diagnosticsWorkingViewByRunId[run.id] ?? null}
                         onExplain={() => void evaluateRunDiagnostics(run.id)}
                         onRefresh={() => void loadRunDiagnostics(run.id)}
@@ -191,7 +253,8 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                   )}
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
@@ -218,6 +281,7 @@ interface RunDiagnosticsPanelProps {
   explanation: string | null;
   isEvaluating: boolean;
   isLoading: boolean;
+  runError: string | null;
   workingView: RunDiagnosticsWorkingView | null;
   onExplain: () => void;
   onRefresh: () => void;
@@ -229,6 +293,7 @@ function RunDiagnosticsPanel({
   explanation,
   isEvaluating,
   isLoading,
+  runError,
   workingView,
   onExplain,
   onRefresh,
@@ -269,6 +334,13 @@ function RunDiagnosticsPanel({
             {diagnostics.failure_detail.operation_type} failed - {diagnostics.failure_detail.node_id}
           </div>
           <pre>{diagnostics.failure_detail.error_message}</pre>
+        </div>
+      )}
+
+      {runError !== null && runError.trim().length > 0 && !diagnostics?.failure_detail && (
+        <div role="alert" data-testid="run-stored-failure-detail" className="run-failure-detail">
+          <div>Stored failure cause</div>
+          <pre>{runError}</pre>
         </div>
       )}
 

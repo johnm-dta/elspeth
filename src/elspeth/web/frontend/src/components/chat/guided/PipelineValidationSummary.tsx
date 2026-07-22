@@ -25,6 +25,8 @@
 // detail, column = signal).
 // ============================================================================
 
+import { useMemo } from "react";
+
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import {
@@ -48,6 +50,12 @@ export function PipelineValidationSummary({
 }: PipelineValidationSummaryProps = {}): JSX.Element {
   const validationResult = useExecutionStore((s) => s.validationResult);
   const compositionState = useSessionStore((s) => s.compositionState);
+  // Memoised (elspeth-40d6efac2b): makePhraseFor() tokenises every known
+  // component id in the composition, so rebuilding it on every render (this
+  // component has no early-return-free hook budget to spare) is wasted work
+  // once the composition itself hasn't changed. Built before the neutral
+  // early-return below so hook order stays stable across renders.
+  const phraseFor = useMemo(() => makePhraseFor(compositionState), [compositionState]);
 
   // Neutral pre-validation state: always render a stable root so the mount /
   // D1 / parity tests can find the surface across every state.
@@ -63,7 +71,6 @@ export function PipelineValidationSummary({
     );
   }
 
-  const phraseFor = makePhraseFor(compositionState);
   // Step labels for the pending-review headline reuse the acknowledgement
   // cards' mapping (stepLabelForPlugin → "Summarise" / "Output" …) so the
   // problems strip names the step exactly as the card it points at. Null when
@@ -90,7 +97,7 @@ export function PipelineValidationSummary({
     const label = errors.length === 1 ? "problem to fix" : "problems to fix";
     const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
-    body = formatFindingBody(errors.length, label, finding, first.component_id, phraseFor);
+    body = formatFindingBody(errors.length, label, finding, first.component_id, first.component_type, phraseFor);
     suggestion = first.suggestion;
   } else if (warnings.length > 0) {
     const first = warnings[0];
@@ -99,7 +106,7 @@ export function PipelineValidationSummary({
     const label = warnings.length === 1 ? "warning" : "warnings";
     const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
-    body = formatFindingBody(warnings.length, label, finding, first.component_id, phraseFor);
+    body = formatFindingBody(warnings.length, label, finding, first.component_id, first.component_type, phraseFor);
     suggestion = first.suggestion;
   } else {
     tone = "ok";

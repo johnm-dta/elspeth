@@ -418,7 +418,7 @@ def test_complete_barrier_passthrough_handoff_counts_toward_blocked_coverage() -
                 row_payload_json=payload,
                 sink_name="out",
                 outcome="success",
-                path="completed",
+                path="default_flow",
             )
         ],
         emitted_ready=[],
@@ -568,7 +568,7 @@ def test_complete_barrier_handed_off_outside_snapshot_is_tier1() -> None:
                     row_payload_json=payload,
                     sink_name="out",
                     outcome="success",
-                    path="completed",
+                    path="default_flow",
                 )
             ],
             emitted_ready=[],
@@ -740,7 +740,7 @@ def test_complete_barrier_rejects_consumed_token_also_emitted() -> None:
                     row_payload_json=payload,
                     sink_name="out",
                     outcome="success",
-                    path="completed",
+                    path="default_flow",
                 )
             ],
             emitted_ready=[],
@@ -771,12 +771,13 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
                 row_payload_json=payload,
                 sink_name="out",
                 outcome="success",
-                path="completed",
+                path="default_flow",
                 error_hash=None,
                 error_message=None,
             )
         },
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
     assert transitioned == 1
     # Legacy wrapper event context carries NO consumed_count.
@@ -788,6 +789,7 @@ def test_wrappers_delegate_preserving_legacy_partial_release() -> None:
         barrier_key=BARRIER_KEY,
         token_ids=("t2",),  # t3 left blocked: legacy partial release
         now=NOW,
+        coordination_token=COORD_TOKEN,
     )
     assert terminalized == 1
     assert _row_for_token(engine, "t2")["status"] == TokenWorkStatus.TERMINAL.value
@@ -930,7 +932,7 @@ def test_complete_barrier_combined_lanes_one_call() -> None:
         consumed_token_ids=["t1", "t2"],
         emitted_pending_sink=[
             # Passthrough: t3 holds a BLOCKED row under the barrier.
-            BarrierEmission(token_id="t3", row_payload_json=payload, sink_name="out", outcome="success", path="completed"),
+            BarrierEmission(token_id="t3", row_payload_json=payload, sink_name="out", outcome="success", path="default_flow"),
             # Fresh terminal-lane insert: t-agg-out has no BLOCKED row.
             BarrierEmission(
                 token_id="t-agg-out",
@@ -1151,6 +1153,7 @@ def test_mark_blocked_barrier_terminal_release_context_merged_into_event() -> No
         barrier_key=BARRIER_KEY,
         token_ids=("t3",),
         now=NOW,
+        coordination_token=COORD_TOKEN,
         release_context={
             "late_arrival": True,
             "reason": "late_arrival_after_merge",

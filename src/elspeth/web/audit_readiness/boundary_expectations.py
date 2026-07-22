@@ -122,6 +122,7 @@ from elspeth.contracts.enums import Determinism
 # their declared determinism is in ``_AUDIT_FLAGGED_DETERMINISMS``.
 
 EXPECTED_SOURCE_DETERMINISMS: dict[str, Determinism] = {
+    "aws_s3": Determinism.IO_READ,
     "azure_blob": Determinism.IO_READ,
     "csv": Determinism.IO_READ,
     "dataverse": Determinism.EXTERNAL_CALL,
@@ -131,15 +132,19 @@ EXPECTED_SOURCE_DETERMINISMS: dict[str, Determinism] = {
 }
 
 EXPECTED_SINK_DETERMINISMS: dict[str, Determinism] = {
+    "aws_s3": Determinism.IO_WRITE,
     "azure_blob": Determinism.IO_WRITE,
     "chroma_sink": Determinism.IO_WRITE,
     "csv": Determinism.IO_WRITE,
     "database": Determinism.IO_WRITE,
     "dataverse": Determinism.EXTERNAL_CALL,
     "json": Determinism.IO_WRITE,
+    "text": Determinism.IO_WRITE,
 }
 
 EXPECTED_TRANSFORM_DETERMINISMS: dict[str, Determinism] = {
+    "aws_bedrock_content_safety": Determinism.EXTERNAL_CALL,
+    "aws_bedrock_prompt_shield": Determinism.EXTERNAL_CALL,
     "azure_content_safety": Determinism.EXTERNAL_CALL,
     "azure_document_intelligence": Determinism.EXTERNAL_CALL,
     "azure_prompt_shield": Determinism.EXTERNAL_CALL,

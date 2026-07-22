@@ -33,6 +33,7 @@ from elspeth.core.secrets import SecretResolutionError, resolve_secret_refs
 from elspeth.core.security.secret_loader import EnvSecretLoader
 from elspeth.plugins.transforms.batch_stats import BatchStats
 from elspeth.testing import make_field, make_row
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
@@ -54,7 +55,8 @@ from elspeth.web.composer.state import (
 from elspeth.web.composer.tools import ToolResult, execute_tool
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationResult
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.sessions.engine import create_session_engine
@@ -166,6 +168,12 @@ def _mock_catalog() -> MagicMock:
     return catalog
 
 
+def _trained_operator_catalog() -> PolicyCatalogView:
+    full_catalog = _mock_catalog()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    return PolicyCatalogView.for_trained_operator(full_catalog, snapshot)
+
+
 def _make_llm_response(
     content: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
@@ -245,7 +253,7 @@ def _composer_for_characterization(
         session_id=session_id,
     )
     return (
-        ComposerServiceImpl(
+        ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=settings,
             sessions_service=sessions_service,
@@ -514,8 +522,6 @@ async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_err
 
     from structlog.testing import capture_logs
 
-    import elspeth.web.composer.service as composer_service_module
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     session_id = "00000000-0000-4000-8000-00000000010b"
     service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
@@ -523,7 +529,14 @@ async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_err
     sessions_service._telemetry = telemetry
     # See CL-PP-10a above for the F-5c gate-priming rationale.
     service._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
-    original_execute_tool = composer_service_module.execute_tool
+
+    # The compose-loop tool dispatch was extracted out of service.py into
+    # tool_batch.run_tool_batch, which binds execute_tool in its own module
+    # namespace and invokes it as a bare global. That module binding is the
+    # live seam these tests must patch to intercept tool execution.
+    import elspeth.web.composer.tool_batch as _composer_tool_batch_module
+
+    original_execute_tool = _composer_tool_batch_module.execute_tool
     calls = 0
 
     def _crash_on_second(tool_name: str, *args: Any, **kwargs: Any) -> ToolResult:
@@ -533,13 +546,6 @@ async def test_cl_pp_10b_commit_failure_during_plugin_crash_preserves_plugin_err
             raise RuntimeError("CL-PP-10b synthetic plugin crash")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    # The compose-loop tool dispatch was extracted into tool_batch.run_tool_batch,
-    # which binds execute_tool in its own module namespace. Patch both the service
-    # (inline-blob recipe path) and tool_batch (dispatch path) seams so the intercept
-    # fires regardless of which path executes the tool.
-    import elspeth.web.composer.tool_batch as _composer_tool_batch_module
-
-    monkeypatch.setattr(composer_service_module, "execute_tool", _crash_on_second)
     monkeypatch.setattr(_composer_tool_batch_module, "execute_tool", _crash_on_second)
     llm = _ReplayLLM(
         (
@@ -635,10 +641,10 @@ async def test_cl_pp_10c_cancellation_during_shielded_sync_dispatch_commits_rows
         pytest.fail("CL-PP-10c worker did not enter shielded dispatch within 2s")
 
     compose_task.cancel()
+    release_worker.set()
     with pytest.raises(asyncio.CancelledError):
         await compose_task
 
-    release_worker.set()
     for _ in range(1000):
         if worker_finished.is_set():
             break
@@ -701,9 +707,9 @@ async def test_cl_pp_10d_cancellation_after_commit_before_response_yield_keeps_s
     assert [row.role for row in rows_after_commit] == ["assistant", "tool"]
 
     compose_task.cancel()
+    release_response.set()
     with pytest.raises(asyncio.CancelledError):
         await compose_task
-    release_response.set()
 
     rows = _chat_rows(sessions_service, session_id=session_id)
     assert [row.role for row in rows] == ["assistant", "tool"]
@@ -724,8 +730,6 @@ async def test_cl_pp_12_tool_call_cap_exceeded_writes_no_rows_and_counts(
 ) -> None:
     """CL-PP-12: over-cap assistant turns fail before any tool executes or persists."""
 
-    import elspeth.web.composer.service as composer_service_module
-
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     session_id = "00000000-0000-4000-8000-000000000012"
     service, sessions_service = _composer_for_characterization(data_dir=tmp_path / "data", session_id=session_id)
@@ -739,12 +743,11 @@ async def test_cl_pp_12_tool_call_cap_exceeded_writes_no_rows_and_counts(
         execute_calls += 1
         raise AssertionError("execute_tool must not run when CL-PP-12 cap fires")
 
-    # Patch both seams (see CL-PP-10b): dispatch resolves execute_tool via
-    # tool_batch.run_tool_batch's own module binding, so a service-only patch
-    # would not catch a tool that slipped past the cap.
+    # Patch the live dispatch seam (see CL-PP-10b): tool_batch.run_tool_batch
+    # resolves execute_tool via its own module binding, so patching that binding
+    # asserts no tool slips past the pre-dispatch cap check.
     import elspeth.web.composer.tool_batch as _composer_tool_batch_module
 
-    monkeypatch.setattr(composer_service_module, "execute_tool", _counting_execute_tool)
     monkeypatch.setattr(_composer_tool_batch_module, "execute_tool", _counting_execute_tool)
     llm = _ReplayLLM(
         (_make_llm_response(tool_calls=[{"id": f"call_{idx}", "name": "get_pipeline_state", "arguments": {}} for idx in range(17)]),)
@@ -767,7 +770,6 @@ async def test_cl_pp_13_unknown_response_key_redacted_in_persisted_tool_row(
 ) -> None:
     """CL-PP-13: declarative response-shape drift is sentinelized before persistence."""
 
-    import elspeth.web.composer.service as composer_service_module
     from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 
     class _StrayToolResult(ToolResult):
@@ -794,11 +796,11 @@ async def test_cl_pp_13_unknown_response_key_redacted_in_persisted_tool_row(
             affected_nodes=(),
         )
 
-    # Patch both seams (see CL-PP-10b): the dispatch path that persists the tool
-    # row resolves execute_tool via tool_batch.run_tool_batch's own module binding.
+    # Patch the live dispatch seam (see CL-PP-10b): the dispatch path that
+    # persists the tool row resolves execute_tool via tool_batch.run_tool_batch's
+    # own module binding.
     import elspeth.web.composer.tool_batch as _composer_tool_batch_module
 
-    monkeypatch.setattr(composer_service_module, "execute_tool", _return_stray_result)
     monkeypatch.setattr(_composer_tool_batch_module, "execute_tool", _return_stray_result)
     llm = _ReplayLLM(
         (
@@ -848,8 +850,8 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
 
     Originally characterized that a relative ``data/blobs/<sid>/<bid>_<filename>``
     path would resolve via the legacy CWD branch in ``web/paths.py`` and pass
-    the runtime path allowlist.  After elspeth-07089fbaa3 closed the
-    composer-stored blob source path defect, the canonical contract is that
+    the runtime path allowlist.  After the composer-stored blob source path
+    defect was closed, the canonical contract is that
     blob-backed source paths are absolute (``BlobRecord.storage_path``); the
     legacy relative form is no longer accepted.  This test now pins the
     *post-fix* contract: an absolute canonical path under the configured
@@ -869,7 +871,7 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
     composer_summary = state.validate()
     assert composer_summary.is_valid, _format_composer_errors(composer_summary)
 
-    runtime_result = validate_pipeline(
+    runtime_result = validate_pipeline_for_trained_operator(
         state,
         _web_settings(data_dir),
         composer_yaml_generator,
@@ -888,7 +890,7 @@ def test_scenario_2_end_of_source_condition_rejected_before_runtime_settings_loa
         aggregation_options={"schema": {"mode": "observed"}, "value_field": "amount"},
     )
 
-    runtime_result = validate_pipeline(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
     assert not runtime_result.is_valid
     assert "end_of_source" in _format_validation_errors(runtime_result)
 
@@ -913,7 +915,7 @@ def test_scenario_2_omitted_trigger_is_end_of_source_only_contract(tmp_path: Pat
     yaml_doc = yaml.safe_load(composer_yaml_generator.generate_yaml(state))
     assert "trigger" not in yaml_doc["aggregations"][0]
 
-    runtime_result = validate_pipeline(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
     assert runtime_result.is_valid, _format_validation_errors(runtime_result)
 
 
@@ -931,7 +933,7 @@ def test_scenario_2_batch_stats_required_input_fields_returns_pre_execution_vali
         },
     )
 
-    runtime_result = validate_pipeline(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
     assert not runtime_result.is_valid
     assert "batch-aware" in _format_validation_errors(runtime_result)
 
@@ -987,7 +989,7 @@ def test_known_secret_env_marker_cannot_bypass_unavailable_web_secret_contract(
         composer_model=EVAL_MODEL,
         server_secret_allowlist=(secret_name,),
     )
-    composer = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    composer = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
     assert composer._availability.available is True
     assert composer._availability.provider == "openrouter"
 
@@ -996,12 +998,14 @@ def test_known_secret_env_marker_cannot_bypass_unavailable_web_secret_contract(
         server_store=ServerSecretStore(allowlist=(secret_name,)),
     )
     resolver = ScopedSecretResolver(web_secret_service, auth_provider_type=settings.auth_provider)
+    catalog = _trained_operator_catalog()
 
     result = execute_tool(
         "validate_secret_ref",
         {"name": secret_name},
         _empty_state(),
-        _mock_catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
         secret_service=resolver,
         user_id=EVAL_USER_ID,
     )
@@ -1030,8 +1034,8 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
     """Characterizes elspeth-0380d5119f redaction across get_pipeline_state and YAML.
 
     Originally exercised ``patch_source_options`` to set the blob source
-    path; after elspeth-07089fbaa3 closed the composer-stored blob source
-    path defect, that flow is forbidden — patches against a blob-backed
+    path; after the composer-stored blob source path defect was closed, that
+    flow is forbidden — patches against a blob-backed
     source may not touch ``path`` or ``blob_ref`` because the binding is
     immutable.  The redaction contract (LLM/HTTP surfaces see the sentinel;
     YAML emission preserves the real path for the runtime) is now pinned
@@ -1061,15 +1065,17 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
         metadata=PipelineMetadata(name=f"{SOURCE_REPORT} scenario 3 patched path"),
         version=1,
     )
+    catalog = _trained_operator_catalog()
 
     # patch_source_options against a blob-backed source must reject any
-    # patch that touches the immutable (path, blob_ref) binding — see
-    # elspeth-07089fbaa3.  Re-binding requires set_source_from_blob.
+    # patch that touches the immutable (path, blob_ref) binding.
+    # Re-binding requires set_source_from_blob.
     rejected = execute_tool(
         "patch_source_options",
         {"patch": {"path": str(source_path)}},
         initial_state,
-        _mock_catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
         data_dir=str(data_dir),
     )
     assert rejected.success is False
@@ -1081,7 +1087,8 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
         "get_pipeline_state",
         {"component": "source"},
         initial_state,
-        _mock_catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
     )
     assert introspection.success is True
     introspected_source = introspection.to_dict()["data"]["sources"]["source"]
@@ -1096,7 +1103,7 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
 async def _failed_progress_for_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ComposerProgressEvent:
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     settings = _web_settings(tmp_path / "data", composer_timeout_seconds=0.05)
-    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
     events: list[ComposerProgressEvent] = []
 
     async def record_progress(event: ComposerProgressEvent) -> None:
@@ -1131,7 +1138,7 @@ async def _failed_progress_for_composition_budget(tmp_path: Path, monkeypatch: p
         data_dir=data_dir,
         session_id=SCENARIO_1A_SESSION_ID,
     )
-    service = ComposerServiceImpl(
+    service = ComposerServiceImpl.for_trained_operator(
         catalog=_mock_catalog(),
         settings=settings,
         sessions_service=sessions_service,
@@ -1213,15 +1220,17 @@ def test_runtime_preflight_preview_blocks_scenario_2_invalid_trigger(tmp_path: P
         aggregation_options={"schema": {"mode": "observed"}, "value_field": "amount"},
     )
     settings = _web_settings(data_dir)
+    catalog = _trained_operator_catalog()
 
     def runtime_preflight(candidate: CompositionState) -> ValidationResult:
-        return validate_pipeline(candidate, settings, composer_yaml_generator)
+        return validate_pipeline_for_trained_operator(candidate, settings, composer_yaml_generator)
 
     preview = execute_tool(
         "preview_pipeline",
         {},
         state,
-        _mock_catalog(),
+        catalog,
+        plugin_snapshot=catalog.snapshot,
         data_dir=str(data_dir),
         runtime_preflight=runtime_preflight,
     )
@@ -1243,7 +1252,7 @@ async def test_final_completion_claim_is_augmented_with_runtime_preflight_failur
     """
     data_dir, source_path, output_path = _scenario_2_files(tmp_path)
     settings = _web_settings(data_dir)
-    composer = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+    composer = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
     state = _aggregation_state(
         source_path,
         output_path,

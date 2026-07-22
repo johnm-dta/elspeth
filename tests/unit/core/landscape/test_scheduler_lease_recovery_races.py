@@ -69,7 +69,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, event, insert, select
+from sqlalchemy import create_engine, event, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
@@ -82,6 +82,9 @@ from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
     rows_table,
+    run_coordination_events_table,
+    run_coordination_table,
+    run_workers_table,
     runs_table,
     scheduler_events_table,
     token_work_items_table,
@@ -246,6 +249,114 @@ def _lower_busy_timeout(engine: Tier1Engine, ms: int = 100) -> None:
         raw.close()
 
 
+def test_named_legacy_adapter_preserves_pre_coordination_direct_harness_recovery(
+    engines: tuple[Tier1Engine, Tier1Engine],
+) -> None:
+    """The named legacy adapter remains available to direct harnesses that
+    have no coordination seat and must recover a crashed owner's lease.
+    """
+    engine, _ = engines
+    repo = TokenSchedulerRepository(engine)
+    _seed_run_rows_tokens(engine, ("token-0",))
+    original = _enqueue_tokens(repo, ("token-0",))["token-0"]
+    _expire_leases(repo, ("token-0",))
+    with engine.connect() as conn:
+        assert conn.execute(select(run_coordination_table.c.run_id)).first() is None
+
+    recovered = repo.recover_expired_leases_legacy_unfenced(
+        run_id=RUN_ID,
+        now=SWEEP_AT,
+        caller_owner="direct-harness-sweeper",
+    )
+
+    assert recovered == 1
+    state = _work_item_states(engine)["token-0"]
+    assert state["status"] == TokenWorkStatus.READY.value
+    assert state["attempt"] == 2
+    assert state["lease_owner"] is None
+    assert state["work_item_id"] != original.work_item_id
+    assert _event_counts(engine)[SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == 1
+
+
+def test_heartbeat_membership_fence_observes_eviction_committed_immediately_before_begin(
+    engines: tuple[Tier1Engine, Tier1Engine],
+) -> None:
+    """A peer eviction committed at heartbeat entry is part of the item CAS.
+
+    The test hook runs before the heartbeat connection executes its
+    ``BEGIN IMMEDIATE``. The peer can therefore commit the active-to-evicted
+    transition first; the heartbeat then takes the writer lock and must refuse
+    without extending the lease or appending scheduler/coordination events.
+    """
+    from elspeth.contracts.errors import RunWorkerEvictedError
+
+    heartbeat_engine, eviction_engine = engines
+    repo = TokenSchedulerRepository(heartbeat_engine)
+    _seed_run_rows_tokens(heartbeat_engine, ("token-0",))
+    with heartbeat_engine.begin() as conn:
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id="worker-a",
+                run_id=RUN_ID,
+                role="follower",
+                status="active",
+                registered_at=BASE,
+                heartbeat_expires_at=BASE + timedelta(hours=1),
+            )
+        )
+    item = _enqueue_tokens(repo, ("token-0",))["token-0"]
+    claimed = repo.claim_ready(run_id=RUN_ID, lease_owner="worker-a", lease_seconds=300, now=BASE)
+    assert claimed is not None
+    before_item = _work_item_states(heartbeat_engine)["token-0"]
+    before_events = _event_counts(heartbeat_engine)
+    with heartbeat_engine.connect() as conn:
+        before_coordination_events = tuple(
+            conn.execute(select(run_coordination_events_table.c.event_id).where(run_coordination_events_table.c.run_id == RUN_ID)).scalars()
+        )
+
+    evicted: list[bool] = []
+
+    @event.listens_for(heartbeat_engine, "before_cursor_execute")
+    def evict_before_heartbeat_begin(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        if evicted or statement.strip().upper() != "BEGIN IMMEDIATE":
+            return
+        with eviction_engine.begin() as peer_conn:
+            result = peer_conn.execute(
+                update(run_workers_table)
+                .where(run_workers_table.c.worker_id == "worker-a", run_workers_table.c.status == "active")
+                .values(status="evicted", evicted_at=BASE + timedelta(seconds=10), evicted_by_worker_id="worker-leader")
+            )
+        assert result.rowcount == 1
+        evicted.append(True)
+
+    try:
+        with pytest.raises(RunWorkerEvictedError):
+            repo.heartbeat_lease(
+                run_id=RUN_ID,
+                work_item_id=item.work_item_id,
+                lease_owner="worker-a",
+                lease_seconds=300,
+                now=BASE + timedelta(seconds=10),
+                membership_fenced=True,
+            )
+    finally:
+        event.remove(heartbeat_engine, "before_cursor_execute", evict_before_heartbeat_begin)
+
+    assert evicted == [True]
+    assert _work_item_states(heartbeat_engine)["token-0"] == before_item
+    assert _event_counts(heartbeat_engine) == before_events
+    with heartbeat_engine.connect() as conn:
+        assert conn.execute(select(run_workers_table.c.status).where(run_workers_table.c.worker_id == "worker-a")).scalar_one() == "evicted"
+        assert (
+            tuple(
+                conn.execute(
+                    select(run_coordination_events_table.c.event_id).where(run_coordination_events_table.c.run_id == RUN_ID)
+                ).scalars()
+            )
+            == before_coordination_events
+        )
+
+
 def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(
     engines: tuple[Tier1Engine, Tier1Engine],
 ) -> None:
@@ -285,7 +396,7 @@ def test_claim_ready_probing_mid_sweep_is_lock_excluded_until_recovery_commits(
             mid_sweep_outcomes.append(exc)
 
     try:
-        recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+        recovered = sweep_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(sweep_engine, "after_cursor_execute", claimant_probes_mid_sweep)
 
@@ -349,11 +460,11 @@ def test_peer_recovery_in_select_update_window_is_lock_excluded_and_loses_cleanl
         # Peer sweep attempts a competing recovery on a separate engine while
         # the caller's sweep is between its SELECT and its per-row UPDATE.
         with pytest.raises(OperationalError, match="database is locked") as excinfo:
-            peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
+            peer_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper")
         peer_outcomes.append(excinfo.value)
 
     try:
-        winner_recovered = sweep_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+        winner_recovered = sweep_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(sweep_engine, "before_cursor_execute", peer_recovers_mid_sweep)
 
@@ -362,7 +473,7 @@ def test_peer_recovery_in_select_update_window_is_lock_excluded_and_loses_cleanl
 
     # Serialized loser path after the commit: nothing left to recover (clean
     # 0, no event), and the rotated attempt is claimable by the peer.
-    assert peer_repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper") == 0
+    assert peer_repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="peer-sweeper") == 0
     peer_claim = peer_repo.claim_ready(run_id=RUN_ID, lease_owner="peer-claimant", lease_seconds=300, now=SWEEP_AT)
     assert peer_claim is not None and peer_claim.attempt == 2
 
@@ -461,7 +572,7 @@ def test_crash_mid_sweep_rolls_back_atomically_and_repeat_sweep_completes(
 
     try:
         with pytest.raises(RuntimeError, match="simulated crash mid-recovery-sweep"):
-            repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
+            repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper")
     finally:
         event.remove(engine, "before_cursor_execute", crash_mid_sweep)
     assert update_count[0] == crash_before_update_number, "Crash fired at the intended per-row UPDATE"
@@ -501,7 +612,7 @@ def test_crash_mid_sweep_rolls_back_atomically_and_repeat_sweep_completes(
     )
 
     # A repeated sweep completes recovery for every item.
-    assert repo.recover_expired_leases(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper") == 3
+    assert repo.recover_expired_leases_legacy_unfenced(run_id=RUN_ID, now=SWEEP_AT, caller_owner="resume-sweeper") == 3
     final_states = _work_item_states(engine)
     for token_id in token_ids:
         assert final_states[token_id]["status"] == TokenWorkStatus.READY.value

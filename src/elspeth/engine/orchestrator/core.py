@@ -32,12 +32,14 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
+from elspeth.contracts.sink_effects import SinkEffectInputKind
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run as prepare_for_run
 from elspeth.engine.orchestrator.ceremony import RunCeremony
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.graph_registration import GraphRegistrationService
 from elspeth.engine.orchestrator.join_admission import JoinAdmissionService
 from elspeth.engine.orchestrator.leader_drain import LeaderDrainCoordinator
+from elspeth.engine.orchestrator.preflight import require_sink_effect_admission
 from elspeth.engine.orchestrator.processor_factory import ProcessorFactory
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
@@ -56,12 +58,14 @@ if TYPE_CHECKING:
     from elspeth.contracts import (
         ResumePoint,
         SecretResolutionInput,
-        SinkProtocol,
     )
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
@@ -182,6 +186,7 @@ class Orchestrator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]:
         """DATABASE-phase delegator (test seam — see RunLifecycleCoordinator)."""
         return self._run_lifecycle.initialize_database_phase(
@@ -193,6 +198,7 @@ class Orchestrator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         )
 
     def run(
@@ -202,15 +208,18 @@ class Orchestrator:
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore | None = None,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver | None = None,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
-        sink_factory: Callable[[str], SinkProtocol] | None = None,
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding] | None = None,
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str | None = None,
         openrouter_catalog_source: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -242,11 +251,19 @@ class Orchestrator:
         Raises:
             OrchestrationInvariantError: If graph or payload_store is not provided
         """
+        require_sink_effect_admission(
+            config.sinks,
+            configured_modes=config.sink_effect_modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=config.sink_effect_admission,
+        )
         return self._run_lifecycle.run(
             config,
             graph,
             settings,
             payload_store=payload_store,
+            audit_export_content_store=audit_export_content_store,
+            audit_export_content_store_resolver=audit_export_content_store_resolver,
             secret_resolutions=secret_resolutions,
             preflight_results=preflight_results,
             shutdown_event=shutdown_event,
@@ -256,6 +273,7 @@ class Orchestrator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
             # Bound AT CALL TIME (not construction) so monkeypatch.setattr on
             # the class and patch.object on this instance keep intercepting.
             initialize_database_phase=self._initialize_database_phase,
@@ -319,6 +337,12 @@ class Orchestrator:
         orchestration extracted from this class. The public signature is the
         stable contract; the implementation lives in resume.py.
         """
+        require_sink_effect_admission(
+            config.sinks,
+            configured_modes=config.sink_effect_modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            admission=config.sink_effect_admission,
+        )
         return self._resume_coordinator.resume(
             resume_point,
             config,

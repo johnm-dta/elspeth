@@ -14,7 +14,7 @@ from elspeth.web.composer.state import (
 # Import shared factories (co-located in test_service.py or extracted to
 # tests/unit/web/audit_readiness/conftest.py if this module grows).
 # These factories cover ALL required NodeSpec/OutputSpec kwargs (review B1, B2).
-from tests.unit.web.audit_readiness.test_service import make_node_spec, make_output_spec
+from tests.unit.web.audit_readiness.test_service import _policy_readiness_snapshot, make_node_spec, make_output_spec
 
 
 def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
@@ -83,6 +83,19 @@ def test_includes_each_sink():
 def test_mentions_retention():
     text = build_narrative(_state(), retention_days=42)
     assert "42" in text
+
+
+def test_includes_sanitized_plugin_policy_readiness_rows():
+    readiness = _policy_readiness_snapshot(tutorial_profile=None)
+
+    text = build_narrative(
+        _state(),
+        retention_days=42,
+        plugin_policy_readiness=readiness,
+    )
+
+    assert "Web plugin policy readiness:" in text
+    assert "Tutorial LLM profile: error" in text
 
 
 def test_is_deterministic():

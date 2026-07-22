@@ -200,6 +200,7 @@ def _build_audit_readiness_app(
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
+        plugin_allowlist=("transform:passthrough",),
     )
     app = create_app(settings=settings)
 

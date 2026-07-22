@@ -19,10 +19,12 @@ from .._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Request,
     SessionServiceProtocol,
     UserIdentity,
     _BadRequestLLMError,
+    _cancel_on_client_disconnect,
     _composer_chat_history,
     _composer_conversation_messages,
     _composer_progress_sink,
@@ -30,9 +32,11 @@ from .._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
+    _is_client_disconnect_cancel,
     _litellm_error_detail,
     _llm_calls_from_exception,
     _message_response,
@@ -42,20 +46,24 @@ from .._helpers import (
     _publish_progress,
     _record_composer_request_terminal,
     _record_composer_runtime_preflight_telemetry,
+    _request_plugin_policy_context,
     _safe_frame_strings,
     _state_data_from_composer_state,
     _state_from_record,
     _state_response,
+    _track_compose_inflight,
     _verify_session_ownership,
     asyncio,
     client_cancelled_progress_event,
     contextlib,
     convergence_progress_event,
-    deep_thaw,
     get_current_user,
     get_rate_limiter,
+    merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
+from .pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
 router = APIRouter()
 
@@ -69,6 +77,9 @@ async def recompose(
     request: Request,
     user: UserIdentity = Depends(get_current_user),  # noqa: B008
     rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
+    # In-flight compose tally for the SPA's post-abort settlement signal
+    # (elspeth-06a23adfcc); decrements only after the route fully unwinds.
+    _inflight_tally: None = Depends(_track_compose_inflight),
 ) -> MessageWithStateResponse:
     """Re-run the composer without inserting a new user message.
 
@@ -81,6 +92,8 @@ async def recompose(
     session = await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
     settings = request.app.state.settings
+    _policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+    profile_registry = request.app.state.operator_profile_registry
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
     async with compose_lock:
         # Load current state
@@ -152,17 +165,22 @@ async def recompose(
             from litellm.exceptions import AuthenticationError as LiteLLMAuthError
 
             try:
-                result = await composer.compose(
-                    last_user_content,
-                    chat_messages,
-                    state,
-                    session_id=str(session_id),
-                    current_state_id=str(pre_send_state_id) if pre_send_state_id is not None else None,
-                    user_id=str(user.user_id),
-                    progress=progress_sink,
-                    guided_terminal=_guided_terminal_for_compose,
-                    user_message_id=request_id,
-                )
+                # Same disconnect watcher as send_message: cancel the
+                # zombie turn when the client aborts the retry
+                # (elspeth-e08063c3a5). Compose stays awaited inline —
+                # see the send_message block comment.
+                async with _cancel_on_client_disconnect(request):
+                    result = await composer.compose(
+                        last_user_content,
+                        chat_messages,
+                        state,
+                        session_id=str(session_id),
+                        current_state_id=str(pre_send_state_id) if pre_send_state_id is not None else None,
+                        user_id=str(user.user_id),
+                        progress=progress_sink,
+                        guided_terminal=_guided_terminal_for_compose,
+                        user_message_id=request_id,
+                    )
             except ComposerConvergenceError as exc:
                 terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
                 # Same three-sub-cause discriminator as the /messages catch
@@ -184,6 +202,9 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
+                    catalog=request.app.state.catalog_service,
                 )
                 raise HTTPException(status_code=422, detail=response_body) from exc
             except LiteLLMAuthError as exc:
@@ -296,6 +317,9 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
+                    catalog=request.app.state.catalog_service,
                 )
                 await _publish_progress(
                     progress_registry,
@@ -346,8 +370,39 @@ async def recompose(
                     pre_send_state_id,
                     settings=settings,
                     secret_service=request.app.state.scoped_secret_resolver,
+                    plugin_snapshot=plugin_snapshot,
+                    profile_registry=profile_registry,
+                    catalog=request.app.state.catalog_service,
                 )
                 raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+            except PipelinePlannerError as exc:
+                # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                # Mirror of the send_message handler — recompose is a retried
+                # freeform compose, so it must translate PipelinePlannerError
+                # identically or the two routes drift on failure UX. See the
+                # send_message clause for the full rationale; _handle_planner_failure
+                # writes the durable disposition row and MUST NOT re-persist the
+                # already-durable planner LLM-call audit evidence.
+                await _publish_progress(
+                    progress_registry,
+                    session_id=str(session.id),
+                    request_id=request_id,
+                    user_id=str(user.user_id),
+                    event=ComposerProgressEvent(
+                        phase="failed",
+                        headline="The composer could not build a pipeline for this retry.",
+                        evidence=("The composer model did not return a usable pipeline plan.",),
+                        likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                        reason="provider_unavailable",
+                    ),
+                )
+                status_code, planner_response_body = await _handle_planner_failure(
+                    exc,
+                    service,
+                    session.id,
+                    pre_send_state_id,
+                )
+                raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
             except ComposerServiceError as exc:
                 await _publish_progress(
                     progress_registry,
@@ -391,9 +446,13 @@ async def recompose(
                     transition_consumed=True,
                 )
 
-            _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+            _post_compose_updates: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
             if _post_compose_guided is not None:
-                _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+                _post_compose_updates["guided_session"] = _post_compose_guided.to_dict()
+            _post_compose_meta = merge_composer_meta_updates(
+                state_record.composer_meta if state_record is not None else None,
+                _post_compose_updates,
+            )
 
             # Save state if version changed.
             # Path 2 (post-compose runtime preflight): mirror of the
@@ -401,7 +460,26 @@ async def recompose(
             # block for the full rationale on the structural fix.
             state_response: CompositionStateResponse | None = None
             post_compose_state_id: UUID | None = pre_send_state_id
-            if result.state.version != state.version:
+            if result.pipeline_commit_intent is not None:
+                authority = await service.get_authoritative_pipeline_proposal(
+                    session_id=session.id,
+                    proposal_id=result.pipeline_commit_intent.proposal_id,
+                    reviewed_facts={},
+                )
+                route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                    request=request,
+                    user=user,
+                    authority=authority,
+                    draft_hash=result.pipeline_commit_intent.draft_hash,
+                    composer_meta=_post_compose_meta,
+                    telemetry_source="recompose",
+                )
+                state_response = _state_response(
+                    route_settlement.settlement.state,
+                    live_validation=route_settlement.validation,
+                )
+                post_compose_state_id = route_settlement.settlement.state.id
+            elif result.state.version != state.version:
                 await _publish_progress(
                     progress_registry,
                     session_id=str(session.id),
@@ -421,6 +499,9 @@ async def recompose(
                         secret_service=request.app.state.scoped_secret_resolver,
                         user_id=str(user.user_id),
                         session_id=session.id,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                         runtime_preflight=result.runtime_preflight,
                         preflight_exception_policy="raise",
                         initial_version=state.version,
@@ -456,6 +537,9 @@ async def recompose(
                         pre_send_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                 await _publish_progress(
@@ -483,10 +567,6 @@ async def recompose(
                 # Version unchanged but transition_consumed must be flipped.
                 # Persist the updated guided_session in a new state row so
                 # subsequent turns pick up transition_consumed=True.
-                _existing_meta: dict[str, Any] = {}
-                if state_record is not None and state_record.composer_meta is not None:
-                    _existing_meta = dict(deep_thaw(state_record.composer_meta))
-                _transition_meta = {**_existing_meta, **_post_compose_meta}
                 _transition_state = result.state
                 _transition_state_d = _transition_state.to_dict()
                 _transition_state_data = CompositionStateData(
@@ -496,8 +576,12 @@ async def recompose(
                     outputs=_transition_state_d["outputs"],
                     metadata_=_transition_state_d["metadata"],
                     is_valid=False,
-                    validation_errors=None,
-                    composer_meta=_transition_meta,
+                    validation_errors=validation_errors_for_composer_surface(
+                        composer_meta=_post_compose_meta,
+                        is_valid=False,
+                        validation_errors=None,
+                    ),
+                    composer_meta=_post_compose_meta,
                 )
                 _transition_record = await service.save_composition_state(
                     session.id,
@@ -606,6 +690,13 @@ async def recompose(
                     )
                 )
             terminal_status = "cancelled"
+            if _is_client_disconnect_cancel(exc):
+                # Disconnect-initiated cancel — see the send_message
+                # mirror for the 499-conversion rationale.
+                raise HTTPException(
+                    status_code=499,
+                    detail="Client disconnected while the compose turn was running.",
+                ) from exc
             raise
         finally:
             _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "recompose"})

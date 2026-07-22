@@ -17,6 +17,7 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.pooling import PoolConfig
 from elspeth.plugins.infrastructure.templates import TemplateError
+from elspeth.plugins.transforms.llm.multi_query import QueryDefinition, resolve_queries
 from elspeth.plugins.transforms.llm.templates import PromptTemplate
 
 
@@ -45,7 +46,7 @@ class LLMConfig(TransformDataConfig):
     only declare the fields that are TRULY required (always accessed).
 
     LLM-specific fields:
-    - provider: LLM provider ("azure" or "openrouter")
+    - provider: LLM provider ("azure", "openrouter", or "bedrock")
     - model: Model identifier (optional — Azure uses deployment_name instead)
     - prompt_template: Jinja2 prompt template (required)
     - system_prompt: Optional system message
@@ -63,9 +64,9 @@ class LLMConfig(TransformDataConfig):
     - max_capacity_retry_seconds: Max time to retry capacity errors per row
     """
 
-    provider: Literal["azure", "openrouter"] = Field(..., description="LLM provider")
+    provider: Literal["azure", "openrouter", "bedrock"] = Field(..., description="LLM provider")
     model: str | None = Field(None, description="Model identifier (optional — Azure uses deployment_name)")
-    queries: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = Field(
+    queries: list[QueryDefinition] | dict[str, QueryDefinition] | None = Field(
         None, description="Multi-query specs (None = single-query mode)"
     )
     prompt_template: str = Field(..., description="Jinja2 prompt template")
@@ -136,6 +137,30 @@ class LLMConfig(TransformDataConfig):
             raise ValueError(f"response_field must be a valid Python identifier, got {v!r}")
         return v
 
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _inject_mapping_query_names(cls, value: Any) -> Any:
+        """Inject the mapping key as each query's ``name`` for the mapping form.
+
+        The two accepted authoring forms are asymmetric under ``extra=forbid``:
+        a mapping value legitimately omits ``name`` (the key supplies it) while a
+        list entry must carry its own. This before-validator injects the key into
+        each raw mapping value so the resulting :class:`QueryDefinition` carries a
+        populated ``name`` (mapping key wins over any name in the value, matching
+        the historical mapping-form semantics). List input and already-typed
+        values pass through untouched; the list-form ``name`` requirement is
+        enforced in ``resolve_queries`` as a safe configuration error.
+        """
+        if isinstance(value, dict):
+            injected: dict[Any, Any] = {}
+            for key, definition in value.items():
+                if isinstance(definition, dict):
+                    injected[key] = {**definition, "name": key}
+                else:
+                    injected[key] = definition
+            return injected
+        return value
+
     @field_validator("prompt_template")
     @classmethod
     def validate_prompt_template(cls, v: str) -> str:
@@ -163,18 +188,43 @@ class LLMConfig(TransformDataConfig):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_cross_query_rules(self) -> LLMConfig:
+        """Run cross-query validation at config-parse time (safe-failure placement).
+
+        The per-query shape is already enforced by ``QueryDefinition`` /
+        ``OutputFieldConfig``. The *cross-query* rules — list-form name presence,
+        duplicate names, reserved-suffix collisions, cross-query output-key
+        collisions, and legacy positional variables — live in
+        ``resolve_queries``. Running that normalizer here (rather than only later
+        in ``LLMTransform.__init__``) means a malformed structured-query draft
+        raises ``ValueError`` *inside* ``model_validate``, which ``from_dict``
+        wraps into the redacted-safe ``PluginConfigError`` category (§5.3) instead
+        of escaping as a bare ``ValueError`` / 500.
+
+        Only *validation* moves earlier; the frozen ``QuerySpec`` runtime
+        resolution still happens in ``LLMTransform.__init__`` (the second call is
+        idempotent). This validator is deliberately scoped to config-shape errors:
+        it delegates solely to ``resolve_queries`` and does not catch or reshape
+        any exception, so a genuine framework failure would still propagate.
+        """
+        if self.queries is None:
+            return self
+        resolve_queries(self.queries)
+        return self
+
     def _field_extraction_templates(self) -> tuple[tuple[str, str], ...]:
         """Return (label, template) for every LLM Jinja2 template that can interpolate row data."""
         templates = [("prompt_template", self.prompt_template)]
         if isinstance(self.queries, dict):
             for name, defn in self.queries.items():
-                if isinstance(defn, dict) and defn.get("template"):
-                    templates.append((f"query {name!r} template", defn["template"]))
+                if defn.template:
+                    templates.append((f"query {name!r} template", defn.template))
         elif isinstance(self.queries, list):
             for index, item in enumerate(self.queries):
-                if isinstance(item, dict) and item.get("template"):
-                    label = item.get("name", index)
-                    templates.append((f"query {label!r} template", item["template"]))
+                if item.template:
+                    label = item.name if item.name is not None else index
+                    templates.append((f"query {label!r} template", item.template))
         return tuple(templates)
 
     @model_validator(mode="after")
@@ -247,18 +297,15 @@ class LLMConfig(TransformDataConfig):
                 # any row.* references in the top-level and per-query templates.
                 extracted: set[str] = set()
                 # Collect row column names from input_fields mappings
+                query_defs: list[QueryDefinition]
                 if isinstance(self.queries, dict):
-                    for defn in self.queries.values():
-                        if isinstance(defn, dict) and "input_fields" in defn:
-                            extracted.update(defn["input_fields"].values())
-                            if "template" in defn and defn["template"]:
-                                extracted.update(extract_jinja2_fields(defn["template"]))
-                elif isinstance(self.queries, list):
-                    for item in self.queries:
-                        if isinstance(item, dict) and "input_fields" in item:
-                            extracted.update(item["input_fields"].values())
-                            if "template" in item and item["template"]:
-                                extracted.update(extract_jinja2_fields(item["template"]))
+                    query_defs = list(self.queries.values())
+                else:
+                    query_defs = list(self.queries)
+                for defn in query_defs:
+                    extracted.update(defn.input_fields.values())
+                    if defn.template:
+                        extracted.update(extract_jinja2_fields(defn.template))
                 # Also check the top-level template for row references
                 extracted.update(extract_jinja2_fields(self.prompt_template))
             else:

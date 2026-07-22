@@ -280,6 +280,133 @@ class TestOIDCTokenValidation:
         assert identity.username == "user-123"
 
 
+class TestOIDCAudienceClaimModes:
+    """Generic aud and Cognito client_id are closed, non-fallback modes."""
+
+    def test_default_aud_mode_requires_exp(self, rsa_keypair, jwks_response) -> None:
+        private_key, _ = rsa_keypair
+        claims = _valid_claims()
+        del claims["exp"]
+        token = make_rs256_token(private_key, claims)
+        validator = JWKSTokenValidator(ISSUER, AUDIENCE)
+        with pytest.raises(AuthenticationError, match="MissingRequiredClaimError"):
+            validator.decode_token(token, jwks_response)
+
+    def test_client_id_mode_accepts_cognito_access_token(self, rsa_keypair, jwks_response) -> None:
+        private_key, _ = rsa_keypair
+        claims = _valid_claims(
+            {
+                "aud": "wrong-generic-audience",
+                "client_id": AUDIENCE,
+                "token_use": "access",
+                "iat": int(time.time()),
+            }
+        )
+        token = make_rs256_token(private_key, claims)
+        validator = JWKSTokenValidator(ISSUER, AUDIENCE, audience_claim="client_id")
+        assert validator.decode_token(token, jwks_response)["sub"] == "user-123"
+
+    @pytest.mark.parametrize(
+        ("claim", "value"),
+        [
+            ("client_id", None),
+            ("client_id", True),
+            ("client_id", [AUDIENCE]),
+            ("client_id", ""),
+            ("client_id", "wrong-client"),
+            ("token_use", None),
+            ("token_use", True),
+            ("token_use", "id"),
+            ("iat", None),
+            ("exp", None),
+        ],
+    )
+    def test_client_id_mode_rejects_missing_or_wrong_required_claim(
+        self,
+        rsa_keypair,
+        jwks_response,
+        claim: str,
+        value: object,
+    ) -> None:
+        private_key, _ = rsa_keypair
+        claims = _valid_claims(
+            {
+                "client_id": AUDIENCE,
+                "token_use": "access",
+                "iat": int(time.time()),
+            }
+        )
+        if value is None:
+            claims.pop(claim, None)
+        else:
+            claims[claim] = value
+        token = make_rs256_token(private_key, claims)
+        validator = JWKSTokenValidator(ISSUER, AUDIENCE, audience_claim="client_id")
+        with pytest.raises(AuthenticationError) as raised:
+            validator.decode_token(token, jwks_response)
+        rendered = str(raised.value)
+        assert AUDIENCE not in rendered
+        assert "wrong-client" not in rendered
+
+    def test_modes_never_fall_back_to_other_audience_claim(self, rsa_keypair, jwks_response) -> None:
+        private_key, _ = rsa_keypair
+        now = int(time.time())
+        cognito_only = make_rs256_token(
+            private_key,
+            _valid_claims({"aud": "wrong", "client_id": AUDIENCE, "token_use": "access", "iat": now}),
+        )
+        generic_only = make_rs256_token(
+            private_key,
+            _valid_claims({"client_id": "wrong", "token_use": "access", "iat": now}),
+        )
+        with pytest.raises(AuthenticationError):
+            JWKSTokenValidator(ISSUER, AUDIENCE).decode_token(cognito_only, jwks_response)
+        with pytest.raises(AuthenticationError):
+            JWKSTokenValidator(ISSUER, AUDIENCE, audience_claim="client_id").decode_token(
+                generic_only,
+                jwks_response,
+            )
+
+    def test_client_id_mode_requires_rs256(self, rsa_keypair) -> None:
+        private_key, public_key = rsa_keypair
+        token = make_rsa_token(
+            private_key,
+            _valid_claims(
+                {
+                    "client_id": AUDIENCE,
+                    "token_use": "access",
+                    "iat": int(time.time()),
+                }
+            ),
+            algorithm="PS256",
+        )
+        validator = JWKSTokenValidator(ISSUER, AUDIENCE, audience_claim="client_id")
+        with pytest.raises(AuthenticationError, match="algorithm"):
+            validator.decode_token(token, build_rsa_jwk(public_key, alg=None))
+
+    def test_manual_claim_helper_is_a_trust_boundary(self) -> None:
+        from elspeth.web.auth.oidc import _validate_cognito_access_claims
+
+        with pytest.raises(AuthenticationError, match="token_use"):
+            _validate_cognito_access_claims(
+                {"client_id": AUDIENCE, "token_use": "id"},
+                audience=AUDIENCE,
+            )
+
+        metadata = _validate_cognito_access_claims.__trust_boundary__  # type: ignore[attr-defined]
+        assert metadata.tier == 3
+        assert metadata.test_ref == (
+            "tests/unit/web/auth/test_oidc_provider.py::TestOIDCAudienceClaimModes::test_manual_claim_helper_is_a_trust_boundary"
+        )
+        assert "client_id" in metadata.invariant
+        assert "token_use" in metadata.invariant
+
+    def test_jwks_discovery_requires_exact_issuer(self) -> None:
+        validator = JWKSTokenValidator(ISSUER, AUDIENCE)
+        with pytest.raises(AuthenticationError, match="issuer"):
+            validator._validate_discovery_document({"issuer": "https://wrong.example.com", "jwks_uri": f"{ISSUER}/keys"})
+
+
 class TestOIDCGetUserInfo:
     """Tests for full profile retrieval from OIDC claims."""
 
@@ -749,7 +876,7 @@ class TestOIDCJWKSShapeValidation:
         """JWKS returning a JSON array must raise AuthenticationError and leave cache untouched."""
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
         with (
-            self._patch_responses({"jwks_uri": f"{ISSUER}/keys"}, []),
+            self._patch_responses({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"}, []),
             pytest.raises(AuthenticationError, match="not a JSON object"),
         ):
             await provider.authenticate("some-token")
@@ -761,7 +888,7 @@ class TestOIDCJWKSShapeValidation:
         """JWKS document without 'keys' list must raise AuthenticationError."""
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
         with (
-            self._patch_responses({"jwks_uri": f"{ISSUER}/keys"}, {"not_keys": []}),
+            self._patch_responses({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"}, {"not_keys": []}),
             pytest.raises(AuthenticationError, match="missing 'keys' list"),
         ):
             await provider.authenticate("some-token")
@@ -771,7 +898,7 @@ class TestOIDCJWKSShapeValidation:
         """JWKS document with non-list 'keys' must raise AuthenticationError."""
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
         with (
-            self._patch_responses({"jwks_uri": f"{ISSUER}/keys"}, {"keys": "not-a-list"}),
+            self._patch_responses({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"}, {"keys": "not-a-list"}),
             pytest.raises(AuthenticationError, match="missing 'keys' list"),
         ):
             await provider.authenticate("some-token")
@@ -787,7 +914,7 @@ class TestOIDCJWKSShapeValidation:
         token = make_rs256_token(private_key, _valid_claims())
 
         with (
-            self._patch_responses({"jwks_uri": f"{ISSUER}/keys"}, {"keys": [42]}),
+            self._patch_responses({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"}, {"keys": [42]}),
             pytest.raises(AuthenticationError, match="unusable key entries"),
         ):
             await provider.authenticate(token)
@@ -805,7 +932,7 @@ class TestOIDCJWKSShapeValidation:
         token = make_rs256_token(private_key, _valid_claims())
 
         with (
-            self._patch_responses({"jwks_uri": f"{ISSUER}/keys"}, {"keys": [{}]}),
+            self._patch_responses({"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"}, {"keys": [{}]}),
             pytest.raises(AuthenticationError, match="unusable key entries"),
         ):
             await provider.authenticate(token)
@@ -827,7 +954,7 @@ class TestOIDCAlgorithmSelection:
         token = make_rsa_token(private_key, _valid_claims(), algorithm="PS256")
 
         with TestOIDCJWKSShapeValidation._patch_responses(
-            {"jwks_uri": f"{ISSUER}/keys"},
+            {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"},
             build_rsa_jwk(public_key, alg=None),
         ):
             identity = await provider.authenticate(token)

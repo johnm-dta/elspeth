@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
@@ -46,6 +46,8 @@ from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -127,7 +129,7 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         shareable_link_signing_key=b"\x00" * 32,
     )
     catalog = create_catalog_service()
-    composer_service = ComposerServiceImpl(
+    composer_service = ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=session_service,
@@ -150,6 +152,11 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     app.state.scoped_secret_resolver = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.catalog_service = catalog
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    profiles = MagicMock(spec=OperatorProfileRegistry)
+    profiles.public_schema.side_effect = lambda _plugin_id, schema, *, available_aliases: schema
+    app.state.operator_profile_registry = profiles
+    app.state.plugin_snapshot_factory = lambda _user: snapshot
     app.state.composer_recorder = BufferingRecorder()
     app.state.composer_progress_registry = ComposerProgressRegistry()
 
@@ -326,7 +333,7 @@ class TestSecondFreeformTurnAfterTransition:
 
         terminal = TerminalState(
             kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=TerminalReason.PROTOCOL_VIOLATION,
+            reason=TerminalReason.USER_PRESSED_EXIT,
             pipeline_yaml=None,
         )
         _seed_terminal_guided_session(composer_freeform_client, session_id, terminal)
@@ -464,10 +471,11 @@ class TestRecomposeTransitionPrompt:
             "elspeth.web.composer.service._litellm_acompletion",
             side_effect=_fake_acompletion,
         ):
-            _recompose(composer_freeform_client, session_id)
+            body = _recompose(composer_freeform_client, session_id)
 
         gs_dict = _get_current_guided_session(composer_freeform_client, session_id)
         assert gs_dict.get("transition_consumed") is True, f"transition_consumed not set to True after recompose. GuidedSession: {gs_dict}"
+        assert body["state"]["validation_errors"] == ["guided_composition_invalid"]
 
     def test_recompose_guided_session_persisted_in_composer_meta(self, composer_freeform_client: TestClient) -> None:
         """guided_session is included in composer_meta after recompose, not silently dropped."""

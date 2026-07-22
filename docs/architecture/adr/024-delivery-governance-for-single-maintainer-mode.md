@@ -28,6 +28,28 @@ In single-maintainer mode:
 - release images must be tied to commits that have passed the required CI gate;
 - advisory quality signals must be labelled as advisory rather than presented as enforced thresholds.
 
+Every process, gate, and document must materially improve at least one of:
+
+- reliability of code or tests;
+- integrity of code, tests, runtime data, audit evidence, or documentation; or
+- supportability of code, deployments, operations, or user workflows.
+
+Plans, run sheets, test procedures, runbooks, and incident diagnostics pass
+this test when they help build, verify, or operate the system. They are ordinary
+working documents: update or delete them as the system changes. Do not sign or
+seal plans, generate plan hash manifests or review-receipt sidecars, construct
+approval chains, or require role handoffs merely to authenticate disposable
+working documents. These controls simulate a multi-person organisation without
+reducing product risk.
+
+This exclusion does not apply to controls protecting actual system assets:
+source commits, releases, images, exports, audit chains, runtime data, deployed
+artifacts, and their admission evidence may still require hashes, signatures,
+independent automated checks, or fail-closed gates. A gate that no longer
+prevents a concrete failure should be removed. If removing a practice is a
+marginal call or may discard a real safeguard, the tradeoff must be surfaced to
+the maintainer before removal.
+
 When a second developer is assigned, ELSPETH will step up to **two-maintainer mode** by enabling:
 
 - one required approving review;

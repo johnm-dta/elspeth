@@ -74,7 +74,7 @@ export OPENROUTER_API_KEY="your-key-from-openrouter.ai"
 
 | Example | What It Demonstrates |
 |---------|---------------------|
-| [`openrouter_sentiment`](openrouter_sentiment/) | Single-query sentiment analysis (sequential, pooled, and batched modes) |
+| [`openrouter_sentiment`](openrouter_sentiment/) | Single-query sentiment analysis (sequential and pooled modes) |
 | [`openrouter_multi_query_assessment`](openrouter_multi_query_assessment/) | Multi-query matrix (case studies x criteria) with stress/overflow variants |
 | [`schema_contracts_llm_assessment`](schema_contracts_llm_assessment/) | LLM pipeline with DAG-time schema contract validation |
 | [`template_lookups`](template_lookups/) | Jinja2 template-driven prompts with field extraction |
@@ -100,6 +100,19 @@ These examples use ELSPETH's built-in fault injection servers to test pipeline r
 | [`chaosweb`](chaosweb/) | Web scraping resilience with ChaosWeb fault injection |
 | [`chaosllm`](chaosllm/) | Response data used by ChaosLLM server (not a runnable pipeline) |
 
+## Resetting examples
+
+Examples write a local audit trail to `runs/audit.db`. ELSPETH is pre-1.0 and
+does not migrate audit databases in place, so re-running an example after
+upgrading ELSPETH can fail with `SchemaCompatibilityError`. Clear the
+accumulated artifacts with:
+
+```bash
+./examples/reset.sh
+```
+
+A fresh checkout has no such artifacts and needs no reset.
+
 ---
 
 ## If You Want to See...
@@ -120,7 +133,6 @@ These examples use ELSPETH's built-in fault injection servers to test pipeline r
 | **LLM without API keys** | [`chaosllm_sentiment`](chaosllm_sentiment/) — same pipeline, local ChaosLLM server |
 | **Multi-query LLM matrices** | [`openrouter_multi_query_assessment`](openrouter_multi_query_assessment/) — case studies x criteria |
 | **Pooled/concurrent execution** | [`openrouter_sentiment`](openrouter_sentiment/) — has `settings_pooled.yaml` variant |
-| **Batch aggregation + LLM** | [`openrouter_sentiment`](openrouter_sentiment/) — has `settings_batched.yaml` variant |
 | **Rate limiting** | [`rate_limited_llm`](rate_limited_llm/) — throttled API calls with ChaosLLM |
 | **Schema contracts** | [`schema_contracts_demo`](schema_contracts_demo/) (pure data) or [`schema_contracts_llm_assessment`](schema_contracts_llm_assessment/) (with LLM) |
 | **Jinja2 templates** | [`template_lookups`](template_lookups/) — field extraction and template-driven prompts |

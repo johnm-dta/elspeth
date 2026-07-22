@@ -24,11 +24,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import (
@@ -40,7 +41,16 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+    ValidationEntry,
+    ValidationSummary,
+)
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PROMPT_TEMPLATE_PARTS_KEY,
@@ -943,6 +953,68 @@ async def test_03b_resolve_recomputes_validation_for_patched_live_state(service)
     assert stale_error not in list(new_state.validation_errors or ())
 
 
+@pytest.mark.parametrize(
+    ("composer_meta", "expected_errors"),
+    [
+        ({"guided_session": GuidedSession.initial().to_dict()}, ("guided_composition_invalid",)),
+        (None, ("/home/operator/private.csv token=VALIDATION-CREDENTIAL-CANARY",)),
+    ],
+    ids=("guided-closes-validator-text", "freeform-preserves-validator-text"),
+)
+@pytest.mark.asyncio
+async def test_resolve_interpretation_normalizes_validation_for_its_composer_surface(
+    service,
+    monkeypatch,
+    composer_meta,
+    expected_errors,
+) -> None:
+    session_id = uuid4()
+    surfacing_state = await _seed_state_with_llm_node(service, session_id=session_id)
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=surfacing_state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_closed_validation",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="Innovative and creative",
+        model_identifier="test-model",
+        model_version="v1",
+        provider="test-provider",
+        composer_skill_hash="a" * 64,
+    )
+    await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=[_llm_node()],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=False,
+            validation_errors=["stale unresolved placeholder"],
+            composer_meta=composer_meta,
+        ),
+        provenance="session_seed",
+    )
+    canary = "/home/operator/private.csv token=VALIDATION-CREDENTIAL-CANARY"
+    monkeypatch.setattr(
+        service,
+        "_validate_patched_composition_state",
+        lambda _state, *, plugin_snapshot: ValidationSummary(
+            is_valid=False,
+            errors=(ValidationEntry(component="node", message=canary, severity="high"),),
+        ),
+    )
+
+    _resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert new_state.validation_errors == expected_errors
+
+
 @pytest.mark.asyncio
 async def test_04_resolve_amended_uses_amended_value(service) -> None:
     """Spec test 4: amended ⇒ accepted_value = amended_value."""
@@ -1007,6 +1079,220 @@ async def test_resolve_prompt_template_review_records_hash_without_rewriting_tem
     assert requirement["event_id"] == str(event.id)
     assert requirement["accepted_value"] == event.llm_draft
     assert requirement["resolved_prompt_template_hash"] == stable_hash(event.llm_draft)
+
+
+@pytest.mark.asyncio
+async def test_resolve_profiled_llm_review_revalidates_lowered_contract(engine) -> None:
+    """Interpretation writes must validate the executable profile binding.
+
+    The persisted node intentionally carries only the audit-safe ``profile``
+    alias.  Validating that authored shape directly cannot construct the LLM
+    pass-through transform and therefore collapses its output guarantees to
+    empty.  The interpretation writer must use the same transient profile
+    lowering as guided composition before persisting its new validity state.
+    """
+    from pathlib import Path
+
+    from pydantic import SecretBytes
+
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.config import WebSettings
+    from elspeth.web.dependencies import create_catalog_service
+    from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+
+    settings = WebSettings(
+        data_dir=Path("/tmp/profiled-interpretation-test"),
+        secret_key="profiled-interpretation-test-key",
+        composer_max_composition_turns=10,
+        composer_max_discovery_turns=5,
+        composer_timeout_seconds=30.0,
+        composer_rate_limit_per_minute=60,
+        shareable_link_signing_key=SecretBytes(bytes(range(32))),
+        llm_profiles={
+            "tutorial": {
+                "provider": "bedrock",
+                "model": "bedrock/zai.glm-5",
+                "region_name": "ap-northeast-1",
+            }
+        },
+        tutorial_llm_profile="tutorial",
+    )
+    runtime_config = RuntimeWebPluginConfig.from_settings(settings)
+    policy = compile_web_plugin_policy(registry=get_shared_plugin_manager(), settings=runtime_config)
+    profiles = OperatorProfileRegistry(policy=policy, settings=runtime_config)
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    llm_id = PluginId("transform", "llm")
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash=policy.policy_hash,
+        principal_scope="local:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((llm_id, ("tutorial",)),),
+        selected_profile_aliases=((llm_id, "tutorial"),),
+        binding_generation_fingerprint="profiled-interpretation-test-generation",
+    )
+    policy_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+        plugin_snapshot_factory=lambda _user_id: snapshot,
+        operator_profile_registry=profiles,
+        catalog=create_catalog_service(),
+    )
+
+    prompt_template = "Summarize {{ row.page_text }}."
+    user_term = "llm_prompt_template:llm1"
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="llm_in",
+            options={
+                "path": "/tmp/input.csv",
+                "schema": {"mode": "observed", "guaranteed_fields": ["page_text", "url"]},
+            },
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="llm1",
+                node_type="transform",
+                plugin="llm",
+                input="llm_in",
+                on_success="map_in",
+                on_error="discard",
+                options={
+                    "profile": "tutorial",
+                    "prompt_template": prompt_template,
+                    "required_input_fields": ["page_text"],
+                    "response_field": "summary",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["summary"]},
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": user_term,
+                            "status": "pending",
+                            "draft": prompt_template,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="map1",
+                node_type="transform",
+                plugin="field_mapper",
+                input="map_in",
+                on_success="output",
+                on_error="discard",
+                options={
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "select_only": True,
+                    "required_input_fields": ["url", "summary"],
+                    "schema": {"mode": "observed"},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="output",
+                plugin="json",
+                options={"path": "/tmp/output.json", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(name="Profiled interpretation", description=""),
+        version=1,
+    )
+    state_dict = state.to_dict()
+
+    async def save_profiled_state(*, review_disabled: bool = False) -> tuple[UUID, CompositionStateRecord]:
+        session_id = uuid4()
+        with policy_service._engine.begin() as conn:
+            _insert_session(conn, str(session_id))
+            if review_disabled:
+                conn.execute(
+                    update(sessions_table).where(sessions_table.c.id == str(session_id)).values(interpretation_review_disabled=True)
+                )
+        saved_state = await policy_service.save_composition_state(
+            session_id,
+            CompositionStateData(
+                sources=state_dict["sources"],
+                nodes=state_dict["nodes"],
+                edges=state_dict["edges"],
+                outputs=state_dict["outputs"],
+                metadata_=state_dict["metadata"],
+                is_valid=True,
+            ),
+            provenance="tool_call",
+        )
+        return session_id, saved_state
+
+    session_id, saved = await save_profiled_state()
+    event = await policy_service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=saved.id,
+        affected_node_id="llm1",
+        tool_call_id="call_profiled_prompt_template",
+        user_term=user_term,
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=prompt_template,
+        model_identifier="composer-model",
+        model_version="composer-model",
+        provider="openrouter",
+        composer_skill_hash="a" * 64,
+    )
+
+    _resolved, new_state = await policy_service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert new_state.is_valid is True
+    assert new_state.validation_errors is None
+
+    opted_out_session_id, opted_out_saved = await save_profiled_state(review_disabled=True)
+    opted_out_event = await policy_service.create_pending_interpretation_event(
+        session_id=opted_out_session_id,
+        composition_state_id=opted_out_saved.id,
+        affected_node_id="llm1",
+        tool_call_id="call_profiled_prompt_template_opt_out",
+        user_term=user_term,
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft=prompt_template,
+        model_identifier="composer-model",
+        model_version="composer-model",
+        provider="openrouter",
+        composer_skill_hash="a" * 64,
+    )
+    opted_out_state = await policy_service.get_current_state(opted_out_session_id)
+
+    assert opted_out_event.choice is InterpretationChoice.OPTED_OUT
+    assert opted_out_state is not None
+    assert opted_out_state.is_valid is True
+    assert opted_out_state.validation_errors is None
 
 
 @pytest.mark.asyncio
@@ -2193,7 +2479,59 @@ def test_patch_helper_resolves_structured_requirement_without_legacy_placeholder
     assert patched_template == "Rate Innovative and creative this is."
     assert requirement["status"] == "resolved"
     assert requirement["accepted_value"] == "Innovative and creative"
-    assert requirement["resolved_prompt_template_hash"] == stable_hash(patched_template)
+    assert requirement["resolved_prompt_template_hash"] == stable_hash("Innovative and creative")
+
+
+def test_patch_helper_sequential_vague_resolutions_keep_per_requirement_value_hashes() -> None:
+    """Resolving a second vague term must not strand the first requirement's hash.
+
+    Each resolved requirement's ``resolved_prompt_template_hash`` attests its
+    own accepted value (sibling-resolution invariant), while the node-level
+    ``options.resolved_prompt_template_hash`` tracks the full rendered prompt.
+    Storing the full-render hash on the requirement froze the first-resolved
+    requirement at a partial render, so reconciliation flagged permanent
+    hash-drift once any second term resolved.
+    """
+    node = _structured_llm_node()
+    node["options"][PROMPT_TEMPLATE_PARTS_KEY] = [
+        {"kind": "text", "text": "Rate "},
+        {"kind": "interpretation_ref", "requirement_id": "cool"},
+        {"kind": "text", "text": " and "},
+        {"kind": "interpretation_ref", "requirement_id": "fast"},
+        {"kind": "text", "text": " this is."},
+    ]
+    node["options"][INTERPRETATION_REQUIREMENTS_KEY].append(
+        {
+            "id": "fast",
+            "kind": "vague_term",
+            "user_term": "fast",
+            "status": "pending",
+            "draft": "A draft of fast",
+            "event_id": None,
+            "accepted_value": None,
+            "resolved_prompt_template_hash": None,
+        }
+    )
+
+    first_pass = _patch_llm_transform_prompt(
+        _state_with_node(node),
+        affected_node_id="llm_transform_1",
+        user_term="cool",
+        accepted_value="modern",
+    )
+    second_pass = _patch_llm_transform_prompt(
+        _state_with_node(dict(next(iter(first_pass)))),
+        affected_node_id="llm_transform_1",
+        user_term="fast",
+        accepted_value="quick",
+    )
+
+    options = next(iter(second_pass))["options"]
+    requirements = {requirement["id"]: requirement for requirement in options[INTERPRETATION_REQUIREMENTS_KEY]}
+    assert options["prompt_template"] == "Rate modern and quick this is."
+    assert options["resolved_prompt_template_hash"] == stable_hash("Rate modern and quick this is.")
+    assert requirements["cool"]["resolved_prompt_template_hash"] == stable_hash("modern")
+    assert requirements["fast"]["resolved_prompt_template_hash"] == stable_hash("quick")
 
 
 def test_patch_helper_accepts_whitespace_tolerant_placeholder() -> None:
@@ -2553,7 +2891,9 @@ async def test_resolve_structured_requirement_round_trips_without_authoring_meta
     assert node.options["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
     assert requirement["status"] == "resolved"
     assert requirement["accepted_value"] == "modern and clear"
-    assert requirement["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+    # Requirement-level hash attests the accepted value; the node-level hash
+    # (asserted above) carries the full-render anchor the event also records.
+    assert requirement["resolved_prompt_template_hash"] == stable_hash("modern and clear")
 
     yaml_str = generate_yaml(cs)
     assert "prompt_template: Rate modern and clear this is." in yaml_str
@@ -2949,3 +3289,81 @@ async def test_resolve_llm_model_choice_amended_patches_options_model(service) -
     # Drift guard must follow the amended model, not the drafted one.
     node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
     _validate_model_choice_review(node_spec, chosen)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_model_choice_rejects_unsafe_amended_model_identifier(service) -> None:
+    """Direct service callers cannot bypass accepted-value content validation."""
+    session_id = uuid4()
+    drafted = "anthropic/claude-haiku-4.5"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=drafted))
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="rate_node",
+        tool_call_id="call_mc_unsafe",
+        user_term="llm_model_choice:rate_node",
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        llm_draft=drafted,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="template metacharacters"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=event.id,
+            choice=InterpretationChoice.AMENDED,
+            amended_value="openai/{{ model }}",
+            actor="user:alice",
+        )
+
+    pending = await service.list_interpretation_events(session_id, status="pending")
+    assert [record.id for record in pending] == [event.id]
+
+
+@pytest.mark.asyncio
+async def test_create_pending_is_idempotent_for_identical_resurface(service) -> None:
+    """An identical re-surface returns the existing pending event, never a twin.
+
+    The resolve path's exactly-one-pending-requirement gate makes duplicate
+    pending events for the same (node, kind, user_term, draft) permanently
+    unresolvable: the first resolve stamps the requirement, and the twin then
+    422s with interpretation_placeholder_unavailable forever
+    (elspeth-1fcaec9b63 — reachable by importing the same YAML twice). The
+    writer boundary must enforce the invariant for every kind, not just
+    pipeline_decision.
+    """
+    session_id = uuid4()
+    model = "anthropic/claude-haiku-4.5"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=model))
+    create_kwargs: dict[str, Any] = {
+        "session_id": session_id,
+        "composition_state_id": state.id,
+        "affected_node_id": "rate_node",
+        "user_term": "llm_model_choice:rate_node",
+        "kind": InterpretationKind.LLM_MODEL_CHOICE,
+        "llm_draft": model,
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-05-01",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+    }
+    first = await service.create_pending_interpretation_event(tool_call_id="call_mc_first", **create_kwargs)
+    second = await service.create_pending_interpretation_event(tool_call_id="call_mc_refire", **create_kwargs)
+
+    assert second.id == first.id
+    pending = await service.list_interpretation_events(session_id, status="pending")
+    assert [e.id for e in pending] == [first.id]
+
+    resolved, _new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=first.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+    assert resolved.choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
+    assert await service.list_interpretation_events(session_id, status="pending") == []

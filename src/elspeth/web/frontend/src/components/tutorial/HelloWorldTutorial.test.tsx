@@ -5,7 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HelloWorldTutorial } from "./HelloWorldTutorial";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { usePreferencesStore } from "@/stores/preferencesStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { resetStore } from "@/test/store-helpers";
+import type { GuidedSession } from "@/types/guided";
 
 vi.mock("@/api/client", () => ({
   deleteTutorialOrphans: vi.fn().mockResolvedValue({ deleted_count: 0 }),
@@ -43,6 +45,9 @@ vi.mock("@/api/client", () => ({
     },
   }),
   sendTutorialAbandonBeacon: vi.fn(),
+  // The chrome "Exit tutorial" control abandons an in-flight run via
+  // TutorialTurn4Run's abandonTutorialRun, which fires this.
+  cancelTutorialRun: vi.fn().mockResolvedValue({ cancelled: true }),
   // The tutorial-persistence slice (elspeth-918f4434b3): the component
   // persists stage transitions through preferencesStore, which calls this.
   // Body-aware echo mirroring the backend upsert (supplied fields land in
@@ -82,18 +87,29 @@ vi.mock("@/api/client", () => ({
 // id — simulating the live race where the shell's guided/start 404 handler
 // and the mount-time membership check both detect the same dead resume.
 let stubShellReportsSessionMissing = false;
+// Per-test session id the stub hands to onCompleted/onExited. The run turn's
+// StrictMode dedupe cache is module-level and keyed by sessionId, so tests
+// that exercise the run step with a bespoke runTutorialPipeline mock must use
+// a distinct id or they replay a previous test's cached run.
+let stubGuidedSessionId = "sess-new";
+let lastExitRequestedRef: { current: boolean } | null = null;
 vi.mock("./TutorialGuidedShell", async () => {
   const { useEffect } = await import("react");
   return {
     TutorialGuidedShell: ({
       sessionId,
       onCompleted,
+      onExited,
       onSessionMissing,
+      exitRequestedRef,
     }: {
       sessionId: string;
       onCompleted: (s: string) => void;
+      onExited?: (s: string) => void;
       onSessionMissing?: (deadSessionId: string) => void;
+      exitRequestedRef?: { current: boolean };
     }) => {
+      lastExitRequestedRef = exitRequestedRef ?? null;
       useEffect(() => {
         if (stubShellReportsSessionMissing) {
           onSessionMissing?.(sessionId);
@@ -103,9 +119,14 @@ vi.mock("./TutorialGuidedShell", async () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
       return (
-        <button type="button" onClick={() => onCompleted("sess-new")}>
-          finish-guided
-        </button>
+        <>
+          <button type="button" onClick={() => onCompleted(stubGuidedSessionId)}>
+            finish-guided
+          </button>
+          <button type="button" onClick={() => onExited?.(stubGuidedSessionId)}>
+            exit-guided
+          </button>
+        </>
       );
     },
   };
@@ -116,6 +137,8 @@ describe("HelloWorldTutorial staged flow", () => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
     stubShellReportsSessionMissing = false;
+    stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
   });
 
   it("renders the welcome bookend first", () => {
@@ -236,6 +259,24 @@ describe("HelloWorldTutorial staged flow", () => {
     expect(api.createSession).not.toHaveBeenCalled();
   });
 
+  it("keeps ordinary authoring reachable while a missing tutorial profile disables only tutorial start", async () => {
+    const api = await import("@/api/client");
+    render(
+      <HelloWorldTutorial
+        composerAvailable={true}
+        tutorialReady={false}
+        tutorialUnavailableReason="Tutorial LLM profile is not configured"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Let's go" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Tutorial LLM profile is not configured",
+    );
+    expect(screen.getByRole("button", { name: "Skip the tutorial" })).toBeEnabled();
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
   // Relocated from the old big-bang test: TutorialTurn4Run dedups the run
   // request under StrictMode's double-invoke. This is the only coverage of
   // that behaviour, so it rides along with HelloWorldTutorial's suite rather
@@ -267,6 +308,8 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
   });
 
   it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
@@ -330,10 +373,269 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
   });
 });
 
+describe("HelloWorldTutorial — exit to freeform (elspeth-61591e64bb)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
+    lastExitRequestedRef = null;
+  });
+
+  it("persists the exit opt-out with the exit discriminator when guided exits to freeform", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(await screen.findByRole("button", { name: "exit-guided" }));
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: expect.any(String),
+        tutorial_completed_via: "exit",
+      }),
+    );
+    // Unlike skip (which keeps the graduation farewell mounted), exit
+    // publishes locally so App's showTutorial gate unmounts the shell and
+    // the learner lands in freeform on the same session.
+    await waitFor(() =>
+      expect(usePreferencesStore.getState().tutorialCompleted).toBe(true),
+    );
+  });
+
+  it("renders an Exit tutorial control on the guided step that persists the same opt-out", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Exit tutorial" }),
+    );
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tutorial_completed_at: expect.any(String),
+          tutorial_completed_via: "exit",
+        }),
+      ),
+    );
+    await waitFor(() =>
+      expect(usePreferencesStore.getState().tutorialCompleted).toBe(true),
+    );
+  });
+
+  it("renders the Exit tutorial control on the run step", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Exit tutorial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Exit tutorial control on the resumed audit step", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "run",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: "This is the audit story." }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Exit tutorial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no Exit tutorial control on the welcome bookend (Skip is the welcome exit)", () => {
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("button", { name: "Skip the tutorial" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exit tutorial" })).toBeNull();
+  });
+
+  it("offers no Exit tutorial control on graduation (the finish CTA is the exit)", () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exit tutorial" })).toBeNull();
+  });
+
+  it("Exit tutorial during Build terminates the live guided session", async () => {
+    // Without this hand-off the non-terminal guidedSession survives the
+    // shell unmount inside sessionStore, and the freeform ChatPanel's
+    // discriminator re-renders the guided workspace — the learner has to
+    // exit guided a second time instead of landing in freeform as promised.
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: { terminal: null } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).toHaveBeenCalledTimes(1);
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial during Build queues a startup exit before guided state loads", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    const exit = await screen.findByRole("button", { name: "Exit tutorial" });
+    expect(useSessionStore.getState().guidedSession).toBeNull();
+    expect(lastExitRequestedRef?.current).toBe(false);
+
+    await user.click(exit);
+
+    expect(lastExitRequestedRef?.current).toBe(true);
+  });
+
+  it("adds the renamed tutorial session to the header session list before guided starts", async () => {
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "sess-new",
+            title: "First-run tutorial (in progress)",
+          }),
+        ]),
+      );
+    });
+  });
+
+  it("Exit tutorial leaves an already-exited-to-freeform guided session alone", async () => {
+    // The wizard-path hand-off (onExited) reaches the same handler with the
+    // terminal already set to exited_to_freeform — firing the control signal
+    // again would be a duplicate respond POST that the backend 409s (only
+    // kind=COMPLETED is exempt from the terminal-rejection; guided.py:1190).
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: {
+        terminal: { kind: "exited_to_freeform", reason: "user_pressed_exit" },
+      } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).not.toHaveBeenCalled();
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial after the guided wizard COMPLETED hands off to freeform", async () => {
+    // elspeth-e2c3dba6b5 review P2: a COMPLETED guided session survives the
+    // shell unmount, and ChatPanel's discriminator checks `completed` FIRST —
+    // so without this hand-off the learner lands on CompletionSummary and must
+    // click "Open freeform editor" (which itself just calls exitToFreeform) to
+    // reach freeform, contradicting the Exit control's "freeform NOW" promise.
+    // The backend accepts exit_to_freeform from kind=COMPLETED (guided.py:1222),
+    // transitioning it to exited_to_freeform so the surface falls through.
+    const exitToFreeform = vi.fn().mockResolvedValue(undefined);
+    const originalExit = useSessionStore.getState().exitToFreeform;
+    useSessionStore.setState({
+      guidedSession: {
+        terminal: { kind: "completed", reason: null },
+      } as unknown as GuidedSession,
+      exitToFreeform,
+    });
+    try {
+      const user = userEvent.setup();
+      render(<HelloWorldTutorial />);
+      await user.click(screen.getByRole("button", { name: "Let's go" }));
+      await user.click(
+        await screen.findByRole("button", { name: "Exit tutorial" }),
+      );
+      expect(exitToFreeform).toHaveBeenCalledTimes(1);
+    } finally {
+      useSessionStore.setState({
+        exitToFreeform: originalExit,
+        guidedSession: null,
+      });
+    }
+  });
+
+  it("Exit tutorial during an in-flight run aborts the fetch and fires the server-side cancel", async () => {
+    const api = await import("@/api/client");
+    // Distinct session id: the run cache is module-level (see the stub note).
+    stubGuidedSessionId = "sess-exit-mid-run";
+    // A run that never settles — the exit must not depend on it finishing.
+    vi.mocked(api.runTutorialPipeline).mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Exit tutorial" }));
+
+    const [, signal] = vi.mocked(api.runTutorialPipeline).mock.calls[0];
+    expect((signal as AbortSignal).aborted).toBe(true);
+    expect(api.cancelTutorialRun).toHaveBeenCalledWith("sess-exit-mid-run");
+  });
+
+  it("Exit tutorial after the run completes does not cancel the finished run", async () => {
+    const api = await import("@/api/client");
+    stubGuidedSessionId = "sess-exit-after-run";
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Exit tutorial" }));
+
+    expect(api.cancelTutorialRun).not.toHaveBeenCalled();
+  });
+});
+
 describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubGuidedSessionId = "sess-new";
   });
 
   it("persists the guided stage + session on Start", async () => {

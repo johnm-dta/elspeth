@@ -79,13 +79,13 @@ def _seed_run_with_artifacts(
             state_id=f"state-{i}",
         )
         factory.execution.register_artifact(
-            run_id,
-            state.state_id,
-            sink_node_id,
-            "file",
-            path_or_uri,
-            content_hash,
-            size_bytes,
+            run_id=run_id,
+            state_id=state.state_id,
+            sink_node_id=sink_node_id,
+            artifact_type="file",
+            path=path_or_uri,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
             artifact_id=artifact_id,
         )
 
@@ -152,7 +152,7 @@ def test_load_run_outputs_rejects_corrupt_artifact_types(tmp_path: Path) -> None
             [("art-1", str(output_path), "a" * 64, output_path.stat().st_size, "sink_r")],
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(text("UPDATE artifacts SET size_bytes = 7.5 WHERE artifact_id = 'art-1'"))
 
         with pytest.raises(ValidationError, match="size_bytes"):
@@ -314,3 +314,209 @@ def test_downloadable_false_when_data_dir_omitted_safe_default(tmp_path: Path) -
         response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
 
     assert response.artifacts[0].downloadable is False
+
+
+# ── storage_kind classification tests (elspeth-52af16f9ae) ────────────
+#
+# storage_kind is the structured discriminator that replaces the
+# frontend's regex-based "does this look like a blob-storage path"
+# heuristic. It is computed against the REAL storage layouts:
+#   * composer blob store:  {data_dir}/blobs/{session_id}/{blob_id}_{filename}
+#   * payload store:        {data_dir}/payloads/<2-hex>/<hash>
+#   * canonical sink output: {data_dir}/outputs/...
+# anything else is "unknown" — the safe default that does not claim a
+# path is internal storage it cannot verify.
+
+
+def test_storage_kind_blob_for_path_under_blobs_directory_even_when_absent(tmp_path: Path) -> None:
+    """The critical case: a blob-store path that was PURGED (never
+    written, or deleted) must still classify as "blob" so the UI never
+    falls back to rendering the raw internal path as the row title or
+    the "no longer available on disk" tooltip. Classification must not
+    be gated on the file actually existing on disk.
+    """
+    data_dir = tmp_path / "data"
+    session_id = "11111111-1111-1111-1111-111111111111"
+    # Deliberately never created — mirrors a blob whose file was purged
+    # between the sink write and this manifest read.
+    target = data_dir / "blobs" / session_id / "blob-abc_report.json"
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-blob-absent"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, 0, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].exists_now is False
+    assert response.artifacts[0].storage_kind == "blob"
+
+
+def test_storage_kind_blob_for_path_under_blobs_directory_when_present(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    session_id = "22222222-2222-2222-2222-222222222222"
+    blob_dir = data_dir / "blobs" / session_id
+    blob_dir.mkdir(parents=True)
+    target = blob_dir / "blob-xyz_report.json"
+    target.write_bytes(b'{"x":1}\n')
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-blob-present"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].exists_now is True
+    assert response.artifacts[0].storage_kind == "blob"
+
+
+def test_storage_kind_payload_for_path_under_payloads_directory(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    payload_dir = data_dir / "payloads" / "ab"
+    payload_dir.mkdir(parents=True)
+    content_hash = "ab" + "c" * 62
+    target = payload_dir / content_hash
+    target.write_bytes(b"payload-bytes")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-payload"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].storage_kind == "payload"
+
+
+def test_storage_kind_payload_honours_payload_root_override(tmp_path: Path) -> None:
+    # WebSettings.payload_store_path can relocate the payload store outside
+    # data_dir; classification must follow the configured root, not the
+    # data_dir-relative default (review-0.7.1 batch E follow-up).
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    override_root = tmp_path / "elsewhere" / "payload-store"
+    payload_dir = override_root / "ab"
+    payload_dir.mkdir(parents=True)
+    content_hash = "ab" + "d" * 62
+    target = payload_dir / content_hash
+    target.write_bytes(b"payload-bytes")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-payload-override"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        without_override = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+        with_override = load_run_outputs_from_db(
+            db,
+            run_id=run_id,
+            landscape_run_id=run_id,
+            data_dir=data_dir,
+            payload_root=override_root,
+        )
+
+    assert without_override.artifacts[0].storage_kind == "unknown"
+    assert with_override.artifacts[0].storage_kind == "payload"
+
+
+def test_storage_kind_sink_file_for_path_under_outputs_directory(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    outputs_dir = data_dir / "outputs"
+    outputs_dir.mkdir(parents=True)
+    target = outputs_dir / "results.csv"
+    target.write_bytes(b"col1\n1\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-sink-file"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].storage_kind == "sink_file"
+    # Downloadable classification is orthogonal to storage_kind — a
+    # sink-allowlisted file keeps its downloadable=True regardless of
+    # which kind it was classified as.
+    assert response.artifacts[0].downloadable is True
+
+
+def test_storage_kind_unknown_for_path_outside_known_layouts(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    (data_dir / "outputs").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    rogue = elsewhere / "rogue.csv"
+    rogue.write_bytes(b"escaped\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-unknown"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(rogue), "a" * 64, rogue.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].storage_kind == "unknown"
+
+
+def test_storage_kind_unknown_for_lookalike_directory_name(tmp_path: Path) -> None:
+    """A directory that merely starts with "blobs" (e.g. a user-configured
+    sink writing into "blobs-extra/") must NOT classify as the internal
+    blob store. Regression guard for a naive string-prefix check instead
+    of a real path-relative-to test.
+    """
+    data_dir = tmp_path / "data"
+    lookalike_dir = data_dir / "blobs-extra"
+    lookalike_dir.mkdir(parents=True)
+    target = lookalike_dir / "sha256-abc_report.json"
+    target.write_bytes(b"x")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-lookalike"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id, data_dir=data_dir)
+
+    assert response.artifacts[0].storage_kind == "unknown"
+
+
+def test_storage_kind_unknown_when_data_dir_omitted(tmp_path: Path) -> None:
+    # Legacy callers that omit data_dir get the same safe degradation as
+    # downloadable=False: no claim can be verified against a real
+    # storage layout, so everything reports "unknown".
+    target = tmp_path / "anywhere.csv"
+    target.write_bytes(b"x\n")
+
+    with LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}") as db:
+        run_id = "web-run-storage-kind-no-data-dir"
+        _seed_run_with_artifacts(
+            db,
+            run_id,
+            [("art-1", str(target), "a" * 64, target.stat().st_size, "sink_r")],
+        )
+
+        response = load_run_outputs_from_db(db, run_id=run_id, landscape_run_id=run_id)
+
+    assert response.artifacts[0].storage_kind == "unknown"

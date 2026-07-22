@@ -337,12 +337,13 @@ def _craft_crashed_lease(
 ) -> str:
     """Write the rows a hard-killed worker leaves behind, via production writers.
 
-    A worker killed mid-claim has durably written, in order: the source row
-    (``rows``), its token (``tokens``), the READY journal enqueue, and the
-    LEASED claim under its own ``lease_owner`` — and nothing else (no
-    node_states, no outcome: the kill predates them). Every one of those
-    writes below goes through the same Tier-1 production writer the engine
-    uses (RecorderFactory / TokenSchedulerRepository), never raw SQL.
+    A current worker killed after claiming transform work has durably written
+    the source row, token, exact source-COMPLETED witness, READY enqueue, and
+    LEASED claim under its own ``lease_owner`` — but no transform node state or
+    outcome. Every write below goes through the same Tier-1 production writer
+    the engine uses (RecorderFactory / TokenSchedulerRepository), never raw
+    SQL. The separate TS-02 compatibility test deliberately constructs the
+    pre-fix image without this source witness.
 
     Epoch-21 (ADR-030 slice 4): ``claim_ready`` is now membership-fenced —
     the claimant must hold an active ``run_workers`` row.  The fictional
@@ -364,6 +365,15 @@ def _craft_crashed_lease(
         ingest_sequence=ingest_sequence,
     )
     token = crashed.factory.data_flow.create_token(row_id=row.row_id)
+    crashed.factory.execution.record_completed_node_state(
+        token_id=token.token_id,
+        node_id=crashed.source_node_id,
+        run_id=crashed.run_id,
+        step_index=0,
+        input_data=data,
+        output_data=data,
+        duration_ms=0,
+    )
     crashed.repo.enqueue_ready(
         run_id=crashed.run_id,
         token_id=token.token_id,

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 
 from elspeth.composer_mcp.server import _build_tool_defs, _dispatch_tool
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSummary
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
@@ -146,9 +147,16 @@ def _connection_valid_field_mapper_state_without_edges() -> CompositionState:
 
 def _mock_catalog() -> CatalogService:
     catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = []
-    catalog.list_transforms.return_value = []
-    catalog.list_sinks.return_value = []
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name="value_transform", description="Value transform", plugin_type="transform", config_fields=[]),
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="csv", description="CSV sink", plugin_type="sink", config_fields=[]),
+        PluginSummary(name="json", description="JSON sink", plugin_type="sink", config_fields=[]),
+    ]
     return catalog
 
 
@@ -207,6 +215,27 @@ class TestBuildToolDefs:
 
 
 class TestDispatchTool:
+    def test_dispatch_constructs_explicit_trained_operator_policy(self, scratch_dir: Path) -> None:
+        from elspeth.web.catalog.policy_view import PolicyCatalogView
+        from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+
+        catalog = _mock_catalog()
+        real_snapshot_builder = PluginAvailabilitySnapshot.for_trained_operator
+        real_view_builder = PolicyCatalogView.for_trained_operator
+        with (
+            patch.object(
+                PluginAvailabilitySnapshot,
+                "for_trained_operator",
+                side_effect=real_snapshot_builder,
+            ) as snapshot_builder,
+            patch.object(PolicyCatalogView, "for_trained_operator", side_effect=real_view_builder) as view_builder,
+        ):
+            result = _dispatch_tool("list_sources", {}, _empty_state(), catalog, scratch_dir)
+
+        assert result["success"] is True
+        snapshot_builder.assert_called_once_with(catalog)
+        view_builder.assert_called_once()
+
     """Tests for _dispatch_tool() dispatch logic."""
 
     @pytest.fixture()
@@ -435,6 +464,61 @@ class TestDispatchTool:
         )
         assert result["success"] is True
         assert isinstance(result["data"], str)
+
+    def test_local_trained_operator_generate_yaml_keeps_raw_profile_behavior_without_registry(
+        self,
+        scratch_dir: Path,
+    ) -> None:
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="llm_in",
+                options={"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="summarize",
+                    node_type="transform",
+                    plugin="llm",
+                    input="llm_in",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "profile": "operator-owned-alias",
+                        "prompt_template": "Summarise {{ row }}",
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="json",
+                    options={
+                        "path": "outputs/out.jsonl",
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = _dispatch_tool("generate_yaml", {}, state, _mock_catalog(), scratch_dir)
+
+        assert result["success"] is True
+        assert yaml.safe_load(result["data"])["transforms"][0]["options"]["profile"] == "operator-owned-alias"
 
     def test_generate_yaml_strips_blob_bound_source_storage_path(self, scratch_dir: Path) -> None:
         storage_path = "/data/blobs/session/98b1357d_input.csv"
@@ -681,3 +765,62 @@ async def test_mcp_preview_runtime_preflight_joins_shared_session_inflight() -> 
     assert first is expected
     assert second is expected
     assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in over the composer MCP surface (elspeth-a5b86149d4 /
+# elspeth-6421ffa028). tools/list must advertise queue in the closed
+# upsert_node node_type enum, and the generic call_tool dispatch must
+# persist and retrieve a queue node with no storage migration.
+# ---------------------------------------------------------------------------
+
+_QUEUE_UPSERT_ARGS: dict[str, object] = {
+    "id": "inbound",
+    "node_type": "queue",
+    "plugin": None,
+    "input": "inbound",
+    "on_success": None,
+    "on_error": None,
+    "options": {"description": "Orders and refunds interleave here"},
+}
+
+
+class TestQueueExposure:
+    @pytest.fixture()
+    def scratch_dir(self, tmp_path: Path) -> Path:
+        d = tmp_path / "scratch"
+        d.mkdir()
+        return d
+
+    def test_tools_list_advertises_queue_node_type(self) -> None:
+        upsert = next(t for t in _build_tool_defs() if t["name"] == "upsert_node")
+        enum = upsert["parameters"]["properties"]["node_type"]["enum"]
+        assert "queue" in enum
+
+    def test_call_tool_persists_and_retrieves_queue_node(self, scratch_dir: Path) -> None:
+        result = _dispatch_tool(
+            "upsert_node",
+            dict(_QUEUE_UPSERT_ARGS),
+            _empty_state(),
+            _mock_catalog(),
+            scratch_dir,
+        )
+        assert result["success"] is True, result.get("error")
+        nodes = result["state"]["nodes"]
+        queue = next(n for n in nodes if n["id"] == "inbound")
+        assert queue["node_type"] == "queue"
+        assert queue["input"] == "inbound"
+        assert queue["plugin"] is None
+        assert queue["options"] == {"description": "Orders and refunds interleave here"}
+
+    def test_call_tool_rejects_malformed_queue_atomically(self, scratch_dir: Path) -> None:
+        state = _empty_state()
+        result = _dispatch_tool(
+            "upsert_node",
+            {**_QUEUE_UPSERT_ARGS, "input": "elsewhere"},
+            state,
+            _mock_catalog(),
+            scratch_dir,
+        )
+        assert result["success"] is False
+        assert result["state"] == state.to_dict()

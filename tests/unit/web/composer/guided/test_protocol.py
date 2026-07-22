@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+from typing import Any
+from uuid import UUID
+
 import pytest
 
 from elspeth.web.composer.guided.protocol import (
+    ComponentReviewPayload,
     ControlSignal,
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
-    ProposeChainPayload,
+    ProposePipelinePayload,
     SchemaFormPayload,
     SingleSelectPayload,
     Turn,
     TurnResponse,
     TurnType,
+    validate_current_turn,
     validate_payload,
 )
 
@@ -26,8 +31,8 @@ class TestTurnType:
             "single_select",
             "multi_select_with_custom",
             "schema_form",
-            "propose_chain",
-            "recipe_offer",
+            "review_components",
+            "propose_pipeline",
             "confirm_wiring",
         }
         assert {t.value for t in TurnType} == expected
@@ -77,65 +82,42 @@ class TestPayloadShapes:
         assert payload["mode"] == "plugin_options"
         assert payload["plugin"] == "csv"
 
-    def test_propose_chain_payload(self) -> None:
-        payload: ProposeChainPayload = {
-            "steps": [
-                {"plugin": "type_coerce", "options": {}, "rationale": "needed for gate"},
+    def test_component_review_payload_is_public_and_stable_id_authoritative(self) -> None:
+        payload: ComponentReviewPayload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": "11111111-1111-4111-8111-111111111111",
+                    "name": "orders",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                }
             ],
-            "why": "bridge str to float",
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert payload["items"][0]["stable_id"].endswith("1111")
+        assert "options" not in payload["items"][0]
+
+    def test_propose_pipeline_payload_is_exported(self) -> None:
+        payload: ProposePipelinePayload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000401",
+            "draft_hash": "d" * 64,
+            "summary": "One transform and one output.",
+            "rationale": "The reviewed contract requires validation.",
             "blockers": [],
+            "graph": {"sources": [], "edges": []},
+            "nodes": [],
+            "outputs": [],
+            "edit_targets": [],
         }
-        assert len(payload["steps"]) == 1
-
-    def test_recipe_offer_payload_is_recipe_decision_schema_form(self) -> None:
-        """RECIPE_OFFER keeps its turn discriminator but shares schema_form payloads."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        payload: SchemaFormPayload = {
-            "mode": "recipe_decision",
-            "knobs": {
-                "fields": [
-                    {
-                        "name": "classifier_template",
-                        "label": "Classifier template",
-                        "description": "Jinja2 template",
-                        "kind": "text",
-                        "required": True,
-                        "nullable": False,
-                    }
-                ]
-            },
-            "prefilled": {"source_blob_id": "abc-uuid", "output_path": "out.jsonl"},
-            "recipe_context": {
-                "recipe_name": "classify-rows-llm-jsonl",
-                "description": "Classify CSV rows",
-                "alternatives": ["build_manually"],
-            },
-        }
-        assert validate_payload(TurnType.RECIPE_OFFER, payload) is None
-        assert payload["recipe_context"]["recipe_name"] == "classify-rows-llm-jsonl"
-
-    def test_recipe_offer_legacy_payload_rejected(self) -> None:
-        """The old recipe_offer shape is not accepted alongside the new contract."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {  # type: ignore[arg-type]
-                "recipe_name": "x",
-                "slots": {},
-                "alternatives": [],
-            },
-        )
-        assert err is not None
-        assert "mode" in err
+        assert payload["proposal_id"].endswith("0401")
 
 
 class TestTurnResponse:
     def test_control_signal_values(self) -> None:
         assert {s.value for s in ControlSignal} == {
             "exit_to_freeform",
-            "request_advisor",
             "reject",
             "back",
             "passthrough",
@@ -143,22 +125,28 @@ class TestTurnResponse:
 
     def test_turn_response_minimal(self) -> None:
         resp: TurnResponse = {
+            "operation_id": "00000000-0000-4000-8000-000000000411",
+            "turn_token": "a" * 64,
             "chosen": ["jsonl"],
             "edited_values": None,
             "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
+            "proposal_id": None,
+            "draft_hash": None,
+            "edit_target": None,
             "control_signal": None,
         }
         assert resp["chosen"] == ["jsonl"]
 
     def test_turn_response_with_control_signal(self) -> None:
         resp: TurnResponse = {
+            "operation_id": "00000000-0000-4000-8000-000000000411",
+            "turn_token": None,
             "chosen": None,
             "edited_values": None,
             "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
+            "proposal_id": None,
+            "draft_hash": None,
+            "edit_target": None,
             "control_signal": ControlSignal.EXIT_TO_FREEFORM,
         }
         assert resp["control_signal"] is ControlSignal.EXIT_TO_FREEFORM
@@ -191,7 +179,8 @@ class TestLegalTurnMatrix:
         assert TurnType.INSPECT_AND_CONFIRM in legal
         assert TurnType.SINGLE_SELECT in legal
         assert TurnType.SCHEMA_FORM in legal
-        assert TurnType.PROPOSE_CHAIN not in legal
+        assert TurnType.REVIEW_COMPONENTS in legal
+        assert TurnType.PROPOSE_PIPELINE not in legal
 
     def test_step_2_legal_types(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
@@ -200,18 +189,13 @@ class TestLegalTurnMatrix:
         assert TurnType.SINGLE_SELECT in legal
         assert TurnType.MULTI_SELECT_WITH_CUSTOM in legal
         assert TurnType.SCHEMA_FORM in legal
-
-    def test_step_2_5_recipe_offer_only(self) -> None:
-        from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
-
-        legal = legal_turn_types_for(GuidedStep.STEP_2_5_RECIPE_MATCH)
-        assert legal == frozenset({TurnType.RECIPE_OFFER})
+        assert TurnType.REVIEW_COMPONENTS in legal
 
     def test_step_3_legal_types(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep, legal_turn_types_for
 
         legal = legal_turn_types_for(GuidedStep.STEP_3_TRANSFORMS)
-        assert TurnType.PROPOSE_CHAIN in legal
+        assert TurnType.PROPOSE_PIPELINE in legal
         assert TurnType.SINGLE_SELECT in legal
 
     def test_step_4_wire_confirm_wiring_only(self) -> None:
@@ -221,6 +205,252 @@ class TestLegalTurnMatrix:
 
 
 class TestPayloadValidation:
+    def test_review_components_golden_payload_validates(self) -> None:
+        payload = {
+            "component_kind": "output",
+            "items": [
+                {
+                    "stable_id": "33333333-3333-4333-8333-333333333333",
+                    "name": "primary",
+                    "plugin": "json",
+                    "status": "reviewed",
+                },
+                {
+                    "stable_id": "44444444-4444-4444-8444-444444444444",
+                    "name": "archive",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                },
+            ],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is None
+        assert (
+            validate_current_turn(
+                GuidedStep.STEP_2_SINK,
+                {"type": "review_components", "step_index": 1, "payload": payload},
+            )
+            is TurnType.REVIEW_COMPONENTS
+        )
+
+    def test_review_components_rejects_status_str_subclass(self) -> None:
+        class ReviewedStatus(str):
+            pass
+
+        payload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": "11111111-1111-4111-8111-111111111111",
+                    "name": "orders",
+                    "plugin": "csv",
+                    "status": ReviewedStatus("reviewed"),
+                }
+            ],
+            "allowed_actions": ["add", "edit", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    def test_review_components_rejects_more_than_256_items(self) -> None:
+        payload = {
+            "component_kind": "source",
+            "items": [
+                {
+                    "stable_id": str(UUID(int=index + 1)),
+                    "name": f"source_{index + 1}",
+                    "plugin": "csv",
+                    "status": "reviewed",
+                }
+                for index in range(257)
+            ],
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    @pytest.mark.parametrize(
+        "mutation",
+        [
+            {"component_kind": "node"},
+            {"component_kind": []},
+            {"items": []},
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-33333333333A",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "reviewed",
+                    }
+                ]
+            },
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-333333333333",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "pending",
+                    }
+                ]
+            },
+            {
+                "items": [
+                    {
+                        "stable_id": "33333333-3333-4333-8333-333333333333",
+                        "name": "primary",
+                        "plugin": "json",
+                        "status": "reviewed",
+                        "options": {"path": "/private/output.jsonl"},
+                    }
+                ]
+            },
+            {"allowed_actions": ["add", "edit", "edit", "finish"]},
+            {"allowed_actions": ["add", "replace", "finish"]},
+            {"selected_index": 0},
+        ],
+        ids=[
+            "closed-kind",
+            "unhashable-kind",
+            "nonempty-items",
+            "canonical-id",
+            "closed-status",
+            "no-private-options",
+            "duplicate-action",
+            "closed-action",
+            "no-index-authority",
+        ],
+    )
+    def test_review_components_rejects_malformed_payload(self, mutation: dict[str, Any]) -> None:
+        payload: dict[str, Any] = {
+            "component_kind": "output",
+            "items": [
+                {
+                    "stable_id": "33333333-3333-4333-8333-333333333333",
+                    "name": "primary",
+                    "plugin": "json",
+                    "status": "reviewed",
+                }
+            ],
+            "allowed_actions": ["add", "edit", "reorder", "finish"],
+        }
+        payload.update(mutation)
+
+        assert validate_payload(TurnType.REVIEW_COMPONENTS, payload) is not None
+
+    def test_review_components_rejects_duplicate_ids_and_names(self) -> None:
+        first = {
+            "stable_id": "33333333-3333-4333-8333-333333333333",
+            "name": "primary",
+            "plugin": "json",
+            "status": "reviewed",
+        }
+        base = {
+            "component_kind": "output",
+            "allowed_actions": ["add", "edit", "remove", "reorder", "finish"],
+        }
+        for second in (
+            {**first, "name": "archive"},
+            {**first, "stable_id": "44444444-4444-4444-8444-444444444444"},
+        ):
+            assert validate_payload(TurnType.REVIEW_COMPONENTS, {**base, "items": [first, second]}) is not None
+
+    @pytest.mark.parametrize(
+        ("step", "turn"),
+        [
+            (
+                GuidedStep.STEP_1_SOURCE,
+                {
+                    "type": "inspect_and_confirm",
+                    "step_index": 0,
+                    "payload": {"observed": {"columns": [1], "samples": [], "warnings": []}},
+                },
+            ),
+            (
+                GuidedStep.STEP_1_SOURCE,
+                {
+                    "type": "single_select",
+                    "step_index": 0,
+                    "payload": {
+                        "question": "Choose",
+                        "options": [{"id": "csv", "label": "CSV", "hint": None, "canary": True}],
+                        "allow_custom": False,
+                    },
+                },
+            ),
+            (
+                GuidedStep.STEP_2_SINK,
+                {
+                    "type": "multi_select_with_custom",
+                    "step_index": 1,
+                    "payload": {
+                        "question": "Choose fields",
+                        "options": [],
+                        "default_chosen": [1],
+                        "escape_label": None,
+                    },
+                },
+            ),
+            (
+                GuidedStep.STEP_1_SOURCE,
+                {
+                    "type": "schema_form",
+                    "step_index": 0,
+                    "payload": {
+                        "mode": "plugin_options",
+                        "plugin": "csv",
+                        "knobs": {
+                            "fields": [
+                                {
+                                    "name": "path",
+                                    "label": "Path",
+                                    "kind": "credential-canary",
+                                    "required": True,
+                                    "nullable": False,
+                                }
+                            ]
+                        },
+                        "prefilled": {},
+                    },
+                },
+            ),
+            (
+                GuidedStep.STEP_4_WIRE,
+                {
+                    "type": "confirm_wiring",
+                    "step_index": 3,
+                    "payload": {
+                        "topology": {
+                            "sources": {
+                                "source": {
+                                    "id": 7,
+                                    "plugin": "csv",
+                                    "on_success": None,
+                                    "on_validation_failure": "discard",
+                                }
+                            },
+                            "nodes": [],
+                            "outputs": [],
+                        },
+                        "edge_contracts": [],
+                        "semantic_contracts": [],
+                        "warnings": [],
+                    },
+                },
+            ),
+        ],
+        ids=["inspect", "single-select", "multi-select", "schema-form", "confirm-wiring"],
+    )
+    def test_validate_current_turn_rejects_recursively_malformed_nonproposal_payloads(
+        self,
+        step: GuidedStep,
+        turn: dict[str, Any],
+    ) -> None:
+        with pytest.raises(ValueError, match="current-schema turn payload is invalid"):
+            validate_current_turn(step, turn)
+
     def test_validate_single_select_ok(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload
 
@@ -275,20 +505,78 @@ class TestPayloadValidation:
 
     def test_confirm_wiring_minimal_wire_payload_validates(self) -> None:
         payload = {
-            "topology": {"sources": {}, "nodes": [], "outputs": []},
-            "edge_contracts": [],
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
+            "sources": [],
+            "nodes": [],
+            "outputs": [],
+            "connections": [],
             "semantic_contracts": [],
             "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
+        }
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
+
+    def test_confirm_wiring_accepts_queue_node_type_generically(self) -> None:
+        # _WireNodeReview.node_type is a generic str transport field, not the
+        # closed composition vocabulary, so a queue node validates without any
+        # queue-specific schema branch (elspeth-a5b86149d4 / elspeth-6421ffa028).
+        payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
+            "sources": [],
+            "nodes": [
+                {
+                    "stable_id": "00000000-0000-4000-8000-000000000002",
+                    "label": "node-1",
+                    "node_type": "queue",
+                    "plugin": None,
+                    "behavior": {"kind": "queue"},
+                    "required_fields": [],
+                    "guaranteed_fields": [],
+                    "row_cardinality": {
+                        "input": "many_producers",
+                        "output": "zero_or_many",
+                        "expected_output_count": None,
+                    },
+                    "structured_output_fields": [],
+                }
+            ],
+            "outputs": [],
+            "connections": [],
+            "semantic_contracts": [],
+            "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
         }
         assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
     def test_confirm_wiring_payload_missing_key_rejected(self) -> None:
-        err = validate_payload(TurnType.CONFIRM_WIRING, {"topology": {}})
+        err = validate_payload(TurnType.CONFIRM_WIRING, {})
         assert err is not None
         assert "confirm_wiring" in err
-        assert "edge_contracts" in err
+        assert "connections" in err
         assert "semantic_contracts" in err
         assert "warnings" in err
+
+    @pytest.mark.parametrize("missing", ["proposal_id", "draft_hash"])
+    def test_confirm_wiring_requires_pending_proposal_binding(self, missing: str) -> None:
+        payload = {
+            "proposal_id": "00000000-0000-4000-8000-000000000001",
+            "draft_hash": "d" * 64,
+            "sources": [],
+            "nodes": [],
+            "outputs": [],
+            "connections": [],
+            "semantic_contracts": [],
+            "warnings": [],
+            "blockers": [],
+            "can_confirm": True,
+        }
+        del payload[missing]
+
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is not None
 
     def test_schema_form_plugin_options_requires_plugin(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload
@@ -303,20 +591,6 @@ class TestPayloadValidation:
         )
         assert err is not None
         assert "plugin" in err
-
-    def test_schema_form_recipe_decision_requires_recipe_context(self) -> None:
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.SCHEMA_FORM,
-            {
-                "mode": "recipe_decision",
-                "knobs": {"fields": []},
-                "prefilled": {},
-            },
-        )
-        assert err is not None
-        assert "recipe_context" in err
 
     # ---------------------------------------------------------------------------
     # Recursive nested-shape validation (S4 uplift)
@@ -357,116 +631,6 @@ class TestPayloadValidation:
         assert "payload.observed" in err
         assert "mapping" in err
 
-    def test_recipe_offer_golden_validates(self) -> None:
-        """Full valid RECIPE_OFFER recipe-decision payload passes."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "mode": "recipe_decision",
-                "knobs": {
-                    "fields": [
-                        {
-                            "name": "x",
-                            "label": "X",
-                            "kind": "text",
-                            "required": True,
-                            "nullable": False,
-                        },
-                    ],
-                },
-                "prefilled": {},
-                "recipe_context": {
-                    "recipe_name": "r",
-                    "description": "Recipe",
-                    "alternatives": ["build_manually"],
-                },
-            },
-        )
-        assert err is None
-
-    def test_recipe_offer_empty_knobs_valid(self) -> None:
-        """Empty knob fields list is valid when resolver covered all required slots."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "mode": "recipe_decision",
-                "knobs": {"fields": []},
-                "prefilled": {"x": 1},
-                "recipe_context": {
-                    "recipe_name": "r",
-                    "description": "Recipe",
-                    "alternatives": [],
-                },
-            },
-        )
-        assert err is None
-
-    def test_recipe_offer_knobs_missing_fields_key(self) -> None:
-        """A knobs mapping missing ``fields`` is rejected path-locally."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "mode": "recipe_decision",
-                "knobs": {},
-                "prefilled": {},
-                "recipe_context": {
-                    "recipe_name": "r",
-                    "description": "Recipe",
-                    "alternatives": [],
-                },
-            },
-        )
-        assert err is not None
-        assert "payload.knobs" in err
-        assert "fields" in err
-
-    def test_recipe_offer_knobs_not_mapping(self) -> None:
-        """``knobs`` must be a Mapping, not a sequence or scalar."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "mode": "recipe_decision",
-                "knobs": "not-a-mapping",
-                "prefilled": {},
-                "recipe_context": {
-                    "recipe_name": "r",
-                    "description": "Recipe",
-                    "alternatives": [],
-                },
-            },
-        )
-        assert err is not None
-        assert "payload.knobs" in err
-        assert "mapping" in err
-
-    def test_recipe_offer_recipe_context_missing_key(self) -> None:
-        """recipe_context must carry the metadata banner fields."""
-        from elspeth.web.composer.guided.protocol import validate_payload
-
-        err = validate_payload(
-            TurnType.RECIPE_OFFER,
-            {
-                "mode": "recipe_decision",
-                "knobs": {"fields": []},
-                "prefilled": {},
-                "recipe_context": {
-                    "recipe_name": "r",
-                    "alternatives": [],
-                },
-            },
-        )
-        assert err is not None
-        assert "payload.recipe_context" in err
-        assert "description" in err
-
     def test_top_level_missing_key_error_takes_priority(self) -> None:
         """Missing top-level key is reported before nested checks run."""
         from elspeth.web.composer.guided.protocol import validate_payload
@@ -477,60 +641,3 @@ class TestPayloadValidation:
         assert "observed" in err
         # Path-rooted nested error should NOT appear when top-level is missing.
         assert "payload.observed" not in err
-
-
-class TestBuildStep3ProposeChainTurn:
-    """Tests for the propose_chain emitter (Task 4.5)."""
-
-    def test_emits_propose_chain_with_step_index_3(self) -> None:
-        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
-        from elspeth.web.composer.guided.state_machine import ChainProposal
-
-        proposal = ChainProposal(
-            steps=(
-                {
-                    "plugin": "passthrough",
-                    "options": {"schema": {"mode": "observed"}},
-                    "rationale": "no-op chain",
-                },
-            ),
-            why="rows already conform",
-        )
-
-        turn = build_step_3_propose_chain_turn(proposal)
-
-        assert turn["type"] == TurnType.PROPOSE_CHAIN.value
-        # STEP_3_TRANSFORMS is the 4th step (0-based index 3).
-        assert turn["step_index"] == 3
-
-    def test_payload_carries_steps_why_and_empty_blockers(self) -> None:
-        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
-        from elspeth.web.composer.guided.state_machine import ChainProposal
-
-        proposal = ChainProposal(
-            steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "r"},),
-            why="why-text",
-        )
-
-        turn = build_step_3_propose_chain_turn(proposal)
-        payload = turn["payload"]
-
-        assert set(payload.keys()) == {"steps", "why", "blockers"}
-        assert payload["why"] == "why-text"
-        # MVP-scope decision: blockers is always [] for server-emitted
-        # propose_chain — solve_chain raises rather than returning a
-        # partial proposal with blockers populated.
-        assert payload["blockers"] == []
-        assert payload["steps"][0]["plugin"] == "passthrough"
-
-    def test_payload_validates_against_propose_chain_schema(self) -> None:
-        from elspeth.web.composer.guided.emitters import build_step_3_propose_chain_turn
-        from elspeth.web.composer.guided.protocol import validate_payload
-        from elspeth.web.composer.guided.state_machine import ChainProposal
-
-        proposal = ChainProposal(
-            steps=({"plugin": "passthrough", "options": {"schema": {"mode": "observed"}}, "rationale": "r"},),
-            why="ok",
-        )
-        turn = build_step_3_propose_chain_turn(proposal)
-        assert validate_payload(TurnType.PROPOSE_CHAIN, turn["payload"]) is None

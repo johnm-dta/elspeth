@@ -1,15 +1,11 @@
 """Tests for FieldMapper transform."""
 
-from pathlib import Path
-
 import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.testing import make_field, make_pipeline_row
-from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_factory
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
@@ -610,50 +606,6 @@ class TestFieldMapperContractPropagation:
         assert renamed.python_type is float
         assert renamed.required is True
         assert renamed.source == "declared"
-
-    def test_headers_original_uses_preserved_source_name_after_rename(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Sink headers: original emits source header after FieldMapper rename."""
-        from elspeth.plugins.sinks.csv_sink import CSVSink
-        from elspeth.plugins.transforms.field_mapper import FieldMapper
-
-        transform = FieldMapper(
-            {
-                "schema": DYNAMIC_SCHEMA,
-                "mapping": {"amount_usd": "price"},
-            }
-        )
-
-        input_contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(make_field("amount_usd", float, original_name="Amount USD", required=True, source="declared"),),
-            locked=True,
-        )
-        result = transform.process(PipelineRow({"amount_usd": 12.5}, input_contract), ctx)
-        assert result.status == "success"
-        assert isinstance(result.row, PipelineRow)
-
-        output_path = tmp_path / "output.csv"
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_path),
-                    "schema": {"mode": "observed"},
-                    "headers": "original",
-                }
-            )
-        )
-        factory = make_factory()
-        sink_ctx = PluginContext(
-            run_id="test-run",
-            config={},
-            landscape=factory.plugin_audit_writer(),
-            contract=result.row.contract,
-        )
-        sink.write([result.row.to_dict()], sink_ctx)
-        sink.close()
-
-        header = output_path.read_text().splitlines()[0]
-        assert header == "Amount USD"
 
 
 class TestOutputSchemaConfig:

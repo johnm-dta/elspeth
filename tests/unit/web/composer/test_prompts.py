@@ -14,23 +14,37 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from elspeth.contracts.freeze import deep_freeze
-from elspeth.contracts.secrets import SecretInventoryItem
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, ControlMode, PluginCapability
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSecretRequirement, PluginSummary
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalReason, TerminalState
 from elspeth.web.composer.prompts import (
     SYSTEM_PROMPT,
-    build_context_string,
-    build_messages,
     build_run_diagnostics_messages,
     build_system_prompt,
 )
+from elspeth.web.composer.prompts import (
+    build_context_string as _build_context_string,
+)
+from elspeth.web.composer.prompts import (
+    build_messages as _build_messages,
+)
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 EXPECTED_REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 
@@ -75,6 +89,40 @@ class StubCatalog:
         raise ValueError(f"Not implemented for stub: {plugin_type}/{name}")
 
 
+def _trained_policy_context(catalog: CatalogService) -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return PolicyCatalogView.for_trained_operator(catalog, snapshot), snapshot
+
+
+def build_context_string(state: CompositionState, catalog: CatalogService, **kwargs: Any) -> str:
+    kwargs.pop("secret_service", None)
+    kwargs.pop("user_id", None)
+    view, snapshot = _trained_policy_context(catalog)
+    return _build_context_string(state, view, plugin_snapshot=snapshot, **kwargs)
+
+
+def build_messages(
+    chat_history: list[dict[str, Any]],
+    state: CompositionState,
+    user_message: str,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    kwargs.pop("secret_service", None)
+    kwargs.pop("user_id", None)
+    view, snapshot = _trained_policy_context(catalog)
+    return _build_messages(
+        chat_history,
+        state,
+        user_message,
+        view,
+        data_dir,
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
+
+
 class PromptShieldCatalog(StubCatalog):
     def list_transforms(self) -> list[PluginSummary]:
         return [
@@ -95,18 +143,6 @@ class PromptShieldCatalog(StubCatalog):
                 secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
             ),
         ]
-
-
-class SecretResolverStub:
-    def __init__(self, inventory: list[SecretInventoryItem], available_names: set[str]) -> None:
-        self._inventory = inventory
-        self._available_names = available_names
-
-    def list_refs(self, _user_id: str) -> list[SecretInventoryItem]:
-        return self._inventory
-
-    def has_ref(self, _user_id: str, name: str) -> bool:
-        return name in self._available_names
 
 
 def _stub_catalog() -> CatalogService:
@@ -256,6 +292,81 @@ class TestBuildContextString:
         assert "passthrough" in plugins["transforms"]
         assert "csv" in plugins["sinks"]
 
+    def test_context_emits_only_safe_policy_inventory(self) -> None:
+        class _CapabilityCatalog(StubCatalog):
+            def list_transforms(self) -> list[PluginSummary]:
+                return [
+                    PluginSummary(
+                        name="llm",
+                        description="LLM transform",
+                        plugin_type="transform",
+                        config_fields=[],
+                        policy_capabilities=(CapabilityDeclaration(PluginCapability.LLM),),
+                    )
+                ]
+
+        catalog: CatalogService = _CapabilityCatalog()
+        base = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash=base.policy_hash,
+            principal_scope=base.principal_scope,
+            available=base.available,
+            unavailable=base.unavailable,
+            selected=base.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint=base.binding_generation_fingerprint,
+            control_modes=((PluginCapability.LLM, ControlMode.REQUIRED),),
+        )
+        view = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+
+        context = _build_context_string(_empty_state(), view, plugin_snapshot=snapshot, schemas_loaded=frozenset())
+        policy = json.loads(context.split("\n", 1)[1])["plugin_policy"]
+
+        assert policy["capability_groups"] == {"llm": ["transform:llm"]}
+        assert policy["selected"]["llm"] == "transform:llm"
+        assert policy["control_modes"] == {"llm": "required"}
+        assert "OPENROUTER_API_KEY" not in context
+        assert "provider" not in json.dumps(policy)
+
+    def test_context_exposes_only_opaque_bedrock_profile_inventory(self) -> None:
+        prompt_id = PluginId("transform", "aws_bedrock_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="bedrock-policy",
+            principal_scope="local:alice",
+            available=frozenset({prompt_id}),
+            unavailable=(),
+            selected=((PluginCapability.PROMPT_SHIELD, prompt_id),),
+            usable_profile_aliases=((prompt_id, ("prompt-default",)),),
+            selected_profile_aliases=((prompt_id, "prompt-default"),),
+            control_modes=((PluginCapability.PROMPT_SHIELD, ControlMode.REQUIRED),),
+            binding_generation_fingerprint="bedrock-binding",
+        )
+        catalog = create_catalog_service()
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
+
+        context = _build_context_string(
+            _empty_state(),
+            view,
+            plugin_snapshot=snapshot,
+            schemas_loaded=frozenset(),
+        )
+        policy = json.loads(context.split("\n", 1)[1])["plugin_policy"]
+
+        assert policy["usable_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": ["prompt-default"]}
+        assert policy["selected_profile_aliases"] == {"transform:aws_bedrock_prompt_shield": "prompt-default"}
+        rendered = json.dumps(policy, sort_keys=True)
+        for private in (
+            "private-guardrail-marker",
+            "private-version-marker",
+            "private-region-marker",
+            "AWS_SECRET_ACCESS_KEY",
+            "arn:aws:iam::123456789012:role/private-role",
+            "https://private-endpoint.invalid",
+            "local_requirement_unavailable",
+        ):
+            assert private not in rendered
+
     def test_context_includes_discovery_time_composer_hints(self) -> None:
         """The LLM sees JIT hints even when it does not call list_* first."""
         state = _empty_state()
@@ -274,17 +385,24 @@ class TestBuildContextString:
             },
         }
 
-    def test_secret_unavailable_prompt_shield_is_hidden_from_dynamic_context(self) -> None:
+    def test_snapshot_unavailable_prompt_shield_is_hidden_from_dynamic_context(self) -> None:
         state = _empty_state()
         catalog: CatalogService = PromptShieldCatalog()
-        secret_service = SecretResolverStub(
-            inventory=[
-                SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
-            ],
-            available_names={"OPENROUTER_API_KEY"},
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        shield_id = PluginId("transform", "azure_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="restricted",
+            principal_scope="local:test-user",
+            available=unrestricted.available - {shield_id},
+            unavailable=(PluginAvailability(shield_id, PluginUnavailableReason.CREDENTIAL_MISSING),),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="restricted",
         )
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
 
-        context = build_context_string(state, catalog, secret_service=secret_service, user_id="test-user")
+        context = _build_context_string(state, view, plugin_snapshot=snapshot)
         parsed = json.loads(context.split("\n", 1)[1])
 
         assert parsed["available_plugins"]["transforms"] == ["web_scrape"]
@@ -389,27 +507,20 @@ class TestBuildSystemPrompt:
         assert "`classify -> aggregate -> cross-tab`" in flattened
         assert "`split/expand -> gate-route per branch`" in flattened
 
-    def test_core_skill_recommends_prompt_shield_for_internet_content_to_llm(self) -> None:
-        """The general skill treats internet-controlled text entering an LLM as a cyber risk."""
+    def test_core_skill_requires_policy_discovered_prompt_injection_control(self) -> None:
+        """The static skill preserves the cyber safeguard without naming a deployment plugin."""
         result = build_system_prompt(None)
         flattened = " ".join(result.split())
 
-        assert "### Internet content flowing into LLMs" in result
-        assert "public internet content" in result
-        assert "prompt-injection defence" in result
-        assert "azure_prompt_shield" in result
-        assert "only when it appears in `available_plugins.transforms`" in result
-        assert 'user_term="prompt_injection_shield_recommendation"' in result
-        assert "stage that direct-routing choice" in result
-        assert 'pending `kind="pipeline_decision"` requirement on the LLM node' in result
-        assert "Do not insert the shield automatically" in result
-        assert "A recommendation is not permission to add a node" in result
-        assert "Do not add `azure_prompt_shield` merely because content is public internet" in result
-        assert "Do not add passthrough, placeholder, no-op, or renamed utility nodes to imply prompt-injection shielding" in flattened
-        assert "A recommendation is prose, not a fake topology step" in flattened
-        assert "If the user declines" in result
-        assert "Do not substitute `azure_content_safety`" in result
-        assert "For intranet or controlled internal pages" in result
+        assert "### Untrusted content flowing into models" in result
+        assert "material prompt-injection risk" in flattened
+        assert "live policy capability groups, plugin schemas, and plugin assistance" in flattened
+        assert "Recommend only a control that discovery proves is available" in flattened
+        assert "stage a pending `pipeline_decision` requirement" in flattened
+        assert "A recommendation is not permission to add a node" in flattened
+        assert "placeholder, passthrough, or renamed utility is not protection" in flattened
+        assert "Do not substitute content moderation for prompt-injection protection" in flattened
+        assert "azure_prompt_shield" not in result
 
     def test_core_skill_flags_delegated_source_generation(self) -> None:
         """User-delegated source choice must create an invented-source review site."""
@@ -446,10 +557,14 @@ class TestBuildSystemPrompt:
         assert "Do not ask the user for a source blob id" in flattened
         assert "do not claim the blob no longer exists" in flattened
         assert "retry the complete workflow" in flattened
-        assert "`columns` controls how a headerless CSV is parsed; it is not by itself a DAG contract" in flattened
-        assert "the source schema must guarantee that field by name" in flattened
-        assert "`schema.guaranteed_fields`" in result
-        assert "the artifact you wrote is authoritative for its header/column names" in flattened
+        assert "load its live schema and assistance before serializing generated content" in flattened
+        assert "exact record framing, escaping, field declaration, and option semantics" in flattened
+        assert "Do not infer any of those facts from a plugin name" in flattened
+        assert "Bind the exact generated bytes to a session source" in flattened
+        assert "Declare authored fields only through the selected source's schema-defined contract mechanism" in flattened
+        assert "does not accept generated content, choose another policy-visible source" in flattened
+        assert "never synthesize a remote location, identifier, or placeholder" in flattened
+        assert "use the plugin's diagnostics and live authority" in flattened
         assert "Do not stop by saying the source contract is incomplete" in flattened
 
     def test_core_skill_requires_uploaded_blob_discovery_before_mutation(self) -> None:
@@ -460,8 +575,8 @@ class TestBuildSystemPrompt:
         assert "If the user says they uploaded, attached, provided, or already have a file in the session" in flattened
         assert "discover it before the first source-binding or `set_pipeline` mutation" in flattened
         assert "Call `list_blobs` or `list_composer_blobs`" in flattened
-        assert "then call `inspect_source` before declaring columns, schema fields, or gate conditions" in flattened
-        assert "Do not synthesize a header-only inline CSV" in flattened
+        assert "then call `inspect_source` before declaring fields, schema facts, or gate conditions" in flattened
+        assert "Do not synthesize a replacement artifact" in flattened
         assert "ask one narrow file-selection question" in flattened
 
     def test_core_skill_rejects_persona_column_and_format_fabrication(self) -> None:
@@ -471,8 +586,9 @@ class TestBuildSystemPrompt:
 
         assert 'Do not turn persona prose such as "approval status indicator" into a column name like `approval_status`' in flattened
         assert "inspect the source and use the literal observed header such as `approved`" in flattened
-        assert "For row-file routing/splitting requests, default outputs to the source row format" in flattened
-        assert "CSV source means CSV sinks unless the user explicitly asks for JSON/JSONL" in flattened
+        assert "choose output plugins and formats from the user's requested result" in flattened
+        assert "each policy-visible sink's live contract" in flattened
+        assert "Do not infer sink behavior from the source plugin's name or from static format lore" in flattened
 
     def test_core_skill_requires_draft_first_on_opening_build_turns(self) -> None:
         """Under-specified opening build asks should mutate state before waiting."""
@@ -489,17 +605,14 @@ class TestBuildSystemPrompt:
         assert "commit the buildable scaffold with a named gap" in flattened
 
     def test_core_skill_rejects_plugin_contract_whiplash(self) -> None:
-        """Plugin schema facts must remain stable across self-correction turns."""
+        """Plugin facts remain stable, but only live discovery defines them."""
         result = build_system_prompt(None)
         flattened = " ".join(result.split())
 
         assert "Plugin schema facts are stable across turns" in flattened
         assert "Do not reinterpret a missing config option as a missing output field" in flattened
-        assert "`batch_stats` always emits `count` and `sum`" in flattened
-        assert "`compute_mean` only controls whether `mean` is also emitted" in flattened
-        assert "Never propose `compute_sum` or `compute_count`" in flattened
-        assert "If the state is unchanged and validation passed" in flattened
-        assert "do not reverse a prior plugin-contract conclusion from visible options alone" in flattened
+        assert "dynamic discovery is the only authority for plugin-specific fields and output behavior" in flattened
+        assert "For `batch_stats`" not in result
 
     def test_core_skill_treats_authored_rubrics_as_reviewable(self) -> None:
         """LLM-authored scoring semantics must create vague-term review cards."""
@@ -559,50 +672,21 @@ class TestBuildSystemPrompt:
         assert '"primary colours used"' in result
         assert "does not by itself require a `vague_term` review" in result
 
-    def test_core_skill_requires_cleanup_mapper_before_sink_for_scraped_results(self) -> None:
-        """Saved web-scrape enrichments must route through cleanup before the sink."""
+    def test_core_skill_requires_schema_proven_cleanup_before_sink(self) -> None:
+        """Saved derived results minimize raw/private intermediates without plugin folklore."""
         result = build_system_prompt(None)
         flattened = " ".join(result.split())
 
-        assert "### Raw Scraped-Content Cleanup" in result
-        assert "must include a cleanup step immediately before the sink" in result
-        assert "Do not wire `web_scrape` or a downstream `llm` node directly to the sink" in result
-        assert "Insert `field_mapper` between the last enrichment node and the sink" in result
-        assert "`source -> web_scrape -> llm -> field_mapper(cleanup) -> sink`" in result
-        assert "That `field_mapper` is a real transform node" in result
-        assert "Even if the graph validator accepts an LLM directly routed to a sink" in flattened
-        assert "Do not call interpretation-review tools or stop in pending-review state until the cleanup mapper exists" in flattened
-        assert "A validator-valid direct route from `web_scrape` or `llm` to a user-facing sink is still skill-incomplete" in flattened
-        assert "A common incomplete shape is:" in result
-        assert "`source -> web_scrape -> llm -> json sink`" in result
-        assert "even when the LLM `on_success`, sink name, or output name contains words like" in flattened
-        assert "The `llm` transform writes its response field and passes through upstream row fields" in flattened
-        assert "A JSON sink writes the row it receives" in flattened
-        assert "does not select or remove fields" in flattened
-        assert "add a real `field_mapper` with `select_only: true` immediately before the sink" in flattened
-        assert "`select_only: true`" in result
-        assert '`user_term="drop_raw_html_fields"`' in result
-        assert "Raw HTML cleanup is a pipeline decision" in result
-        assert "A sink name, output name, node id, or metadata description that says cleanup" in flattened
-        assert "A stream or connection name that says cleanup is not cleanup" in flattened
-        assert "Only a transform node whose `plugin` is `field_mapper` counts as cleanup" in flattened
-        assert "A direct edge from the LLM or scraper to a JSON sink means cleanup is missing" in flattened
-        assert "If a producer points at a cleanup stream but no `field_mapper` consumes that stream" in flattened
-        assert "create the `field_mapper` in the next full `set_pipeline`" in flattened
-        assert "Do not end with an offer to repair this next" in flattened
-        assert "Before stopping, inspect the final edge into each user-facing sink" in flattened
-        assert "its predecessor must be the cleanup `field_mapper`" in flattened
-        assert "If the cleanup mapper exists but its `on_success` points to an intermediate stream" in flattened
-        assert "Removing the cleanup mapper or the output is not a repair" in flattened
-        assert "A mapper before `web_scrape` or before raw scraped fields exist cannot satisfy scraped-content cleanup" in flattened
-        assert "cleanup drops raw scrape artifacts, not the requested analysis" in flattened
-        assert "Preserve requested enrichment, extraction, scoring, or LLM response fields" in flattened
-        assert "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields" in flattened
-        assert "that request is the authorization and requirement to add the cleanup `field_mapper`" in flattened
-        assert "do not ask whether to add cleanup later" in flattened
-        assert "The `pipeline_decision` review records the exact row-shaping decision for audit" in flattened
-        assert "not permission to omit the cleanup node" in flattened
-        assert 'use the stable `user_term="drop_raw_html_fields"`' in flattened
+        assert "### Output data minimization" in result
+        assert "policy-visible cleanup or projection transform" in flattened
+        assert "live schema and assistance prove it removes unwanted fields" in flattened
+        assert "immediately before the sink" in flattened
+        assert "Preserve requested result fields" in flattened
+        assert "raw bodies, fingerprints, credentials, and private intermediate data" in flattened
+        assert "does not remove data" in flattened
+        assert "configured options actually project or remove fields" in flattened
+        assert "stage that row-shaping choice as a pending `pipeline_decision`" in flattened
+        assert "field_mapper" not in result
 
     def test_core_skill_preserves_requested_workflow_during_repairs(self) -> None:
         """Validation repairs must not shrink away user-requested behavior."""
@@ -622,9 +706,9 @@ class TestBuildSystemPrompt:
         assert "create a blob from the generated rows, bind it as the source, and retry the complete workflow" in flattened
         assert "Source or node options rejected with extra/unknown fields" in flattened
         assert "Remove the rejected fields from that component's options" in flattened
-        assert "Consumer requires a generated or inspected CSV column but source guarantees are empty" in flattened
-        assert "Patch the source schema to guarantee that known column" in flattened
-        assert "do not ask the user to confirm a column you authored or inspected" in flattened
+        assert "Consumer requires a generated or inspected source field but source guarantees are empty" in flattened
+        assert "Declare that known field through the selected source's schema-defined contract mechanism" in flattened
+        assert "do not ask the user to confirm a field you authored or inspected" in flattened
         assert "Rejected `set_pipeline` used `source.inline_blob` and the source blob is absent afterward" in flattened
         assert "Failed mutations do not create reusable blobs" in flattened
         assert "do not ask for a blob id" in flattened
@@ -663,7 +747,7 @@ class TestBuildSystemPrompt:
             in flattened
         )
         assert "repair the topology first, then surface the review cards" in flattened
-        assert "Review acceptance is not required before adding a missing cleanup `field_mapper`" in flattened
+        assert "Review acceptance is not required before adding a missing schema-proven cleanup transform" in flattened
         assert "Do not treat a subset of pending review cards as enough" in flattened
         assert "missing `vague_term` or prompt-injection recommendation review is still non-terminal" in flattened
 
@@ -700,20 +784,28 @@ class TestBuildSystemPrompt:
         assert "Every downstream field dependency must be backed by an upstream schema guarantee" in flattened
         assert "Do not make an LLM prompt template, cleanup mapping, sink, or transform require a field" in flattened
         assert "If the exact value matters to the output or audit trail, preserve it explicitly" in flattened
-        assert "Do not repair a missing-field validation error by guessing `guaranteed_fields`" in flattened
-        assert "wire the required field through the graph" in flattened
-        assert "When a downstream cleanup, sink, mapper, or transform needs an LLM response field" in flattened
-        assert "the LLM node must guarantee that `response_field` by name" in flattened
-        assert "also guarantee any pass-through fields the downstream node requires" in flattened
-        assert "Single-query LLM output is written to `response_field`" in flattened
-        assert "JSON keys requested inside the prompt are not separate pipeline fields unless another transform parses them" in flattened
-        assert "Preserve `response_field` through cleanup rather than invented prompt-internal keys" in flattened
-        assert "If `web_scrape` output feeds an LLM prompt that needs the original URL" in flattened
-        assert "Do not require `url` from a scrape node whose schema does not guarantee `url`" in flattened
-        assert "The final producer's `on_success` must exactly match the JSON sink name" in flattened
+        assert "repair a missing field by guessing guarantees" in flattened
+        assert "preserve or rename the real field through the graph" in flattened
+        assert "derive the model node's emitted and pass-through fields only from" in flattened
+        assert "selected policy-visible plugin's live schema and assistance" in flattened
+        assert "Prompt text and object-shaped prose do not create pipeline fields" in flattened
+        assert "Preserve the schema-proven outputs through cleanup" in flattened
+        assert "require that field only when the upstream schema guarantees it" in flattened
+        assert "The final producer's routing field must exactly match the sink/connection name" in flattened
         assert "Edge objects alone do not make a sink receive rows" in flattened
-        assert "set the LLM `on_success` to the cleanup mapper's input stream" in flattened
-        assert "set the cleanup mapper's `on_success` to the sink name" in flattened
+        assert "route through every intervening cleanup node" in flattened
+
+    def test_core_skill_never_invents_wire_visible_identity(self) -> None:
+        """Deployment identity/contact values come only from policy-filtered discovery."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Wire-visible identity, purpose, custody, and contact values" in flattened
+        assert "policy-filtered schema and plugin assistance" in flattened
+        assert "Never invent a deployment identity, contact, secret, or fallback" in flattened
+        assert "stage that exact decision for review" in flattened
+        assert "abuse-contact-unset@elspeth.foundryside.dev" not in result
+        assert "web_scrape" not in result
 
     def test_core_skill_treats_utility_transforms_as_planned_plugins(self) -> None:
         """Utility transforms must be planned even when the user names only the end effect."""
@@ -723,9 +815,9 @@ class TestBuildSystemPrompt:
         assert "### Utility Transforms" in result
         assert "Users often describe the effect, not the utility plugin" in flattened
         assert "Plan utility transforms explicitly when the requested workflow needs row shaping" in flattened
-        assert "field_mapper" in flattened
-        assert "load its schema before `set_pipeline`" in flattened
-        assert "Do not skip utility transforms just because the user did not name them" in flattened
+        assert "Discover an appropriate policy-visible plugin" in flattened
+        assert "load its schema before proposing" in flattened
+        assert "do not skip a required utility transform" in flattened
 
 
 class TestBuildRunDiagnosticsMessages:
@@ -832,7 +924,7 @@ def _blob_source_state(
 
 def _completed_terminal() -> TerminalState:
     """A COMPLETED TerminalState (no reason required)."""
-    return TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=None)
+    return TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml="pipeline: complete\n")
 
 
 def _exited_terminal(reason: TerminalReason = TerminalReason.USER_PRESSED_EXIT) -> TerminalState:
@@ -926,11 +1018,11 @@ class TestBuildMessagesGuidedTerminal:
             state,
             "continue",
             catalog,
-            guided_terminal=_exited_terminal(TerminalReason.SOLVER_EXHAUSTED),
+            guided_terminal=_exited_terminal(TerminalReason.USER_PRESSED_EXIT),
         )
 
         system_content = messages[0]["content"]
-        assert "solver_exhausted" in system_content
+        assert "user_pressed_exit" in system_content
 
     def test_guided_terminal_exited_without_reason_raises_invariant_error_no_leak(self) -> None:
         """obs-ae69e10e00 regression: an EXITED_TO_FREEFORM TerminalState with
@@ -950,16 +1042,15 @@ class TestBuildMessagesGuidedTerminal:
         """
         state = _empty_state()
         catalog = _stub_catalog()
-        # Construct an invalid TerminalState directly — bypass the step_advance
-        # invariant that would normally prevent this combination.  Sentinel
+        # Construct an invalid TerminalState directly to bypass its normal
+        # construction invariant. Sentinel
         # strings in pipeline_yaml pin the no-leak assertion: if the {!r}
         # interpolation regresses, the assertion fires.
         sentinel_yaml = "source:\n  options:\n    secret_ref: env://LEAKED_SECRET_SENTINEL_AE69E10E00\n"
-        bad_terminal = TerminalState(
-            kind=TerminalKind.EXITED_TO_FREEFORM,
-            reason=None,
-            pipeline_yaml=sentinel_yaml,
-        )
+        bad_terminal = object.__new__(TerminalState)
+        object.__setattr__(bad_terminal, "kind", TerminalKind.EXITED_TO_FREEFORM)
+        object.__setattr__(bad_terminal, "reason", None)
+        object.__setattr__(bad_terminal, "pipeline_yaml", sentinel_yaml)
 
         with pytest.raises(InvariantError) as exc_info:
             build_messages(

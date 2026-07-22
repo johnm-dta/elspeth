@@ -47,6 +47,23 @@
   gap: var(--space-xs);
 }
 
+/* Compose-timeout bootstrap notice for the side-rail Apply: soft, transient
+   "connecting" status shown while the backend wall clock is still landing.
+   Muted register — mirrors .chat-input-bootstrapping on the main Send. */
+.side-rail-suggestion-connecting {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* Stuck state: backend reachable but reported no usable compose timeout, so
+   Apply can never ungate. Error register (not the muted "connecting" one). */
+.side-rail-suggestion-unavailable {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
 .side-rail-suggestion-item {
   display: flex;
   align-items: flex-start;
@@ -247,6 +264,89 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
+}
+
+.import-yaml-preview {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+}
+
+.import-yaml-preview-section {
+  display: grid;
+  gap: var(--space-2xs);
+}
+
+.import-yaml-preview-heading {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+
+.import-yaml-preview-counts,
+.import-yaml-preview-ok,
+.import-yaml-preview-warning {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.import-yaml-preview-counts,
+.import-yaml-preview-ok {
+  color: var(--color-text);
+}
+
+.import-yaml-preview-warning {
+  color: var(--color-warning);
+}
+
+.import-yaml-source-bindings {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+}
+
+.import-yaml-source-bindings-heading {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+
+.import-yaml-source-bindings-list {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.import-yaml-source-binding-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-xs);
+}
+
+.import-yaml-source-binding-detail {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.import-yaml-source-binding-name {
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+
+.import-yaml-source-binding-detail code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .import-yaml-actions {

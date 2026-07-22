@@ -8,10 +8,7 @@
 //      that is Prism's contract, not ours.)
 //   2. Task-oriented terminal actions render as <button type="button">.
 //   3. The freeform click invokes useSessionStore.exitToFreeform once.
-//   5. pipeline_yaml === null -> widget returns null (nothing rendered).
-//      This is the strict gate: no defensive ?? "" coercion to silently
-//      render an empty highlight block.
-//   6. terminal.kind !== "completed" handling -- the parent should not render
+//   5. terminal.kind !== "completed" handling -- the parent should not render
 //      CompletionSummary in non-completed terminals.  The widget defensively
 //      returns null in that case as well.  Negative-space pin.
 //   7. Distinctness pin (Task 7.4 I4 inheritance): two simultaneous
@@ -49,12 +46,6 @@ const COMPLETED_TERMINAL: TerminalState = {
   kind: "completed",
   reason: null,
   pipeline_yaml: 'source:\n  plugin: csv\n  options:\n    path: data.csv\n',
-};
-
-const COMPLETED_TERMINAL_NULL_YAML: TerminalState = {
-  kind: "completed",
-  reason: null,
-  pipeline_yaml: null,
 };
 
 const EXITED_TERMINAL: TerminalState = {
@@ -103,7 +94,7 @@ describe("CompletionSummary -- button identity", () => {
   it("renders task-oriented action buttons with type='button'", () => {
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
     expect(screen.getAllByRole("button")).toHaveLength(3);
-    for (const name of [/open freeform editor/i, /review yaml/i, /validate pipeline/i]) {
+    for (const name of [/open freeform editor/i, /export yaml/i, /validate pipeline/i]) {
       expect(screen.getByRole("button", { name }).getAttribute("type")).toBe("button");
     }
   });
@@ -126,13 +117,13 @@ describe("CompletionSummary -- exit action", () => {
     expect(mockExit).toHaveBeenCalledWith();
   });
 
-  it("clicking 'Review YAML' opens the YAML export modal", async () => {
+  it("clicking 'Export YAML' opens the YAML export modal", async () => {
     const user = userEvent.setup();
     const handler = vi.fn();
     window.addEventListener(OPEN_YAML_MODAL_EVENT, handler);
 
     render(<CompletionSummary terminal={COMPLETED_TERMINAL} />);
-    await user.click(screen.getByRole("button", { name: /review yaml/i }));
+    await user.click(screen.getByRole("button", { name: /export yaml/i }));
 
     expect(handler).toHaveBeenCalledTimes(1);
     window.removeEventListener(OPEN_YAML_MODAL_EVENT, handler);
@@ -151,24 +142,7 @@ describe("CompletionSummary -- exit action", () => {
   });
 });
 
-// ── Contract 5: pipeline_yaml === null -> widget returns null ─────────────────
-
-describe("CompletionSummary -- null pipeline_yaml guard", () => {
-  it("returns null (renders nothing) when terminal.pipeline_yaml is null", () => {
-    const { container } = render(
-      <CompletionSummary terminal={COMPLETED_TERMINAL_NULL_YAML} />,
-    );
-    // Strict null render -- no buttons, no heading, no pre
-    expect(container.firstChild).toBeNull();
-  });
-
-  it("does not render any button when pipeline_yaml is null", () => {
-    render(<CompletionSummary terminal={COMPLETED_TERMINAL_NULL_YAML} />);
-    expect(screen.queryByRole("button")).toBeNull();
-  });
-});
-
-// ── Contract 6: non-completed terminal -> null ────────────────────────────────
+// ── Contract 5: non-completed terminal -> null ────────────────────────────────
 
 describe("CompletionSummary -- non-completed terminal guard (negative space)", () => {
   it("returns null when terminal.kind is 'exited_to_freeform'", () => {
@@ -242,7 +216,7 @@ describe("CompletionSummary -- tutorial suppression (concern B)", () => {
     // button count, so a regression that drops a non-freeform button can't
     // slip past an absent-button-only check.
     expect(
-      screen.getByRole("button", { name: "Review YAML" }),
+      screen.getByRole("button", { name: "Export YAML" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Validate pipeline" }),

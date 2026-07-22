@@ -13,13 +13,15 @@ Plugin Types:
 """
 
 from collections.abc import Iterator, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from elspeth.contracts.enums import (
+    CallType,
     DeclaredAuditCharacteristics,
     Determinism,
 )
 from elspeth.contracts.header_modes import HeaderMode
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
 from elspeth.contracts.schema import SchemaConfig
 
 if TYPE_CHECKING:
@@ -30,6 +32,16 @@ if TYPE_CHECKING:
     from elspeth.contracts.results import SourceRow, TransformResult
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
+    from elspeth.contracts.sink_effects import (
+        RestrictedSinkEffectContext,
+        SinkEffectCommitResult,
+        SinkEffectInputKind,
+        SinkEffectInspection,
+        SinkEffectInspectionRequest,
+        SinkEffectPlan,
+        SinkEffectPrepareRequest,
+        SinkEffectReconcileResult,
+    )
 
 
 class PluginConfigProtocol(Protocol):
@@ -87,6 +99,8 @@ class _PluginReferenceContent(Protocol):
     usage_when_not_to_use: str | None
     example_use: str | None
     capability_tags: tuple[str, ...]
+    web_config_authority: WebConfigAuthority
+    policy_capabilities: frozenset[CapabilityDeclaration]
     audit_characteristics: DeclaredAuditCharacteristics
     discovery_secret_requirements: Mapping[str, tuple[str, ...]]
 
@@ -864,6 +878,43 @@ class SinkProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
         a discriminated union.
         """
         ...
+
+
+class SinkEffectProtocol(SinkProtocol, Protocol):
+    """Explicit opt-in contract for recoverable sink publication effects."""
+
+    effect_protocol_version: ClassVar[str]
+    effect_call_type: ClassVar[CallType]
+    supported_effect_modes: ClassVar[frozenset[str]]
+    supported_effect_input_kinds: ClassVar[frozenset["SinkEffectInputKind"]]
+
+    def inspect_effect(
+        self,
+        request: "SinkEffectInspectionRequest",
+        ctx: "RestrictedSinkEffectContext",
+    ) -> "SinkEffectInspection":
+        raise NotImplementedError
+
+    def prepare_effect(
+        self,
+        request: "SinkEffectPrepareRequest",
+        ctx: "RestrictedSinkEffectContext",
+    ) -> "SinkEffectPlan":
+        raise NotImplementedError
+
+    def commit_effect(
+        self,
+        plan: "SinkEffectPlan",
+        ctx: "RestrictedSinkEffectContext",
+    ) -> "SinkEffectCommitResult":
+        raise NotImplementedError
+
+    def reconcile_effect(
+        self,
+        plan: "SinkEffectPlan",
+        ctx: "RestrictedSinkEffectContext",
+    ) -> "SinkEffectReconcileResult":
+        raise NotImplementedError
 
 
 class DisplayHeaderHost(Protocol):

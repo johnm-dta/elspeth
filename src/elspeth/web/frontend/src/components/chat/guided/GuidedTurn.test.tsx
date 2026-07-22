@@ -18,8 +18,8 @@
 //   inspect_and_confirm   -- "Looks right" button (inspect-view action)
 //   multi_select_with_custom -- payload.question text (legend text)
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
-//   propose_chain         -- "Accept proposal" button
-//   recipe_offer          -- SchemaFormTurn recipe-decision renderer
+//   review_components     -- ComponentReviewTurn review heading + stable-id actions
+//   propose_pipeline      -- ProposePipelineTurn review heading + accept action
 //   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
 
@@ -33,8 +33,9 @@ import type {
   SingleSelectPayload,
   InspectAndConfirmPayload,
   MultiSelectWithCustomPayload,
+  ComponentReviewPayload,
+  ProposePipelinePayload,
   SchemaFormPayload,
-  ProposeChainPayload,
   WireStageData,
 } from "@/types/guided";
 
@@ -64,6 +65,19 @@ const MULTI_SELECT_PAYLOAD: MultiSelectWithCustomPayload = {
   escape_label: null,
 };
 
+const COMPONENT_REVIEW_PAYLOAD: ComponentReviewPayload = {
+  component_kind: "source",
+  items: [
+    {
+      stable_id: "00000000-0000-4000-8000-000000000111",
+      name: "customers",
+      plugin: "csv",
+      status: "reviewed",
+    },
+  ],
+  allowed_actions: ["add", "edit", "reorder", "finish"],
+};
+
 // SchemaFormTurn renders a "Continue" button (enabled when canSubmit=true).
 // A required string field with a non-empty prefilled value satisfies canSubmit.
 const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
@@ -83,105 +97,55 @@ const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
   prefilled: { path: "/data/file.csv" },
 };
 
-const PROPOSE_CHAIN_PAYLOAD: ProposeChainPayload = {
-  steps: [
-    {
-      plugin: "llm_classify",
-      options: {},
-      rationale: "Classifies rows using an LLM.",
-    },
-  ],
-  why: "This chain addresses the stated classification goal.",
-  blockers: [],
-};
-
-const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
-  mode: "recipe_decision",
-  knobs: { fields: [] },
-  prefilled: {},
-  recipe_context: {
-    recipe_name: "csv_to_json",
-    description: "Convert CSV rows to JSON.",
-    alternatives: ["build_manually"],
-  },
-};
-
 const WIRE_STAGE_PAYLOAD: WireStageData = {
-  topology: {
-    sources: {
-      source: {
-        id: "source",
-        plugin: "inline_blob",
-        on_success: "chain_in",
-        on_validation_failure: "discard",
-      },
-    },
-    nodes: [
-      {
-        id: "scrape",
-        node_type: "transform",
-        plugin: "web_scrape",
-        input: "chain_in",
-        on_success: "scraped",
-        on_error: "scrape_error",
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-      {
-        id: "mapper",
-        node_type: "transform",
-        plugin: "field_mapper",
-        input: "scraped",
-        on_success: "jsonl_out",
-        on_error: null,
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-      {
-        id: "error_handler",
-        node_type: "transform",
-        plugin: "dead_letter",
-        input: "scrape_error",
-        on_success: null,
-        on_error: null,
-        routes: null,
-        fork_to: null,
-        branches: null,
-      },
-    ],
-    outputs: [
-      {
-        id: "output:jsonl_out",
-        sink_name: "jsonl_out",
-        plugin: "json",
-        on_write_failure: "discard",
-      },
-    ],
-  },
-  edge_contracts: [
-    {
-      from: "scrape",
-      to: "mapper",
-      producer_guarantees: ["body", "status"],
-      consumer_requires: ["body"],
-      missing_fields: [],
-      satisfied: true,
-    },
-    {
-      from: "mapper",
-      to: "output:jsonl_out",
-      producer_guarantees: ["mapped"],
-      consumer_requires: ["mapped"],
-      missing_fields: [],
-      satisfied: true,
-    },
-  ],
+  proposal_id: "00000000-0000-4000-8000-000000000001",
+  draft_hash: "d".repeat(64),
+  sources: [{ stable_id: "00000000-0000-4000-8000-000000000010", label: "source-1", plugin: "inline_blob", on_validation_failure: "discard", guaranteed_fields: [], row_cardinality: { input: "none", output: "zero_or_many", expected_output_count: null } }],
+  nodes: [],
+  outputs: [{ stable_id: "00000000-0000-4000-8000-000000000020", label: "output-1", plugin: "json", on_write_failure: "discard", required_fields: [], business_schema: { mode: "observed", fields: [], guaranteed_fields: [], required_fields: [] } }],
+  connections: [{ stable_id: "00000000-0000-4000-8000-000000000030", from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000010" }, to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000020" }, flow: { kind: "source_success", branch: null }, schema_contract: null }],
   semantic_contracts: [],
   warnings: [],
-  // Initial confirm_wiring turn shape: no advisor pass has run, so signoff_outcome
-  // is absent and the dispatcher routes to the actionable "Confirm wiring" action.
+  blockers: [],
+  can_confirm: true,
+};
+
+const PROPOSAL_PAYLOAD: ProposePipelinePayload = {
+  proposal_id: "00000000-0000-4000-8000-000000000401",
+  draft_hash: "d".repeat(64),
+  supersedes_draft_hash: null,
+  summary: "guided.proposal.summary.full_graph.v1",
+  rationale: "guided.proposal.rationale.review_required.v1",
+  component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
+  blockers: [],
+  graph: {
+    sources: [{
+      stable_id: "00000000-0000-4000-8000-000000000402",
+      label: "source-1",
+      plugin: { kind: "source", id: "csv" },
+    }],
+    edges: [
+      {
+        stable_id: "00000000-0000-4000-8000-000000000403",
+        from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000402" },
+        to_endpoint: { kind: "output", stable_id: "00000000-0000-4000-8000-000000000404" },
+        flow: { kind: "source_success", branch: null },
+      },
+      {
+        stable_id: "00000000-0000-4000-8000-000000000405",
+        from_endpoint: { kind: "source", stable_id: "00000000-0000-4000-8000-000000000402" },
+        to_endpoint: { kind: "discard" },
+        flow: { kind: "source_validation_failure" },
+      },
+    ],
+  },
+  nodes: [],
+  outputs: [{
+    stable_id: "00000000-0000-4000-8000-000000000404",
+    label: "output-1",
+    plugin: { kind: "sink", id: "json" },
+  }],
+  edit_targets: [],
 };
 
 /** Build a TurnPayload with the given type and typed payload. */
@@ -202,19 +166,19 @@ function makeTurn(
   payload: SchemaFormPayload,
 ): TurnPayload;
 function makeTurn(
-  type: "propose_chain",
-  payload: ProposeChainPayload,
+  type: "review_components",
+  payload: ComponentReviewPayload,
 ): TurnPayload;
 function makeTurn(
-  type: "recipe_offer",
-  payload: SchemaFormPayload,
+  type: "propose_pipeline",
+  payload: ProposePipelinePayload,
 ): TurnPayload;
 function makeTurn(
   type: "confirm_wiring",
   payload: WireStageData,
 ): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
-  return { type, step_index: 0, payload };
+  return { type, step_index: 0, turn_token: "a".repeat(64), payload } as TurnPayload;
 }
 
 // ── Suite 1: Turn-type routing correctness ───────────────────────────────────
@@ -285,27 +249,31 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
   });
 
-  it("propose_chain: renders ProposeChainTurn ('Accept all steps' button)", () => {
+  it("review_components: renders ComponentReviewTurn with server-authored collection", () => {
     render(
       <GuidedTurn
-        turn={makeTurn("propose_chain", PROPOSE_CHAIN_PAYLOAD)}
+        turn={makeTurn("review_components", COMPONENT_REVIEW_PAYLOAD)}
         onSubmit={vi.fn()}
       />,
     );
-    expect(
-      screen.getByRole("button", { name: "Accept all steps" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Review sources" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Edit customers" })).toBeEnabled();
   });
 
-  it("recipe_offer: renders SchemaFormTurn recipe decision", () => {
+  it("propose_pipeline: renders the current durable proposal renderer", () => {
     render(
       <GuidedTurn
-        turn={makeTurn("recipe_offer", RECIPE_OFFER_PAYLOAD)}
+        turn={makeTurn("propose_pipeline", PROPOSAL_PAYLOAD)}
+        proposalReviewState={{
+          status: "active",
+          proposal_id: PROPOSAL_PAYLOAD.proposal_id,
+          draft_hash: PROPOSAL_PAYLOAD.draft_hash,
+        }}
         onSubmit={vi.fn()}
       />,
     );
-    expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Review pipeline proposal" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
   });
 
   it("confirm_wiring: renders WireStageTurn UI", () => {
@@ -317,8 +285,7 @@ describe("GuidedTurn dispatcher — routing", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Review wiring" })).toBeTruthy();
-    // Wiring rows carry human step names, not internal ids (elspeth-016f463ff0).
-    expect(screen.getByRole("listitem", { name: /Source to Fetch step/ })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: /source-1 to output-1/ })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Confirm wiring" }),
     ).toBeTruthy();
@@ -328,6 +295,26 @@ describe("GuidedTurn dispatcher — routing", () => {
 // ── Suite 2: onSubmit forwarding ──────────────────────────────────────────────
 
 describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
+  it("review component action forwards the exact component body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("review_components", COMPONENT_REVIEW_PAYLOAD)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add source" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: null,
+      custom_inputs: null,
+      component_action: { action: "add", component_kind: "source" },
+    });
+  });
+
   it("click on option chip forwards onSubmit with the correct GuidedRespondRequest body", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
@@ -362,42 +349,39 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith({
-      chosen: ["confirm"],
+      chosen: ["confirm_wiring"],
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: WIRE_STAGE_PAYLOAD.proposal_id,
+      draft_hash: WIRE_STAGE_PAYLOAD.draft_hash,
+      edit_target: null,
       control_signal: null,
     });
   });
 
-  it("confirm_wiring Ask advisor forwards the request_advisor body", async () => {
+  it("confirm_wiring correction forwards the exact stable target and feedback", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: review",
-          passes_remaining: 2,
-        })}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
-    );
+    await user.type(screen.getByLabelText("What should change?"), "Change the source route.");
+    await user.click(screen.getByRole("button", { name: "Re-plan wiring" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit).toHaveBeenCalledWith({
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: "request_advisor",
+      proposal_id: WIRE_STAGE_PAYLOAD.proposal_id,
+      draft_hash: WIRE_STAGE_PAYLOAD.draft_hash,
+      edit_target: { kind: "source", stable_id: WIRE_STAGE_PAYLOAD.sources[0].stable_id },
+      correction_feedback: "Change the source route.",
+      control_signal: null,
     });
   });
 
@@ -406,12 +390,7 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "revise",
-          advisor_findings: "FLAGGED: review",
-          passes_remaining: 2,
-        })}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
       />,
     );
@@ -423,43 +402,10 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: null,
       edited_values: null,
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: "exit_to_freeform",
-    });
-  });
-
-  it("confirm_wiring Complete without sign-off forwards chosen=['complete_without_signoff']", async () => {
-    // Governance-critical: chosen is string[], so this literal is NOT
-    // type-checked. The forwarded body must match the backend escape guard
-    // (_helpers.py: chosen in (['confirm'], ['complete_without_signoff'])); a
-    // typo here would silently 400 the only sanctioned advisor-unreachable exit.
-    const user = userEvent.setup();
-    const onSubmit = vi.fn();
-    render(
-      <GuidedTurn
-        turn={makeTurn("confirm_wiring", {
-          ...WIRE_STAGE_PAYLOAD,
-          signoff_outcome: "escape_unavailable",
-          advisor_findings: "Advisor unreachable.",
-          passes_remaining: 0,
-        })}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "Complete without sign-off" }),
-    );
-
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    expect(onSubmit).toHaveBeenCalledWith({
-      chosen: ["complete_without_signoff"],
-      edited_values: null,
-      custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: null,
     });
   });
 

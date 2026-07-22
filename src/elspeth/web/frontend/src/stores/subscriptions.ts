@@ -34,10 +34,16 @@ let previousWasPendingReview = false;
 let unsubscribeExecution: (() => void) | null = null;
 
 const lastValidatedVersionBySession = new Map<string, number>();
-let pendingValidateTarget: { sessionId: string; version: number } | null = null;
+interface ValidateTarget {
+  sessionId: string;
+  version: number;
+  force: boolean;
+}
+
+let pendingValidateTarget: ValidateTarget | null = null;
 let validateInflight = false;
 let unsubscribeAutoValidate: (() => void) | null = null;
-let inflightValidateTarget: { sessionId: string; version: number } | null = null;
+let inflightValidateTarget: ValidateTarget | null = null;
 let unsubscribeAuth: (() => void) | null = null;
 
 /**
@@ -121,16 +127,22 @@ function validationFingerprint(result: ValidationResult | null): string | null {
  * mirrors formatFindingBody (elspeth-901a404926). Interpretation-review-pending
  * findings never reach here (handled by isPendingInterpretationReviewResult
  * above), so no stepLabelFor is needed.
+ *
+ * `componentType` is the SAME finding's structured `component_type` —
+ * required (not optional) so this can't silently drop the hint that lets
+ * `phraseFor` resolve a role-less generated id in the right direction
+ * (elspeth-ede84df6b3). Pass `null` when the caller has none.
  */
 function humanisedValidationBullet(
   message: string,
   componentId: string | null,
-  phraseFor: (componentId: string | null) => string,
+  componentType: string | null,
+  phraseFor: (componentId: string | null, componentType?: string | null) => string,
 ): string {
   const finding = humaniseValidationMessage(message, phraseFor);
   const attributed = finding.raw === null && componentId !== null;
   return attributed
-    ? `- **${phraseFor(componentId)}:** ${finding.headline}`
+    ? `- **${phraseFor(componentId, componentType)}:** ${finding.headline}`
     : `- ${finding.headline}`;
 }
 
@@ -308,7 +320,9 @@ export function initStoreSubscriptions(): void {
       const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation failed** — fix the following errors before running:"];
       for (const err of result.errors) {
-        lines.push(humanisedValidationBullet(err.message, err.component_id ?? null, phraseFor));
+        lines.push(
+          humanisedValidationBullet(err.message, err.component_id ?? null, err.component_type ?? null, phraseFor),
+        );
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
@@ -316,7 +330,9 @@ export function initStoreSubscriptions(): void {
       const phraseFor = makePhraseFor(sessionStore.compositionState);
       const lines = ["**Validation passed with warnings:**"];
       for (const warn of result.warnings) {
-        lines.push(humanisedValidationBullet(warn.message, warn.component_id ?? null, phraseFor));
+        lines.push(
+          humanisedValidationBullet(warn.message, warn.component_id ?? null, warn.component_type ?? null, phraseFor),
+        );
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
     } else if (result.is_valid && previousWasPendingReview) {
@@ -344,7 +360,7 @@ export function initStoreSubscriptions(): void {
     const exec = useExecutionStore.getState();
     if (exec.isExecuting || exec.progress?.status === "running") return;
 
-    pendingValidateTarget = { sessionId, version };
+    pendingValidateTarget = { sessionId, version, force: false };
     if (validateInflight) return;
     void fireValidateLoop();
   });
@@ -378,7 +394,10 @@ async function fireValidateLoop(): Promise<void> {
         pendingValidateTarget = null;
         break;
       }
-      if (lastValidatedVersionBySession.get(target.sessionId) === target.version) {
+      if (
+        !target.force &&
+        lastValidatedVersionBySession.get(target.sessionId) === target.version
+      ) {
         pendingValidateTarget = null;
         break;
       }
@@ -405,10 +424,11 @@ async function fireValidateLoop(): Promise<void> {
 }
 
 /**
- * Cache-aware manual validate request. Mirrors the auto-validate
- * subscriber's enqueue logic so a manual trigger at an already-validated
- * version is a no-op. Use this from keyboard shortcuts and command-palette
- * actions instead of calling useExecutionStore.validate() directly.
+ * Manual validate request. Reuses the auto-validation queue and live-run
+ * guards, but deliberately bypasses the same-version cache: a visible user
+ * action must perform validation rather than silently no-op. Use this from
+ * buttons, keyboard shortcuts, and command-palette actions instead of calling
+ * useExecutionStore.validate() directly.
  *
  * Skips validate when the active composition has no source, transforms,
  * or outputs. This mirrors the auto-validate subscription guard so that
@@ -418,13 +438,12 @@ async function fireValidateLoop(): Promise<void> {
  * but content is empty).
  */
 export function requestValidate(sessionId: string, version: number): void {
-  if (lastValidatedVersionBySession.get(sessionId) === version) return;
   if (!hasCompositionContent(useSessionStore.getState().compositionState)) {
     return;
   }
   const exec = useExecutionStore.getState();
   if (exec.isExecuting || exec.progress?.status === "running") return;
-  pendingValidateTarget = { sessionId, version };
+  pendingValidateTarget = { sessionId, version, force: true };
   if (validateInflight) return;
   void fireValidateLoop();
 }

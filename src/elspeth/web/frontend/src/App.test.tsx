@@ -18,10 +18,19 @@ import type {
   SystemStatus,
   UserProfile,
 } from "./types/index";
+import {
+  COMPOSE_CLIENT_GRACE_MS,
+  getComposeTimeoutMs,
+  resetComposeTimeoutForTests,
+} from "@/config/composer";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // App renders many heavy children (Layout, ChatPanel, …).
 // Stub them out so the test focuses solely on App's own banner DOM.
+
+const tutorialMountSpy = vi.hoisted(() => vi.fn());
+const tutorialPropsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock("./components/common/Layout", () => ({
   Layout: ({
@@ -57,9 +66,24 @@ vi.mock("./components/settings/SecretsPanel", () => ({
   SecretsPanel: () => <div data-testid="secrets-panel-stub" />,
 }));
 
-vi.mock("./components/tutorial", () => ({
-  HelloWorldTutorial: () => <div data-testid="tutorial-stub" />,
-}));
+vi.mock("./components/tutorial", async () => {
+  const React = await import("react");
+  return {
+    HelloWorldTutorial: (props: {
+      composerAvailable?: boolean;
+      tutorialReady?: boolean;
+    }) => {
+      tutorialPropsSpy({
+        composerAvailable: props.composerAvailable,
+        tutorialReady: props.tutorialReady,
+      });
+      React.useEffect(() => {
+        tutorialMountSpy();
+      }, []);
+      return <div data-testid="tutorial-stub" />;
+    },
+  };
+});
 
 vi.mock("./components/audit/AuditReadinessPanel", () => ({
   AuditReadinessPanel: () => <div data-testid="audit-readiness-stub" />,
@@ -153,6 +177,7 @@ vi.mock("./api/client", () => ({
   fetchUserComposerPreferences: vi.fn().mockResolvedValue({
     default_mode: "guided",
     banner_dismissed_at: null,
+    freeform_intro_dismissed_at: null,
     tutorial_completed_at: "2026-05-19T00:00:00Z",
     tutorial_stage: null,
     tutorial_session_id: null,
@@ -213,6 +238,7 @@ describe("App banner roles", () => {
     } satisfies SystemStatus);
     vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
     vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
+    tutorialMountSpy.mockClear();
   });
 
   it("uses role=alert for the backend-unavailable banner (hard outage)", async () => {
@@ -474,6 +500,7 @@ describe("App banner roles", () => {
 function makeState(version: number): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: [],
@@ -493,6 +520,209 @@ function makeAssistantMessage(): ChatMessage {
     created_at: "2026-05-14T00:00:00Z",
   };
 }
+
+describe("App compose timeout readiness (bootstrap race)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(useSessionStore);
+    resetComposeTimeoutForTests();
+    useExecutionStore.getState().reset();
+    useAuthStore.setState({
+      token: "test-token",
+      user: {
+        user_id: "test-001",
+        username: "test-operator",
+        display_name: null,
+        email: null,
+        groups: [],
+      } as never,
+    } as never);
+    localStorage.clear();
+    window.history.replaceState(null, "", "/");
+    vi.spyOn(api, "fetchSessions").mockResolvedValue([]);
+    vi.spyOn(api, "fetchRuns").mockResolvedValue([]);
+  });
+
+  it("marks the composer ready and adopts the backend ceiling once system status lands", async () => {
+    // A deployment configured ABOVE the checked-in default (300s wall clock)
+    // is the exact case the stale 295s default would abort early. Readiness
+    // must flip only after applyServerComposerTimeout adopts 300s → 325s.
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+      composer_timeout_seconds: 300,
+    } satisfies SystemStatus);
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true),
+    );
+    expect(getComposeTimeoutMs()).toBe(300_000 + COMPOSE_CLIENT_GRACE_MS);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+  });
+
+  it("leaves the composer unready when system status fails, so no send starts against the unsafe default", async () => {
+    vi.spyOn(api, "fetchSystemStatus").mockRejectedValue(new Error("down"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<App />);
+
+    await screen.findByText(/Backend unavailable/i);
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    // Backend down → the banner owns the signal; the composer-specific
+    // diagnostic must not latch.
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("flags the composer unavailable when the backend is up but reports no compose timeout", async () => {
+    // Backend reachable (health 200) but composer_timeout_seconds omitted: the
+    // gate stays closed (no send against the stale default) AND a distinct
+    // stuck-state diagnostic latches so the Send stops reading as "connecting".
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue({
+      composer_available: true,
+      composer_model: "gpt-4o",
+      composer_provider: "openai",
+      composer_reason: null,
+      composer_missing_keys: [],
+    } satisfies SystemStatus);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("a partial poll AFTER a good ceiling keeps ready and does not re-flag or re-log (else-guard)", async () => {
+    // The else-guard (!composeTimeoutReady) across two polls: once a real
+    // ceiling latches, a later partial/absent response is a transient — it must
+    // not un-ready, flag unavailable, or spam a false "no usable timeout" error.
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce({
+        composer_available: true,
+        composer_model: "gpt-4o",
+        composer_provider: "openai",
+        composer_reason: null,
+        composer_missing_keys: [],
+        composer_timeout_seconds: 300,
+      } satisfies SystemStatus)
+      .mockResolvedValue({
+        composer_available: true,
+        composer_model: "gpt-4o",
+        composer_provider: "openai",
+        composer_reason: null,
+        composer_missing_keys: [],
+      } satisfies SystemStatus);
+
+    render(<App />);
+
+    // First poll (mount) latches ready off the 300s ceiling.
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true),
+    );
+
+    // Second poll (30s interval) returns a partial response with no timeout.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    const falseAlarms = errorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("no usable"),
+    );
+    expect(falseAlarms).toHaveLength(0);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  const GOOD_STATUS = {
+    composer_available: true,
+    composer_model: "gpt-4o",
+    composer_provider: "openai",
+    composer_reason: null,
+    composer_missing_keys: [],
+    composer_timeout_seconds: 300,
+  } satisfies SystemStatus;
+  const PARTIAL_STATUS = {
+    composer_available: true,
+    composer_model: "gpt-4o",
+    composer_provider: "openai",
+    composer_reason: null,
+    composer_missing_keys: [],
+  } satisfies SystemStatus;
+
+  it("recovers from unavailable to ready when a later poll supplies a valid timeout", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce(PARTIAL_STATUS)
+      .mockResolvedValue(GOOD_STATUS);
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  it("logs the missing-timeout diagnostic once across repeated partial polls, not every poll", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus").mockResolvedValue(PARTIAL_STATUS);
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+    // A second poll while still stuck must NOT re-log (false→true guard).
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const noUsable = errorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("no usable"),
+    );
+    expect(noUsable).toHaveLength(1);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+
+  it("clears the unavailable diagnostic when the backend later goes unreachable (banner owns it)", async () => {
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(api, "fetchSystemStatus")
+      .mockResolvedValueOnce(PARTIAL_STATUS)
+      .mockRejectedValue(new Error("down"));
+
+    render(<App />);
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true),
+    );
+
+    // Backend goes down on the next poll → catch resets the composer diagnostic.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+
+    vi.useRealTimers();
+    errorSpy.mockRestore();
+  });
+});
 
 describe("App composer recovery panel", () => {
   beforeEach(() => {
@@ -740,6 +970,82 @@ describe("App preferences bootstrap (Phase 1B)", () => {
 
     expect(screen.getByTestId("tutorial-stub")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-stub")).not.toBeInTheDocument();
+  });
+
+  it("keeps tutorial readiness fail-closed while system status is still loading", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+    vi.spyOn(api, "fetchSystemStatus").mockReturnValue(new Promise(() => {}));
+    tutorialPropsSpy.mockClear();
+
+    render(<App />);
+
+    await waitFor(() => expect(tutorialPropsSpy).toHaveBeenCalled());
+    expect(tutorialPropsSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        composerAvailable: false,
+        tutorialReady: false,
+      }),
+    );
+  });
+
+  it("remounts the tutorial shell after Reset tutorial succeeds", async () => {
+    const { usePreferencesStore } = await import("@/stores/preferencesStore");
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-in-progress",
+      tutorialRunId: null,
+      tutorialSourceDataHash: null,
+      writeError: null,
+    });
+    vi.spyOn(usePreferencesStore.getState(), "bootstrap").mockResolvedValueOnce(
+      undefined,
+    );
+    vi.spyOn(api, "updateUserComposerPreferences").mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-10T07:30:00Z",
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(tutorialMountSpy).toHaveBeenCalledTimes(1);
+    });
+    await userEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    await userEvent.click(screen.getByRole("button", { name: /composer preferences/i }));
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    await waitFor(() => {
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: null,
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
+      });
+    });
+    await waitFor(() => {
+      expect(tutorialMountSpy).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

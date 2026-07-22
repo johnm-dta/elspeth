@@ -17,9 +17,10 @@ from unittest.mock import patch
 import pytest
 from opentelemetry.sdk.trace.export import SpanExportResult
 
-from elspeth.contracts import TokenCompleted, TokenUsage
-from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
+from elspeth.contracts import RawCallPayload, TokenCompleted, TokenUsage
+from elspeth.contracts.enums import CallStatus, CallType, RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
+    ExternalCallCompleted,
     RunFinished,
     RunStarted,
 )
@@ -122,15 +123,103 @@ class TestOTLPExporterConfiguration:
             exporter.configure({})
         assert "endpoint" in str(exc_info.value)
 
-    def test_empty_endpoint_in_config_accepted(self) -> None:
-        """Empty string endpoint is technically accepted (SDK will fail later)."""
+    @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer secret-token"}])
+    def test_cleartext_remote_endpoint_is_rejected_without_echo(self, headers: dict[str, str]) -> None:
         exporter = OTLPExporter()
-        # This will fail at SDK level, but our config validation accepts it
-        # since OpenTelemetry SDK should validate URLs
+
+        with pytest.raises(TelemetryExporterError) as exc_info:
+            exporter.configure({"endpoint": "http://collector.invalid:4317", "headers": headers})
+
+        message = str(exc_info.value)
+        assert "endpoint" in message
+        assert "collector.invalid" not in message
+        assert "secret-token" not in message
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "http://localhost:4317",
+            "http://127.0.0.1:4317",
+            "http://[::1]:4317",
+        ],
+    )
+    def test_cleartext_loopback_endpoint_is_accepted(self, endpoint: str) -> None:
+        exporter = OTLPExporter()
+
         with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
             mock_exporter_class.return_value = _OTLPExporterDouble()
-            exporter.configure({"endpoint": ""})
-            mock_exporter_class.assert_called_once()
+            exporter.configure({"endpoint": endpoint})
+
+        mock_exporter_class.assert_called_once_with(endpoint=endpoint, headers=None)
+
+    def test_tls_remote_endpoint_is_accepted(self) -> None:
+        exporter = OTLPExporter()
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure({"endpoint": "https://collector.invalid:4317"})
+
+        mock_exporter_class.assert_called_once_with(endpoint="https://collector.invalid:4317", headers=None)
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "",
+            "not-a-url",
+            "ftp://collector.invalid:4317",
+            "http://user:password@collector.invalid:4317",
+            "http://collector.invalid:4317/path?credential=secret",
+            "http://collector.invalid:4317/path#secret",
+            "http://collector.invalid:4317\nX-Header: secret",
+            "http://:4317",
+        ],
+    )
+    def test_invalid_endpoint_is_rejected_without_echo(self, endpoint: str) -> None:
+        exporter = OTLPExporter()
+
+        with pytest.raises(TelemetryExporterError) as exc_info:
+            exporter.configure({"endpoint": endpoint})
+
+        message = str(exc_info.value)
+        assert "endpoint" in message
+        if endpoint:
+            assert endpoint not in message
+        assert "credential=secret" not in message
+        assert "password" not in message
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("service_name", ""),
+            ("service_name", "contains\ncontrol"),
+            ("service_name", "x" * 129),
+            ("service_version", "\tbad"),
+            ("deployment_environment", " "),
+            ("cloud_provider", "aws\r"),
+        ],
+    )
+    def test_invalid_resource_identity_is_rejected_without_echo(self, field: str, value: str) -> None:
+        exporter = OTLPExporter()
+
+        with pytest.raises(TelemetryExporterError) as exc_info:
+            exporter.configure({"endpoint": "http://localhost:4317", field: value})
+
+        message = str(exc_info.value)
+        assert field in message
+        if value.strip():
+            assert value not in message
+
+    def test_boolean_batch_size_is_rejected(self) -> None:
+        exporter = OTLPExporter()
+
+        with pytest.raises(TelemetryExporterError, match="batch_size"):
+            exporter.configure({"endpoint": "http://localhost:4317", "batch_size": True})
+
+    def test_batch_size_has_bounded_upper_limit(self) -> None:
+        exporter = OTLPExporter()
+
+        with pytest.raises(TelemetryExporterError, match="batch_size"):
+            exporter.configure({"endpoint": "http://localhost:4317", "batch_size": 10_001})
 
     def test_invalid_batch_size_raises(self) -> None:
         """batch_size < 1 raises TelemetryExporterError."""
@@ -234,6 +323,133 @@ class TestOTLPExporterConfiguration:
                 headers=None,
             )
 
+    def test_resource_configuration_is_bounded_and_explicit(self) -> None:
+        exporter = OTLPExporter()
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure(
+                {
+                    "endpoint": "http://localhost:4317",
+                    "service_name": "elspeth-web",
+                    "service_version": "0.7.1",
+                    "deployment_environment": "production",
+                    "cloud_provider": "aws",
+                    "aws_ecs_cluster_name": "elspeth-production",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "42",
+                }
+            )
+
+        assert dict(exporter.resource.attributes) == {
+            "service.name": "elspeth-web",
+            "service.version": "0.7.1",
+            "deployment.environment": "production",
+            "cloud.provider": "aws",
+            "aws.ecs.cluster.name": "elspeth-production",
+            "aws.ecs.service.name": "elspeth-web",
+            "aws.ecs.task.family": "elspeth-web-task",
+            "aws.ecs.task.revision": "42",
+        }
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("service_name", "arn:aws:ecs:ap-southeast-2:123456789012:service/elspeth-web"),
+            ("service_name", "123456789012"),
+            ("service_name", "elspeth-123456789012-web"),
+            ("deployment_environment", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/production"),
+            ("deployment_environment", "123456789012"),
+            ("deployment_environment", "prod-123456789012-blue"),
+        ],
+    )
+    def test_aws_profile_rejects_arn_and_account_resource_labels(self, field: str, raw_value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_name": "elspeth-web",
+            "deployment_environment": "production",
+            "cloud_provider": "aws",
+            field: raw_value,
+        }
+
+        with pytest.raises(TelemetryExporterError, match=field) as caught:
+            exporter.configure(config)
+
+        assert raw_value not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("service_name", "elspeth-web"),
+            ("service_name", "orders.api_v2"),
+            pytest.param("service_name", "s" * 128, id="service-128-char-boundary"),
+            ("deployment_environment", "production"),
+            ("deployment_environment", "prod-blue"),
+            pytest.param("deployment_environment", "e" * 128, id="environment-128-char-boundary"),
+        ],
+    )
+    def test_aws_profile_accepts_safe_resource_labels(self, field: str, value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_name": "elspeth-web",
+            "deployment_environment": "production",
+            "cloud_provider": "aws",
+            field: value,
+        }
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure(config)
+
+        attribute_name = "service.name" if field == "service_name" else "deployment.environment"
+        assert exporter.resource.attributes[attribute_name] == value
+
+    def test_non_aws_profile_preserves_generic_resource_labels(self) -> None:
+        exporter = OTLPExporter()
+
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            mock_exporter_class.return_value = _OTLPExporterDouble()
+            exporter.configure(
+                {
+                    "endpoint": "http://127.0.0.1:4317",
+                    "service_name": "team/service:blue",
+                    "deployment_environment": "staging/eu:1",
+                }
+            )
+
+        assert exporter.resource.attributes["service.name"] == "team/service:blue"
+        assert exporter.resource.attributes["deployment.environment"] == "staging/eu:1"
+
+    @pytest.mark.parametrize(
+        ("field", "raw_value"),
+        [
+            ("service_version", "arn:aws:ecr:ap-southeast-2:123456789012:repository/elspeth"),
+            ("aws_ecs_cluster_name", "arn:aws:ecs:ap-southeast-2:123456789012:cluster/elspeth-production"),
+            ("aws_ecs_service_name", "elspeth-123456789012-service"),
+            ("aws_ecs_task_family", "task-definition/elspeth-web"),
+            ("aws_ecs_task_revision", "123456789012"),
+        ],
+    )
+    def test_aws_resource_identity_rejects_arns_accounts_and_non_names(self, field: str, raw_value: str) -> None:
+        exporter = OTLPExporter()
+        config = {
+            "endpoint": "http://127.0.0.1:4317",
+            "service_version": "git-deadbeef",
+            "cloud_provider": "aws",
+            "aws_ecs_cluster_name": "elspeth-production",
+            "aws_ecs_service_name": "elspeth-web",
+            "aws_ecs_task_family": "elspeth-web-task",
+            "aws_ecs_task_revision": "42",
+            field: raw_value,
+        }
+
+        with pytest.raises(TelemetryExporterError, match=field) as caught:
+            exporter.configure(config)
+
+        assert raw_value not in str(caught.value)
+
 
 class TestOTLPExporterBuffering:
     """Tests for event buffering and batch export."""
@@ -273,6 +489,61 @@ class TestOTLPExporterBuffering:
         exporter.export(event)
         mock_sdk.export.assert_called_once()
         assert len(exporter._buffer) == 0
+
+    def test_buffered_events_are_attempted_but_not_delivered(self) -> None:
+        exporter, _ = self._create_configured_exporter(batch_size=3)
+        event = RunStarted(timestamp=datetime.now(UTC), run_id="run-123", config_hash="abc", source_plugin="csv")
+
+        exporter.export(event)
+        exporter.export(event)
+
+        assert exporter.delivery_metrics == {
+            "attempted": 2,
+            "delivered": 0,
+            "failed": 0,
+            "dropped": 0,
+            "pending": 2,
+            "consecutive_failures": 0,
+            "last_success_unix_nano": None,
+            "lifecycle_failures": 0,
+        }
+
+    def test_successful_batch_accounts_for_every_member_once(self) -> None:
+        exporter, _ = self._create_configured_exporter(batch_size=2)
+        event = RunStarted(timestamp=datetime.now(UTC), run_id="run-123", config_hash="abc", source_plugin="csv")
+
+        exporter.export(event)
+        exporter.export(event)
+
+        metrics = exporter.delivery_metrics
+        assert metrics["attempted"] == 2
+        assert metrics["delivered"] == 2
+        assert metrics["failed"] == 0
+        assert metrics["dropped"] == 0
+        assert metrics["pending"] == 0
+        assert metrics["consecutive_failures"] == 0
+        assert isinstance(metrics["last_success_unix_nano"], int)
+
+    def test_failed_batch_accounts_for_every_cleared_member_once(self) -> None:
+        exporter, sdk = self._create_configured_exporter(batch_size=3)
+        sdk.export.return_value = SpanExportResult.FAILURE
+        event = RunStarted(timestamp=datetime.now(UTC), run_id="run-123", config_hash="abc", source_plugin="csv")
+
+        exporter.export(event)
+        exporter.export(event)
+        result = exporter.export(event)
+
+        assert result is False
+        assert exporter.delivery_metrics == {
+            "attempted": 3,
+            "delivered": 0,
+            "failed": 3,
+            "dropped": 3,
+            "pending": 0,
+            "consecutive_failures": 1,
+            "last_success_unix_nano": None,
+            "lifecycle_failures": 0,
+        }
 
     def test_flush_exports_partial_batch(self) -> None:
         """flush() exports buffered events even if batch_size not reached."""
@@ -397,6 +668,136 @@ class TestOTLPExporterSpanConversion:
         assert attrs["config_hash"] == "abc123"
         assert attrs["source_plugin"] == "csv_source"
         assert attrs["event_type"] == "RunStarted"
+
+    def test_span_has_configured_resource_identity(self) -> None:
+        exporter = OTLPExporter()
+        with patch(OTLP_EXPORTER_PATCH) as mock_exporter_class:
+            sdk = _OTLPExporterDouble()
+            mock_exporter_class.return_value = sdk
+            exporter.configure(
+                {
+                    "endpoint": "http://127.0.0.1:4317",
+                    "batch_size": 1,
+                    "service_name": "elspeth",
+                    "service_version": "0.7.1",
+                    "deployment_environment": "production",
+                    "cloud_provider": "aws",
+                    "aws_ecs_cluster_name": "elspeth-production",
+                    "aws_ecs_service_name": "elspeth-web",
+                    "aws_ecs_task_family": "elspeth-web-task",
+                    "aws_ecs_task_revision": "42",
+                }
+            )
+
+        exporter.export(RunStarted(timestamp=datetime.now(UTC), run_id="run-123", config_hash="abc", source_plugin="csv"))
+        span = sdk.export.call_args[0][0][0]
+        assert dict(span.resource.attributes) == {
+            "service.name": "elspeth",
+            "service.version": "0.7.1",
+            "deployment.environment": "production",
+            "cloud.provider": "aws",
+            "aws.ecs.cluster.name": "elspeth-production",
+            "aws.ecs.service.name": "elspeth-web",
+            "aws.ecs.task.family": "elspeth-web-task",
+            "aws.ecs.task.revision": "42",
+        }
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            RunFinished(
+                timestamp=datetime.now(UTC),
+                run_id="run-failed",
+                status=RunStatus.FAILED,
+                row_count=1,
+                duration_ms=5.0,
+            ),
+            ExternalCallCompleted(
+                timestamp=datetime.now(UTC),
+                run_id="run-call",
+                state_id="state-1",
+                call_type=CallType.HTTP,
+                provider="http",
+                status=CallStatus.ERROR,
+                latency_ms=5.0,
+            ),
+        ],
+    )
+    def test_failed_result_sets_error_status_without_description(self, event: object) -> None:
+        exporter, sdk = self._create_configured_exporter()
+
+        exporter.export(event)  # type: ignore[arg-type]
+
+        span = sdk.export.call_args[0][0][0]
+        assert span.status.status_code.name == "ERROR"
+        assert span.status.description is None
+
+    def test_successful_result_sets_ok_status(self) -> None:
+        exporter, sdk = self._create_configured_exporter()
+        exporter.export(
+            RunFinished(
+                timestamp=datetime.now(UTC),
+                run_id="run-ok",
+                status=RunStatus.COMPLETED,
+                row_count=1,
+                duration_ms=5.0,
+            )
+        )
+
+        span = sdk.export.call_args[0][0][0]
+        assert span.status.status_code.name == "OK"
+        assert span.status.description is None
+
+    def test_empty_run_sets_ok_status(self) -> None:
+        exporter, sdk = self._create_configured_exporter()
+        exporter.export(
+            RunFinished(
+                timestamp=datetime.now(UTC),
+                run_id="run-empty",
+                status=RunStatus.EMPTY,
+                row_count=0,
+                duration_ms=5.0,
+            )
+        )
+
+        span = sdk.export.call_args[0][0][0]
+        assert span.status.status_code.name == "OK"
+        assert span.status.description is None
+
+    def test_attribute_allowlist_excludes_content_and_transport_material(self) -> None:
+        sentinel = "SENTINEL_RAW_SECRET_CONTENT"
+        exporter, sdk = self._create_configured_exporter()
+        event = ExternalCallCompleted(
+            timestamp=datetime.now(UTC),
+            run_id="run-safe-correlation",
+            state_id="state-1",
+            call_type=CallType.HTTP,
+            provider=f"https://user:{sentinel}@example.invalid/path",
+            status=CallStatus.ERROR,
+            latency_ms=5.0,
+            request_hash="request-hash",
+            response_hash="response-hash",
+            request_payload=RawCallPayload({"url": f"https://example.invalid/{sentinel}", "Authorization": f"Bearer {sentinel}"}),
+            response_payload=RawCallPayload({"body": sentinel, "exception": f"/tmp/{sentinel}"}),
+        )
+
+        exporter.export(event)
+
+        span = sdk.export.call_args[0][0][0]
+        attrs = dict(span.attributes)
+        rendered = repr(attrs)
+        assert attrs["run_id"] == "run-safe-correlation"
+        assert attrs["call_type"] == "http"
+        assert attrs["status"] == "error"
+        assert attrs["request_hash"] == "request-hash"
+        assert attrs["response_hash"] == "response-hash"
+        assert "provider" not in attrs
+        assert "request_payload" not in attrs
+        assert "response_payload" not in attrs
+        assert sentinel not in rendered
+        assert "https://" not in rendered
+        assert "Bearer" not in rendered
+        assert "/tmp/" not in rendered
 
     def test_datetime_serialized_as_iso8601(self) -> None:
         """datetime fields are serialized as ISO 8601 strings."""

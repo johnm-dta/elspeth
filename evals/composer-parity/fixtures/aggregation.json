@@ -1,0 +1,59 @@
+{
+  "class": "aggregation",
+  "intent": "Build a pipeline that reads numeric records from CSV, collects them into batches, computes batch statistics over each batch with a real aggregation node, then hands the aggregated result to a downstream transform and writes it to one JSON output.",
+  "canonical_arguments": {
+    "source": {
+      "plugin": "csv",
+      "on_success": "rows",
+      "options": {"path": "measurements.csv", "schema": {"mode": "observed"}},
+      "on_validation_failure": "discard"
+    },
+    "nodes": [
+      {
+        "id": "batch_summary",
+        "node_type": "aggregation",
+        "plugin": "batch_stats",
+        "input": "rows",
+        "on_success": "stats",
+        "on_error": "discard",
+        "options": {"schema": {"mode": "observed"}, "value_field": "value"},
+        "trigger": {"count": 10},
+        "output_mode": "transform"
+      },
+      {
+        "id": "forward_stats",
+        "node_type": "transform",
+        "plugin": "passthrough",
+        "input": "stats",
+        "on_success": "aggregated",
+        "on_error": "discard",
+        "options": {"schema": {"mode": "observed"}}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "aggregated",
+        "plugin": "json",
+        "options": {"path": "outputs/aggregated.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "aggregation", "description": "Batch aggregation node with a downstream consumer."}
+  },
+  "semantic_expectations": {
+    "source": {"plugin": "csv", "on_success": "rows"},
+    "nodes": [
+      {"id": "batch_summary", "node_type": "aggregation", "plugin": "batch_stats", "input": "rows", "on_success": "stats", "trigger": {"count": 10}},
+      {"id": "forward_stats", "node_type": "transform", "plugin": "passthrough", "input": "stats", "on_success": "aggregated"}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "aggregated", "plugin": "json"}],
+    "topology": "source -> batch_summary(aggregation) -> forward_stats(transform) -> aggregated(sink)"
+  },
+  "runtime_assertions": [
+    "The aggregation node is a real batch/aggregate node (node_type aggregation) with a batch trigger.",
+    "Rows are collected into batches and the aggregation emits one result per triggered batch.",
+    "The downstream transform consumes the aggregation's output field contract and the sink receives the aggregated rows."
+  ]
+}

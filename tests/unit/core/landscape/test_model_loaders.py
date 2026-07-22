@@ -837,6 +837,7 @@ class TestNodeStateLoader:
             "step_index": 0,
             "attempt": 1,
             "status": "open",
+            "sink_effect_id": None,
             "input_hash": "in123",
             "started_at": NOW,
             "output_hash": None,
@@ -1586,6 +1587,7 @@ class TestArtifactLoader:
             artifact_id="art-1",
             run_id="run-1",
             produced_by_state_id="state-1",
+            sink_effect_id=None,
             sink_node_id="sink-1",
             artifact_type="csv",
             path_or_uri="/output/results.csv",
@@ -1593,6 +1595,8 @@ class TestArtifactLoader:
             size_bytes=1024,
             created_at=NOW,
             idempotency_key=None,
+            publication_performed=True,
+            publication_evidence_kind="legacy_returned",
         )
         loader = ArtifactLoader()
         result = loader.load(sa_row)
@@ -1609,6 +1613,7 @@ class TestArtifactLoader:
             artifact_id="art-2",
             run_id="run-1",
             produced_by_state_id="state-2",
+            sink_effect_id=None,
             sink_node_id="sink-1",
             artifact_type="json",
             path_or_uri="/output/data.json",
@@ -1616,6 +1621,8 @@ class TestArtifactLoader:
             size_bytes=2048,
             created_at=NOW,
             idempotency_key="retry-key-42",
+            publication_performed=True,
+            publication_evidence_kind="legacy_returned",
         )
         loader = ArtifactLoader()
         result = loader.load(sa_row)
@@ -1677,6 +1684,7 @@ class TestOperationLoader:
             "run_id": "run-1",
             "node_id": "node-1",
             "operation_type": "source_load",
+            "sink_effect_id": None,
             "started_at": NOW,
             "status": "open",
             "completed_at": None,

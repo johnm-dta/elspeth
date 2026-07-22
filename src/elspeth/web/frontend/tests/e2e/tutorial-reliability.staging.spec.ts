@@ -21,6 +21,7 @@ import {
   JUDGE_RUBRIC,
 } from "./harness/prompt-and-rubric";
 import { classifyOutcome, type StepSignal } from "./harness/classify";
+import { ACKNOWLEDGEMENT_PRIMARY_ACTION_NAMES } from "./harness/guided-driver";
 import type { RunRecord } from "./harness/types";
 import {
   fetchComposition,
@@ -40,29 +41,28 @@ const BATCH_SIZE = Number(process.env.HARNESS_BATCH_SIZE ?? "1");
 // return how many were acknowledged this pass.
 //
 // Post-redesign (acknowledge card-stack): the cards render in the pinned
-// AcknowledgementStack. The primary is "Acknowledge" (aria-label
-// "Acknowledge the …"), NOT the old "Accept …". The LLM-prompt-template REVIEW
-// GATE still applies but its surface moved BEHIND a "View" expander: the
-// Acknowledge button stays `disabled` until the prompt region
-// (role="region" name="Prompt template review", revealed by clicking "View")
-// is scrolled to the end (AcknowledgementCard: requiresPromptScroll + expanded
-// + hasScrolledToEnd). So each pass: open any collapsed "View" expanders,
-// scroll any revealed prompt regions to the end, then click an enabled
-// Acknowledge.
+// AcknowledgementStack. Most cards resolve through an "Acknowledge …" primary.
+// Prompt-template cards are two-stage: the same primary first says
+// "View prompt", then flips to "Approve the LLM prompt template". Drive those
+// primary actions as first-class unblockers; otherwise the prompt review stays
+// pending and "Confirm wiring" never enables.
 async function resolveVisibleReviews(page: Page): Promise<number> {
-  const ackButtons = page.getByRole("button", { name: /^Acknowledge/i });
-  const viewToggles = page.getByRole("button", { name: /^View$/ });
+  const primaryButtons = ACKNOWLEDGEMENT_PRIMARY_ACTION_NAMES.map((name) =>
+    page.getByRole("button", { name }),
+  );
+  const legacyViewToggles = page.getByRole("button", { name: /^View$/ });
   const promptRegions = page.getByRole("region", {
     name: "Prompt template review",
   });
-  let accepted = 0;
+  let actions = 0;
   // Bounded inner loop: each acknowledged card unmounts, shrinking the list.
+  // Prompt-template cards take two iterations (View prompt -> Approve).
   for (let guard = 0; guard < 12; guard++) {
-    // Open any collapsed value expanders so the prompt scroll region (and its
-    // gate) exists. An opened toggle relabels to "Hide", so it is not reopened.
-    const toggleCount = await viewToggles.count().catch(() => 0);
+    // Keep the retired exact-"View" path for old staging bundles while the
+    // current bundle uses the two-stage primary handled below.
+    const toggleCount = await legacyViewToggles.count().catch(() => 0);
     for (let i = 0; i < toggleCount; i++) {
-      await viewToggles.nth(i).click().catch(() => {});
+      await legacyViewToggles.nth(i).click().catch(() => {});
     }
     const regionCount = await promptRegions.count().catch(() => 0);
     for (let i = 0; i < regionCount; i++) {
@@ -74,23 +74,25 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
         })
         .catch(() => {});
     }
-    const total = await ackButtons.count().catch(() => 0);
-    if (total === 0) break;
     let clicked = false;
-    for (let i = 0; i < total; i++) {
-      const btn = ackButtons.nth(i);
-      if (await btn.isEnabled().catch(() => false)) {
-        await btn.click().catch(() => {});
-        accepted += 1;
-        clicked = true;
-        break;
+    for (const buttons of primaryButtons) {
+      const total = await buttons.count().catch(() => 0);
+      for (let i = 0; i < total; i++) {
+        const btn = buttons.nth(i);
+        if (await btn.isEnabled().catch(() => false)) {
+          await btn.click().catch(() => {});
+          actions += 1;
+          clicked = true;
+          break;
+        }
       }
+      if (clicked) break;
     }
     if (!clicked) {
       await page.waitForTimeout(300);
     }
   }
-  return accepted;
+  return actions;
 }
 
 // Drive the staged guided walk (source → sink → recipe/transforms → wire) to
@@ -110,8 +112,8 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
 // request; then these fields mirror /guided/respond"). We seed FIXED_PROMPT into
 // that chat once at step_1_source, then run a robust turn-pump: each pass
 // resolves surfaced per-stage interpretation cards, then advances by the enabled
-// stage primary ("Apply recipe", "Confirm wiring" — the D12 wire gate that frees
-// once cards are resolved — or "Continue" for chain-accept). Exits once the run
+// stage primary ("Confirm wiring" — the D12 wire gate that frees once cards are
+// resolved — or "Continue" for schema forms). Exits once the run
 // turn mounts or the deadline trips. A driver that drove the source via a
 // plugin+schema_form instead would test a deterministic path and defeat the
 // harness's purpose (grading the real LLM-backed scenario, dims a/b/c/d).
@@ -127,7 +129,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // nothing and never picks from a widget: on each LLM-driven phase they press
   // Send on the prelocked worked-example prompt, and the orchestrator LLM builds
   // THAT phase via the apply-capable /guided/chat drivers (resolve_source →
-  // resolve_sink → propose_chain), each extracting its part of the one prompt.
+  // resolve_sink → proposal), each extracting its part of the one prompt.
   // We therefore drive each phase by Send (once per phase) and advance through
   // the structured result via the stage primaries. Wait for the locked prompt to
   // populate (synthetic URLs are fetched + appended async).
@@ -137,15 +139,48 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // Stage primary affordances, in priority order. "Confirm wiring" is the wire
   // gate (D12): it stays disabled until the stage's interpretation cards are
   // resolved, which resolveVisibleReviews handles each pass.
+  //
+  // "Review wiring" carries a send-first guard (below): the step-2→step-3
+  // transition auto-plans a FIRST proposal from a fallback intent BEFORE the
+  // locked transforms prompt is sent — accepting that one commits a
+  // source→sink passthrough that the tutorial launch gate rejects (run 18,
+  // session 07e8a3a8). The primary is honored only after this driver has
+  // Sent the Transforms-phase prompt, so the proposal it accepts is the
+  // frozen-prompt revision. (The tutorial UI withholds the button on the
+  // pre-Send auto-proposal too — supersedes_draft_hash null — this guard
+  // keeps the driver correct on its own.)
+  const reviewWiring = page.getByRole("button", { name: "Review wiring", exact: true });
   const primaries = [
-    // Transforms chain proposal (ProposeChainTurn): the passive learner's only
-    // action is "Accept all steps" (Reject / Ask advisor / Edit are !isTutorial).
-    // Accepting applies the chain; the per-step interpretation cards then surface
-    // in the acknowledge stack and resolveVisibleReviews clears them.
-    page.getByRole("button", { name: "Accept all steps", exact: true }),
-    page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
+    // Pipeline proposal turn (propose_pipeline): the transforms phase yields a
+    // REAL planner proposal; accepting it (chosen ["review_wiring"]) is the
+    // only advance into the wire stage. Renders only on the proposal turn.
+    reviewWiring,
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Source inspection review (inspect_and_confirm): rendered after the
+    // chat-resolved inline source is materialized into a session blob and
+    // inspected — confirming the observed columns is the designed answer.
+    page.getByRole("button", { name: "Looks right", exact: true }),
+    // Component review turns: once the chat-resolved source/output lands as a
+    // reviewed component, the stage ends on its review turn — finishing it is
+    // the designed advance (mirrors composer-guided-live).
+    page.getByRole("button", { name: "Finish sources", exact: true }),
+    page.getByRole("button", { name: "Finish outputs", exact: true }),
+    // Transient provider failure on a step chat leaves a Retry affordance;
+    // pressing it is the designed recovery. Last in priority so it never
+    // preempts forward progress. Scoped HARD to the provider-unavailable
+    // failure bubble on the transcript's LAST row: run 19 (session 921491db)
+    // showed a recovered step-1 failure kept a live Retry that the pump then
+    // clicked every pass at the sink stage — re-sending the stale source
+    // prompt ~22 times (each answered by an advisory) and starving the
+    // phase-Send branch until the walk deadline. The frontend now withholds
+    // Retry on non-final turns; this scope keeps the driver correct against
+    // a stale build too.
+    page
+      .locator(".message-row")
+      .last()
+      .filter({ hasText: "I'm unavailable right now; you can still use the wizard controls." })
+      .getByRole("button", { name: "Retry", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
     // built is observed-mode (pass-all-through), and the real output fields come
     // from the downstream transforms — so the correct, designed answer here is
@@ -172,7 +207,11 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // summary (.guided-schema-summary), not an editable form. The first time a
   // summary is visible, assert no editable schema input is shown alongside it.
   let assertedSummary = false;
-  const deadline = Date.now() + 600_000;
+  // The walk crosses TWO inherent sequential planner runs (the step-2→3
+  // auto-proposal plus the frozen-prompt replan), measured at 222s + 233s on
+  // 2026-07-22 — a 600s ceiling was the binding constraint that failed an
+  // otherwise-converging walk. Budget both plus discovery-turn variance.
+  const deadline = Date.now() + 900_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
     if (await runHeading.isVisible().catch(() => false)) {
@@ -182,7 +221,20 @@ async function driveGuidedWalk(page: Page): Promise<void> {
       expect(assertedSummary, "expected to observe a read-only decision summary").toBe(true);
       return;
     }
-    if (!(await guidedPanel.isVisible().catch(() => false))) return;
+    if (!(await guidedPanel.isVisible().catch(() => false))) {
+      // On terminal=completed the guided panel is replaced by the completion
+      // surface ("Pipeline summary") — which may still hold pending Accept
+      // cards: the wire-confirm commit surfaces interpretation events AFTER
+      // the terminal lands, and TutorialGuidedShell defers the run handoff
+      // until they drain. Keep pumping resolveVisibleReviews there; the run
+      // turn mounts (and the loop exits above) once the last card resolves.
+      // Exit only when NEITHER surface is present.
+      const completionVisible = await page
+        .getByRole("region", { name: /pipeline summary/i })
+        .isVisible()
+        .catch(() => false);
+      if (!completionVisible) return;
+    }
 
     if (
       !assertedSummary &&
@@ -206,6 +258,9 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     // 1. Advance through the structured result via an enabled stage primary.
     let advanced = false;
     for (const primary of primaries) {
+      // Send-first guard: never accept a transforms proposal before the
+      // locked Transforms prompt has been sent this walk.
+      if (primary === reviewWiring && lastDrivenPhase !== "Transforms") continue;
       if (
         (await primary.count().catch(() => 0)) > 0 &&
         (await primary.isEnabled().catch(() => false))
@@ -221,7 +276,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     }
 
     // 2. No primary yet — drive the CURRENT LLM phase with the locked prompt. A
-    //    confirm primary (Continue/Apply recipe) appears once the result renders.
+    //    confirm primary appears once the result renders.
     const phase = await currentPhase();
     const canSend = await stepChatSend.isEnabled().catch(() => false);
     if (canSend && phase !== null && drivenPhases.has(phase) && phase !== lastDrivenPhase) {
@@ -267,7 +322,7 @@ function substantiveRowCount(
 }
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
-  test.setTimeout(900_000); // real compose + tutorial run; headroom for the draft-wait (≤420s) + run-wait (≤360s) below
+  test.setTimeout(1_800_000); // walk (≤900s, two sequential planner runs) + draft-wait (≤420s) + run-wait (≤360s) + grading
 
   // --- per-run state (Task 5 capture targets; all consumed in the record) ---
   let sessionId: string | null = null;

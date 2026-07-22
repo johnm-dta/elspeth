@@ -416,10 +416,13 @@ def test_resume_calls_prepare_for_run() -> None:
     where register_declaration_contract() could succeed after bootstrap.
     """
     from elspeth.contracts import Checkpoint, ResumePoint
+    from elspeth.engine.orchestrator import PipelineConfig
     from elspeth.engine.orchestrator import resume as resume_module
     from elspeth.engine.orchestrator.core import Orchestrator
     from elspeth.engine.orchestrator.resume import ResumeCoordinator
+    from tests.fixtures.base_classes import as_sink, as_source
     from tests.fixtures.landscape import make_landscape_db
+    from tests.fixtures.plugins import CollectSink, ListSource
     from tests.fixtures.stores import MockPayloadStore
 
     calls: list[str] = []
@@ -461,7 +464,7 @@ def test_resume_calls_prepare_for_run() -> None:
         from elspeth.contracts import RunStatus
         from elspeth.core.landscape.schema import runs_table
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 runs_table.insert().values(
                     run_id="run-resume-bootstrap",
@@ -494,11 +497,16 @@ def test_resume_calls_prepare_for_run() -> None:
             "validate",
             lambda self, cp, graph: ResumeCheck(can_resume=True),
         )
+        config = PipelineConfig(
+            sources={"primary": as_source(ListSource([]))},
+            transforms=[],
+            sinks={"output": as_sink(CollectSink("output"))},
+        )
 
         with pytest.raises(ReconstructReached):
             orchestrator.resume(
                 resume_point=resume_point,
-                config=object(),  # type: ignore[arg-type]
+                config=config,
                 graph=object(),  # type: ignore[arg-type]
                 payload_store=MockPayloadStore(),
             )

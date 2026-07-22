@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_AUDIT_SAFE_PROVIDER_ERROR = "LLM provider request failed"
+
 
 @dataclass(frozen=True, slots=True)
 class LLMResponse:
@@ -166,6 +168,7 @@ _CONTENT_POLICY_PATTERNS = (
 CONTEXT_LENGTH_PATTERNS = (
     "context_length_exceeded",  # OpenAI / Azure OpenAI canonical code
     "context length",  # OpenAI / Azure verbose wording ("maximum context length is X")
+    "context window",  # LiteLLM Bedrock wrapper ("Context Window Error")
     "maximum context",  # Catches "maximum context length", "exceeds maximum context"
     "prompt is too long",  # Anthropic via OpenRouter ("prompt is too long: N tokens > M maximum")
 )
@@ -184,6 +187,9 @@ def _classify_llm_error(exception: Exception) -> str:
     if re.search(r"\b429\b", error_str) or any(pattern.search(error_str) for pattern in _RATE_LIMIT_PATTERNS):
         return "rate_limit"
 
+    status_code = vars(exception).get("status_code")
+    if type(status_code) is int and status_code in (500, 502, 503, 504, 529):
+        return "server"
     if _SERVER_ERROR_CODE_PATTERN.search(error_str):
         return "server"
     if any(pattern in error_str for pattern in _NETWORK_ERROR_PATTERNS):
@@ -430,7 +436,7 @@ class AuditedLLMClient(AuditedClientBase):
                 request_data=request_dto,
                 error=LLMCallError(
                     type=error_type,
-                    message=str(e),
+                    message=_AUDIT_SAFE_PROVIDER_ERROR,
                     retryable=is_retryable,
                 ),
                 latency_ms=latency_ms,
@@ -448,20 +454,25 @@ class AuditedLLMClient(AuditedClientBase):
                 token_usage=None,
             )
 
-            # Raise specific exception type based on error classification
+            # Raise specific exception type based on error classification.
+            # Message is the audit-safe constant, not str(e): callers persist
+            # caught exception text into transform_errors.error_details_json,
+            # so raw SDK error text (endpoints, ARNs, presigned URLs) must not
+            # leave this boundary. The original exception stays reachable via
+            # __cause__ for in-process diagnostics (elspeth-5d17bcff15).
             if error_class == "rate_limit":
-                raise RateLimitError(str(e)) from e
+                raise RateLimitError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "content_policy":
-                raise ContentPolicyError(str(e)) from e
+                raise ContentPolicyError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "context_length":
-                raise ContextLengthError(str(e)) from e
+                raise ContextLengthError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "server":
-                raise ServerError(str(e)) from e
+                raise ServerError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             elif error_class == "network":
-                raise NetworkError(str(e)) from e
+                raise NetworkError(_AUDIT_SAFE_PROVIDER_ERROR) from e
             else:
                 # Client error or unknown - not retryable
-                raise LLMClientError(str(e), retryable=False) from e
+                raise LLMClientError(_AUDIT_SAFE_PROVIDER_ERROR, retryable=False) from e
 
         # Success path — OUTSIDE the SDK-call try/except so genuine internal logic
         # bugs crash instead of being misclassified as LLM errors. Tier-3 boundary

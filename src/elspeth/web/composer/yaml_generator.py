@@ -26,12 +26,18 @@ after blob ownership checks pass.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import yaml
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
+from elspeth.web.composer.guided_blob_refs import (
+    validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_source_mapping,
+)
+from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
 
@@ -130,6 +136,27 @@ def _generate_pipeline_dict(state: CompositionState, *, omit_blob_bound_source_p
         doc["sources"] = {
             name: _source_entry(source, omit_blob_bound_source_paths=omit_blob_bound_source_paths) for name, source in sources.items()
         }
+
+    # Queues — structural pass-through fan-in points (elspeth-a5b86149d4).
+    # Emitted after sources and before executable node lists so the YAML reads
+    # source -> queues -> transforms -> ... Queue nodes are in COMPOSER_NODE_TYPES
+    # but belong to none of the executable node lists below, so without this
+    # block a queue node would be silently dropped from the export. Defend the
+    # canonical shape here via the single source of truth rather than trusting
+    # internal state blindly.
+    queues = [node for node in state.nodes if node.node_type == "queue"]
+    if queues:
+        queues_doc: dict[str, Any] = {}
+        for queue in queues:
+            contract_error = queue_node_contract_error(queue)
+            if contract_error is not None:
+                raise ValueError(contract_error)
+            queue_entry: dict[str, Any] = {}
+            description = queue.options.get("description")
+            if isinstance(description, str):
+                queue_entry["description"] = description
+            queues_doc[queue.id] = queue_entry
+        doc["queues"] = queues_doc
 
     # Transforms — filter nodes by type, access always-present fields directly.
     transforms = [n for n in state_dict["nodes"] if n["node_type"] == "transform"]
@@ -241,9 +268,67 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     return _generate_pipeline_dict(state, omit_blob_bound_source_paths=False)
 
 
+def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> CompositionState:
+    """Reconstitute guided blob refs before public YAML generation.
+
+    Guided mode can commit sources with only their storage ``path`` while each
+    authoritative ``blob_ref`` survives in schema-8 ``reviewed_sources``.
+    Public YAML stripping keys off ``blob_ref``, so reattach each binding to a
+    working copy when both the persisted source name and storage path match.
+    """
+    guided = state.guided_session
+    if guided is None or not guided.reviewed_sources:
+        return state
+
+    reviewed_bindings: list[tuple[str, frozenset[str], str]] = []
+    for snapshot in guided.reviewed_sources.values():
+        source_name = snapshot.name
+        snapshot_options = snapshot.options
+        if "blob_ref" not in snapshot_options:
+            continue
+        blob_ref, blob_backed_paths = validate_guided_reviewed_blob_binding(snapshot_options)
+        reviewed_bindings.append((source_name, blob_backed_paths, blob_ref))
+
+    if not reviewed_bindings:
+        return state
+    validate_guided_reviewed_blob_source_mapping(
+        [(name, paths) for name, paths, _blob_ref in reviewed_bindings],
+        {name: source.options for name, source in state.sources.items()},
+    )
+    all_reviewed_paths = frozenset(path for _name, paths, _blob_ref in reviewed_bindings for path in paths)
+    reattached = dict(state.sources)
+    changed = False
+    for source_name, source in state.sources.items():
+        live_reviewed_paths = {
+            value for key in SOURCE_LOCAL_PATH_OPTION_KEYS if type(value := source.options.get(key)) is str and value in all_reviewed_paths
+        }
+        if not live_reviewed_paths:
+            continue
+        candidates = [
+            (paths, blob_ref)
+            for reviewed_name, paths, blob_ref in reviewed_bindings
+            if reviewed_name == source_name and live_reviewed_paths <= paths
+        ]
+        if len(candidates) != 1:
+            raise AuditIntegrityError("guided blob source mapping is inconsistent")
+        _reviewed_paths, blob_ref = candidates[0]
+        options = source.options
+        if "blob_ref" in options:
+            if options["blob_ref"] != blob_ref:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
+            continue
+        merged = dict(options)
+        merged["blob_ref"] = blob_ref
+        reattached[source_name] = replace(source, options=merged)
+        changed = True
+
+    return replace(state, sources=reattached) if changed else state
+
+
 def generate_public_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     """Convert a CompositionState to public export/share/MCP pipeline dict."""
-    return _generate_pipeline_dict(state, omit_blob_bound_source_paths=True)
+    export_state = reattach_guided_blob_refs_for_public_export(state)
+    return _generate_pipeline_dict(export_state, omit_blob_bound_source_paths=True)
 
 
 def generate_yaml(state: CompositionState) -> str:

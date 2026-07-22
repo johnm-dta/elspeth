@@ -11,6 +11,8 @@ import type {
   CompositionProposal,
 } from "@/types/api";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
+import { clearAllGuidedRetries } from "./guidedOperationRetry";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
 const validateMock = vi.hoisted(() => vi.fn());
@@ -29,6 +31,8 @@ vi.mock("@/api/client", () => ({
   acceptCompositionProposal: vi.fn(),
   rejectCompositionProposal: vi.fn(),
   forkFromMessage: vi.fn(),
+  isForkCommittedResponseError: (error: unknown) =>
+    typeof error === "object" && error !== null && "committedSuccessResponse" in error,
   revertToVersion: vi.fn(),
   fetchStateVersions: vi.fn(),
   archiveSession: vi.fn(),
@@ -71,6 +75,7 @@ vi.mock("./executionStore", () => ({
 function makeCompositionState(version: number, nodeIds: string[] = []): CompositionState {
   return {
     id: `state-${version}`,
+    ...compositionStateAuthorityFields,
     version,
     sources: {},
     nodes: nodeIds.map((id) => ({
@@ -149,6 +154,7 @@ function makeCompositionProposal(
     base_state_id: "state-1",
     committed_state_id: null,
     audit_event_id: null,
+    pipeline_metadata: null,
     created_at: "2026-05-14T00:00:00Z",
     updated_at: "2026-05-14T00:00:00Z",
     ...overrides,
@@ -158,6 +164,8 @@ function makeCompositionProposal(
 describe("sessionStore", () => {
   beforeEach(async () => {
     vi.resetAllMocks();
+    window.sessionStorage.clear();
+    clearAllGuidedRetries();
     resetStore(useSessionStore);
     // Phase 1B: keep existing createSession-touching tests on the pre-change
     // behaviour by pinning preferences to freeform-loaded. The new
@@ -210,6 +218,33 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("compose timeout readiness", () => {
+    it("starts not ready so every send is gated until the backend wall clock lands", () => {
+      // Fail-closed default: the single reactive source of truth for the
+      // compose gate. Until App.checkHealth applies the server wall clock, the
+      // composer Send affordances stay disabled so no request is scheduled
+      // against the stale default ceiling (bootstrap race).
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    });
+
+    it("setComposeTimeoutReady flips the reactive gate", () => {
+      useSessionStore.getState().setComposeTimeoutReady(true);
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(true);
+      useSessionStore.getState().setComposeTimeoutReady(false);
+      expect(useSessionStore.getState().composeTimeoutReady).toBe(false);
+    });
+
+    it("composerTimeoutUnavailable starts false and is toggled by its setter", () => {
+      // Distinguishes "up but misconfigured" from the transient boot window;
+      // must default false so a healthy boot never shows the stuck diagnostic.
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+      useSessionStore.getState().setComposerTimeoutUnavailable(true);
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(true);
+      useSessionStore.getState().setComposerTimeoutUnavailable(false);
+      expect(useSessionStore.getState().composerTimeoutUnavailable).toBe(false);
+    });
+  });
+
   describe("loaded-ness flags", () => {
     it("loadSessions marks sessionsLoaded on success", async () => {
       const apiMod = await import("@/api/client");
@@ -230,6 +265,59 @@ describe("sessionStore", () => {
 
       expect(useSessionStore.getState().sessionsLoaded).toBe(false);
       expect(useSessionStore.getState().error).toMatch(/failed to load sessions/i);
+    });
+
+    it("ignores a stale response that resolves after a subsequent create+rename replaced the list (elspeth-4d5b0e634a)", async () => {
+      // Regression pin for the tutorial session-list race: an app-start
+      // loadSessions can still be in flight when the user clicks "Let's go"
+      // (createSession + renameSession). If the fetch resolves afterwards
+      // with its pre-rename snapshot, it must not clobber the rename.
+      const apiMod = await import("@/api/client");
+      let resolveFetch!: (sessions: unknown[]) => void;
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+      );
+
+      // App-start loadSessions fires and is still in flight...
+      const loading = useSessionStore.getState().loadSessions();
+
+      // ...when the tutorial's "Let's go" creates and renames a session —
+      // the exact sequence HelloWorldTutorial.onStart runs.
+      (apiMod.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "tutorial-session",
+        title: "Session — 10 Jul 2026",
+        created_at: "2026-07-10T00:00:00Z",
+        updated_at: "2026-07-10T00:00:00Z",
+      });
+      await useSessionStore.getState().createSession();
+
+      const renamed = {
+        id: "tutorial-session",
+        title: "First-run tutorial (in progress)",
+        created_at: "2026-07-10T00:00:00Z",
+        updated_at: "2026-07-10T00:00:01Z",
+      };
+      (apiMod.renameSession as ReturnType<typeof vi.fn>).mockResolvedValue(renamed);
+      await useSessionStore
+        .getState()
+        .renameSession("tutorial-session", "First-run tutorial (in progress)");
+
+      const sessionsAfterMutation = useSessionStore.getState().sessions;
+      expect(sessionsAfterMutation[0]).toEqual(renamed);
+
+      // NOW the stale app-start fetch resolves with its pre-rename (empty)
+      // snapshot.
+      resolveFetch([]);
+      await loading;
+
+      // The rename must survive — the stale snapshot did not clobber it.
+      expect(useSessionStore.getState().sessions).toBe(sessionsAfterMutation);
+      expect(useSessionStore.getState().sessions[0]).toEqual(renamed);
+      // The fetch itself still succeeded, so the loaded-ness flag is honest
+      // to flip even though its (stale) snapshot was discarded.
+      expect(useSessionStore.getState().sessionsLoaded).toBe(true);
     });
 
     it("selectSession clears compositionStateLoaded while fetching, sets it once settled", async () => {
@@ -485,6 +573,627 @@ describe("sessionStore", () => {
       expect(state.error).not.toContain("Failed to send message");
       expect(state.messages[0].local_status).toBe("failed");
       expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("maps the raw compose_timeout abort reason to the compose-timeout copy (elspeth-475647c47a)", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      // useComposer aborts with controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+      // a bare string. Per WHATWG semantics the in-flight fetch then rejects
+      // with that raw string — NOT a DOMException — so the store must classify
+      // on the rejection value too or the user gets the generic send failure.
+      const controller = new AbortController();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_timeout");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toMatch(/took too long/i);
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("maps the raw compose_user_cancel abort reason to the cancelled copy (elspeth-475647c47a)", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      const controller = new AbortController();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toContain("Composition stopped");
+      expect(state.error).not.toContain("Failed to send message");
+    });
+
+    it("resyncs durable server state after a compose abort (elspeth-06a23adfcc)", async () => {
+      // A client-side abort (Stop button / COMPOSE_TIMEOUT_MS guard) only
+      // rejects the local fetch — the turn ran server-side until the
+      // disconnect watcher cancelled it, and every step it completed before
+      // the cancel (canonical user row, assistant rows, state advances,
+      // proposals, interpretation reviews) is already committed. The store
+      // must refetch those surfaces or the transcript/side rail keep the
+      // pre-send snapshot until a manual reload.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const canonicalUser: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:00Z",
+      };
+      const partialAssistant: ChatMessage = {
+        id: "asst-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "Built the pipeline; interpretation review cards are ready.",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:01Z",
+      };
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        canonicalUser,
+        partialAssistant,
+      ]);
+      (
+        apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(makeCompositionState(3, ["analyze"]));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([makeCompositionProposal({ id: "proposal-abort" })]);
+      (
+        apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([makePendingInterpretationEvent("evt-abort")]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(1),
+      });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.error).toContain("Composition stopped");
+      // Side rail reflects the durable head, not the pre-send snapshot.
+      expect(state.compositionState?.version).toBe(3);
+      expect(state.compositionProposals).toEqual([
+        expect.objectContaining({ id: "proposal-abort" }),
+      ]);
+      // Version moved 1 -> 3, so stale validation must be dropped (R4-H3).
+      expect(clearValidationMock).toHaveBeenCalled();
+      // Transcript shows the canonical rows; the optimistic local-* user
+      // row is dropped because its canonical counterpart was persisted.
+      expect(state.messages.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
+      // The turn's pending interpretation reviews surface without a reload.
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-abort"]).toBeDefined();
+      });
+    });
+
+    it("waits for the cancelled turn's terminal progress before resyncing", async () => {
+      // The disconnect watcher cancels the route task, but the compose
+      // loop's dispatch+persist critical section is shielded (deferred
+      // cancellation, a7ac0f06f): the in-flight tool finishes and P4
+      // publishes AFTER the client's fetch has already rejected. Resyncing
+      // immediately reads the pre-publish snapshot and the late commits
+      // stay invisible until reload. The terminal 'cancelled' progress
+      // snapshot is published strictly after those persists, so the resync
+      // must wait for it.
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const progressMock = apiMod.fetchComposerProgress as ReturnType<
+        typeof vi.fn
+      >;
+      progressMock
+        // sendMessage's initial progress poll.
+        .mockResolvedValueOnce({ phase: "using_tools", inflight_requests: 1 })
+        // First settle check: the cancelled turn is still unwinding
+        // (shielded tool + P4 publish in flight).
+        .mockResolvedValueOnce({ phase: "using_tools", inflight_requests: 1 })
+        // Second settle check onward: the route has fully unwound.
+        .mockResolvedValue({ phase: "cancelled", inflight_requests: 0 });
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        {
+          id: "user-1",
+          session_id: "session-1",
+          role: "user",
+          content: "hello",
+          tool_calls: null,
+          created_at: "2026-07-11T00:00:00Z",
+        },
+      ]);
+      const stateMock = apiMod.fetchCompositionState as ReturnType<
+        typeof vi.fn
+      >;
+      stateMock.mockResolvedValue(makeCompositionState(3));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(1),
+      });
+      const sendPromise = useSessionStore
+        .getState()
+        .sendMessage("hello", controller.signal);
+      controller.abort("compose_user_cancel");
+      await sendPromise;
+
+      // The resync's state GET must run only after the settle wait
+      // observed the terminal snapshot (progress call #3).
+      const progressOrder = progressMock.mock.invocationCallOrder;
+      const stateOrder = stateMock.mock.invocationCallOrder[0];
+      expect(progressOrder.length).toBeGreaterThanOrEqual(3);
+      expect(stateOrder).toBeGreaterThan(progressOrder[2]);
+      expect(useSessionStore.getState().compositionState?.version).toBe(3);
+    });
+
+    it("keeps waiting past any wall-clock budget while the cancelled turn is still unwinding", async () => {
+      // Synchronous tools are cancel-safe by running to completion —
+      // tool_batch.py never wraps them in asyncio.wait_for — so the
+      // shielded window has NO upper bound. A wall-clock budget on the
+      // settle wait just reintroduces the reconciliation race past its
+      // edge: the wait must end on semantic conditions only.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Mutable registry: still unwinding until the test flips it.
+        const registry = { phase: "using_tools", inflight_requests: 1 };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+          {
+            id: "user-1",
+            session_id: "session-1",
+            role: "user",
+            content: "hello",
+            tool_calls: null,
+            created_at: "2026-07-11T00:00:00Z",
+          },
+        ]);
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        // A long synchronous tool: 25 (fake) seconds pass with the server
+        // still unwinding. The resync must NOT have fired.
+        await vi.advanceTimersByTimeAsync(25_000);
+        expect(stateMock).not.toHaveBeenCalled();
+
+        // The server finally settles; the resync now proceeds.
+        registry.phase = "cancelled";
+        registry.inflight_requests = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+        await sendPromise;
+        expect(stateMock).toHaveBeenCalled();
+        expect(useSessionStore.getState().compositionState?.version).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abandons the settle wait when the user switches sessions", async () => {
+      // The unbounded wait needs semantic exits: navigating away makes the
+      // resync moot, so the loop must end rather than poll a session the
+      // user has left (and must not fetch state for it either).
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "using_tools", inflight_requests: 1 });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({ activeSessionId: "session-1" });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        useSessionStore.setState({ activeSessionId: "session-2" });
+        await vi.advanceTimersByTimeAsync(25_000);
+        await sendPromise;
+
+        expect(stateMock).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not treat a previous turn's terminal snapshot as settlement", async () => {
+      // Immediate Stop / multi-tab queued-on-lock: the aborted route has
+      // not published any progress yet, so the registry still holds the
+      // PREVIOUS turn's terminal snapshot (or idle). The phase says
+      // "settled"; the in-flight request count says the aborted route is
+      // still running — and it will still write the user row (and possibly
+      // state) once it reaches/acquires the lock. Only quiescence — zero
+      // in-flight compose requests for the session — is settlement.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Previous turn's terminal snapshot, but OUR aborted route is
+        // still counted in flight.
+        const registry = { phase: "complete", inflight_requests: 1 };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+          {
+            id: "user-1",
+            session_id: "session-1",
+            role: "user",
+            content: "hello",
+            tool_calls: null,
+            created_at: "2026-07-11T00:00:00Z",
+          },
+        ]);
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+
+        // The aborted route is still in flight (queued / unwinding): the
+        // resync must hold even though the visible phase is terminal.
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(stateMock).not.toHaveBeenCalled();
+
+        // The route unwinds; quiescence reached; the resync proceeds.
+        registry.phase = "cancelled";
+        registry.inflight_requests = 0;
+        await vi.advanceTimersByTimeAsync(1_000);
+        await sendPromise;
+        expect(useSessionStore.getState().compositionState?.version).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("abandons the settle wait when a newer compose turn claims the poller", async () => {
+      // Guided chat sets guidedChatPending (not isComposing) and its route
+      // is not the freeform POST — a store-flag check cannot see it. Every
+      // compose entry point (sendMessage/retryMessage/chatGuided) claims
+      // the module-global progress poller via startComposerProgressPolling,
+      // so the poller generation is the mode-agnostic supersession signal:
+      // once a newer turn owns it, the aborted turn's resync must abandon
+      // without fetching at all.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        const registry = { phase: "using_tools", inflight_requests: 1 };
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockImplementation(() =>
+          Promise.resolve({
+            phase: registry.phase,
+            inflight_requests: registry.inflight_requests,
+          }),
+        );
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockResolvedValue(makeCompositionState(3));
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(1_000); // waiter parked
+
+        // A guided chat turn starts in the same session: it claims the
+        // progress poller exactly as chatGuided does.
+        useSessionStore.getState().startComposerProgressPolling("session-1");
+        // The registry then quiesces (the guided turn finished; guided
+        // requests are also counted server-side, but even a zero count
+        // must not revive the superseded resync).
+        registry.phase = "complete";
+        registry.inflight_requests = 0;
+        await vi.advanceTimersByTimeAsync(2_000);
+        await sendPromise;
+
+        expect(stateMock).not.toHaveBeenCalled();
+        expect(useSessionStore.getState().compositionState?.version).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not apply a resync snapshot fetched before a newer turn finished", async () => {
+      // The race the fence must close at the APPLY side: the waiter
+      // settles, the resync's GETs go out, a newer turn starts AND
+      // completes while they are in flight, and the older snapshot then
+      // arrives. Applying it would overwrite the newer turn's state.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controller = new AbortController();
+        (
+          apiMod.sendMessage as ReturnType<typeof vi.fn>
+        ).mockImplementationOnce(
+          () =>
+            new Promise((_resolve, reject) => {
+              controller.signal.addEventListener("abort", () =>
+                reject(controller.signal.reason),
+              );
+            }),
+        );
+        // Quiescent from the start: the waiter settles immediately and
+        // the resync proceeds straight to its GETs.
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "cancelled", inflight_requests: 0 });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        // Gate the state fetch so the test controls when it resolves.
+        let releaseStateFetch: (state: CompositionState) => void = () => {};
+        const gatedState = new Promise<CompositionState>((resolve) => {
+          releaseStateFetch = resolve;
+        });
+        const stateMock = apiMod.fetchCompositionState as ReturnType<
+          typeof vi.fn
+        >;
+        stateMock.mockReturnValue(gatedState);
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({
+          activeSessionId: "session-1",
+          compositionState: makeCompositionState(1),
+        });
+        const sendPromise = useSessionStore
+          .getState()
+          .sendMessage("hello", controller.signal);
+        controller.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(500); // resync GETs in flight
+
+        // A newer turn claims the poller and finishes, leaving newer
+        // frontend state (version 5).
+        useSessionStore.getState().startComposerProgressPolling("session-1");
+        useSessionStore.setState({ compositionState: makeCompositionState(5) });
+
+        // The stale snapshot (version 3) finally arrives.
+        releaseStateFetch(makeCompositionState(3));
+        await vi.advanceTimersByTimeAsync(500);
+        await sendPromise;
+
+        expect(useSessionStore.getState().compositionState?.version).toBe(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not tear down a newer turn's pollers when the aborted turn settles", async () => {
+      // Turn A aborts and its settle wait parks. The user then sends turn B
+      // in the same session: B starts the module-global progress/message
+      // pollers, A's waiter exits (isComposing), and A's finally runs its
+      // teardown. That teardown must not stop the pollers B now owns —
+      // otherwise B runs with no live progress or transcript polling.
+      vi.useFakeTimers();
+      try {
+        const apiMod = await import("@/api/client");
+        const controllerA = new AbortController();
+        (apiMod.sendMessage as ReturnType<typeof vi.fn>)
+          .mockImplementationOnce(
+            () =>
+              new Promise((_resolve, reject) => {
+                controllerA.signal.addEventListener("abort", () =>
+                  reject(controllerA.signal.reason),
+                );
+              }),
+          )
+          // Turn B stays in flight for the remainder of the test.
+          .mockImplementationOnce(() => new Promise(() => {}));
+        (
+          apiMod.fetchComposerProgress as ReturnType<typeof vi.fn>
+        ).mockResolvedValue({ phase: "using_tools", inflight_requests: 1 });
+        (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue(
+          [],
+        );
+        (
+          apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+        ).mockResolvedValue(null);
+        (
+          apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+        ).mockResolvedValue([]);
+
+        useSessionStore.setState({ activeSessionId: "session-1" });
+        const sendA = useSessionStore
+          .getState()
+          .sendMessage("hello", controllerA.signal);
+        controllerA.abort("compose_user_cancel");
+        await vi.advanceTimersByTimeAsync(1_000); // A's waiter is parked
+
+        const sendB = useSessionStore.getState().sendMessage("again");
+        await vi.advanceTimersByTimeAsync(1_000); // A's waiter sees isComposing
+        await sendA;
+
+        // B's pollers must still tick after A's teardown ran.
+        const progressMock = apiMod.fetchComposerProgress as ReturnType<
+          typeof vi.fn
+        >;
+        const messagesMock = apiMod.fetchMessages as ReturnType<typeof vi.fn>;
+        const progressBaseline = progressMock.mock.calls.length;
+        const messagesBaseline = messagesMock.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(6_000);
+        expect(progressMock.mock.calls.length).toBeGreaterThanOrEqual(
+          progressBaseline + 2,
+        );
+        expect(messagesMock.mock.calls.length).toBeGreaterThanOrEqual(
+          messagesBaseline + 2,
+        );
+        void sendB;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps the failed-row contract on a non-abort failure (no resync)", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 422,
+        error_type: "convergence",
+        detail: "ignored",
+      });
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().sendMessage("hello");
+
+      const state = useSessionStore.getState();
+      // Non-abort failures keep the pre-existing contract: failed optimistic
+      // row + retry affordance, no composition-state refetch (recovery-class
+      // errors are mediated by the recovery panel, not a silent resync).
+      expect(apiMod.fetchCompositionState).not.toHaveBeenCalled();
+      expect(state.messages[0].local_status).toBe("failed");
     });
 
     it("includes provider detail when an LLM unavailable response exposes it", async () => {
@@ -1071,6 +1780,43 @@ describe("sessionStore", () => {
         "proposal-1",
       );
     });
+
+    it("echoes canonical pipeline draft hashes when accepting", async () => {
+      const apiClient = await import("@/api/client");
+      const proposal = makeCompositionProposal({
+        pipeline_metadata: {
+          surface: "freeform",
+          draft_hash: "d".repeat(64),
+          base: { kind: "absent" },
+          reviewed_anchor_hash: "a".repeat(64),
+          repair_count: 0,
+          skill_hash: "s".repeat(64),
+          audit_payload_hash: "p".repeat(64),
+          custody_result: "not_required",
+        },
+      });
+      (
+        apiClient.acceptCompositionProposal as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(proposal);
+      (
+        apiClient.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+      (
+        apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionProposals: [proposal],
+      });
+
+      await useSessionStore.getState().acceptProposal(proposal.id);
+
+      expect(apiClient.acceptCompositionProposal).toHaveBeenCalledWith(
+        "session-1",
+        proposal.id,
+        proposal.pipeline_metadata?.draft_hash,
+      );
+    });
   });
 
   describe("applyResolvedInterpretation", () => {
@@ -1267,11 +2013,14 @@ describe("sessionStore", () => {
       (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(
         makeCompositionState(1),
       );
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
       (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
-        session,
-        messages: [],
-        composition_state: makeCompositionState(1),
+        session_id: "00000000-0000-4000-8000-000000000702",
       });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { ...session, id: "00000000-0000-4000-8000-000000000702" },
+      ]);
       (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
         guided_session: null,
         next_turn: null,
@@ -1281,7 +2030,7 @@ describe("sessionStore", () => {
 
       const seedRecovery = () =>
         useSessionStore.setState({
-          activeSessionId: "session-1",
+          activeSessionId: "00000000-0000-4000-8000-000000000701",
           recoveryError: makeRecoveryError(),
           recoveryStartedCompositionVersion: 1,
         });
@@ -1295,7 +2044,7 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().recoveryError).toBeNull();
 
       seedRecovery();
-      await useSessionStore.getState().archiveSession("session-1");
+      await useSessionStore.getState().archiveSession("00000000-0000-4000-8000-000000000701");
       expect(useSessionStore.getState().recoveryError).toBeNull();
 
       seedRecovery();
@@ -1572,6 +2321,105 @@ describe("sessionStore", () => {
       expect(state.error).not.toContain("Failed to send message");
       expect(state.messages[0].local_status).toBe("failed");
       expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("maps the raw compose_timeout abort reason to the compose-timeout copy (elspeth-475647c47a)", async () => {
+      const { recompose: mockRecompose } = await import("@/api/client");
+      // Real fetch rejects with the bare abort-reason string, not a
+      // DOMException — see the sendMessage sibling test.
+      const controller = new AbortController();
+      (mockRecompose as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: new Date().toISOString(),
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+      });
+
+      const retryPromise = useSessionStore
+        .getState()
+        .retryMessage("user-1", controller.signal);
+      controller.abort("compose_timeout");
+      await retryPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toMatch(/took too long/i);
+      expect(state.error).not.toContain("Failed to send message");
+      expect(state.messages[0].local_status).toBe("failed");
+      expect(state.messages[0].local_error).toBe(state.error);
+    });
+
+    it("resyncs durable server state after an aborted retry (elspeth-06a23adfcc)", async () => {
+      const apiMod = await import("@/api/client");
+      const controller = new AbortController();
+      (apiMod.recompose as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            controller.signal.addEventListener("abort", () =>
+              reject(controller.signal.reason),
+            );
+          }),
+      );
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:00Z",
+      };
+      const partialAssistant: ChatMessage = {
+        id: "asst-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "Partial recompose output.",
+        tool_calls: null,
+        created_at: "2026-07-11T00:00:01Z",
+      };
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        userMessage,
+        partialAssistant,
+      ]);
+      (
+        apiMod.fetchCompositionState as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(makeCompositionState(2));
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+        compositionState: makeCompositionState(1),
+      });
+      const retryPromise = useSessionStore
+        .getState()
+        .retryMessage("user-1", controller.signal);
+      controller.abort("compose_user_cancel");
+      await retryPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.error).toContain("Composition stopped");
+      expect(state.compositionState?.version).toBe(2);
+      expect(state.messages.map((m) => m.id)).toEqual(["user-1", "asst-1"]);
+      // The canonical refetch clears the transient failed flag — the user
+      // message was always durable; only the recompose turn was cancelled.
+      expect(state.messages[0].local_status).toBeUndefined();
     });
   });
 
@@ -1882,6 +2730,304 @@ describe("sessionStore", () => {
       expect(enterGuided).not.toHaveBeenCalled();
       expect(useSessionStore.getState().activeSessionId).toBe("sess-existing");
       expect(useSessionStore.getState().error).toBeNull();
+    });
+  });
+
+  describe("session fork retry custody", () => {
+    const parentId = "00000000-0000-4000-8000-000000000701";
+    const childId = "00000000-0000-4000-8000-000000000702";
+    const child = {
+      id: childId,
+      title: "Fork",
+      created_at: "2026-07-19T00:00:00Z",
+      updated_at: "2026-07-19T00:00:00Z",
+      forked_from_session_id: parentId,
+    };
+
+    it("reuses the exact operation id after an ambiguous POST failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+        .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(calls[0]?.slice(2)).toEqual(["message-1", "edited"]);
+    });
+
+    it("reports conflicting fork content without rejecting or sending another request", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValue(new TypeError("response lost"));
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "first edit");
+      await expect(
+        useSessionStore.getState().forkFromMessage("message-1", "different edit"),
+      ).resolves.toBeUndefined();
+
+      expect(apiClient.forkFromMessage).toHaveBeenCalledTimes(1);
+      expect(useSessionStore.getState().isComposing).toBe(false);
+      expect(useSessionStore.getState().error).toMatch(/unsettled/i);
+
+      await useSessionStore.getState().forkFromMessage("message-1", "first edit");
+      expect(apiClient.forkFromMessage).toHaveBeenCalledTimes(2);
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[1]?.[1]).toBe(calls[0]?.[1]);
+    });
+
+    it("reuses the exact operation id after a 5xx POST failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 503 })
+        .mockRejectedValueOnce({ status: 503 });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+    });
+
+    it("retires operation custody after a definitive 4xx failure", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 409 })
+        .mockRejectedValueOnce({ status: 409 });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("keeps the operation id after locator success until authoritative child refresh succeeds", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+        session_id: childId,
+      });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("refresh failed"))
+        .mockResolvedValueOnce([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null,
+        next_turn: null,
+        terminal: null,
+        composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+      expect(useSessionStore.getState().sessions).toEqual([child]);
+      expect(useSessionStore.getState().error).toBeNull();
+    });
+
+    it("keeps parent active and reuses the operation id when a child read fails after the locator", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new TypeError("child state failed"))
+        .mockResolvedValueOnce(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+    });
+
+    it("keeps parent active and reuses the operation id when guided hydration returns 503", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ status: 503 })
+        .mockResolvedValueOnce({ guided_session: null, next_turn: null, terminal: null, composition_state: null });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      expect(useSessionStore.getState().activeSessionId).toBe(parentId);
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+      expect(useSessionStore.getState().activeSessionId).toBe(childId);
+    });
+
+    it("retains retry custody for malformed 2xx fork responses", async () => {
+      const apiClient = await import("@/api/client");
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce({ committedSuccessResponse: true })
+        .mockRejectedValueOnce({ committedSuccessResponse: true });
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
+    });
+
+    it("publishes the child without clobbering intervening rename, create, or archive mutations", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedSessions = deferred<Array<Record<string, unknown>>>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mockResolvedValue({ session_id: childId });
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockReturnValue(delayedSessions.promise);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      const renamedParent = { ...child, id: parentId, title: "Renamed while hydrating" };
+      const archivedElsewhere = { ...child, id: "session-archived", title: "Archived elsewhere" };
+      const createdElsewhere = { ...child, id: "session-created", title: "Created elsewhere" };
+      useSessionStore.setState({ activeSessionId: parentId, sessions: [renamedParent, archivedElsewhere] });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({
+        sessions: [{ ...renamedParent, title: "Newest title" }, createdElsewhere],
+      });
+      delayedSessions.resolve([
+        { ...renamedParent, title: "Stale parent title" },
+        archivedElsewhere,
+        child,
+      ]);
+      await pending;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe(childId);
+      expect(state.sessions.map((session) => session.id)).toEqual([
+        childId,
+        parentId,
+        "session-created",
+      ]);
+      expect(state.sessions[1]?.title).toBe("Newest title");
+    });
+
+    it("keeps a pre-locator user selection sovereign while publishing the committed child", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedLocator = deferred<{ session_id: string }>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(delayedLocator.promise)
+        .mockRejectedValueOnce(new TypeError("lost retry response"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      const forkPromise = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({
+        activeSessionId: "00000000-0000-4000-8000-000000000703",
+        isComposing: false,
+        error: null,
+      });
+      delayedLocator.resolve({ session_id: childId });
+      await forkPromise;
+
+      expect(useSessionStore.getState().activeSessionId).toBe(
+        "00000000-0000-4000-8000-000000000703",
+      );
+      expect(useSessionStore.getState().sessions).toEqual([child]);
+      expect(useSessionStore.getState().error).toBeNull();
+      expect(apiClient.fetchMessages).not.toHaveBeenCalled();
+
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("keeps a mid-hydration user selection sovereign while publishing the committed child", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedMessages = deferred<ChatMessage[]>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ session_id: childId })
+        .mockRejectedValueOnce(new TypeError("second request"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([child]);
+      (apiClient.fetchMessages as ReturnType<typeof vi.fn>).mockReturnValue(delayedMessages.promise);
+      (apiClient.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiClient.fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiClient.getGuided as ReturnType<typeof vi.fn>).mockResolvedValue({
+        guided_session: null, next_turn: null, terminal: null, composition_state: null,
+      });
+      useSessionStore.setState({ activeSessionId: parentId, sessions: [] });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      await vi.waitFor(() => expect(apiClient.fetchMessages).toHaveBeenCalledWith(childId));
+      useSessionStore.setState({
+        activeSessionId: "00000000-0000-4000-8000-000000000704",
+        messages: [{ id: "selected-message" } as ChatMessage],
+        isComposing: false,
+        error: null,
+      });
+      delayedMessages.resolve([]);
+      await pending;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("00000000-0000-4000-8000-000000000704");
+      expect(state.messages).toEqual([{ id: "selected-message" }]);
+      expect(state.sessions).toEqual([child]);
+
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).not.toBe(calls[1]?.[1]);
+    });
+
+    it("retains parent-scoped retry custody when child publication fails after a user switch", async () => {
+      const apiClient = await import("@/api/client");
+      const delayedLocator = deferred<{ session_id: string }>();
+      (apiClient.forkFromMessage as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(delayedLocator.promise)
+        .mockRejectedValueOnce(new TypeError("lost retry response"));
+      (apiClient.fetchSessions as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new TypeError("publication failed"),
+      );
+      useSessionStore.setState({ activeSessionId: parentId });
+
+      const pending = useSessionStore.getState().forkFromMessage("message-1", "edited");
+      useSessionStore.setState({ activeSessionId: "selected-session", error: null });
+      delayedLocator.resolve({ session_id: childId });
+      await pending;
+
+      expect(useSessionStore.getState().activeSessionId).toBe("selected-session");
+      expect(useSessionStore.getState().sessions).toEqual([]);
+      useSessionStore.setState({ activeSessionId: parentId });
+      await useSessionStore.getState().forkFromMessage("message-1", "edited");
+      const calls = (apiClient.forkFromMessage as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls[0]?.[1]).toBe(calls[1]?.[1]);
     });
   });
 });

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 
 from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.audit import TokenRef
@@ -8,7 +13,9 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import node_states_table, token_outcomes_table, token_parents_table, tokens_table
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -403,6 +410,56 @@ class TestForkToken:
         )
         assert all(c.step_in_pipeline == 3 for c in children)
 
+    def test_exact_replay_returns_existing_children_without_reminting(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        replayed_children, replayed_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        assert replayed_group == first_group
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in first_children]
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.fork_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_parents_table).where(token_parents_table.c.parent_token_id == token.token_id)).all()) == 2
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
+    def test_incompatible_replay_refuses_without_mutation(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.fork_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            branches=["path-a", "path-b"],
+            step_in_pipeline=3,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="divergent fork replay"):
+            factory.data_flow.fork_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                branches=["path-b", "path-a"],
+                step_in_pipeline=3,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.fork_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
 
 class TestCoalesceTokens:
     """Tests for DataFlowRepository.coalesce_tokens."""
@@ -528,18 +585,104 @@ class TestExpandToken:
                 output_contract=_MINIMAL_CONTRACT,
             )
 
-    def test_record_parent_outcome_false_skips_outcome(self):
+    def test_batch_expansion_consumes_parent_atomically_and_reconciles_exact_replay(self):
         _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand")
         row, token = _make_row(factory)
-        _children, _eg = factory.data_flow.expand_token(
+        factory.execution.add_batch_member(batch_id, token.token_id, 0)
+        children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}],
-            record_parent_outcome=False,
             output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
         )
+
         outcome = factory.data_flow.get_token_outcome(token.token_id)
-        assert outcome is None
+        assert outcome is not None
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.BATCH_CONSUMED
+        assert outcome.batch_id == batch_id
+
+        replayed_children, replayed_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
+        )
+        assert replayed_group_id == expand_group_id
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in children]
+
+        with pytest.raises(AuditIntegrityError, match="divergent expansion replay"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}, {"item": 3}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
+
+        with _db.connection() as conn:
+            persisted_children = conn.execute(
+                select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == expand_group_id)
+            ).all()
+        assert len(children) == 2
+        assert len(persisted_children) == 2
+
+    def test_batch_expansion_claim_is_scoped_to_batch_not_selected_parent(self):
+        """A different member cannot replay an already materialized batch expansion."""
+        _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand-once")
+        first_row, first_parent = _make_row(factory, row_index=0)
+        second_row, second_parent = _make_row(factory, row_index=1)
+        factory.execution.add_batch_member(batch_id, first_parent.token_id, 0)
+        factory.execution.add_batch_member(batch_id, second_parent.token_id, 1)
+
+        children, expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=first_parent.token_id, run_id="run-1"),
+            row_id=first_row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="already claimed an expansion"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=second_parent.token_id, run_id="run-1"),
+                row_id=second_row.row_id,
+                child_payloads=[{"item": 3}, {"item": 4}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
+
+        with _db.connection() as conn:
+            persisted_children = conn.execute(
+                select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == expand_group_id)
+            ).all()
+        assert len(children) == 2
+        assert len(persisted_children) == 2
+
+    def test_batch_expansion_rejects_parent_outside_batch(self):
+        """BATCH_CONSUMED expansion must be claimed by an actual batch member."""
+        _db, factory = _setup()
+        batch_id = _make_batch(factory, batch_id="batch-expand-membership")
+        row, parent = _make_row(factory)
+
+        with pytest.raises(AuditIntegrityError, match="is not a member"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=parent.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}],
+                output_contract=_MINIMAL_CONTRACT,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=batch_id,
+            )
 
     def test_children_have_unique_token_ids(self):
         _db, factory = _setup()
@@ -564,6 +707,61 @@ class TestExpandToken:
             output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.step_in_pipeline == 7 for c in children)
+
+    def test_exact_replay_returns_existing_children_without_reminting(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        payloads = [{"item": 1}, {"item": 2}]
+        first_children, first_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=payloads,
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        replayed_children, replayed_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=payloads,
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        assert replayed_group == first_group
+        assert [child.token_id for child in replayed_children] == [child.token_id for child in first_children]
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_parents_table).where(token_parents_table.c.parent_token_id == token.token_id)).all()) == 2
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
+
+    def test_incompatible_replay_refuses_without_mutation(self):
+        db, factory = _setup()
+        row, token = _make_row(factory)
+        first_children, first_group = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            row_id=row.row_id,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
+            step_in_pipeline=7,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="divergent expansion replay"):
+            factory.data_flow.expand_token(
+                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                row_id=row.row_id,
+                child_payloads=[{"item": 1}, {"item": 3}],
+                output_contract=_MINIMAL_CONTRACT,
+                step_in_pipeline=7,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.expand_group_id == first_group)).all() == [
+                (child.token_id,) for child in first_children
+            ]
+            assert len(conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.token_id == token.token_id)).all()) == 1
 
     def test_expand_count_one(self):
         _db, factory = _setup()
@@ -994,6 +1192,323 @@ class TestRecordTokenOutcome:
         fetched = factory.data_flow.get_token_outcome(token.token_id)
         assert fetched is not None
         assert fetched.recorded_at is not None
+
+
+class TestRecordTokenOutcomeAtomicity:
+    """Cross-table validation and outcome insertion share one write boundary."""
+
+    def test_repository_owned_call_threads_one_write_connection_through_validation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcomes = factory.data_flow.outcomes
+        ownership_connections: list[Connection | None] = []
+        invariant_connections: list[Connection | None] = []
+        original_ownership = outcomes._ownership.validate_token_run_ownership
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def capture_ownership(ref: TokenRef, *, conn: Connection | None = None) -> None:
+            ownership_connections.append(conn)
+            original_ownership(ref, conn=conn)
+
+        def capture_invariants(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+            lock_witnesses: bool = True,
+        ) -> None:
+            invariant_connections.append(conn)
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+                lock_witnesses=lock_witnesses,
+            )
+
+        monkeypatch.setattr(outcomes._ownership, "validate_token_run_ownership", capture_ownership)
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", capture_invariants)
+
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="output",
+        )
+
+        assert ownership_connections == invariant_connections
+        assert len(ownership_connections) == 1
+        assert ownership_connections[0] is not None
+
+    def test_injected_failure_rolls_back_validation_side_effect_and_outcome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        register_test_node(factory.data_flow, "run-1", "sink-atomic", node_type=NodeType.SINK, plugin_name="sink")
+        state = factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="sink-atomic",
+            run_id="run-1",
+            step_index=0,
+            input_data={},
+        )
+        outcomes = factory.data_flow.outcomes
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def fail_after_validation_write(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+            lock_witnesses: bool = True,
+        ) -> None:
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+                lock_witnesses=lock_witnesses,
+            )
+            mutation = (
+                update(node_states_table)
+                .where(node_states_table.c.state_id == state.state_id)
+                .values(status=NodeStateStatus.COMPLETED.value)
+            )
+            if conn is None:
+                # This is the pre-fix shape: validation runs outside the
+                # outcome transaction, so its side effect commits independently.
+                with db.write_connection() as separate_conn:
+                    separate_conn.execute(mutation)
+            else:
+                conn.execute(mutation)
+            raise RuntimeError("injected after cross-table validation")
+
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", fail_after_validation_write)
+
+        with pytest.raises(RuntimeError, match="injected after cross-table validation"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        with db.read_only_connection() as conn:
+            persisted_status = conn.execute(
+                select(node_states_table.c.status).where(node_states_table.c.state_id == state.state_id)
+            ).scalar_one()
+            persisted_outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+        assert persisted_status == NodeStateStatus.OPEN.value
+        assert persisted_outcomes == []
+
+    def test_caller_supplied_connection_carries_validation_insert_and_outer_rollback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        outcomes = factory.data_flow.outcomes
+        seen_connections: list[Connection | None] = []
+        original_invariants = outcomes._validate_cross_table_invariants
+
+        def capture_invariants(
+            ref: TokenRef,
+            outcome: TerminalOutcome | None,
+            path: TerminalPath,
+            *,
+            sink_name: str | None,
+            sink_node_id: str | None,
+            artifact_id: str | None,
+            conn: Connection | None = None,
+            lock_witnesses: bool = True,
+        ) -> None:
+            seen_connections.append(conn)
+            original_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=conn,
+                lock_witnesses=lock_witnesses,
+            )
+
+        monkeypatch.setattr(outcomes, "_validate_cross_table_invariants", capture_invariants)
+
+        with pytest.raises(RuntimeError, match="outer transaction rollback"), db.write_connection() as caller_conn:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                conn=caller_conn,
+            )
+            assert seen_connections == [caller_conn]
+            raise RuntimeError("outer transaction rollback")
+
+        with db.read_only_connection() as conn:
+            persisted_outcomes = conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+        assert persisted_outcomes == []
+
+    def test_context_serialization_failure_opens_no_owned_write_transaction(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        opened_transactions: list[bool] = []
+        original_write_connection = db.write_connection
+
+        def track_write_connection():
+            opened_transactions.append(True)
+            return original_write_connection()
+
+        monkeypatch.setattr(db, "write_connection", track_write_connection)
+
+        with pytest.raises(ValueError, match="Cannot canonicalize non-finite float"):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                context={"invalid": float("nan")},
+            )
+
+        assert opened_transactions == []
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_context_serialization_failure_precedes_caller_connection_validation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        validation_calls: list[TokenRef] = []
+        outcomes = factory.data_flow.outcomes
+        original_ownership = outcomes._ownership.validate_token_run_ownership
+
+        def capture_ownership(ref: TokenRef, *, conn: Connection | None = None) -> None:
+            validation_calls.append(ref)
+            original_ownership(ref, conn=conn)
+
+        monkeypatch.setattr(outcomes._ownership, "validate_token_run_ownership", capture_ownership)
+
+        with db.write_connection() as caller_conn:
+            with pytest.raises(ValueError, match="Cannot canonicalize non-finite float"):
+                factory.data_flow.record_token_outcome(
+                    ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                    outcome=TerminalOutcome.SUCCESS,
+                    path=TerminalPath.DEFAULT_FLOW,
+                    sink_name="output",
+                    context={"invalid": float("nan")},
+                    conn=caller_conn,
+                )
+            persisted_outcomes = caller_conn.execute(
+                select(token_outcomes_table.c.outcome_id).where(token_outcomes_table.c.token_id == token.token_id)
+            ).all()
+
+        assert validation_calls == []
+        assert persisted_outcomes == []
+
+    def test_repository_owned_begin_failure_uses_landscape_error_taxonomy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+
+        @contextmanager
+        def fail_begin():
+            raise OperationalError("BEGIN IMMEDIATE", {}, RuntimeError("injected begin failure"))
+            yield  # pragma: no cover - contextmanager shape only
+
+        monkeypatch.setattr(db, "write_connection", fail_begin)
+
+        with pytest.raises(LandscapeRecordError, match=r"transaction boundary.*OperationalError") as exc_info:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        assert isinstance(exc_info.value.__cause__, OperationalError)
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_repository_owned_commit_failure_rolls_back_and_uses_landscape_error_taxonomy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+        original_write_connection = db.write_connection
+
+        @contextmanager
+        def fail_commit():
+            with original_write_connection() as conn:
+                yield conn
+                raise OperationalError("COMMIT", {}, RuntimeError("injected commit failure"))
+
+        monkeypatch.setattr(db, "write_connection", fail_commit)
+
+        with pytest.raises(LandscapeRecordError, match=r"transaction boundary.*OperationalError") as exc_info:
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+            )
+
+        assert isinstance(exc_info.value.__cause__, OperationalError)
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
+
+    def test_caller_owned_commit_failure_remains_the_callers_raw_boundary_error(self) -> None:
+        db, factory = _setup()
+        _row, token = _make_row(factory)
+
+        @contextmanager
+        def caller_transaction_with_commit_failure():
+            with db.write_connection() as conn:
+                yield conn
+                raise OperationalError("COMMIT", {}, RuntimeError("caller-owned commit failure"))
+
+        with (
+            pytest.raises(OperationalError, match="caller-owned commit failure"),
+            caller_transaction_with_commit_failure() as caller_conn,
+        ):
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id="run-1"),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="output",
+                conn=caller_conn,
+            )
+
+        assert factory.data_flow.get_token_outcome(token.token_id) is None
 
 
 class TestGetTokenOutcome:
@@ -1636,7 +2151,7 @@ class TestTokenRunIdConsistency:
         # Try to insert directly into token_outcomes with mismatched (token_id, run_id)
         # token_a belongs to run-A, but we try to record under run-B
         # The composite FK should reject this
-        with pytest.raises(IntegrityError), db.connection() as conn:
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
             conn.execute(
                 token_outcomes_table.insert().values(
                     outcome_id=f"out_{generate_id()[:12]}",
@@ -1700,7 +2215,7 @@ class TestTokenRunIdConsistency:
 
         # Try to insert a node_state with token_id from run-A but run_id from run-B
         # The composite FK should reject this
-        with pytest.raises(IntegrityError), db.connection() as conn:
+        with pytest.raises(IntegrityError), db.write_connection() as conn:
             conn.execute(
                 node_states_table.insert().values(
                     state_id=f"state_{generate_id()[:12]}",

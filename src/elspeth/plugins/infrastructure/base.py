@@ -45,6 +45,12 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.plugin_capabilities import (
+    CapabilityDeclaration,
+    ControlRole,
+    PluginCapability,
+    WebConfigAuthority,
+)
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 
 if TYPE_CHECKING:
@@ -59,6 +65,8 @@ if TYPE_CHECKING:
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.sink import OutputValidationResult
     from elspeth.plugins.infrastructure.config_base import PluginConfig, TransformDataConfig
+
+from elspeth.contracts.sink_effects import ResolvedSinkEffectMode, SinkEffectExecutionPurpose, SinkEffectInputKind
 from elspeth.plugins.infrastructure.results import (
     TransformResult,
 )
@@ -188,6 +196,9 @@ class BaseTransform(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
+
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
@@ -243,6 +254,22 @@ class BaseTransform(ABC):
     the field requires some available secret, but the plugin has no canonical
     inventory name.
     """
+
+    @classmethod
+    def is_effective_blocking_control(
+        cls,
+        *,
+        capability: PluginCapability,
+        role: ControlRole,
+        options: Mapping[str, object],
+    ) -> bool:
+        """Evaluate whether this concrete config can enforce a declared control."""
+        if options.get("detect_only") is True:
+            return False
+        return any(
+            declaration.capability is capability and declaration.control_role is role and declaration.blocks_positive_detection
+            for declaration in cls.policy_capabilities
+        )
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -925,6 +952,25 @@ class BaseSink(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # Recoverable publication is an explicit per-adapter opt-in. Legacy sinks
+    # remain visibly unsupported until they implement the full effect protocol.
+    effect_protocol_version: ClassVar[str | None] = None
+    supported_effect_modes: ClassVar[frozenset[str]] = frozenset()
+    supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]] = frozenset()
+    effect_mode_remediation: ClassVar[str | None] = None
+    supports_member_effects: ClassVar[bool] = False
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        """Adapter-owned, local mode resolution seam for runtime construction."""
+        del cls, config, purpose
+        return None
+
     # ── Reference content (Phase 7A) ────────────────────────────────────
     # These fields populate the catalog's reference cards. They are
     # documentation, not configuration — authors fill them in to explain
@@ -957,6 +1003,8 @@ class BaseSink(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags
@@ -1358,6 +1406,8 @@ class BaseSource(ABC):
     kind. Renders inside a <pre> block in the UI; preserve whitespace."""
 
     capability_tags: tuple[str, ...] = ()
+    web_config_authority: WebConfigAuthority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: frozenset[CapabilityDeclaration] = frozenset()
     """Short lowercase tags that drive catalog filter chips and fuzzy
     search. Examples: ("csv", "file", "batch") for csv_source;
     ("http", "network", "scraping") for a web-scrape transform. Tags

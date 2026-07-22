@@ -23,6 +23,9 @@ import type {
   CancelRunResponse,
   InlineSourceProvenance,
   PluginSchemaInfo,
+  PluginPolicyFinding,
+  PluginPolicyResponse,
+  PluginSnapshotResponse,
   PluginSummary,
   Run,
   RunDiagnostics,
@@ -43,8 +46,15 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  GuidedStartOperationReconciliation,
   TutorialSampleResponse,
 } from "@/types/guided";
+import {
+  decodeGetGuidedResponse,
+  decodeGuidedChatResponse,
+  decodeGuidedRespondResponse,
+  decodeGuidedStartOperationReconciliation,
+} from "./guidedDecoder";
 import type {
   InterpretationEvent,
   InterpretationOptOutResponse,
@@ -104,6 +114,34 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
   return primary !== undefined ? primary : secondary;
 }
 
+function firstStringField(
+  sources: readonly unknown[],
+  fields: readonly string[],
+): string | undefined {
+  for (const field of fields) {
+    for (const source of sources) {
+      const value = ownField(source, field);
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function optionalResponseHeader(response: Response, name: string): string | undefined {
+  const headers = (response as unknown as { headers?: unknown }).headers;
+  if (typeof headers !== "object" || headers === null) {
+    return undefined;
+  }
+  const getHeader = (headers as { get?: unknown }).get;
+  if (typeof getHeader !== "function") {
+    return undefined;
+  }
+  const value = getHeader.call(headers, name) as unknown;
+  return typeof value === "string" ? value : undefined;
+}
+
 /**
  * Parse a response. Throws ApiError for non-2xx status codes.
  *
@@ -119,6 +157,48 @@ function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | 
  */
 interface ParseResponseOptions {
   logoutOnUnauthorized?: boolean;
+}
+
+export class ForkCommittedResponseError extends Error {
+  readonly committedSuccessResponse = true;
+  readonly cause: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ForkCommittedResponseError";
+    this.cause = cause;
+  }
+}
+
+export function isForkCommittedResponseError(error: unknown): error is ForkCommittedResponseError {
+  return error instanceof ForkCommittedResponseError;
+}
+
+export class GuidedResponseReceiptError extends Error {
+  readonly received = true;
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The guided response was received but could not be read.");
+    this.name = "GuidedResponseReceiptError";
+    this.cause = cause;
+  }
+}
+
+const CANONICAL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function decodeForkSessionLocator(value: unknown): { session_id: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("fork locator must be an exact object");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 1 || !Object.prototype.hasOwnProperty.call(record, "session_id")) {
+    throw new Error("fork locator must contain exactly session_id");
+  }
+  if (typeof record.session_id !== "string" || !CANONICAL_SESSION_UUID.test(record.session_id)) {
+    throw new Error("fork locator session_id must be a canonical UUID");
+  }
+  return { session_id: record.session_id };
 }
 
 export async function parseResponse<T>(
@@ -143,15 +223,20 @@ export async function parseResponse<T>(
       }
     }
 
-    // Parse the error envelope. All backend errors use `detail` (not
-    // `message`) as the human-readable field, matching FastAPI's default
-    // HTTPException format.
+    // Parse the error envelope into one ApiError contract. Canonical backend
+    // fields are `error_type`, `detail`, and optional `errors`; `kind` and
+    // `message` remain accepted as compatibility aliases for older execution
+    // responses.
     let detail = response.statusText;
     let errorType: string | undefined;
+    let componentId: string | undefined;
+    let pluginId: string | undefined;
+    let nestedSnapshotFingerprint: string | undefined;
     let providerDetail: string | undefined;
     let providerStatusCode: number | undefined;
     let fanoutGuard: ExecutionFanoutGuard | undefined;
     let validationErrors: ApiError["validation_errors"];
+    let errors: ApiError["errors"];
     let partialState: ApiError["partial_state"];
     let failedTurn: ApiError["failed_turn"];
     let partialStateSaveFailed: ApiError["partial_state_save_failed"];
@@ -163,20 +248,31 @@ export async function parseResponse<T>(
           ? body.detail
           : null;
 
-      errorType =
-        typeof body.error_type === "string"
-          ? body.error_type
-          : typeof nestedDetail?.error_type === "string"
-            ? nestedDetail.error_type
-            : typeof nestedDetail?.code === "string"
-              ? nestedDetail.code
-              : undefined;
+      errorType = firstStringField(
+        [body, nestedDetail],
+        ["error_type", "error_code", "code", "kind"],
+      );
 
-      if (typeof nestedDetail?.detail === "string") {
-        detail = nestedDetail.detail;
-      } else if (typeof body.detail === "string") {
-        detail = body.detail;
-      }
+      const rawComponentId = firstDefined(
+        ownField(body, "component_id"),
+        ownField(nestedDetail, "component_id"),
+      );
+      componentId = typeof rawComponentId === "string" ? rawComponentId : undefined;
+
+      const rawPluginId = firstDefined(
+        ownField(body, "plugin_id"),
+        ownField(nestedDetail, "plugin_id"),
+      );
+      pluginId = typeof rawPluginId === "string" ? rawPluginId : undefined;
+
+      const rawSnapshotFingerprint = firstDefined(
+        ownField(body, "snapshot_fingerprint"),
+        ownField(nestedDetail, "snapshot_fingerprint"),
+      );
+      nestedSnapshotFingerprint =
+        typeof rawSnapshotFingerprint === "string"
+          ? rawSnapshotFingerprint
+          : undefined;
 
       providerDetail =
         typeof body.provider_detail === "string"
@@ -200,6 +296,29 @@ export async function parseResponse<T>(
 
       validationErrors =
         body.validation_errors ?? nestedDetail?.validation_errors;
+
+      const rawErrors = firstDefined(
+        ownField(body, "errors"),
+        ownField(nestedDetail, "errors"),
+      );
+      errors = Array.isArray(rawErrors)
+        ? rawErrors.filter(
+            (entry): entry is NonNullable<ApiError["errors"]>[number] =>
+              typeof entry === "object" &&
+              entry !== null &&
+              !Array.isArray(entry) &&
+              typeof ownField(entry, "message") === "string",
+          )
+        : undefined;
+
+      const explicitDetail = firstStringField(
+        [nestedDetail, body],
+        ["detail", "message"],
+      );
+      const firstErrorMessage = errors
+        ?.map((entry) => ownField(entry, "message"))
+        .find((message): message is string => typeof message === "string");
+      detail = explicitDetail ?? firstErrorMessage ?? detail;
 
       const rawPartialState =
         firstDefined(
@@ -243,6 +362,8 @@ export async function parseResponse<T>(
       status: response.status,
       detail,
       error_type: errorType,
+      component_id: componentId,
+      plugin_id: pluginId,
       partial_state: partialState,
       failed_turn: failedTurn,
       partial_state_save_failed: partialStateSaveFailed,
@@ -251,6 +372,10 @@ export async function parseResponse<T>(
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
       validation_errors: validationErrors,
+      errors,
+      snapshot_fingerprint:
+        optionalResponseHeader(response, "X-ELSPETH-Plugin-Snapshot") ??
+        nestedSnapshotFingerprint,
     };
     throw error;
   }
@@ -265,7 +390,7 @@ export async function parseResponse<T>(
  * callable before login. Returns provider type and OIDC params.
  */
 export async function fetchAuthConfig(): Promise<AuthConfig> {
-  const response = await fetch("/api/auth/config");
+  const response = await fetch("/api/auth/config", { cache: "no-store" });
   return parseResponse<AuthConfig>(response);
 }
 
@@ -567,12 +692,14 @@ export async function fetchCompositionProposals(
 export async function acceptCompositionProposal(
   sessionId: string,
   proposalId: string,
+  draftHash: string | null,
 ): Promise<CompositionProposal> {
   const response = await fetch(
     `/api/sessions/${sessionId}/proposals/${proposalId}/accept`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
+      ...(draftHash === null ? {} : { body: JSON.stringify({ draft_hash: draftHash }) }),
     },
   );
   return parseResponse<CompositionProposal>(response);
@@ -652,7 +779,7 @@ export async function getGuided(
     headers: authHeaders(),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
@@ -688,16 +815,49 @@ export async function getTutorialSample(
  * Idempotent (D16): a second call for a session that already has a persisted
  * guided session returns the existing session unchanged.
  */
+type GuidedStartCommand =
+  | { profile: "live"; intent: string; operationId: string }
+  | { profile: "tutorial"; operationId: string };
+
 export async function startGuidedSession(
   sessionId: string,
-  profileKind: "live" | "tutorial",
+  command: GuidedStartCommand,
+  signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ profile: profileKind }),
+    body: JSON.stringify({
+      profile: command.profile,
+      ...(command.profile === "live" ? { intent: command.intent } : {}),
+      operation_id: command.operationId,
+    }),
+    signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGetGuidedResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
+}
+
+export async function reconcileGuidedStartOperation(
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<GuidedStartOperationReconciliation> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/start/${operationId}/reconcile`,
+    {
+      method: "POST",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return decodeGuidedStartOperationReconciliation(await parseResponse<unknown>(response));
 }
 
 /**
@@ -719,7 +879,14 @@ export async function respondGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedRespondResponse>(response);
+  if (!response.ok) {
+    return parseResponse<never>(response);
+  }
+  try {
+    return decodeGuidedRespondResponse(await parseResponse<unknown>(response));
+  } catch (cause) {
+    throw new GuidedResponseReceiptError(cause);
+  }
 }
 
 /**
@@ -730,30 +897,55 @@ export async function respondGuided(
  */
 export async function reenterGuided(
   sessionId: string,
+  operationId: string,
   signal?: AbortSignal,
 ): Promise<GetGuidedResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/guided/reenter`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
     signal,
   });
-  return parseResponse<GetGuidedResponse>(response);
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
+}
+
+/**
+ * Convert a freeform session into guided mode.
+ *
+ * "Switch to guided" on a session that has already done freeform composition
+ * work cannot go through GET /guided — that endpoint 400s by design for a
+ * session with no persisted guided_session (and must, since it is also the
+ * passive freeform-probe on session select). This POST is the explicit
+ * conversion: it seeds a FRESH wizard as a new composition-state version,
+ * setting the freeform pipeline aside (recoverable from version history), and
+ * returns the same envelope shape as GET /guided. Idempotent — a session that
+ * is already guided (including a terminal one) is returned unchanged.
+ */
+export async function convertToGuided(
+  sessionId: string,
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/convert`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ operation_id: operationId }),
+    signal,
+  });
+  return decodeGetGuidedResponse(await parseResponse<unknown>(response));
 }
 
 /**
  * Post a free-text chat message scoped to the user's current wizard step.
  *
- * Most chat is advisory: the server invokes the per-step chat solver with
- * the step-scoped skill briefing and returns the LLM's reply. Step 1 source
- * chat can also resolve a complete inline source request and return updated
- * `next_turn` / `composition_state` fields. Server-side: see
- * _guided_step_chat.solve_step_chat_with_auto_drop; on transient LLM failure
- * the server returns 200 with a synthetic "I'm unavailable" message rather
- * than failing the request.
+ * The server runs bounded Step 1/2 provider work, projects supported results
+ * through the schema-8 transition authority, and returns the authoritative
+ * post-settlement session, turn, terminal, and composition state. Generated
+ * inline source bytes are reported as a typed non-applying failure until blob
+ * custody can join the same atomic settlement.
  *
- * The `step_index` carried in the body lets the server detect that the
- * wizard has advanced under the client (returns 409) so a stale chat
- * does not arrive at the wrong step's skill briefing.
+ * The required turn token binds the request to the server-held current
+ * unanswered occurrence; stale tokens return 409 before provider work.
  */
 export async function chatGuided(
   sessionId: string,
@@ -766,32 +958,33 @@ export async function chatGuided(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<GuidedChatResponse>(response);
+  return decodeGuidedChatResponse(await parseResponse<unknown>(response));
 }
 
 /** Fork a session from a specific user message. */
 export async function forkFromMessage(
   sessionId: string,
+  operationId: string,
   fromMessageId: string,
   newMessageContent: string,
-): Promise<{
-  session: Session;
-  messages: ChatMessage[];
-  composition_state: CompositionState | null;
-}> {
+): Promise<{ session_id: string }> {
   const response = await fetch(`/api/sessions/${sessionId}/fork`, {
     method: "POST",
     headers: authHeaders("application/json"),
     body: JSON.stringify({
+      operation_id: operationId,
       from_message_id: fromMessageId,
       new_message_content: newMessageContent,
     }),
   });
-  return parseResponse<{
-    session: Session;
-    messages: ChatMessage[];
-    composition_state: CompositionState | null;
-  }>(response);
+  if (!response.ok) {
+    return parseResponse<{ session_id: string }>(response);
+  }
+  try {
+    return decodeForkSessionLocator(await response.json());
+  } catch (cause) {
+    throw new ForkCommittedResponseError("Fork succeeded but its result locator could not be decoded", cause);
+  }
 }
 
 // ── Composition State ───────────────────────────────────────────────────────
@@ -827,13 +1020,14 @@ export async function fetchStateVersions(
 export async function revertToVersion(
   sessionId: string,
   stateId: string,
+  operationId: string,
 ): Promise<CompositionState> {
   const response = await fetch(
     `/api/sessions/${sessionId}/state/revert`,
     {
       method: "POST",
       headers: authHeaders("application/json"),
-      body: JSON.stringify({ state_id: stateId }),
+      body: JSON.stringify({ operation_id: operationId, state_id: stateId }),
     },
   );
   return parseResponse<CompositionState>(response);
@@ -890,6 +1084,7 @@ export interface ImportedCompositionState {
   version: number;
   is_valid: boolean;
   validation_errors: string[] | null;
+  plugin_policy_findings?: PluginPolicyFinding[];
 }
 
 /**
@@ -919,28 +1114,50 @@ export async function importCompositionYaml(
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
+async function parsePluginSnapshotResponse<T>(
+  response: Response,
+): Promise<PluginSnapshotResponse<T>> {
+  const data = await parseResponse<T>(response);
+  const snapshotFingerprint = response.headers.get(
+    "X-ELSPETH-Plugin-Snapshot",
+  );
+  if (snapshotFingerprint === null || snapshotFingerprint === "") {
+    throw new Error("Plugin catalog response omitted its snapshot fingerprint.");
+  }
+  return { data, snapshotFingerprint };
+}
+
+/** Fetch the current principal's immutable plugin-policy snapshot metadata. */
+export async function fetchPluginPolicy(): Promise<PluginSnapshotResponse<PluginPolicyResponse>> {
+  const response = await fetch("/api/catalog/policy", {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+  return parsePluginSnapshotResponse<PluginPolicyResponse>(response);
+}
+
 /** List available source plugins. */
-export async function listSources(): Promise<PluginSummary[]> {
+export async function listSources(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sources", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available transform plugins. */
-export async function listTransforms(): Promise<PluginSummary[]> {
+export async function listTransforms(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/transforms", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /** List available sink plugins. */
-export async function listSinks(): Promise<PluginSummary[]> {
+export async function listSinks(): Promise<PluginSnapshotResponse<PluginSummary[]>> {
   const response = await fetch("/api/catalog/sinks", {
     headers: authHeaders(),
   });
-  return parseResponse<PluginSummary[]>(response);
+  return parsePluginSnapshotResponse<PluginSummary[]>(response);
 }
 
 /**
@@ -951,7 +1168,7 @@ export async function listSinks(): Promise<PluginSummary[]> {
 export async function getPluginSchema(
   pluginType: "source" | "transform" | "sink",
   pluginName: string,
-): Promise<PluginSchemaInfo> {
+): Promise<PluginSnapshotResponse<PluginSchemaInfo>> {
   // REST URL uses plural path segments; the route handler translates
   // plural -> singular before calling CatalogService.
   const pluralType = `${pluginType}s`;
@@ -959,7 +1176,7 @@ export async function getPluginSchema(
     `/api/catalog/${pluralType}/${pluginName}/schema`,
     { headers: authHeaders() },
   );
-  return parseResponse<PluginSchemaInfo>(response);
+  return parsePluginSnapshotResponse<PluginSchemaInfo>(response);
 }
 
 // ── Validation & Execution ──────────────────────────────────────────────────
@@ -1304,6 +1521,13 @@ export async function deleteBlob(
 
 // ── Secrets ────────────────────────────────────────────────────────────────
 
+export const PLUGIN_CATALOG_INVALIDATED_EVENT =
+  "elspeth:plugin-catalog-invalidated";
+
+function emitPluginCatalogInvalidation(): void {
+  window.dispatchEvent(new Event(PLUGIN_CATALOG_INVALIDATED_EVENT));
+}
+
 /** List all available secret references (no values). */
 export async function listSecrets(): Promise<SecretInventoryItem[]> {
   const response = await fetch("/api/secrets", { headers: authHeaders() });
@@ -1320,7 +1544,9 @@ export async function createSecret(
     headers: authHeaders("application/json"),
     body: JSON.stringify({ name, value }),
   });
-  return parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  const created = await parseResponse<{ name: string; scope: string; available: boolean }>(response);
+  emitPluginCatalogInvalidation();
+  return created;
 }
 
 /** Delete a user-scoped secret. */
@@ -1332,6 +1558,7 @@ export async function deleteSecret(name: string): Promise<void> {
   if (!response.ok) {
     await parseResponse<never>(response);
   }
+  emitPluginCatalogInvalidation();
 }
 
 // ── Interpretation events (Phase 5b) ───────────────────────────────────────

@@ -25,6 +25,7 @@
 
 import { useState, type MouseEvent } from "react";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
+import { MarkdownRenderer } from "@/components/chat/MarkdownRenderer";
 import { AuditCharacteristicIcon } from "./AuditCharacteristicIcon";
 import { isInternalPlugin, pluginDisplayName } from "./pluginDisplayName";
 
@@ -270,7 +271,21 @@ function ProseSection({ label, body }: { label: string; body: string | null }) {
   return (
     <div className="plugin-card-prose-section">
       <div className="plugin-card-prose-label">{label}:</div>
-      <div className="plugin-card-prose-body">{body}</div>
+      <FormattedCatalogProse body={body} />
+    </div>
+  );
+}
+
+/** Renders plugin authors' persona-facing prose (usage_when_to_use /
+ *  usage_when_not_to_use) through the shared MarkdownRenderer — the same
+ *  dialect chat and NarrativeResults use — so headings/bold/links/ordered
+ *  lists render as real markdown instead of literal text (elspeth-b7b1b62940).
+ *  The wrapper class keeps the catalog card's denser xs/1.4 typography
+ *  (see catalog.css) rather than MarkdownRenderer's default chat-sized text. */
+function FormattedCatalogProse({ body }: { body: string }) {
+  return (
+    <div className="plugin-card-prose-body">
+      <MarkdownRenderer content={body} />
     </div>
   );
 }

@@ -35,6 +35,11 @@ if TYPE_CHECKING:
     from elspeth.contracts.coordination import RegisteredWorker
 
 
+# TIER-2: Configuration/preflight refusal for sinks that cannot satisfy the recoverable-effect contract; no audit mutation has begun.
+class SinkEffectCapabilityError(ValueError):
+    """A sink cannot safely participate in recoverable effect publication."""
+
+
 def _scrub_traceback_for_audit(traceback_text: str) -> str:
     """Scrub traceback lines independently so safe frame diagnostics survive."""
     lines = traceback_text.splitlines(keepends=True)
@@ -488,6 +493,7 @@ TransformErrorCategory = Literal[
     "content_filtered",
     "content_safety_violation",
     "prompt_injection_detected",
+    "guardrail_partial_coverage",  # Guardrail scanned only part of the input (fail-closed, oversized input)
     "unknown_category",  # Unknown category from external API (fail-closed)
     "non_string_field",  # Explicitly-configured field is non-string (security fail-closed)
     # Field type validation (Tier 3 - LLM output value type mismatch)
@@ -713,6 +719,9 @@ class TransformErrorReason(TypedDict):
     field_length: NotRequired[int]  # Total length of scanned field value
     categories: NotRequired[list[str] | dict[str, dict[str, Any]]]  # List of names OR detailed severity/threshold map
     attacks: NotRequired[dict[str, bool]]  # Prompt shield attack flags (user_prompt_attack, document_attack)
+    coverage_key: NotRequired[str]  # Guardrail coverage bucket that was partial (textCharacters | images)
+    guarded_units: NotRequired[int]  # Guardrail coverage units actually scanned (guardrail_partial_coverage)
+    total_units: NotRequired[int]  # Guardrail coverage units in the input (guardrail_partial_coverage)
 
     # Batch processing context
     batch_id: NotRequired[str]
@@ -943,9 +952,9 @@ class RunWorkerEvictedError(Exception):
 
     Latched from the heartbeat CAS miss (slice-4 thread) or raised directly
     when a membership-fenced verb (``claim_ready`` / ``claim_pending_sink`` /
-    ``enqueue_ready``, slice 4) refuses with zero rows. The worker abandons
-    in-flight processing without emitting; a returning process mints a fresh
-    worker identity and re-admits.
+    ``enqueue_ready`` / ``heartbeat_lease``, slice 4) refuses with zero rows.
+    The worker abandons in-flight processing without emitting; a returning
+    process mints a fresh worker identity and re-admits.
 
     Attributes:
         worker_id: The evicted/departed worker identity.

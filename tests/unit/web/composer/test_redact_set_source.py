@@ -14,6 +14,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.redaction import (
     MANIFEST,
     REDACTED_BLOB_SOURCE_PATH,
@@ -203,37 +204,169 @@ def test_redact_source_storage_path_leaves_manual_file_without_blob_ref() -> Non
 def test_redact_guided_snapshot_masks_both_channels() -> None:
     """A guided blob source is committed via manual set_source (blob_ref stripped),
     so the committed source carries the real storage_path with NO blob_ref and the
-    source-keyed redaction misses it. The co-located GuidedSession snapshot retained
+    source-keyed redaction misses it. The co-located schema-8 reviewed source retained
     blob_ref; the helper uses it (no DB lookup) to mask BOTH the committed source
-    path (channel 2) and the snapshot path (channel 3)."""
+    path (channel 2) and the reviewed snapshot path (channel 3)."""
     real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
     sources = {"source": {"plugin": "csv", "options": {"path": real_path, "schema": {"mode": "observed"}}}}
     composer_meta = {
         "guided_session": {
-            "step_1_result": {"plugin": "csv", "options": {"path": real_path, "blob_ref": "abc", "schema": {"mode": "observed"}}},
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "source",
+                    "plugin": "csv",
+                    "options": {
+                        "path": real_path,
+                        "blob_ref": "11111111-1111-4111-8111-111111111111",
+                        "schema": {"mode": "observed"},
+                    },
+                }
+            },
+            "pending_source_intents": {},
         }
     }
     sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
     assert sources_out["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
-    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    reviewed = meta_out["guided_session"]["reviewed_sources"]["11111111-1111-4111-8111-111111111111"]
+    assert reviewed["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
     # blob_ref is retained — it is the redaction SIGNAL, not a sensitive value.
-    assert meta_out["guided_session"]["step_1_result"]["options"]["blob_ref"] == "abc"
+    assert reviewed["options"]["blob_ref"] == "11111111-1111-4111-8111-111111111111"
     assert real_path not in str(sources_out)
     assert real_path not in str(meta_out)
     # inputs are not mutated.
     assert sources["source"]["options"]["path"] == real_path
-    assert composer_meta["guided_session"]["step_1_result"]["options"]["path"] == real_path
+    original = composer_meta["guided_session"]["reviewed_sources"]["11111111-1111-4111-8111-111111111111"]
+    assert original["options"]["path"] == real_path
 
 
 def test_redact_guided_snapshot_leaves_operator_typed_source() -> None:
     """No blob_ref on the snapshot => the path is operator-typed, NOT a blob
     carrier => nothing is redacted on either channel."""
     sources = {"source": {"options": {"path": "/tmp/user.csv"}}}
-    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": "/tmp/user.csv", "schema": {"mode": "observed"}}}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "source",
+                    "options": {"path": "/tmp/user.csv", "schema": {"mode": "observed"}},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
     sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
     assert sources_out["source"]["options"]["path"] == "/tmp/user.csv"
-    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == "/tmp/user.csv"
+    reviewed = meta_out["guided_session"]["reviewed_sources"]["11111111-1111-4111-8111-111111111111"]
+    assert reviewed["options"]["path"] == "/tmp/user.csv"
     assert REDACTED_BLOB_SOURCE_PATH not in str((sources_out, meta_out))
+
+
+def test_redact_guided_snapshot_projects_canonical_blob_sentinel_by_exact_name() -> None:
+    real_path = "/internal/blobs/session/source.csv"
+    sentinel = "blob:11111111-1111-4111-8111-111111111111"
+    sources = {"source": {"options": {"path": real_path, "schema": {"mode": "observed"}}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": "source",
+                    "options": {"path": sentinel, "schema": {"mode": "observed"}},
+                }
+            },
+            "pending_source_intents": {},
+        },
+        "implicit_decisions": {
+            "schema_version": 1,
+            "entries": [{"path": "source.path", "value": real_path, "category": "source"}],
+            "normalization_events": [],
+        },
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == sentinel
+    assert real_path not in str((sources_out, meta_out))
+    assert meta_out["implicit_decisions"]["entries"][0]["value"] == sentinel
+    assert composer_meta["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]["options"]["path"] == sentinel
+
+
+def test_redact_guided_snapshot_accepts_matching_fork_sentinel_and_blob_ref() -> None:
+    blob_id = "11111111-1111-4111-8111-111111111111"
+    sentinel = f"blob:{blob_id}"
+    real_path = "/internal/blobs/child/source.csv"
+    sources = {"source": {"options": {"path": real_path, "blob_ref": blob_id}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": "source",
+                    "options": {"path": sentinel, "blob_ref": blob_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == sentinel
+    reviewed = meta_out["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]
+    assert reviewed["options"] == {"path": sentinel, "blob_ref": blob_id}
+    assert real_path not in str((sources_out, meta_out))
+
+    composer_meta["guided_session"]["reviewed_sources"]["22222222-2222-4222-8222-222222222222"]["options"]["blob_ref"] = (
+        "33333333-3333-4333-8333-333333333333"
+    )
+    with pytest.raises(AuditIntegrityError):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+@pytest.mark.parametrize(
+    ("source_name", "sentinel"),
+    [
+        ("missing", "blob:11111111-1111-4111-8111-111111111111"),
+        ("source", "blob:not-a-uuid"),
+    ],
+    ids=["missing_name", "invalid_sentinel"],
+)
+def test_redact_guided_snapshot_rejects_unbound_or_invalid_blob_sentinel(source_name: str, sentinel: str) -> None:
+    sources = {"source": {"options": {"path": "/internal/blobs/session/source.csv"}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": source_name,
+                    "options": {"path": sentinel},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_rejects_duplicate_reviewed_source_names() -> None:
+    sources = {"source": {"options": {"path": "/internal/blobs/session/source.csv"}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": f"blob:{stable_id}"},
+                }
+                for stable_id in (
+                    "11111111-1111-4111-8111-111111111111",
+                    "22222222-2222-4222-8222-222222222222",
+                )
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="names must be unique"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
 
 
 def test_redact_guided_snapshot_noop_for_freeform_state() -> None:
@@ -256,15 +389,51 @@ def test_redact_guided_snapshot_rejects_malformed_present_guided_session() -> No
 
 def test_redact_guided_snapshot_rejects_malformed_present_snapshot_options() -> None:
     sources = {"source": {"options": {"path": "/some/path.csv"}}}
-    composer_meta = {"guided_session": {"step_1_result": {"options": "not-options"}}}
-    with pytest.raises(ValueError, match=r"step_1_result\.options must be a dict"):
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {"11111111-1111-4111-8111-111111111111": {"name": "source", "options": "not-options"}},
+            "pending_source_intents": {},
+        }
+    }
+    with pytest.raises(ValueError, match=r"reviewed_sources.*options must be a dict"):
         redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+
+def test_redact_guided_snapshot_requires_schema8_pending_source_intents() -> None:
+    with pytest.raises(KeyError, match="pending_source_intents"):
+        redact_guided_snapshot_storage_paths(
+            {},
+            {"guided_session": {"reviewed_sources": {}}},
+        )
+
+
+def test_redact_guided_snapshot_requires_exact_pending_intent_options() -> None:
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {},
+            "pending_source_intents": {
+                "11111111-1111-4111-8111-111111111111": {"name": "incoming"},
+            },
+        }
+    }
+    with pytest.raises(KeyError, match="options"):
+        redact_guided_snapshot_storage_paths({}, composer_meta)
 
 
 def test_redact_guided_snapshot_rejects_malformed_source_when_blob_redaction_active() -> None:
     real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
     sources = {"source": {"options": "not-options"}}
-    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": real_path, "blob_ref": "abc"}}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "source",
+                    "options": {"path": real_path, "blob_ref": "11111111-1111-4111-8111-111111111111"},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
     with pytest.raises(ValueError, match=r"source\.options must be a dict"):
         redact_guided_snapshot_storage_paths(sources, composer_meta)
 
@@ -274,11 +443,297 @@ def test_redact_guided_snapshot_masks_file_carrier() -> None:
     the guided snapshot helper masks it on both channels too."""
     real = "/internal/blobs/sess/zzz_data.csv"
     sources = {"source": {"options": {"file": real}}}
-    composer_meta = {"guided_session": {"step_1_result": {"options": {"file": real, "blob_ref": "zzz"}}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "source",
+                    "options": {"file": real, "blob_ref": "11111111-1111-4111-8111-111111111111"},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
     sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
     assert sources_out["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
-    assert meta_out["guided_session"]["step_1_result"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    reviewed = meta_out["guided_session"]["reviewed_sources"]["11111111-1111-4111-8111-111111111111"]
+    assert reviewed["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
     assert real not in str((sources_out, meta_out))
+
+
+def test_redact_guided_snapshot_handles_plural_reviewed_sources_by_name() -> None:
+    first_path = "/internal/blobs/first.csv"
+    second_path = "/internal/blobs/second.csv"
+    sources = {
+        "first": {"options": {"path": first_path}},
+        "second": {"options": {"path": second_path}},
+    }
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "first",
+                    "options": {"path": first_path, "blob_ref": "11111111-1111-4111-8111-111111111111"},
+                },
+                "22222222-2222-4222-8222-222222222222": {
+                    "name": "second",
+                    "options": {"path": second_path, "blob_ref": "22222222-2222-4222-8222-222222222222"},
+                },
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["first"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert sources_out["second"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    reviewed = meta_out["guided_session"]["reviewed_sources"]
+    assert reviewed["11111111-1111-4111-8111-111111111111"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert reviewed["22222222-2222-4222-8222-222222222222"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert first_path not in str((sources_out, meta_out))
+    assert second_path not in str((sources_out, meta_out))
+
+
+def test_redact_guided_snapshot_allows_two_reviewed_names_to_share_one_blob_path() -> None:
+    shared_path = "/internal/blobs/shared.csv"
+    sources = {
+        "first": {"options": {"path": shared_path}},
+        "second": {"options": {"path": shared_path}},
+    }
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": name,
+                    "options": {"path": shared_path, "blob_ref": "abc12300-0000-4000-8000-000000000000"},
+                }
+                for stable_id, name in (
+                    ("11111111-1111-4111-8111-111111111111", "first"),
+                    ("22222222-2222-4222-8222-222222222222", "second"),
+                )
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out is not None
+    assert sources_out["first"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert sources_out["second"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert shared_path not in str((sources_out, meta_out))
+
+
+@pytest.mark.parametrize(
+    "invalid_blob_ref",
+    [None, "", 123, "98B1357D-5AAB-4FB3-85B4-5AD643912E84"],
+    ids=["none", "empty", "wrong_type", "noncanonical_uuid"],
+)
+def test_redact_guided_snapshot_rejects_present_invalid_reviewed_blob_ref(invalid_blob_ref: object) -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    live_path = "/internal/blobs/foreign.csv"
+    sources = {"source": {"options": {"path": live_path}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": live_path, "blob_ref": invalid_blob_ref},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="canonical UUID"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"]["path"] == live_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == {
+        "path": live_path,
+        "blob_ref": invalid_blob_ref,
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_carriers",
+    [
+        {"path": ""},
+        {"file": ""},
+        {"path": None},
+        {"file": 123},
+        {"path": "/internal/blobs/foreign.csv", "file": None},
+        {"path": "/internal/blobs/for\x00eign.csv"},
+    ],
+    ids=["empty_path", "empty_file", "none_path", "wrong_type_file", "valid_path_invalid_file", "nul_path"],
+)
+def test_redact_guided_snapshot_rejects_invalid_reviewed_path_carriers(invalid_carriers: dict[str, object]) -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    live_path = "/internal/blobs/foreign.csv"
+    sources = {"source": {"options": {"path": live_path}}}
+    snapshot_options = {**invalid_carriers, "blob_ref": stable_id}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": snapshot_options,
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="path carrier"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"]["path"] == live_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == snapshot_options
+
+
+def test_redact_guided_snapshot_accepts_two_valid_path_carriers() -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    path = "/internal/blobs/source.csv"
+    file = "/internal/blobs/source-alias.csv"
+    sources = {"source": {"options": {"path": path, "file": file}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"path": path, "file": file, "blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert sources_out["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    reviewed_options = meta_out["guided_session"]["reviewed_sources"][stable_id]["options"]
+    assert reviewed_options["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert reviewed_options["file"] == REDACTED_BLOB_SOURCE_PATH
+
+
+@pytest.mark.parametrize(
+    ("reviewed_carriers", "live_options"),
+    [
+        ({"path": " /internal/blobs/bogus.csv "}, {"path": "/internal/blobs/live.csv"}),
+        ({"path": " /internal/blobs/bogus.csv "}, {"schema": {"mode": "observed"}}),
+        ({"path": "/internal/blobs/source.csv"}, {"path": "/internal/blobs/source.csv", "file": "/internal/blobs/secret.csv"}),
+        ({"path": "/internal/blobs/source.csv", "file": "/internal/blobs/source-alias.csv"}, {"path": "/internal/blobs/source.csv"}),
+    ],
+    ids=["mismatched_path", "missing_live_carrier", "extra_live_carrier", "missing_live_reviewed_carrier"],
+)
+def test_redact_guided_snapshot_rejects_same_name_without_exact_reviewed_path(
+    reviewed_carriers: dict[str, object],
+    live_options: dict[str, object],
+) -> None:
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    sources = {"source": {"options": live_options}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {**reviewed_carriers, "blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"] == live_options
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == {
+        **reviewed_carriers,
+        "blob_ref": stable_id,
+    }
+
+
+def test_redact_guided_snapshot_rejects_reviewed_blob_ref_without_string_path_carrier() -> None:
+    """A reviewed blob binding without its path cannot be mapped safely."""
+    stable_id = "11111111-1111-4111-8111-111111111111"
+    live_path = "/internal/blobs/foreign.csv"
+    sources = {"source": {"options": {"path": live_path}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                stable_id: {
+                    "name": "source",
+                    "options": {"blob_ref": stable_id},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="string path carrier"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["source"]["options"]["path"] == live_path
+    assert composer_meta["guided_session"]["reviewed_sources"][stable_id]["options"] == {"blob_ref": stable_id}
+
+
+def test_redact_guided_snapshot_fails_closed_when_name_drift_hides_same_blob_path() -> None:
+    real_path = "/internal/blobs/renamed.csv"
+    sources = {"renamed": {"options": {"path": real_path}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {
+                "11111111-1111-4111-8111-111111111111": {
+                    "name": "original",
+                    "options": {"path": real_path, "blob_ref": "11111111-1111-4111-8111-111111111111"},
+                }
+            },
+            "pending_source_intents": {},
+        }
+    }
+
+    with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
+        redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources["renamed"]["options"]["path"] == real_path
+    snapshot = composer_meta["guided_session"]["reviewed_sources"]["11111111-1111-4111-8111-111111111111"]
+    assert snapshot["options"]["path"] == real_path
+
+
+@pytest.mark.parametrize("carrier", ["path", "file"])
+def test_redact_guided_pending_source_intent_blob_path_without_mutation(carrier: str) -> None:
+    real_path = f"/internal/blobs/pending-{carrier}.csv"
+    pending_id = "11111111-1111-4111-8111-111111111111"
+    sources = {"current": {"options": {"path": "/operator/current.csv"}}}
+    composer_meta = {
+        "guided_session": {
+            "reviewed_sources": {},
+            "pending_source_intents": {
+                pending_id: {
+                    "name": "incoming",
+                    "phase": "inspection_review",
+                    "plugin": "csv",
+                    "options": {carrier: real_path, "blob_ref": "11111111-1111-4111-8111-111111111111"},
+                    "inspection_facts": None,
+                    "observed_columns": [],
+                    "sample_rows": [],
+                }
+            },
+        }
+    }
+
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+
+    assert sources_out == sources
+    assert meta_out is not None
+    pending = meta_out["guided_session"]["pending_source_intents"][pending_id]
+    assert pending["options"][carrier] == REDACTED_BLOB_SOURCE_PATH
+    assert pending["options"]["blob_ref"] == "11111111-1111-4111-8111-111111111111"
+    assert real_path not in str(meta_out)
+    assert composer_meta["guided_session"]["pending_source_intents"][pending_id]["options"][carrier] == real_path
 
 
 def test_summarize_set_source_options_accepts_coerced_datetime() -> None:

@@ -49,13 +49,20 @@ from elspeth.web.composer.tools._common import (
     _compute_validation_delta,
     _credential_wiring_contract_failure,
     _failure_result,
+    # Cross-package consumer: composer.yaml_importer applies the default
+    # LLM review auto-stagers to imported runtime YAML so imported states
+    # honour the same stage-then-surface contract as tool mutations
+    # (elspeth-ae5160c3cb).
+    _options_with_default_llm_reviews,
     _prevalidate_plugin_options,
     diff_states,
+    normalize_tool_result_validation,
     validate_composer_file_sink_collision_policy,
 )
 from elspeth.web.composer.tools._dispatch import (
     _inject_prior_validation,
     execute_tool,
+    finalize_tool_result,
     get_tool_definitions,
 )
 from elspeth.web.composer.tools._registry import (
@@ -74,8 +81,6 @@ from elspeth.web.composer.tools.blobs import (
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _session_blob_lock,
-    _sync_get_blob_by_id,
-    _sync_get_blob_by_storage_path,
     _sync_list_blobs,
 )
 from elspeth.web.composer.tools.discovery import (
@@ -93,10 +98,7 @@ from elspeth.web.composer.tools.generation import (
     compute_proof_diagnostics,
     get_expression_grammar,
 )
-from elspeth.web.composer.tools.outputs import (
-    _execute_patch_output_options,
-    _execute_set_output,
-)
+from elspeth.web.composer.tools.outputs import _execute_patch_output_options
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_DETERMINISTIC_EARLY,
@@ -105,12 +107,14 @@ from elspeth.web.composer.tools.sessions import (
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RATE_CAP_PER_SESSION_DAY_CODE,
     RATE_CAP_PER_TERM_CODE,
+    SetPipelineCandidate,
     _check_interpretation_rate_limits,
     _detect_unresolved_interpretation_placeholders_typed,
     _execute_apply_pipeline_recipe,
     _execute_set_pipeline,
     _handle_request_interpretation_review,
     _utc_day_start,
+    build_set_pipeline_candidate,
 )
 from elspeth.web.composer.tools.sources import (
     _execute_patch_source_options,
@@ -142,6 +146,7 @@ __all__ = [
     "_SECRET_MUTATION_TOOLS",
     "_SESSION_AWARE_TOOL_HANDLERS",
     "RuntimePreflight",
+    "SetPipelineCandidate",
     "ToolContext",
     "ToolResult",
     "_ResolvedSourceBlob",
@@ -158,7 +163,6 @@ __all__ = [
     "_execute_patch_output_options",
     "_execute_patch_source_options",
     "_execute_preview_pipeline",
-    "_execute_set_output",
     "_execute_set_pipeline",
     "_execute_set_source",
     "_execute_set_source_from_blob",
@@ -166,18 +170,19 @@ __all__ = [
     "_failure_result",
     "_handle_request_interpretation_review",
     "_inject_prior_validation",
+    "_options_with_default_llm_reviews",
     "_persist_prepared_blob_create",
     "_prepare_blob_create",
     "_prevalidate_plugin_options",
     "_resolve_source_blob",
     "_session_blob_lock",
-    "_sync_get_blob_by_id",
-    "_sync_get_blob_by_storage_path",
     "_sync_list_blobs",
     "_utc_day_start",
+    "build_set_pipeline_candidate",
     "compute_proof_diagnostics",
     "diff_states",
     "execute_tool",
+    "finalize_tool_result",
     "get_expression_grammar",
     "get_tool_definitions",
     "is_approval_required_blob_store_only_mutation_tool",
@@ -186,5 +191,6 @@ __all__ = [
     "is_discovery_tool",
     "is_mutation_tool",
     "is_session_aware_tool",
+    "normalize_tool_result_validation",
     "validate_composer_file_sink_collision_policy",
 ]

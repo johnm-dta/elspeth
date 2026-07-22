@@ -3,11 +3,14 @@
 //
 // Pins THREE contracts:
 //   1. Chip-toggle wire shape on Continue:
-//        chosen=[<sorted selected ids>], custom_inputs=[<added customs>],
+//        chosen=[<sorted selected ids>], custom_inputs=null,
 //        all four other fields explicitly null.
-//   2. Custom-add wire shape on Continue:
-//        custom_inputs reflects added strings in addition order, including
-//        when chosen is empty (custom_inputs=[..], chosen=[]).
+//   2. Custom-only wire shape on Continue:
+//        custom_inputs reflects added strings in addition order and
+//        chosen=null when no known option is selected.
+//   3. Mixed wire shape on Continue:
+//        chosen and custom_inputs are both non-empty when the user selects
+//        known options and adds custom values in the same response.
 //
 // Continue is disabled when both chosen and customs are empty (the widget's
 // only way to surface "the user has asserted nothing" — preventing an empty
@@ -27,8 +30,8 @@
 // matches InspectAndConfirmTurn (Task 7.3) — refs + useEffect + firstRunRef
 // to skip initial mount. Future remove-path widgets should copy this.
 //
-// Escape branch coverage pins the "let source decide" path: chosen=[] and
-// custom_inputs=[] with control_signal="passthrough" (C-3a) leaves required
+// Escape branch coverage pins the "let source decide" path: chosen=null and
+// custom_inputs=null with control_signal="passthrough" (C-3a) leaves required
 // fields source-decided while the backend preserves observed schema mode
 // from persisted sink intent. The explicit signal is required — a bare
 // empty chosen/custom_inputs pair with no signal 400s server-side
@@ -45,7 +48,7 @@ import userEvent from "@testing-library/user-event";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { nullResponse } from "@/test/guided-fixtures";
 import type {
-  GuidedRespondRequest,
+  GuidedRespondAction,
   MultiSelectWithCustomPayload,
 } from "@/types/guided";
 
@@ -193,7 +196,7 @@ describe("MultiSelectWithCustomTurn — chip toggle behaviour", () => {
 });
 
 describe("MultiSelectWithCustomTurn — Continue submit (chip-only)", () => {
-  it("Continue with default selection submits chosen=[<defaults sorted>], custom_inputs=[]", async () => {
+  it("Continue with default selection submits chosen=[<defaults sorted>], custom_inputs=null", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
@@ -205,11 +208,11 @@ describe("MultiSelectWithCustomTurn — Continue submit (chip-only)", () => {
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
       chosen: ["name", "price"],
-      custom_inputs: [],
+      custom_inputs: null,
     });
   });
 
@@ -229,11 +232,11 @@ describe("MultiSelectWithCustomTurn — Continue submit (chip-only)", () => {
     await user.click(screen.getByRole("button", { name: "qty" }));
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
       chosen: ["price", "qty"],
-      custom_inputs: [],
+      custom_inputs: null,
     });
   });
 });
@@ -347,15 +350,15 @@ describe("MultiSelectWithCustomTurn — Continue submit (with customs)", () => {
 
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
       chosen: ["name", "price"],
       custom_inputs: ["first_extra", "second_extra"],
     });
   });
 
-  it("Continue submits with chosen=[] when only customs are provided", async () => {
+  it("Continue submits with chosen=null when only customs are provided", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
@@ -370,10 +373,10 @@ describe("MultiSelectWithCustomTurn — Continue submit (with customs)", () => {
     await user.click(screen.getByRole("button", { name: /^add$/i }));
     await user.click(screen.getByRole("button", { name: /continue/i }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       ...nullResponse(),
-      chosen: [],
+      chosen: null,
       custom_inputs: ["only_custom"],
     });
   });
@@ -448,7 +451,7 @@ describe("MultiSelectWithCustomTurn — escape_label", () => {
     ).toBeInTheDocument();
   });
 
-  it("escape button submits empty required fields with control_signal=passthrough (C-3a)", async () => {
+  it("escape button submits the standalone passthrough control action", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
@@ -459,14 +462,13 @@ describe("MultiSelectWithCustomTurn — escape_label", () => {
     );
     await user.click(screen.getByRole("button", { name: /let source decide/i }));
 
-    // control_signal="passthrough" is the explicit signal the backend
-    // requires before it accepts an empty required-fields set — a bare
-    // chosen=[]/custom_inputs=[] pair with control_signal=null 400s
-    // (guided_step2_no_fields_selected).
-    expect(onSubmit).toHaveBeenCalledWith<GuidedRespondRequest[]>({
+    // A control action cannot be combined with response fields at the schema-8
+    // request boundary. The server derives the empty selection from the
+    // standalone passthrough signal.
+    expect(onSubmit).toHaveBeenCalledWith<GuidedRespondAction[]>({
       ...nullResponse(),
-      chosen: [],
-      custom_inputs: [],
+      chosen: null,
+      custom_inputs: null,
       control_signal: "passthrough",
     });
   });

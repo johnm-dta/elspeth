@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -135,7 +138,7 @@ def test_release_dockerfile_builds_frontend_dist_before_python_install() -> None
     assert "npm ci" in dockerfile
     assert "npm run build" in dockerfile
     assert "COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/" in dockerfile
-    assert dockerfile.index("npm run build") < dockerfile.index("uv sync --frozen --extra all --no-editable --active")
+    assert dockerfile.index("npm run build") < dockerfile.index('uv sync --frozen "$@" --no-editable --active')
 
 
 def test_release_build_context_excludes_host_node_modules() -> None:
@@ -146,13 +149,22 @@ def test_release_build_context_excludes_host_node_modules() -> None:
     assert "**/node_modules/" in dockerignore_patterns
 
 
+def test_release_build_context_excludes_frontend_unit_tests() -> None:
+    """Production SPA compilation must not depend on test-only source fixtures."""
+    raw_lines = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+    dockerignore_patterns = {line.strip() for line in raw_lines if line.strip() and not line.lstrip().startswith("#")}
+
+    assert "src/elspeth/web/frontend/src/**/*.test.ts" in dockerignore_patterns
+    assert "src/elspeth/web/frontend/src/**/*.test.tsx" in dockerignore_patterns
+
+
 def test_release_dockerfile_copies_local_uv_sources_before_dependency_sync() -> None:
     """Root pyproject local uv sources must exist before Docker runs uv sync."""
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
     assert "COPY elspeth-lints/ ./elspeth-lints/" in dockerfile
     assert dockerfile.index("COPY elspeth-lints/ ./elspeth-lints/") < dockerfile.index(
-        "uv sync --frozen --extra all --no-install-project --active"
+        'uv sync --frozen "$@" --no-install-project --active'
     )
 
 
@@ -163,6 +175,81 @@ def test_release_dockerfile_copies_frontend_dist_into_installed_package() -> Non
     assert "COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/" in dockerfile
     assert "import elspeth.web" in dockerfile
     assert 'shutil.copytree("/tmp/frontend-dist", target)' in dockerfile
-    assert dockerfile.index("uv sync --frozen --extra all --no-editable --active") < dockerfile.index(
+    assert dockerfile.index('uv sync --frozen "$@" --no-editable --active') < dockerfile.index(
         'shutil.copytree("/tmp/frontend-dist", target)'
     )
+
+
+def _extras_validation_scripts() -> list[str]:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    blocks = re.findall(
+        r'test -n "\$INSTALL_EXTRAS" && \\\n.*?uv sync --frozen "\$@" --no-(?:install-project|editable) --active',
+        dockerfile,
+        flags=re.DOTALL,
+    )
+    assert len(blocks) == 2, "both dependency sync layers must use the same extras validator"
+    return [
+        re.sub(
+            r'uv sync --frozen "\$@" --no-(?:install-project|editable) --active',
+            lambda _match: "printf '%s\\n' \"$@\"",
+            block,
+        )
+        for block in blocks
+    ]
+
+
+def _run_extras_validator(script: str, extras: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/sh", "-c", script],
+        env={"INSTALL_EXTRAS": extras},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_release_dockerfile_defaults_to_all_extras_and_validates_both_sync_layers() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert dockerfile.count('ARG INSTALL_EXTRAS="all"') == 1
+    assert dockerfile.count('test -n "$INSTALL_EXTRAS"') == 2
+    assert dockerfile.count('case "$e" in [a-z0-9]*) ;; *) exit 2 ;; esac;') == 2
+    assert dockerfile.count('case "$e" in *[!a-z0-9-]*) exit 2 ;; esac;') == 2
+    assert dockerfile.count('set -- "$@" --extra "$e"') == 2
+    assert dockerfile.count('test "$#" -gt 0') == 2
+
+
+@pytest.mark.parametrize("extras", ["", "   ", "--no-dev", "ALL", "webui*", "webui;llm"])
+def test_release_dockerfile_rejects_invalid_install_extras_in_both_sync_layers(extras: str) -> None:
+    for script in _extras_validation_scripts():
+        result = _run_extras_validator(script, extras)
+        assert result.returncode != 0, (extras, result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize(
+    ("extras", "expected"),
+    [
+        ("all", ["--extra", "all"]),
+        (
+            "webui llm aws postgres",
+            ["--extra", "webui", "--extra", "llm", "--extra", "aws", "--extra", "postgres"],
+        ),
+    ],
+)
+def test_release_dockerfile_expands_valid_install_extras_in_both_sync_layers(
+    extras: str,
+    expected: list[str],
+) -> None:
+    for script in _extras_validation_scripts():
+        result = _run_extras_validator(script, extras)
+        assert result.returncode == 0, (extras, result.stdout, result.stderr)
+        assert result.stdout.splitlines() == expected
+
+
+def test_release_dockerfile_documents_orchestrator_owned_probe_wiring() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "Web task definitions: loopback GET /api/health" in dockerfile
+    assert "ALB target groups:     GET /api/ready" in dockerfile
+    assert "Batch tasks:           process exit code" in dockerfile
+    assert "elspeth health --port 8451" not in dockerfile

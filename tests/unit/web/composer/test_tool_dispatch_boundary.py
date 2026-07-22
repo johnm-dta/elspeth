@@ -7,12 +7,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import PluginSchemaInfo
+from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _dispatch as dispatch_module
-from elspeth.web.composer.tools import execute_tool
 from elspeth.web.composer.tools._common import ToolContext, ToolResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
 def _empty_state() -> CompositionState:
@@ -28,6 +29,11 @@ def _empty_state() -> CompositionState:
 
 def _catalog() -> MagicMock:
     catalog = MagicMock(spec=CatalogService)
+    catalog.list_sources.return_value = [
+        PluginSummary(name="csv", description="CSV file source", plugin_type="source", config_fields=[]),
+    ]
+    catalog.list_transforms.return_value = []
+    catalog.list_sinks.return_value = []
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
         plugin_type="source",
@@ -36,6 +42,24 @@ def _catalog() -> MagicMock:
         knob_schema={"fields": []},
     )
     return catalog
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> ToolResult:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return dispatch_module.execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def test_execute_tool_rejects_extra_top_level_arguments_before_handler() -> None:
@@ -98,7 +122,7 @@ def test_secret_tool_missing_context_fails_before_handler(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(dispatch_module, "_SECRET_DISCOVERY_TOOLS", {"list_secret_refs": _explode})
 
-    result = dispatch_module.execute_tool("list_secret_refs", {}, _empty_state(), _catalog())
+    result = execute_tool("list_secret_refs", {}, _empty_state(), _catalog())
 
     assert result.success is False
     assert "Secret tools require secret service context" in result.data["error"]

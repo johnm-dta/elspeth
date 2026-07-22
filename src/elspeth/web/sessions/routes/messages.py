@@ -24,12 +24,14 @@ from ._helpers import (
     HTTPException,
     InvariantError,
     MessageWithStateResponse,
+    PipelinePlannerError,
     Query,
     Request,
     SendMessageRequest,
     SessionServiceProtocol,
     UserIdentity,
     _BadRequestLLMError,
+    _cancel_on_client_disconnect,
     _composer_chat_history,
     _composer_conversation_messages,
     _composer_conversation_or_llm_audit_messages,
@@ -40,9 +42,11 @@ from ._helpers import (
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
     _handle_convergence_error,
+    _handle_planner_failure,
     _handle_plugin_crash,
     _handle_runtime_preflight_failure,
     _initial_composition_state_with_guided_session,
+    _is_client_disconnect_cancel,
     _litellm_error_detail,
     _llm_calls_from_exception,
     _message_response,
@@ -52,21 +56,25 @@ from ._helpers import (
     _publish_progress,
     _record_composer_request_terminal,
     _record_composer_runtime_preflight_telemetry,
+    _request_plugin_policy_context,
     _safe_frame_strings,
     _state_data_from_composer_state,
     _state_from_record,
     _state_response,
+    _track_compose_inflight,
     _verify_session_ownership,
     asyncio,
     client_cancelled_progress_event,
     contextlib,
     convergence_progress_event,
-    deep_thaw,
     get_current_user,
     get_rate_limiter,
     maybe_auto_title_session,
+    merge_composer_meta_updates,
     slog,
+    validation_errors_for_composer_surface,
 )
+from .composer.pipeline_settlement import settle_pipeline_proposal_under_compose_lock
 
 
 def _requests_audit_grade_messages_view(
@@ -90,6 +98,9 @@ def register_message_routes(router: APIRouter) -> None:
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         rate_limiter: ComposerRateLimiter = Depends(get_rate_limiter),  # noqa: B008
+        # In-flight compose tally for the SPA's post-abort settlement signal
+        # (elspeth-06a23adfcc); decrements only after the route fully unwinds.
+        _inflight_tally: None = Depends(_track_compose_inflight),
     ) -> MessageWithStateResponse:
         """Send a user message, run the LLM composer, persist results.
 
@@ -153,6 +164,22 @@ def register_message_routes(router: APIRouter) -> None:
                     pre_send_state_id = client_state_id
                 else:
                     pre_send_state_id = state_record.id
+
+            # Optimistic-concurrency baseline for the compose loop: the
+            # ACTUAL head this request composes against (loaded above,
+            # under the compose lock) — NOT the client-asserted
+            # ``body.state_id``. ``pre_send_state_id`` records what the
+            # user was looking at (AD-2/AD-7 provenance) and may
+            # legitimately lag the head: a client-aborted turn keeps
+            # mutating state server-side, and the SPA never sees the new
+            # version. Seeding the loop's ``expected_current_state_id``
+            # from the client id turned that legitimate lag into an
+            # unrecoverable 409 stale_compose_state on every follow-up
+            # send (elspeth-e08063c3a5). ``/recompose`` already seeds
+            # from the head; this keeps the two routes symmetric.
+            compose_base_state_id = state_record.id if state_record is not None else None
+            _policy_catalog, plugin_snapshot = _request_plugin_policy_context(request, user)
+            profile_registry = request.app.state.operator_profile_registry
 
             # 1b. Detect guided→freeform mode transition (spec §8.2).
             # The first freeform chat turn after guided_session.terminal is set
@@ -252,26 +279,35 @@ def register_message_routes(router: APIRouter) -> None:
                 from litellm.exceptions import AuthenticationError as LiteLLMAuthError
 
                 try:
-                    result = await composer.compose(
-                        body.content,
-                        chat_messages,
-                        state,
-                        session_id=str(session_id),
-                        current_state_id=str(pre_send_state_id) if pre_send_state_id is not None else None,
-                        user_id=str(user.user_id),
-                        progress=progress_sink,
-                        guided_terminal=_guided_terminal_for_compose,
-                        # Bind the freshly persisted user message id so any
-                        # inline_blob created by
-                        # this turn's tool calls can record provenance
-                        # back to it.  The composite FK on
-                        # ``(created_from_message_id, session_id)`` in
-                        # ``blobs_table`` rejects cross-session lineage,
-                        # so a stale or wrong id from a prior request
-                        # would surface as an IntegrityError, not as a
-                        # silent provenance corruption.
-                        user_message_id=str(user_msg.id),
-                    )
+                    # The watcher cancels this task if the client
+                    # disconnects mid-compose (Stop button, SPA compose
+                    # timeout, closed tab) — the server stack does not do
+                    # that on its own, so without it the turn runs to
+                    # completion as a zombie (elspeth-e08063c3a5). The
+                    # compose MUST stay awaited inline (no child task):
+                    # ``attach_llm_calls`` rides on the CancelledError
+                    # instance and a task boundary would drop it.
+                    async with _cancel_on_client_disconnect(request):
+                        result = await composer.compose(
+                            body.content,
+                            chat_messages,
+                            state,
+                            session_id=str(session_id),
+                            current_state_id=str(compose_base_state_id) if compose_base_state_id is not None else None,
+                            user_id=str(user.user_id),
+                            progress=progress_sink,
+                            guided_terminal=_guided_terminal_for_compose,
+                            # Bind the freshly persisted user message id so any
+                            # inline_blob created by
+                            # this turn's tool calls can record provenance
+                            # back to it.  The composite FK on
+                            # ``(created_from_message_id, session_id)`` in
+                            # ``blobs_table`` rejects cross-session lineage,
+                            # so a stale or wrong id from a prior request
+                            # would surface as an IntegrityError, not as a
+                            # silent provenance corruption.
+                            user_message_id=str(user_msg.id),
+                        )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"
                     # Discriminate the three sub-causes (composition / discovery /
@@ -291,9 +327,12 @@ def register_message_routes(router: APIRouter) -> None:
                         session.id,
                         str(user.user_id),
                         "convergence",
-                        pre_send_state_id,
+                        compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=422, detail=response_body) from exc
                 except LiteLLMAuthError as exc:
@@ -332,7 +371,7 @@ def register_message_routes(router: APIRouter) -> None:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
+                        await _persist_llm_calls(service, session.id, llm_calls, compose_base_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -367,7 +406,7 @@ def register_message_routes(router: APIRouter) -> None:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
+                        await _persist_llm_calls(service, session.id, llm_calls, compose_base_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -397,7 +436,7 @@ def register_message_routes(router: APIRouter) -> None:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
+                        await _persist_llm_calls(service, session.id, llm_calls, compose_base_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail=_litellm_error_detail(
@@ -440,9 +479,12 @@ def register_message_routes(router: APIRouter) -> None:
                         session.id,
                         str(user.user_id),
                         "compose",
-                        pre_send_state_id,
+                        compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     await _publish_progress(
                         progress_registry,
@@ -508,11 +550,46 @@ def register_message_routes(router: APIRouter) -> None:
                         session.id,
                         str(user.user_id),
                         "compose",
-                        pre_send_state_id,
+                        compose_base_state_id,
                         settings=settings,
                         secret_service=request.app.state.scoped_secret_resolver,
+                        plugin_snapshot=plugin_snapshot,
+                        profile_registry=profile_registry,
+                        catalog=request.app.state.catalog_service,
                     )
                     raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
+                except PipelinePlannerError as exc:
+                    # Freeform empty-pipeline planner failure (elspeth-54c11243a3).
+                    # PipelinePlannerError is a bare RuntimeError subclass, so it is
+                    # NOT caught by the generic ComposerServiceError arm below; without
+                    # this clause it escaped as an unhandled 500 with no "failed"
+                    # progress event and no closed failure-disposition record. The
+                    # guided-full route translates the same exception via
+                    # fail_guided_operation_with_audit; _handle_planner_failure is the
+                    # freeform mirror (persisting one durable, redacted disposition
+                    # row). The planner's LLM-call audit evidence is already durable
+                    # (llm_calls_durable), so _handle_planner_failure MUST NOT — and
+                    # does not — persist it again.
+                    await _publish_progress(
+                        progress_registry,
+                        session_id=str(session.id),
+                        request_id=str(user_msg.id),
+                        user_id=str(user.user_id),
+                        event=ComposerProgressEvent(
+                            phase="failed",
+                            headline="The composer could not build a pipeline for this request.",
+                            evidence=("The composer model did not return a usable pipeline plan.",),
+                            likely_next="Retry the request; if it keeps failing, simplify it or check the composer provider.",
+                            reason="provider_unavailable",
+                        ),
+                    )
+                    status_code, planner_response_body = await _handle_planner_failure(
+                        exc,
+                        service,
+                        session.id,
+                        compose_base_state_id,
+                    )
+                    raise HTTPException(status_code=status_code, detail=planner_response_body) from exc
                 except ComposerServiceError as exc:
                     await _publish_progress(
                         progress_registry,
@@ -529,7 +606,7 @@ def register_message_routes(router: APIRouter) -> None:
                     )
                     llm_calls = _llm_calls_from_exception(exc)
                     if llm_calls:
-                        await _persist_llm_calls(service, session.id, llm_calls, pre_send_state_id, plugin_crash_pending=True)
+                        await _persist_llm_calls(service, session.id, llm_calls, compose_base_state_id, plugin_crash_pending=True)
                     raise HTTPException(
                         status_code=502,
                         detail={"error_type": "composer_error", "detail": str(exc)},
@@ -578,13 +655,36 @@ def register_message_routes(router: APIRouter) -> None:
                 # first-class column) so any save must propagate it forward — failing
                 # to include it would silently drop the guided session from the DB on
                 # every freeform compose turn that mutates state.
-                _post_compose_meta: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
+                _post_compose_updates: dict[str, Any] = {"repair_turns_used": result.repair_turns_used}
                 if _post_compose_guided is not None:
-                    _post_compose_meta["guided_session"] = _post_compose_guided.to_dict()
+                    _post_compose_updates["guided_session"] = _post_compose_guided.to_dict()
+                _post_compose_meta = merge_composer_meta_updates(
+                    state_record.composer_meta if state_record is not None else None,
+                    _post_compose_updates,
+                )
 
                 state_response: CompositionStateResponse | None = None
-                post_compose_state_id: UUID | None = pre_send_state_id
-                if result.state.version != state.version:
+                post_compose_state_id: UUID | None = compose_base_state_id
+                if result.pipeline_commit_intent is not None:
+                    authority = await service.get_authoritative_pipeline_proposal(
+                        session_id=session.id,
+                        proposal_id=result.pipeline_commit_intent.proposal_id,
+                        reviewed_facts={},
+                    )
+                    route_settlement = await settle_pipeline_proposal_under_compose_lock(
+                        request=request,
+                        user=user,
+                        authority=authority,
+                        draft_hash=result.pipeline_commit_intent.draft_hash,
+                        composer_meta=_post_compose_meta,
+                        telemetry_source="compose",
+                    )
+                    state_response = _state_response(
+                        route_settlement.settlement.state,
+                        live_validation=route_settlement.validation,
+                    )
+                    post_compose_state_id = route_settlement.settlement.state.id
+                elif result.state.version != state.version:
                     await _publish_progress(
                         progress_registry,
                         session_id=str(session.id),
@@ -604,6 +704,9 @@ def register_message_routes(router: APIRouter) -> None:
                             secret_service=request.app.state.scoped_secret_resolver,
                             user_id=str(user.user_id),
                             session_id=session.id,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=profile_registry,
+                            catalog=request.app.state.catalog_service,
                             runtime_preflight=result.runtime_preflight,
                             preflight_exception_policy="raise",
                             initial_version=state.version,
@@ -640,9 +743,12 @@ def register_message_routes(router: APIRouter) -> None:
                             session.id,
                             str(user.user_id),
                             "compose",
-                            pre_send_state_id,
+                            compose_base_state_id,
                             settings=settings,
                             secret_service=request.app.state.scoped_secret_resolver,
+                            plugin_snapshot=plugin_snapshot,
+                            profile_registry=profile_registry,
+                            catalog=request.app.state.catalog_service,
                         )
                         raise HTTPException(status_code=500, detail=response_body) from rpf_exc.original_exc
                     await _publish_progress(
@@ -670,10 +776,6 @@ def register_message_routes(router: APIRouter) -> None:
                     # Version unchanged but transition_consumed must be flipped.
                     # Persist the updated guided_session in a new state row so
                     # subsequent turns pick up transition_consumed=True.
-                    _existing_meta: dict[str, Any] = {}
-                    if state_record is not None and state_record.composer_meta is not None:
-                        _existing_meta = dict(deep_thaw(state_record.composer_meta))
-                    _transition_meta = {**_existing_meta, **_post_compose_meta}
                     _transition_state = result.state
                     _transition_state_d = _transition_state.to_dict()
                     _transition_state_data = CompositionStateData(
@@ -683,8 +785,12 @@ def register_message_routes(router: APIRouter) -> None:
                         outputs=_transition_state_d["outputs"],
                         metadata_=_transition_state_d["metadata"],
                         is_valid=False,
-                        validation_errors=None,
-                        composer_meta=_transition_meta,
+                        validation_errors=validation_errors_for_composer_surface(
+                            composer_meta=_post_compose_meta,
+                            is_valid=False,
+                            validation_errors=None,
+                        ),
+                        composer_meta=_post_compose_meta,
                     )
                     _transition_record = await service.save_composition_state(
                         session.id,
@@ -725,7 +831,7 @@ def register_message_routes(router: APIRouter) -> None:
                         service,
                         session.id,
                         result.llm_calls,
-                        pre_send_state_id,
+                        compose_base_state_id,
                         plugin_crash_pending=False,
                     )
                 await _publish_progress(
@@ -763,7 +869,7 @@ def register_message_routes(router: APIRouter) -> None:
                 return response
             except InvariantError as exc:
                 # Same B1-sanitization rationale as the /guided/respond
-                # step_advance and dispatch handlers: server-invariant
+                # transition and settlement handlers: server-invariant
                 # violations route through a static 500 detail and a
                 # structured slog event so on-call dashboards can filter on
                 # ``guided.invariant_violated``.  Without this handler an
@@ -800,7 +906,7 @@ def register_message_routes(router: APIRouter) -> None:
                                 service,
                                 session.id,
                                 llm_calls,
-                                pre_send_state_id,
+                                compose_base_state_id,
                                 plugin_crash_pending=True,
                             )
                         )
@@ -820,6 +926,22 @@ def register_message_routes(router: APIRouter) -> None:
                         )
                     )
                 terminal_status = "cancelled"
+                if _is_client_disconnect_cancel(exc):
+                    # Disconnect-initiated cancellation (our
+                    # _cancel_on_client_disconnect watcher): the client is
+                    # gone, so the response body is discarded by the
+                    # transport either way — but converting to an
+                    # HTTPException here lets the task unwind as a normal
+                    # handled request instead of escaping as a
+                    # CancelledError, which uvicorn logs as "Exception in
+                    # ASGI application" on every Stop click / client
+                    # timeout. 499 is the de-facto "client closed request"
+                    # status. A real external cancel (server shutdown)
+                    # takes the bare ``raise`` below and keeps unwinding.
+                    raise HTTPException(
+                        status_code=499,
+                        detail="Client disconnected while the compose turn was running.",
+                    ) from exc
                 raise
             finally:
                 _COMPOSER_REQUESTS_INFLIGHT.add(-1, {"endpoint": "send_message"})

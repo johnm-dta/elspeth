@@ -2,19 +2,35 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import types
+import typing
+from collections.abc import Mapping
+from decimal import Decimal
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationError, ValidationInfo, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
 from elspeth.core.config import PayloadStoreSettings
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
-from elspeth.web.auth.urls import validate_oidc_authorization_endpoint, validate_oidc_issuer
+from elspeth.plugins.transforms.aws.guardrail_profiles import (
+    BEDROCK_GUARDRAIL_PLUGIN_IDS,
+    BedrockGuardrailProfileSettings,
+)
+from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
+from elspeth.web.auth.urls import (
+    validate_oidc_browser_endpoints,
+    validate_oidc_browser_origins,
+    validate_oidc_issuer,
+)
+from elspeth.web.plugin_policy.profiles import WebLLMProfileSettings, validate_profile_alias
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -35,6 +51,18 @@ _DEFAULT_PAYLOAD_STORE_RETENTION_DAYS: int = PayloadStoreSettings.model_fields["
 
 def _allow_insecure_test_keys(host: str) -> bool:
     return host in _LOCAL_HOSTS and ("pytest" in sys.modules or os.environ.get("ELSPETH_ENV") == "test")
+
+
+def is_default_secret_key_placeholder(secret_key: str) -> bool:
+    return secret_key == "change-me-in-production"
+
+
+def is_undersized_secret_key(secret_key: str) -> bool:
+    return len(secret_key.encode("utf-8")) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES
+
+
+def is_uniform_byte_key(key_bytes: bytes) -> bool:
+    return len(set(key_bytes)) == 1
 
 
 def _is_loopback_or_private_origin(value: str) -> bool:
@@ -76,11 +104,28 @@ class WebSettings(BaseModel):
     settings are constructed once and shared via app.state.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
     host: str = "127.0.0.1"
     port: int = Field(default=8451, ge=1, le=65535)
     auth_provider: AuthProviderType = "local"
+    # ``default`` preserves current behavior; ``aws-ecs`` is strictly validated by
+    # web/deployment_contract.py::validate_aws_ecs_settings.
+    deployment_target: Literal["default", "aws-ecs"] = "default"
+    # Operator telemetry is deployment policy, not pipeline-authored routing.
+    # The AWS destination and headers are intentionally absent from this model:
+    # web/operator_telemetry.py fixes them to the task-local collector and the
+    # ECS task role owns AWS authentication.
+    operator_telemetry: Literal["prometheus", "aws-otlp"] = "prometheus"
+    operator_telemetry_service_name: str = "elspeth-web"
+    operator_telemetry_environment: str | None = None
+    operator_telemetry_release: str | None = None
+    operator_telemetry_ecs_cluster: str | None = None
+    operator_telemetry_ecs_service: str | None = None
+    operator_telemetry_task_definition_family: str | None = None
+    operator_telemetry_task_definition_revision: str | None = None
+    operator_telemetry_export_interval_seconds: int = Field(default=60, strict=True, ge=1, le=3600)
+    operator_pipeline_telemetry_granularity: Literal["lifecycle", "rows"] = "lifecycle"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
@@ -110,6 +155,15 @@ class WebSettings(BaseModel):
     composer_max_discovery_turns: int = Field(..., ge=1)
     composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
     composer_timeout_seconds: float = Field(..., gt=0)
+    # Canonical full-pipeline planner budgets. These are independent of the
+    # ordinary incremental compose loop because the planner accounts for exact
+    # request bytes, physical provider attempts, requested completion tokens,
+    # and post-call provider cost.
+    composer_planner_max_provider_calls: int = Field(default=75, strict=True, ge=1)
+    composer_planner_max_request_bytes: int = Field(default=2 * 1024 * 1024, strict=True, ge=1)
+    composer_planner_max_completion_tokens: int = Field(default=16_384, strict=True, ge=1)
+    composer_planner_max_cumulative_provider_cost: Decimal = Field(default=Decimal("5.00"), ge=0)
+    composer_planner_repair_budget: int = Field(default=2, strict=True, ge=0)
     composer_transport_idle_ceiling_seconds: float = Field(
         default=_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS,
         gt=0,
@@ -201,6 +255,20 @@ class WebSettings(BaseModel):
         "AZURE_API_KEY",
         "AZURE_CONTENT_SAFETY_KEY",
     )
+    # Universal web plugin policy.  These user-facing Pydantic values are
+    # converted immediately to RuntimeWebPluginConfig before consumption.
+    plugin_allowlist: tuple[str, ...] = ()
+    plugin_preferences: Mapping[PluginCapability, tuple[str, ...]] = Field(default_factory=dict)
+    plugin_control_modes: Mapping[PluginCapability, ControlMode] = Field(
+        default_factory=lambda: {
+            PluginCapability.PROMPT_SHIELD: ControlMode.RECOMMEND,
+            PluginCapability.CONTENT_SAFETY: ControlMode.RECOMMEND,
+        }
+    )
+    llm_profiles: Mapping[str, WebLLMProfileSettings] = Field(default_factory=dict)
+    tutorial_llm_profile: str | None = None
+    bedrock_guardrail_profiles: tuple[BedrockGuardrailProfileSettings, ...] = ()
+    bedrock_guardrail_default_profiles: Mapping[str, str] = Field(default_factory=dict)
     orphan_run_max_age_seconds: int = Field(default=3600, ge=60)
     orphan_run_check_interval_seconds: int = Field(default=300, ge=30)
 
@@ -227,6 +295,9 @@ class WebSettings(BaseModel):
     oidc_audience: str | None = None
     oidc_client_id: str | None = None
     oidc_authorization_endpoint: str | None = None
+    oidc_token_endpoint: str | None = None
+    oidc_authorization_allowed_origins: tuple[str, ...] = ()
+    oidc_audience_claim: Literal["aud", "client_id"] = "aud"
     entra_tenant_id: str | None = None
 
     # JWKS cache tuning (OIDC / Entra). Defaults match the provider
@@ -321,6 +392,7 @@ class WebSettings(BaseModel):
         "oidc_audience",
         "oidc_client_id",
         "oidc_authorization_endpoint",
+        "oidc_token_endpoint",
         "entra_tenant_id",
     )
     @classmethod
@@ -330,6 +402,11 @@ class WebSettings(BaseModel):
         if not v.strip():
             raise ValueError("must not be blank (omit the field or set to a non-empty value)")
         return v
+
+    @field_validator("oidc_authorization_allowed_origins")
+    @classmethod
+    def _validate_oidc_authorization_allowed_origins(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        return validate_oidc_browser_origins(v)
 
     @field_validator("landscape_url", "session_db_url")
     @classmethod
@@ -451,11 +528,20 @@ class WebSettings(BaseModel):
 
     @field_validator("data_dir", "payload_store_path")
     @classmethod
-    def _normalize_paths(cls, v: Path | None) -> Path | None:
+    def _normalize_paths(cls, v: Path | None, info: ValidationInfo) -> Path | None:
         if v is None:
             return None
         if not str(v).strip():
             raise ValueError("must not be blank")
+        expanded = v.expanduser()
+        if info.field_name == "payload_store_path":
+            # Preserve the configured lexical path so the payload-store
+            # boundary can detect and reject a pre-existing symlink. resolve()
+            # would follow the link here and erase the evidence before either
+            # AWS startup validation or FilesystemPayloadStore sees it.
+            # absolute() still pins relative configuration to the construction
+            # CWD, preserving the process-lifetime stability promised below.
+            return expanded.absolute()
         # Resolve to an absolute path at validation time so downstream
         # consumers do not depend on the running process CWD. Without
         # this, a relative `data_dir` (e.g. the default Path("data"))
@@ -464,7 +550,7 @@ class WebSettings(BaseModel):
         # sink-allowlist is checked — same code, different answers.
         # `.resolve()` makes the answer immutable for the process
         # lifetime regardless of later os.chdir calls.
-        return v.expanduser().resolve()
+        return expanded.resolve()
 
     @field_validator("server_secret_allowlist")
     @classmethod
@@ -474,6 +560,109 @@ class WebSettings(BaseModel):
         if reserved:
             raise ValueError(f"server_secret_allowlist entries must not start with {SERVER_SECRET_RESERVED_PREFIX}: {sorted(reserved)}")
         return validated
+
+    @field_validator("llm_profiles")
+    @classmethod
+    def _validate_llm_profile_aliases(cls, value: Mapping[str, WebLLMProfileSettings]) -> Mapping[str, WebLLMProfileSettings]:
+        for alias in value:
+            validate_profile_alias(alias)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_tutorial_profile_alias(self) -> WebSettings:
+        if self.tutorial_llm_profile is not None:
+            validate_profile_alias(self.tutorial_llm_profile)
+            if self.tutorial_llm_profile not in self.llm_profiles:
+                raise ValueError("tutorial_llm_profile must name a configured LLM profile")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bedrock_guardrail_profiles(self) -> WebSettings:
+        by_alias: dict[str, BedrockGuardrailProfileSettings] = {}
+        by_plugin: dict[str, list[BedrockGuardrailProfileSettings]] = {plugin: [] for plugin in BEDROCK_GUARDRAIL_PLUGIN_IDS}
+        for profile in self.bedrock_guardrail_profiles:
+            if profile.alias in by_alias:
+                raise ValueError("Bedrock Guardrail profile aliases must be unique")
+            by_alias[profile.alias] = profile
+            by_plugin[profile.plugin].append(profile)
+
+        unknown_defaults = set(self.bedrock_guardrail_default_profiles) - set(BEDROCK_GUARDRAIL_PLUGIN_IDS)
+        if unknown_defaults:
+            raise ValueError("Bedrock Guardrail default profile names an unknown plugin")
+        for plugin, profiles in by_plugin.items():
+            default_alias = self.bedrock_guardrail_default_profiles.get(plugin)
+            aliases = {profile.alias for profile in profiles}
+            if len(profiles) > 1 and default_alias is None:
+                raise ValueError("multiple Bedrock Guardrail profiles require an explicit plugin default")
+            if default_alias is not None and default_alias not in aliases:
+                raise ValueError("Bedrock Guardrail default profile must name a profile for the same plugin")
+        return self
+
+    @field_validator("operator_telemetry_service_name")
+    @classmethod
+    def _validate_operator_telemetry_service_name(cls, value: str) -> str:
+        return cls._validate_operator_resource_identity("operator_telemetry_service_name", value)
+
+    @field_validator("operator_telemetry_environment")
+    @classmethod
+    def _validate_operator_telemetry_environment(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return cls._validate_operator_resource_identity("operator_telemetry_environment", value)
+
+    @field_validator(
+        "operator_telemetry_release",
+        "operator_telemetry_ecs_cluster",
+        "operator_telemetry_ecs_service",
+        "operator_telemetry_task_definition_family",
+        "operator_telemetry_task_definition_revision",
+    )
+    @classmethod
+    def _validate_operator_deployment_identity(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        field_name = info.field_name
+        assert field_name is not None
+        value = cls._validate_operator_resource_identity(field_name, value)
+        if field_name == "operator_telemetry_release":
+            valid = is_release_identity(value)
+        elif field_name == "operator_telemetry_task_definition_revision":
+            valid = is_aws_task_revision(value)
+        else:
+            valid = is_aws_ecs_name(value)
+        if not valid:
+            raise ValueError(f"{field_name} must be a bounded AWS deployment identity without ARN or account identity")
+        return value
+
+    @field_validator("operator_telemetry_export_interval_seconds", mode="before")
+    @classmethod
+    def _parse_operator_export_interval_from_env(cls, value: object) -> object:
+        # Environment variables arrive as strings; direct Python booleans must
+        # not pass through int coercion as 0/1.
+        if isinstance(value, str):
+            try:
+                return int(value, 10)
+            except ValueError:
+                raise ValueError("operator_telemetry_export_interval_seconds must be an integer") from None
+        return value
+
+    @staticmethod
+    def _validate_operator_resource_identity(field_name: str, value: str) -> str:
+        if not value.strip() or value != value.strip() or len(value) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"{field_name} must be a non-blank bounded string without control characters")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_aws_operator_resource_labels(self) -> WebSettings:
+        if self.operator_telemetry != "aws-otlp" and self.deployment_target != "aws-ecs":
+            return self
+        for field_name, value in (
+            ("operator_telemetry_service_name", self.operator_telemetry_service_name),
+            ("operator_telemetry_environment", self.operator_telemetry_environment),
+        ):
+            if value is not None and not is_aws_resource_label(value):
+                raise ValueError(f"{field_name} must be a bounded AWS-safe resource label without ARN or account identity")
+        return self
 
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:
@@ -485,6 +674,10 @@ class WebSettings(BaseModel):
                 raise ValueError("public_base_url for a non-local email_verified host must be publicly reachable")
 
         if self.auth_provider == "local":
+            if self.oidc_audience_claim != "aud":
+                raise ValueError("Local auth does not permit the OIDC client_id audience claim mode")
+            if self.oidc_authorization_allowed_origins:
+                raise ValueError("Local auth does not permit the OIDC browser origin allowlist")
             configured = [
                 name
                 for name, val in (
@@ -492,6 +685,11 @@ class WebSettings(BaseModel):
                     ("oidc_audience", self.oidc_audience),
                     ("oidc_client_id", self.oidc_client_id),
                     ("oidc_authorization_endpoint", self.oidc_authorization_endpoint),
+                    ("oidc_token_endpoint", self.oidc_token_endpoint),
+                    (
+                        "oidc_authorization_allowed_origins",
+                        self.oidc_authorization_allowed_origins or None,
+                    ),
                     ("entra_tenant_id", self.entra_tenant_id),
                 )
                 if val is not None
@@ -512,15 +710,17 @@ class WebSettings(BaseModel):
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
             assert self.oidc_issuer is not None
             object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
-            if self.oidc_authorization_endpoint is not None:
-                object.__setattr__(
-                    self,
-                    "oidc_authorization_endpoint",
-                    validate_oidc_authorization_endpoint(
-                        self.oidc_authorization_endpoint,
-                        issuer=self.oidc_issuer,
-                    ),
+            if (self.oidc_authorization_endpoint is None) != (self.oidc_token_endpoint is None):
+                raise ValueError("OIDC authorization_endpoint and token_endpoint must be configured both or neither")
+            if self.oidc_authorization_endpoint is not None and self.oidc_token_endpoint is not None:
+                authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
+                    self.oidc_authorization_endpoint,
+                    self.oidc_token_endpoint,
+                    issuer=self.oidc_issuer,
+                    allowed_origins=self.oidc_authorization_allowed_origins,
                 )
+                object.__setattr__(self, "oidc_authorization_endpoint", authorization_endpoint)
+                object.__setattr__(self, "oidc_token_endpoint", token_endpoint)
         elif self.auth_provider == "entra":
             # oidc_issuer is NOT required — EntraAuthProvider derives it
             # from entra_tenant_id (login.microsoftonline.com/{tid}/v2.0).
@@ -535,16 +735,21 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"Entra auth requires: {', '.join(missing)}")
-            if self.oidc_authorization_endpoint is not None:
+            if self.oidc_authorization_allowed_origins:
+                raise ValueError("Entra auth does not permit the OIDC browser origin allowlist")
+            if self.oidc_audience_claim != "aud":
+                raise ValueError("Entra auth does not permit the OIDC client_id audience claim mode")
+            if (self.oidc_authorization_endpoint is None) != (self.oidc_token_endpoint is None):
+                raise ValueError("Entra authorization_endpoint and token_endpoint must be configured both or neither")
+            if self.oidc_authorization_endpoint is not None and self.oidc_token_endpoint is not None:
                 assert self.entra_tenant_id is not None
-                object.__setattr__(
-                    self,
-                    "oidc_authorization_endpoint",
-                    validate_oidc_authorization_endpoint(
-                        self.oidc_authorization_endpoint,
-                        issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
-                    ),
+                authorization_endpoint, token_endpoint = validate_oidc_browser_endpoints(
+                    self.oidc_authorization_endpoint,
+                    self.oidc_token_endpoint,
+                    issuer=f"https://login.microsoftonline.com/{self.entra_tenant_id}/v2.0",
                 )
+                object.__setattr__(self, "oidc_authorization_endpoint", authorization_endpoint)
+                object.__setattr__(self, "oidc_token_endpoint", token_endpoint)
         return self
 
     @model_validator(mode="after")
@@ -604,13 +809,12 @@ class WebSettings(BaseModel):
         """Reject default or undersized JWT HMAC keys outside explicit test contexts."""
         if _allow_insecure_test_keys(self.host):
             return self
-        if self.secret_key == "change-me-in-production":
+        if is_default_secret_key_placeholder(self.secret_key):
             raise ValueError(
                 "secret_key must be set to a secure value outside explicit test contexts. "
                 "Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
             )
-        secret_key_bytes = self.secret_key.encode("utf-8")
-        if len(secret_key_bytes) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES:
+        if is_undersized_secret_key(self.secret_key):
             raise ValueError(
                 f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes outside explicit test contexts. "
                 "Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
@@ -635,7 +839,7 @@ class WebSettings(BaseModel):
         if _allow_insecure_test_keys(self.host):
             return self
         raw_key = self.shareable_link_signing_key.get_secret_value()
-        if len(set(raw_key)) == 1:
+        if is_uniform_byte_key(raw_key):
             raise ValueError(
                 "shareable_link_signing_key is a known-weak placeholder "
                 "(uniform-byte pattern detected); generate a real key with "
@@ -662,3 +866,101 @@ class WebSettings(BaseModel):
             return self.session_db_url
         db_path = self.data_dir / "sessions.db"
         return f"sqlite:///{db_path}"
+
+
+# Fields that accept JSON-encoded collection values from environment variables.
+# Add new tuple-typed WebSettings fields here so settings_from_env() decodes
+# them. Scalar fields are handled by Pydantic.
+_JSON_COLLECTION_FIELDS: frozenset[str] = frozenset(
+    {"cors_origins", "server_secret_allowlist", "oidc_authorization_allowed_origins", "plugin_allowlist", "bedrock_guardrail_profiles"}
+)
+_JSON_OBJECT_FIELDS: frozenset[str] = frozenset(
+    {"plugin_preferences", "plugin_control_modes", "llm_profiles", "bedrock_guardrail_default_profiles"}
+)
+
+
+def _annotation_scalar_types(annotation: Any) -> set[type]:
+    """Flatten an annotation (including ``X | None`` unions) to its scalar types."""
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        return {member for arg in typing.get_args(annotation) for member in _annotation_scalar_types(arg)}
+    return {annotation} if isinstance(annotation, type) else set()
+
+
+def _coerce_env_scalar(value: str, annotation: Any) -> object:
+    """Coerce a numeric environment string when the target field is int/float.
+
+    Environment values are always strings, but several fields are declared
+    ``strict=True`` and reject string input outright — without coercion those
+    fields are silently un-settable from the environment (the misconfiguration
+    only detonates as a startup crash-loop). Non-numeric targets, unparseable
+    values, and bool-typed fields pass through unchanged so Pydantic reports
+    them against the original input.
+    """
+    scalar_types = _annotation_scalar_types(annotation)
+    if bool in scalar_types:
+        return value
+    try:
+        if int in scalar_types and float not in scalar_types:
+            return int(value)
+        if float in scalar_types:
+            return float(value)
+    except ValueError:
+        return value
+    return value
+
+
+def settings_from_env() -> WebSettings:
+    """Construct :class:`WebSettings` from ``ELSPETH_WEB__*`` variables.
+
+    Collection fields use JSON arrays/objects, the literal ``null`` clears an
+    optional scalar, numeric strings are coerced for strict int/float fields,
+    unknown fields fail with their original environment name, and
+    policy-validation failures never echo raw operator input.
+    """
+    kwargs: dict[str, object] = {}
+    prefix = "ELSPETH_WEB__"
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        field_name = key[len(prefix) :].lower()
+        if field_name not in WebSettings.model_fields:
+            raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
+        if field_name in _JSON_COLLECTION_FIELDS | _JSON_OBJECT_FIELDS:
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                expected = "array" if field_name in _JSON_COLLECTION_FIELDS else "object"
+                raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON {expected}.") from None
+            if field_name in _JSON_COLLECTION_FIELDS:
+                if not isinstance(parsed, list):
+                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON array.")
+                kwargs[field_name] = tuple(parsed)
+            else:
+                if not isinstance(parsed, dict):
+                    raise RuntimeError(f"ELSPETH_WEB__{field_name.upper()} must be valid JSON object.")
+                kwargs[field_name] = parsed
+        elif value == "null":
+            kwargs[field_name] = None
+        else:
+            kwargs[field_name] = _coerce_env_scalar(value, WebSettings.model_fields[field_name].annotation)
+
+    try:
+        return WebSettings(**kwargs)  # type: ignore[arg-type]
+    except ValidationError as error:
+        policy_fields = {
+            "plugin_allowlist",
+            "plugin_preferences",
+            "plugin_control_modes",
+            "llm_profiles",
+            "tutorial_llm_profile",
+            "bedrock_guardrail_profiles",
+            "bedrock_guardrail_default_profiles",
+        }
+        safe_paths = {
+            str(item) for detail in error.errors(include_input=False) for item in detail.get("loc", ()) if isinstance(item, (str, int))
+        }
+        if policy_fields & safe_paths:
+            rendered_paths = ", ".join(sorted(safe_paths))
+            raise RuntimeError(f"Invalid ELSPETH_WEB__ plugin policy setting at: {rendered_paths}") from None
+        raise

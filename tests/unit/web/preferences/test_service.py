@@ -327,6 +327,73 @@ def test_tutorial_completed_counter_repeat_label(
     assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "repeat"})
 
 
+def test_tutorial_completed_counter_exit_label(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    """An exit-to-freeform opt-out carries the explicit discriminator and must
+    not be bucketed as "skip" by the payload-shape inference (elspeth-61591e64bb)."""
+    stamp = datetime(2026, 5, 15, 14, 25, tzinfo=UTC)
+
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-exit-counter",
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp, tutorial_completed_via="exit"),
+        )
+    )
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "exit"})
+
+
+def test_tutorial_completed_counter_exit_discriminator_wins_over_mode_shape(
+    service,
+    tutorial_completed_counter: _RecordingCounter,
+):
+    """The explicit discriminator outranks the addressed-mode shape inference
+    that would otherwise classify this payload as "first_time"."""
+    stamp = datetime(2026, 5, 15, 14, 30, tzinfo=UTC)
+
+    asyncio.run(
+        service.update_composer_preferences(
+            "alice-tutorial-exit-mode-counter",
+            UpdateComposerPreferencesRequest(
+                default_mode="freeform",
+                tutorial_completed_at=stamp,
+                tutorial_completed_via="exit",
+            ),
+        )
+    )
+
+    assert tutorial_completed_counter.calls[-1] == (1, {"completion_path": "exit"})
+
+
+def test_tutorial_exit_patch_clears_resume_fields(service):
+    """The exit opt-out is a completion write, so the completion-clears-progress
+    rule applies: a later retake must resume at Welcome, not mid-stage."""
+    user = "alice-tutorial-exit-clears-progress"
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_stage="guided", tutorial_session_id="sess-exit-1"),
+        )
+    )
+
+    stamp = datetime(2026, 5, 15, 14, 35, tzinfo=UTC)
+    asyncio.run(
+        service.update_composer_preferences(
+            user,
+            UpdateComposerPreferencesRequest(tutorial_completed_at=stamp, tutorial_completed_via="exit"),
+        )
+    )
+
+    prefs = asyncio.run(service.get_composer_preferences(user))
+    assert prefs.tutorial_completed_at is not None
+    assert prefs.tutorial_stage is None
+    assert prefs.tutorial_session_id is None
+    assert prefs.tutorial_run_id is None
+    assert prefs.tutorial_source_data_hash is None
+
+
 def test_tutorial_completed_counter_does_not_fire_for_mode_only_patch(
     service,
     tutorial_completed_counter: _RecordingCounter,

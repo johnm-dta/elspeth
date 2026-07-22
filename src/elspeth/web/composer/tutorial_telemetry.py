@@ -6,13 +6,15 @@ from typing import Literal
 
 from opentelemetry import metrics
 
-_CompletionPath = Literal["first_time", "skip", "retake", "repeat"]
-_COMPLETION_PATHS: frozenset[str] = frozenset({"first_time", "skip", "retake", "repeat"})
+_CompletionPath = Literal["first_time", "skip", "retake", "repeat", "exit"]
+_COMPLETION_PATHS: frozenset[str] = frozenset({"first_time", "skip", "retake", "repeat", "exit"})
 
 _meter = metrics.get_meter(__name__)
 _TUTORIAL_COMPLETED_COUNTER = _meter.create_counter(
     "composer.tutorial.completed_total",
-    description=("First-run tutorial completion preference writes. Attributes: completion_path in {first_time, skip, retake, repeat}."),
+    description=(
+        "First-run tutorial completion preference writes. Attributes: completion_path in {first_time, skip, retake, repeat, exit}."
+    ),
 )
 _TUTORIAL_ABANDON_COUNTER = _meter.create_counter(
     "composer.tutorial.abandon_total",

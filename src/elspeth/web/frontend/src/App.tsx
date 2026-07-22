@@ -1,6 +1,11 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import "./styles/index.css";
 import * as api from "./api/client";
+import {
+  STALE_BUILD_POLLS_REQUIRED,
+  nextStaleBuildStreak,
+  ownFrontendBuild,
+} from "./utils/deployBeacon";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
@@ -8,6 +13,7 @@ import { SideRail } from "./components/sidebar/SideRail";
 import { GraphMiniView } from "./components/sidebar/GraphMiniView";
 import { GraphModal } from "./components/sidebar/GraphModal";
 import { ExportYamlModal } from "./components/sidebar/ExportYamlModal";
+import { ImportYamlModalHost } from "./components/sidebar/ImportYamlModal";
 import { CatalogButton } from "./components/sidebar/CatalogButton";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { ConfirmDialog } from "./components/common/ConfirmDialog";
@@ -48,6 +54,7 @@ import {
   OPEN_CATALOG_EVENT,
 } from "./lib/composer-events";
 import type { SystemStatus } from "./types/index";
+import { applyServerComposerTimeout } from "./config/composer";
 
 // Health check interval in milliseconds (30 seconds)
 const HEALTH_CHECK_INTERVAL = 30_000;
@@ -65,11 +72,20 @@ initStoreSubscriptions();
  */
 function App() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  // Deploy-cache coherence beacon: this tab's own bundle identity (null in
+  // dev disarms the feature) plus the stable-mismatch latch. Latched once
+  // the polled frontend_build differs across STALE_BUILD_POLLS_REQUIRED
+  // consecutive health checks; only a refresh clears it — never auto-reload
+  // (an in-flight guided operation must not be yanked).
+  const ownBuild = useMemo(() => ownFrontendBuild(), []);
+  const staleBuildStreakRef = useRef(0);
+  const [staleBuildDetected, setStaleBuildDetected] = useState(false);
   const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
   const [showSecrets, setShowSecrets] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showComposerSettings, setShowComposerSettings] = useState(false);
+  const [tutorialResetEpoch, setTutorialResetEpoch] = useState(0);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const logout = useAuthStore((s) => s.logout);
   const openComposerSettings = useCallback(
@@ -80,6 +96,10 @@ function App() {
     () => setShowComposerSettings(false),
     [],
   );
+  const handleResetTutorialComplete = useCallback(() => {
+    setShowComposerSettings(false);
+    setTutorialResetEpoch((epoch) => epoch + 1);
+  }, []);
   const healthCheckRef = useRef<number | null>(null);
 
   // Phase 6B Task 8: shared-inspect route detection. When the URL hash is
@@ -205,6 +225,59 @@ function App() {
     try {
       const status = await api.fetchSystemStatus();
       setSystemStatus(status);
+      // Derive the compose abort ceiling from the deployment's configured
+      // wall clock — a hard-coded client cap only satisfies the
+      // client-outlives-server invariant for the checked-in defaults.
+      // Latch the store readiness gate (the single source of truth) true once
+      // a known-good ceiling is applied: the Send affordances (freeform,
+      // guided, side-rail Apply) ungate only then, closing the bootstrap race
+      // where a send started before this fetch would schedule an abort from
+      // the stale default. Only ever set true — the backend wall clock does
+      // not change mid-session, so a later partial health response must not
+      // un-ready a composer that already knows its ceiling.
+      if (
+        status.composer_timeout_seconds !== undefined &&
+        applyServerComposerTimeout(status.composer_timeout_seconds)
+      ) {
+        // Latch the reactive readiness gate — the single source of truth the
+        // Send affordances subscribe to — now that a known-good ceiling is
+        // applied. Only ever set true: the backend wall clock does not change
+        // mid-session, so a later partial poll must not un-ready a composer that
+        // already knows its ceiling (the else-guard below enforces that).
+        useSessionStore.getState().setComposeTimeoutReady(true);
+        useSessionStore.getState().setComposerTimeoutUnavailable(false);
+      } else if (!useSessionStore.getState().composeTimeoutReady) {
+        // Backend reachable but no usable composer_timeout_seconds AND no good
+        // ceiling was ever latched this session — genuinely stuck. The gate must
+        // stay closed (a send would schedule an abort from the stale default
+        // ceiling), so latch a distinct diagnostic: the Send affordance stops
+        // saying "Connecting…" and the misconfiguration is visible. Log once on
+        // the false→true transition, not every poll.
+        //
+        // The `!composeTimeoutReady` guard is load-bearing: a partial or absent
+        // response that arrives AFTER a good ceiling was latched is a transient
+        // (readiness holds), so we must not flag unavailable or spam a false "no
+        // usable timeout" error on a genuinely healthy composer.
+        const sessionState = useSessionStore.getState();
+        if (!sessionState.composerTimeoutUnavailable) {
+          console.error(
+            "[health-check] system status reported no usable " +
+              "composer_timeout_seconds:",
+            status.composer_timeout_seconds,
+          );
+        }
+        sessionState.setComposerTimeoutUnavailable(true);
+      }
+      // Deploy beacon: debounce across consecutive polls so a mid-deploy
+      // status flap never flashes the banner; latch once stable.
+      staleBuildStreakRef.current = nextStaleBuildStreak(
+        staleBuildStreakRef.current,
+        ownBuild,
+        status.frontend_build,
+      );
+      if (staleBuildStreakRef.current >= STALE_BUILD_POLLS_REQUIRED) {
+        setStaleBuildDetected(true);
+      }
       setBackendAvailable(true);
       setLastHealthCheckAt(null);
     } catch (err) {
@@ -215,11 +288,15 @@ function App() {
       console.error("[health-check] fetchSystemStatus failed:", err);
       setSystemStatus(null);
       setBackendAvailable(false);
+      // Backend unreachable: the "Backend unavailable" banner is the signal
+      // now, not the composer-specific diagnostic. Clear it so a later
+      // recovery does not surface a stale "composer unavailable".
+      useSessionStore.getState().setComposerTimeoutUnavailable(false);
       setLastHealthCheckAt(new Date().toLocaleTimeString());
     } finally {
       setHealthChecking(false);
     }
-  }, []);
+  }, [ownBuild]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -341,6 +418,21 @@ function App() {
     };
   }, [checkHealth]);
 
+  // Re-establish the compose-timeout gate on RE-authentication. App stays
+  // mounted across auth changes (AuthGuard gates only its children), so the
+  // mount effect above does not re-run on login; meanwhile logout's store reset
+  // dropped composeTimeoutReady to false (and reset the module ceiling in
+  // lockstep). Without this, a fresh login would sit behind a disabled Send
+  // until the next 30s poll re-latched the backend ceiling. Fire only on the
+  // false→true transition so the initial mount does not double-fetch.
+  const wasAuthenticatedRef = useRef(isAuthenticated);
+  useEffect(() => {
+    if (isAuthenticated && !wasAuthenticatedRef.current) {
+      void checkHealth();
+    }
+    wasAuthenticatedRef.current = isAuthenticated;
+  }, [isAuthenticated, checkHealth]);
+
   // Phase 6B Task 8 short-circuit: if the URL hash is `#/shared/{token}`,
   // render the read-only inspect view inside AuthGuard. The token is a
   // CAPABILITY, not an authenticator — the recipient must still be logged
@@ -428,6 +520,23 @@ function App() {
           </div>
         )}
 
+        {/* Deploy beacon: this tab is running a previous bundle (stale
+            hashed assets may 404 and new features are absent). Non-blocking,
+            persistent once latched; refresh is the only clear. */}
+        {staleBuildDetected && (
+          <div role="status" className="alert-banner">
+            <span>
+              A new version of ELSPETH is available — refresh to load it.
+            </span>
+            <button
+              onClick={() => window.location.reload()}
+              className="alert-banner-action"
+            >
+              Refresh
+            </button>
+          </div>
+        )}
+
         {/* Composer unavailable banner (backend is up but LLM not configured) */}
         {backendAvailable && systemStatus && !systemStatus.composer_available && (
           <div role="status" className="alert-banner">
@@ -452,8 +561,11 @@ function App() {
         />
         {showTutorial ? (
           <HelloWorldTutorial
-            composerAvailable={systemStatus?.composer_available ?? true}
+            key={tutorialResetEpoch}
+            composerAvailable={systemStatus?.composer_available ?? false}
             composerUnavailableReason={systemStatus?.composer_reason ?? null}
+            tutorialReady={systemStatus?.tutorial_ready ?? false}
+            tutorialUnavailableReason={systemStatus?.tutorial_reason ?? null}
           />
         ) : showEmptyLanding ? (
           <div className="app-main" role="main">
@@ -523,6 +635,7 @@ function App() {
         {showSecrets && <SecretsPanel onClose={closeSecrets} />}
         <GraphModal />
         <ExportYamlModal />
+        <ImportYamlModalHost />
         {/* Phase 6B Task 4: mount the SaveForReviewDialog at app-root level so
          *  CompletionBar's Save-for-review verb can open it regardless of
          *  which view is currently focused. The dialog reads its state from
@@ -533,7 +646,10 @@ function App() {
           onClose={() => setCatalogOpen(false)}
         />
         {showComposerSettings && (
-          <ComposerPreferencesPanel onClose={closeComposerSettings} />
+          <ComposerPreferencesPanel
+            onClose={closeComposerSettings}
+            onResetTutorialComplete={handleResetTutorialComplete}
+          />
         )}
         <CommandPalette isOpen={showPalette} onClose={closePalette} />
         {showShortcuts && (

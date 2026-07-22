@@ -94,6 +94,22 @@ class TestProducerResolverBuild:
         for branch in ("a", "b"):
             assert resolver.find_producer_for(branch) is not None
 
+    def test_fork_route_target_is_not_a_connection_producer(self):
+        """Route target 'fork' is the reserved fork-mode keyword, not a connection.
+
+        Two gates routing to 'fork' must not contend as duplicate producers
+        (elspeth-b6940369a7); the DAG builder resolves 'fork' to
+        RouteDestination.fork() and never registers it as a connection.
+        """
+        nodes = (
+            _node("g1", plugin="gate1", node_type="gate", input="src", routes={"true": "fork"}, fork_to=("a1", "a2")),
+            _node("g2", plugin="gate2", node_type="gate", input="mid", routes={"true": "fork"}, fork_to=("b1", "b2")),
+        )
+        resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset())
+
+        assert "fork" not in resolver.duplicate_connections
+        assert resolver.find_producer_for("fork") is None
+
     def test_coalesce_without_on_success_publishes_under_own_id(self):
         nodes = (_node("c", plugin=None, node_type="coalesce", input="branches"),)
         resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset())
@@ -179,3 +195,73 @@ class TestProducerResolverWalkBack:
         producer = resolver.walk_to_real_producer("explode_in")
         assert producer is not None
         assert producer.producer_id == "source"
+
+
+def _queue(queue_id: str, *, description: str | None = None) -> NodeSpec:
+    """Canonical structural queue NodeSpec: id == input, no plugin/routing,
+    implicit output under its own id, description-only options."""
+    return _node(
+        queue_id,
+        plugin=None,
+        node_type="queue",
+        input=queue_id,
+        on_success=None,
+        options=None if description is None else {"description": description},
+    )
+
+
+class TestProducerResolverQueue:
+    """Declared queue fan-in (elspeth-a5b86149d4): many producers may publish
+    one connection, the queue is that connection's canonical producer, and the
+    predecessors are tracked separately from the ordinary single-producer map —
+    without relaxing the duplicate-producer rule for undeclared fan-in."""
+
+    @staticmethod
+    def _two_sources() -> dict[str, SourceSpec]:
+        return {
+            "orders": SourceSpec(plugin="csv", on_success="inbound", options={}, on_validation_failure="discard"),
+            "refunds": SourceSpec(plugin="csv", on_success="inbound", options={}, on_validation_failure="discard"),
+        }
+
+    def test_declared_queue_absorbs_fan_in_without_duplicate(self):
+        resolver = ProducerResolver.build(source=None, sources=self._two_sources(), nodes=(_queue("inbound"),), sink_names=frozenset())
+        assert "inbound" not in resolver.duplicate_connections
+
+    def test_queue_is_the_canonical_producer_for_its_id(self):
+        resolver = ProducerResolver.build(source=None, sources=self._two_sources(), nodes=(_queue("inbound"),), sink_names=frozenset())
+        producer = resolver.find_producer_for("inbound")
+        assert producer is not None
+        assert producer.producer_id == "inbound"
+
+    def test_queue_predecessors_are_sorted_and_insertion_order_independent(self):
+        forward = ProducerResolver.build(source=None, sources=self._two_sources(), nodes=(_queue("inbound"),), sink_names=frozenset())
+        reversed_sources = dict(reversed(list(self._two_sources().items())))
+        backward = ProducerResolver.build(source=None, sources=reversed_sources, nodes=(_queue("inbound"),), sink_names=frozenset())
+        for resolver in (forward, backward):
+            assert [entry.producer_id for entry in resolver.queue_predecessors("inbound")] == [
+                "source:orders",
+                "source:refunds",
+            ]
+
+    def test_repeated_predecessor_registration_is_deduplicated(self):
+        # One gate routing two labels to the queue is a single predecessor.
+        gate = _node("g", plugin="gate", node_type="gate", input="src", routes={"a": "inbound", "b": "inbound"})
+        src = {"s": SourceSpec(plugin="csv", on_success="src", options={}, on_validation_failure="discard")}
+        resolver = ProducerResolver.build(source=None, sources=src, nodes=(gate, _queue("inbound")), sink_names=frozenset())
+        assert [entry.producer_id for entry in resolver.queue_predecessors("inbound")] == ["g"]
+
+    def test_walk_to_real_producer_returns_the_queue_not_a_predecessor(self):
+        resolver = ProducerResolver.build(source=None, sources=self._two_sources(), nodes=(_queue("inbound"),), sink_names=frozenset())
+        producer = resolver.walk_to_real_producer("inbound")
+        assert producer is not None
+        assert producer.producer_id == "inbound"
+
+    def test_queue_predecessors_is_empty_tuple_for_a_non_queue_connection(self):
+        nodes = (_node("a", plugin="p", input="src", on_success="out"),)
+        resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset())
+        assert resolver.queue_predecessors("out") == ()
+
+    def test_undeclared_fan_in_still_reports_a_duplicate(self):
+        resolver = ProducerResolver.build(source=None, sources=self._two_sources(), nodes=(), sink_names=frozenset())
+        assert "inbound" in resolver.duplicate_connections
+        assert resolver.find_producer_for("inbound") is None

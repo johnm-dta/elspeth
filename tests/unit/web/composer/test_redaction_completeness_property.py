@@ -354,3 +354,35 @@ def test_redaction_replaces_every_sensitive_response_value(tool_name: str) -> No
                 )
 
     check()
+
+
+def test_queue_node_options_are_redacted_in_set_pipeline() -> None:
+    """A queue node's ``options`` is the same Sensitive ``nodes[*].options``
+    surface as any other node: the operator-facing description must collapse
+    to the summarizer output at the persistence boundary (elspeth-a5b86149d4).
+
+    The queue exposure did NOT weaken the persisted transport model
+    (``_PipelineNodeModel.node_type`` stays ``str``) nor the redaction
+    inventory — this pins that a queue rides the existing Sensitive path.
+    """
+    import json
+
+    canary = "SECRET-OPERATOR-QUEUE-NOTE"
+    args = {
+        "source": {"plugin": "csv", "on_success": "inbound"},
+        "nodes": [
+            {
+                "id": "inbound",
+                "node_type": "queue",
+                "input": "inbound",
+                "options": {"description": canary},
+            }
+        ],
+        "edges": [],
+        "outputs": [],
+    }
+    redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=NoopRedactionTelemetry())
+    # node_type survives verbatim (structural); options collapses to a str.
+    assert redacted["nodes"][0]["node_type"] == "queue"
+    assert isinstance(redacted["nodes"][0]["options"], str)
+    assert canary not in json.dumps(redacted, sort_keys=True)

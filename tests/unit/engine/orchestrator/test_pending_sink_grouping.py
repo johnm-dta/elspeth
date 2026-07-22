@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import groupby
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -526,3 +527,32 @@ class TestPendingTokenConsumption:
                 )
 
         assert pending_tokens == {"output": [pending_pair]}
+
+
+def test_flush_threads_live_coordination_worker_into_sink_effects() -> None:
+    from elspeth.engine.executors.sink import DiversionCounts
+
+    coordinator = SinkFlushCoordinator(span_factory=object(), checkpoints=object())
+    processor = SimpleNamespace(
+        coordination_token=SimpleNamespace(worker_id="worker:run-1:process-unique"),
+        resolve_sink_step=lambda: 5,
+    )
+    loop_ctx = SimpleNamespace(
+        counters=ExecutionCounters(),
+        config=_PipelineConfigFake(sinks={}),
+        ctx=object(),
+        pending_tokens={},
+        processor=processor,
+    )
+
+    with patch.object(coordinator, "write_pending_to_sinks", return_value=DiversionCounts()) as write_pending:
+        coordinator.flush_and_write_sinks(
+            factory=_recorder_factory_fake(),  # type: ignore[arg-type]
+            run_id="run-1",
+            loop_ctx=loop_ctx,
+            sink_id_map={},
+            edge_map={},
+            interrupted_by_shutdown=False,
+        )
+
+    assert write_pending.call_args.kwargs["worker_id"] == "worker:run-1:process-unique"

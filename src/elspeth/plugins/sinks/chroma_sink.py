@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-import time
-from collections.abc import Callable
+import urllib.parse
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import chromadb
@@ -21,14 +21,31 @@ from pydantic import BaseModel, Field, model_validator
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
-from elspeth.contracts.enums import CallStatus, CallType
+from elspeth.contracts.enums import CallType
 from elspeth.contracts.errors import (
-    AuditIntegrityError,
-    DuplicateDocumentError,
     FrameworkBugError,
 )
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
@@ -37,6 +54,7 @@ from elspeth.plugins.infrastructure.clients.retrieval.connection import (
 )
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import build_diversion_attribution
 
 slog = structlog.get_logger(__name__)
 
@@ -176,9 +194,28 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6520cfa82797f8e6"
+    source_file_hash: str | None = "sha256:92218f2096f03f38"
     config_model = ChromaSinkConfig
     supports_resume = False
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.VECTOR
+    supported_effect_modes = frozenset({"overwrite"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS})
+    supports_member_effects = True
+    effect_mode_remediation = "set on_duplicate=overwrite or choose a sink with a target-side effect marker"
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        del cls
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            return None
+        mode = config.get("on_duplicate", "overwrite")
+        return ResolvedSinkEffectMode(mode) if isinstance(mode, str) else None
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
@@ -257,346 +294,319 @@ class ChromaSink(BaseSink):
         payload_bytes = payload.encode("utf-8")
         return hashlib.sha256(payload_bytes).hexdigest(), len(payload_bytes)
 
-    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        if self._collection is None:
-            raise FrameworkBugError("ChromaSink._collection is None — on_start() was not called before write()")
-        collection = self._collection
-
-        chroma_url = SanitizedDatabaseUrl.from_raw_url(f"chromadb://{self._config.collection}")
-
-        if not rows:
-            return SinkWriteResult(
-                artifact=ArtifactDescriptor.for_database(
-                    url=chroma_url,
-                    table=self._config.collection,
-                    content_hash=hashlib.sha256(b"").hexdigest(),
-                    payload_size=0,
-                    row_count=0,
-                )
-            )
-
+    def _extract_effect_member(self, member: SinkEffectMember) -> tuple[str, str, dict[str, object] | None]:
+        row = deep_thaw(member.row)
+        if not isinstance(row, dict):  # pragma: no cover - member contract guarantees a mapping
+            raise FrameworkBugError("Chroma effect member row is not an object")
         fm = self._config.field_mapping
-
-        # Per-row extraction of required fields (id, document) and optional metadata.
-        # Missing or non-string required fields are per-row data problems — divert
-        # the row rather than aborting the entire batch.
-        ids: list[str] = []
-        documents: list[str] = []
-        # Per-row metadata: non-empty dict if metadata was extracted, None if the row
-        # had none of the configured metadata fields present. ChromaDB rejects empty
-        # metadata dicts {}, so rows with no extractable metadata must be sent in a
-        # separate batch with metadatas=None.
-        per_row_metadata: list[dict[str, Any] | None] = []
-        valid_indices: list[int] = []
-
-        for i, row in enumerate(rows):
-            # Required fields: id and document must be present.
-            # Missing or wrong-type values are per-row data problems. Observed
-            # schemas defer id/document typing to runtime, so validate before
-            # building the Chroma payload.
-            try:
-                raw_id = row[fm.id_field]
-                raw_doc = row[fm.document_field]
-            except KeyError as exc:
-                self._divert_row(
-                    row,
-                    row_index=i,
-                    reason=f"Missing required field: {exc}",
-                )
-                continue
-
-            bad_required_fields: dict[str, str] = {}
-            if not isinstance(raw_id, str):
-                bad_required_fields[fm.id_field] = type(raw_id).__name__
-            if not isinstance(raw_doc, str):
-                bad_required_fields[fm.document_field] = type(raw_doc).__name__
-            if bad_required_fields:
-                self._divert_row(
-                    row,
-                    row_index=i,
-                    reason=f"Invalid ChromaDB required field types: {bad_required_fields}",
-                )
-                continue
-
-            # Optional metadata fields — extract if configured, validate types.
-            # ChromaDB accepts str|int|float|bool|None — anything else is a per-row
-            # data problem, not a plugin bug.
-            if fm.metadata_fields:
-                meta: dict[str, Any] = {}
-                bad_fields: dict[str, str] = {}
-                for field in fm.metadata_fields:
-                    try:
-                        value = row[field]
-                    except KeyError:
-                        # Missing metadata field — skip it (metadata is optional per-field)
-                        continue
-                    if value is not None and not isinstance(value, (str, int, float, bool)):
-                        bad_fields[field] = type(value).__name__
-                    elif isinstance(value, float) and not math.isfinite(value):
-                        bad_fields[field] = f"non-finite float ({value!r})"
-                    else:
-                        meta[field] = value
-                if bad_fields:
-                    self._divert_row(
-                        row,
-                        row_index=i,
-                        reason=f"Invalid ChromaDB metadata types: {bad_fields}",
-                    )
-                    continue
-                # ChromaDB rejects empty metadata dicts — mark as None so the row
-                # can be sent in a metadata-free sub-batch instead of crashing.
-                per_row_metadata.append(meta if meta else None)
-            else:
-                per_row_metadata.append(None)
-
-            ids.append(raw_id)
-            documents.append(raw_doc)
-            valid_indices.append(i)
-
-        # Partition rows by metadata availability.  ChromaDB rejects empty
-        # metadata dicts {}, so rows where all configured metadata fields were
-        # absent must be sent in a separate API call with metadatas=None.
-        # When metadata_fields is not configured, per_row_metadata is all-None
-        # and every row lands in the no-metadata partition.
-        meta_ids: list[str] = []
-        meta_documents: list[str] = []
-        meta_metadatas: list[dict[str, Any]] = []
-        nometa_ids: list[str] = []
-        nometa_documents: list[str] = []
-
-        for id_, doc, m in zip(ids, documents, per_row_metadata, strict=True):
-            if m is not None:
-                meta_ids.append(id_)
-                meta_documents.append(doc)
-                meta_metadatas.append(m)
-            else:
-                nometa_ids.append(id_)
-                nometa_documents.append(doc)
-
-        # Handle all-rejected case: nothing to write, return zero-write artifact
-        if not ids:
-            content_hash, payload_size = self._compute_payload_hash([], [], None)
-            try:
-                ctx.record_call(
-                    call_type=CallType.VECTOR,
-                    status=CallStatus.SUCCESS,
-                    request_data={
-                        "operation": self._config.on_duplicate.upper(),
-                        "collection": self._config.collection,
-                        "row_count": 0,
-                        "batch_size": len(rows),
-                    },
-                    response_data={
-                        "rows_written": 0,
-                    },
-                    latency_ms=0.0,
-                    provider="chromadb",
-                )
-            except Exception as exc:
-                raise AuditIntegrityError(
-                    f"Failed to record metadata-rejected ChromaDB write to audit trail (collection={self._config.collection!r})."
-                ) from exc
-            return SinkWriteResult(
-                artifact=ArtifactDescriptor.for_database(
-                    url=chroma_url,
-                    table=self._config.collection,
-                    content_hash=content_hash,
-                    payload_size=payload_size,
-                    row_count=0,
-                ),
-                diversions=self._get_diversions(),
-            )
-
-        # Build the sub-batches to send.  Most batches are homogeneous (all
-        # rows have metadata or none do), so we usually make a single call.
-        # Mixed batches produce two calls.
-        sub_batches: list[tuple[list[str], list[str], list[dict[str, Any]] | None]] = []
-        if meta_ids:
-            sub_batches.append((meta_ids, meta_documents, meta_metadatas))
-        if nometa_ids:
-            sub_batches.append((nometa_ids, nometa_documents, None))
-
-        # Aggregate write-ids/documents/metadatas across sub-batches for audit.
-        # These will be updated for skip/error mode to reflect actual payload sent.
-        all_write_ids: list[str] = []
-        all_write_documents: list[str] = []
-        # Aligned 1:1 with all_write_ids — no-metadata rows hold None so the audit
-        # hash covers a length-consistent, replayable payload (elspeth-b19ee26dc2).
-        all_write_metadatas: list[dict[str, Any] | None] = []
-        total_rows_written = 0
-        total_rows_skipped = 0
-        all_skipped_ids: list[str] = []
-
-        start_time = time.perf_counter()
         try:
-            if self._config.on_duplicate == "error":
-                # Preflight the FULL logical batch for duplicates before ANY
-                # external add. A mixed batch splits into a metadata sub-batch
-                # and a no-metadata sub-batch; checking per sub-batch inside the
-                # loop below would add the first sub-batch to ChromaDB and only
-                # then raise on a later sub-batch's duplicate, leaving a partial
-                # external write with no success audit (elspeth-f56603c31a).
-                preflight_ids = [id_ for sub_ids, _docs, _metas in sub_batches for id_ in sub_ids]
-                existing = collection.get(ids=preflight_ids)
-                existing_ids = set(existing["ids"])
-                duplicates = [id_ for id_ in preflight_ids if id_ in existing_ids]
-                if duplicates:
-                    raise DuplicateDocumentError(
-                        collection=self._config.collection,
-                        duplicate_ids=duplicates,
-                    )
+            raw_id = row[fm.id_field]
+            raw_document = row[fm.document_field]
+        except KeyError as exc:
+            raise ValueError(f"Chroma effect member is missing required field {exc.args[0]!r}") from exc
+        if not isinstance(raw_id, str) or not isinstance(raw_document, str):
+            raise ValueError("Chroma effect member id and document fields must be strings")
+        metadata: dict[str, object] = {}
+        for field_name in fm.metadata_fields:
+            if field_name not in row:
+                continue
+            value = row[field_name]
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"Chroma effect member metadata field {field_name!r} is not a supported scalar")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"Chroma effect member metadata field {field_name!r} must be finite")
+            metadata[field_name] = value
+        return raw_id, raw_document, metadata or None
 
-            for batch_ids, batch_docs, batch_metadatas in sub_batches:
-                write_ids = batch_ids
-                write_documents = batch_docs
-                write_metadatas = batch_metadatas
-                rows_written = len(batch_ids)
-
-                if self._config.on_duplicate == "overwrite":
-                    try:
-                        collection.upsert(
-                            ids=batch_ids,
-                            documents=batch_docs,
-                            metadatas=batch_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
-                        )
-                    except ValueError as ve:
-                        raise _ChromaPayloadRejection(str(ve)) from ve
-                elif self._config.on_duplicate == "skip":
-                    existing = collection.get(ids=batch_ids)
-                    existing_ids = set(existing["ids"])
-                    new_indices = [i for i, id_ in enumerate(batch_ids) if id_ not in existing_ids]
-
-                    skipped_ids = [id_ for id_ in batch_ids if id_ in existing_ids]
-                    all_skipped_ids.extend(skipped_ids)
-                    total_rows_skipped += len(skipped_ids)
-
-                    if new_indices:
-                        write_ids = [batch_ids[i] for i in new_indices]
-                        write_documents = [batch_docs[i] for i in new_indices]
-                        write_metadatas = [batch_metadatas[i] for i in new_indices] if batch_metadatas is not None else None
-                        rows_written = len(new_indices)
-                        try:
-                            collection.add(
-                                ids=write_ids,
-                                documents=write_documents,
-                                metadatas=write_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
-                            )
-                        except ValueError as ve:
-                            raise _ChromaPayloadRejection(str(ve)) from ve
-                    else:
-                        write_ids = []
-                        write_documents = []
-                        write_metadatas = None
-                        rows_written = 0
-                elif self._config.on_duplicate == "error":
-                    # Duplicates were already rejected by the full-batch preflight
-                    # above, so every sub-batch here is known-new — add directly.
-                    try:
-                        collection.add(
-                            ids=batch_ids,
-                            documents=batch_docs,
-                            metadatas=batch_metadatas,  # type: ignore[arg-type]  # chromadb stub Metadata vs dict[str, Any]
-                        )
-                    except ValueError as ve:
-                        raise _ChromaPayloadRejection(str(ve)) from ve
-
-                all_write_ids.extend(write_ids)
-                all_write_documents.extend(write_documents)
-                # Keep metadatas aligned 1:1 with ids: the no-metadata sub-batch
-                # (write_metadatas is None) contributes a None per written row so the
-                # aggregate length matches and the hash reflects which rows carried
-                # metadata, instead of silently dropping to a shorter array.
-                if write_metadatas is not None:
-                    all_write_metadatas.extend(write_metadatas)
-                else:
-                    all_write_metadatas.extend([None] * len(write_ids))
-                total_rows_written += rows_written
-
-            latency_ms = (time.perf_counter() - start_time) * 1000
-        except (chromadb.errors.ChromaError, DuplicateDocumentError, _ChromaPayloadRejection) as write_exc:
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            try:
-                ctx.record_call(
-                    call_type=CallType.VECTOR,
-                    status=CallStatus.ERROR,
-                    request_data={
-                        "operation": self._config.on_duplicate.upper(),
-                        "collection": self._config.collection,
-                        "row_count": len(rows),
-                    },
-                    error={
-                        "type": type(write_exc).__name__,
-                        "message": str(write_exc),
-                    },
-                    latency_ms=latency_ms,
-                    provider="chromadb",
-                )
-            except Exception as audit_exc:
-                raise AuditIntegrityError(
-                    f"Failed to record failed ChromaDB write to audit trail "
-                    f"(collection={self._config.collection!r}, original_error={type(write_exc).__name__}). "
-                    f"Write failed AND audit record is missing."
-                ) from audit_exc
-            raise
-
-        # Hash the actual payload sent, not the full batch (critical for skip mode).
-        # all_write_metadatas is aligned 1:1 with all_write_ids (None for rows that
-        # carried no metadata). Collapse to None only when NO row had metadata, so
-        # an all-no-metadata batch hashes metadatas=None (a single metadatas=None
-        # call) while a mixed batch keeps the aligned [meta, ..., None, ...] array.
-        hash_metadatas: list[dict[str, Any] | None] | None = (
-            all_write_metadatas if any(m is not None for m in all_write_metadatas) else None
-        )
-        content_hash, payload_size = self._compute_payload_hash(all_write_ids, all_write_documents, hash_metadatas)
-
-        diversions = self._get_diversions()
-
-        try:
-            response_data: dict[str, Any] = {"rows_written": total_rows_written}
-            if total_rows_skipped > 0:
-                response_data["rows_skipped"] = total_rows_skipped
-                response_data["skipped_ids"] = all_skipped_ids
-
-            request_data: dict[str, Any] = {
-                "operation": self._config.on_duplicate.upper(),
-                "collection": self._config.collection,
-                "row_count": total_rows_written,
-                "document_ids": all_write_ids,
+    @property
+    def _effect_target(self) -> str:
+        if self._config.mode == "persistent":
+            target_binding: dict[str, object] = {
+                "mode": "persistent",
+                "persist_directory": self._config.persist_directory,
             }
-            if total_rows_skipped > 0 or diversions:
-                request_data["batch_size"] = len(rows)
+        else:
+            target_binding = {
+                "host": self._config.host,
+                "mode": "client",
+                "port": self._config.port,
+                "ssl": self._config.ssl,
+            }
+        binding_hash = stable_hash(target_binding)
+        collection = urllib.parse.quote(self._config.collection, safe="")
+        return f"chromadb://target/{collection}?binding={binding_hash}"
 
-            ctx.record_call(
-                call_type=CallType.VECTOR,
-                status=CallStatus.SUCCESS,
-                request_data=request_data,
-                response_data=response_data,
-                latency_ms=latency_ms,
-                provider="chromadb",
-            )
-        except Exception as exc:
-            raise AuditIntegrityError(
-                f"Failed to record successful ChromaDB write to audit trail "
-                f"(collection={self._config.collection!r}, row_count={total_rows_written}). "
-                f"Write completed but audit record is missing."
-            ) from exc
+    def _member_effect_material(
+        self,
+        effect_id: str,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[ArtifactDescriptor, str, str, dict[int, tuple[str, str, dict[str, object] | None]], tuple[tuple[int, str], ...]]:
+        """Deterministically partition members into extractable payloads and diversions.
 
-        self._total_written += total_rows_written
-        self._total_bytes += payload_size
-
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor.for_database(
-                url=chroma_url,
-                table=self._config.collection,
-                content_hash=content_hash,
-                payload_size=payload_size,
-                row_count=total_rows_written,
-            ),
-            diversions=diversions,
+        An invalid member (missing/non-string ID or document, unsupported or
+        non-finite metadata) diverts individually with its exact reason instead
+        of aborting the plan and blocking valid siblings (elspeth-32bf1a9b63).
+        The descriptor and payload hash cover only the members that will be
+        published. Recomputation over the same members is exact, so plan
+        validation on commit/reconcile still binds.
+        """
+        extracted_by_ordinal: dict[int, tuple[str, str, dict[str, object] | None]] = {}
+        diversions: list[tuple[int, str]] = []
+        for member in effect_input.members:
+            try:
+                extracted_by_ordinal[member.ordinal] = self._extract_effect_member(member)
+            except ValueError as exc:
+                diversions.append((member.ordinal, str(exc)))
+        ids = [item[0] for item in extracted_by_ordinal.values()]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Chroma effect members require unique stable document IDs")
+        documents = [item[1] for item in extracted_by_ordinal.values()]
+        aligned_metadata = [item[2] for item in extracted_by_ordinal.values()]
+        hash_metadata = aligned_metadata if any(item is not None for item in aligned_metadata) else None
+        payload_hash, payload_size = self._compute_payload_hash(ids, documents, hash_metadata)
+        descriptor = ArtifactDescriptor.for_database(
+            url=SanitizedDatabaseUrl.from_raw_url(self._effect_target),
+            table=self._config.collection,
+            content_hash=payload_hash,
+            payload_size=payload_size,
+            row_count=len(extracted_by_ordinal),
         )
+        bindings = [
+            {
+                "document_id_hash": stable_hash(extracted_by_ordinal[member.ordinal][0]),
+                "member_effect_id": member.member_effect_id,
+                "ordinal": member.ordinal,
+                "payload_hash": stable_hash(
+                    {
+                        "document": extracted_by_ordinal[member.ordinal][1],
+                        "document_id": extracted_by_ordinal[member.ordinal][0],
+                        "metadata": extracted_by_ordinal[member.ordinal][2],
+                    }
+                ),
+            }
+            for member in effect_input.members
+            if member.ordinal in extracted_by_ordinal
+        ]
+        plan_hash = stable_hash(
+            {
+                "bindings": bindings,
+                "collection": self._config.collection,
+                "descriptor_hash": stable_hash(
+                    {
+                        "artifact_type": descriptor.artifact_type,
+                        "content_hash": descriptor.content_hash,
+                        "metadata": deep_thaw(descriptor.metadata),
+                        "path_or_uri": descriptor.path_or_uri,
+                        "size_bytes": descriptor.size_bytes,
+                    }
+                ),
+                "diverted": [build_diversion_attribution(ordinal=ordinal, reason=reason).as_mapping() for ordinal, reason in diversions],
+                "effect_id": effect_id,
+                "schema": "chroma-member-effect-plan-v1",
+            }
+        )
+        return descriptor, payload_hash, plan_hash, extracted_by_ordinal, tuple(diversions)
+
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del request, ctx
+        return SinkEffectInspection(
+            mode=SinkEffectInspectionMode.NO_INSPECTION_REQUIRED,
+            reference="no-inspection-required:v1",
+            evidence={},
+        )
+
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        if self._config.on_duplicate != "overwrite":
+            raise ValueError(
+                "Recoverable Chroma publication requires on_duplicate=overwrite; "
+                "use overwrite or choose a sink with a target-side effect marker"
+            )
+        if type(request.effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("Chroma effects require pipeline member input")
+        descriptor, payload_hash, plan_hash, extracted_by_ordinal, diversions = self._member_effect_material(
+            request.effect_id, request.effect_input
+        )
+        member_by_ordinal = {member.ordinal: member for member in request.effect_input.members}
+        diversion_attribution = []
+        for ordinal, reason in diversions:
+            row = deep_thaw(member_by_ordinal[ordinal].row)
+            assert isinstance(row, dict)
+            # Live diversion log BEFORE the plan binds: fails closed with
+            # FrameworkBugError when no on_write_failure policy is configured.
+            self._divert_row(row, row_index=ordinal, reason=reason)
+            diversion_attribution.append(build_diversion_attribution(ordinal=ordinal, reason=reason).as_mapping())
+        diversion_attribution.sort(key=lambda item: item["ordinal"])  # type: ignore[arg-type,return-value]
+        safe_evidence: dict[str, object] = {
+            "accepted_ordinals": sorted(extracted_by_ordinal),
+            "diversion_attribution": diversion_attribution,
+            "diverted_ordinals": sorted(ordinal for ordinal, _reason in diversions),
+            "member_count": len(request.effect_input.members),
+            "member_plans_hash": stable_hash(
+                [
+                    {
+                        "document_id_hash": stable_hash(item[0]),
+                        "member_effect_id": member_by_ordinal[ordinal].member_effect_id,
+                        "ordinal": ordinal,
+                        "payload_hash": stable_hash({"document": item[1], "document_id": item[0], "metadata": item[2]}),
+                    }
+                    for ordinal, item in sorted(extracted_by_ordinal.items())
+                ]
+            ),
+            "schema": "chroma-member-effect-plan-v1",
+        }
+        # A group with no publishable member performs no external I/O at all:
+        # finalize it as a no-publication effect so the diverted members do
+        # not wedge the batch waiting for an external attempt that can never
+        # exist.
+        descriptor_mode = SinkEffectDescriptorMode.PRECOMPUTED
+        if not extracted_by_ordinal:
+            descriptor_mode = SinkEffectDescriptorMode.NO_PUBLICATION
+            safe_evidence["publication_kind"] = "virtual"
+        return SinkEffectPlan(
+            effect_id=request.effect_id,
+            protocol_version=SINK_EFFECT_PROTOCOL_VERSION,
+            input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+            descriptor_mode=descriptor_mode,
+            inspection_mode=request.inspection.mode,
+            target=self._effect_target,
+            plan_hash=plan_hash,
+            payload_hash=payload_hash,
+            expected_descriptor=descriptor,
+            safe_evidence=safe_evidence,
+        )
+
+    def _validate_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+    ) -> tuple[str, str, dict[str, object] | None, ArtifactDescriptor]:
+        descriptor, payload_hash, plan_hash, extracted_by_ordinal, _diversions = self._member_effect_material(plan.effect_id, effect_input)
+        if (
+            plan.protocol_version != SINK_EFFECT_PROTOCOL_VERSION
+            or plan.input_kind is not SinkEffectInputKind.PIPELINE_MEMBERS
+            or plan.descriptor_mode is not SinkEffectDescriptorMode.PRECOMPUTED
+            or plan.target != self._effect_target
+            or plan.payload_hash != payload_hash
+            or plan.plan_hash != plan_hash
+            or plan.expected_descriptor != descriptor
+        ):
+            raise ValueError("Chroma member effect plan is divergent from the bound input and target")
+        if member.ordinal >= len(effect_input.members) or effect_input.members[member.ordinal] != member:
+            raise ValueError("Chroma member does not match its exact stored ordinal")
+        if member.member_effect_id is None:
+            raise ValueError("Chroma member effect requires a durable member_effect_id")
+        if member.ordinal not in extracted_by_ordinal:
+            raise ValueError("Chroma member was diverted during preparation and must not reach external I/O")
+        document_id, document, metadata = extracted_by_ordinal[member.ordinal]
+        return document_id, document, metadata, descriptor
+
+    @staticmethod
+    def _member_group_evidence(plan: SinkEffectPlan, classification: str) -> dict[str, object]:
+        return {
+            "classification": classification,
+            "effect_id": plan.effect_id,
+            "plan_hash": plan.plan_hash,
+            "schema": "chroma-member-effect-result-v1",
+        }
+
+    @staticmethod
+    def _normalize_metadata_for_comparison(metadata: object) -> object:
+        if not isinstance(metadata, Mapping):
+            return metadata
+        normalized = {key: value for key, value in metadata.items() if value is not None}
+        return normalized or None
+
+    def commit_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectCommitResult:
+        del ctx
+        if self._collection is None:
+            raise FrameworkBugError("Chroma collection is unavailable — on_start() was not called")
+        document_id, document, metadata, descriptor = self._validate_member_effect(plan, member, effect_input)
+        try:
+            self._collection.upsert(
+                ids=[document_id],
+                documents=[document],
+                metadatas=None if metadata is None else [metadata],  # type: ignore[list-item]
+            )
+        except ValueError as exc:
+            raise _ChromaPayloadRejection(str(exc)) from exc
+        member_metadatas: list[dict[str, Any] | None] | None = None if metadata is None else [metadata]
+        _, payload_size = self._compute_payload_hash([document_id], [document], member_metadatas)
+        self._total_written += 1
+        self._total_bytes += payload_size
+        return SinkEffectCommitResult(
+            descriptor=descriptor,
+            evidence=self._member_group_evidence(plan, "committed"),
+            accepted_ordinals=tuple(item.ordinal for item in effect_input.members),
+            diverted_ordinals=(),
+        )
+
+    def reconcile_member_effect(
+        self,
+        plan: SinkEffectPlan,
+        member: SinkEffectMember,
+        effect_input: SinkEffectPipelineMembersInput,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectReconcileResult:
+        del ctx
+        if self._collection is None:
+            raise FrameworkBugError("Chroma collection is unavailable — on_start() was not called")
+        document_id, document, metadata, descriptor = self._validate_member_effect(plan, member, effect_input)
+        try:
+            result = self._collection.get(ids=[document_id], include=["documents", "metadatas"])
+        except (chromadb.errors.ChromaError, ValueError):
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "unverifiable"))
+        ids = result.get("ids")
+        documents = result.get("documents")
+        metadatas = result.get("metadatas")
+        if ids == []:
+            return SinkEffectReconcileResult.not_applied(evidence=self._member_group_evidence(plan, "missing"))
+        if (
+            ids != [document_id]
+            or not isinstance(documents, list)
+            or len(documents) != 1
+            or not isinstance(metadatas, list)
+            or len(metadatas) != 1
+        ):
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "ambiguous"))
+        actual_metadata = self._normalize_metadata_for_comparison(metadatas[0])
+        expected_metadata = self._normalize_metadata_for_comparison(metadata)
+        if documents[0] != document or actual_metadata != expected_metadata:
+            return SinkEffectReconcileResult.unknown(evidence=self._member_group_evidence(plan, "divergent"))
+        return SinkEffectReconcileResult.applied(
+            descriptor,
+            evidence=self._member_group_evidence(plan, "exact"),
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del plan, ctx
+        raise FrameworkBugError("Chroma publication requires durable member-effect coordination")
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del plan, ctx
+        raise FrameworkBugError("Chroma reconciliation requires durable member-effect coordination")
+
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
+        del rows, ctx
+        raise RuntimeError("ChromaSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
-        """ChromaDB writes are synchronous in write() — no pending data to flush."""
+        """No-op: ChromaDB publication is synchronous in the member-effect commit path."""
 
     def on_complete(self, ctx: LifecycleContext) -> None:
         super().on_complete(ctx)

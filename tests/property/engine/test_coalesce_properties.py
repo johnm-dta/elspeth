@@ -106,10 +106,12 @@ class _FakeTokenManager:
         merged_data: Any,
         node_id: NodeID,
         run_id: str,
+        parent_completions: list[Any],
     ) -> TokenInfo:
         # Production CoalesceExecutor._execute_merge() passes merged_data as a
         # PipelineRow (already wrapped with contract). Match TokenManager.coalesce_tokens
         # behavior: use merged_data directly as row_data, don't re-wrap.
+        assert len(parent_completions) == len(parents)
         return TokenInfo(
             token_id=f"merged-{parents[0].row_id}",
             row_id=parents[0].row_id,

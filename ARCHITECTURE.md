@@ -2,8 +2,8 @@
 
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
-**Last Updated:** 2026-07-08 (synchronized with 0.7.0 release line)
-**Framework Version:** 0.7.0 (package metadata aligned at 0.7.0)
+**Last Updated:** 2026-07-23 (synchronized with 0.7.1 release line)
+**Framework Version:** 0.7.1 (package metadata aligned at 0.7.1)
 **Status:** Pre-release
 
 ---
@@ -17,8 +17,8 @@ C4 model documentation for the ELSPETH auditable pipeline framework.
 | **Data flow?** | Source → Transforms/Gates → Sinks (all recorded) |
 | **Audit storage?** | SQLite/SQLCipher (dev) / PostgreSQL (prod) |
 | **Extension model?** | pluggy-based plugin system |
-| **Production LOC** | ~236,100 Python lines across 598 files in `src/elspeth/` (frontend TSX/CSS counts not included) |
-| **Test LOC** | ~619,900 Python lines across 1,391 files (2.6:1 ratio) |
+| **Production LOC** | ~310,600 Python lines across 667 files in `src/elspeth/` (frontend TSX/CSS counts not included) |
+| **Test LOC** | ~727,300 Python lines across 1,565 files (2.3:1 ratio) |
 
 ---
 
@@ -69,14 +69,14 @@ C4Context
     Person(operator, "Pipeline Operator", "Configures and runs data pipelines")
     Person(auditor, "Auditor", "Queries lineage and verifies decisions")
 
-    System(elspeth, "ELSPETH", "Auditable Sense/Decide/Act pipeline framework")
+    System(elspeth, "ELSPETH", "Auditable Sense/Decide/Act pipeline framework with CLI and Web Composer authoring")
 
     System_Ext(datasources, "Data Sources", "CSV, JSON, APIs, databases")
     System_Ext(destinations, "Data Destinations", "Files, databases, message queues")
     System_Ext(llm, "LLM Providers", "Azure OpenAI, OpenRouter")
 
-    Rel(operator, elspeth, "Configures and executes pipelines", "CLI/YAML")
-    Rel(auditor, elspeth, "Queries lineage", "CLI/TUI")
+    Rel(operator, elspeth, "Authors and executes pipelines", "CLI/YAML or authenticated Web Composer")
+    Rel(auditor, elspeth, "Queries lineage", "CLI/TUI/MCP")
     Rel(elspeth, datasources, "Reads data from", "Various protocols")
     Rel(elspeth, destinations, "Writes data to", "Various protocols")
     Rel(elspeth, llm, "Calls for decisions", "HTTP/API")
@@ -86,8 +86,8 @@ C4Context
 
 | Actor/System | Interaction |
 |--------------|-------------|
-| Pipeline Operator | Configures YAML, executes via CLI, monitors runs |
-| Auditor | Queries lineage via CLI/TUI, verifies decisions |
+| Pipeline Operator | Authors YAML or uses Web Composer, executes pipelines, and monitors runs |
+| Auditor | Queries lineage through CLI, TUI, or MCP and verifies decisions |
 | Data Sources | CSV, JSON, APIs - read by Source plugins |
 | Data Destinations | Files, databases - written by Sink plugins |
 | LLM Providers | External calls for classification via LLM pack |
@@ -107,6 +107,7 @@ C4Container
 
     Container_Boundary(elspeth, "ELSPETH Framework") {
         Container(cli, "CLI", "Typer", "Command-line interface for run, explain, validate")
+        Container(web, "Web app + Composer", "FastAPI + React", "Authenticated authoring, validation, execution, and review")
         Container(tui, "TUI", "Textual", "Interactive terminal UI for lineage exploration")
         Container(mcp, "MCP Server", "Python", "Read-only analysis API for investigation")
         Container(engine, "Engine", "Python", "Pipeline orchestration and row processing")
@@ -120,9 +121,11 @@ C4Container
     }
 
     ContainerDb(auditdb, "Audit Database", "SQLite/SQLCipher/PostgreSQL", "Stores complete audit trail")
+    ContainerDb(sessiondb, "Session Database", "SQLite/PostgreSQL", "Stores Composer sessions, proposals, and durable guided operations")
     ContainerDb(payloads, "Payload Store", "Filesystem", "Large blob storage")
 
     Rel(operator, cli, "Executes pipelines")
+    Rel(operator, web, "Authors, reviews, and runs pipelines")
     Rel(auditor, tui, "Explores lineage")
     Rel(auditor, cli, "Queries lineage")
     Rel(auditor, mcp, "Queries via Claude")
@@ -131,6 +134,10 @@ C4Container
     Rel(cli, plugins, "Instantiates plugins")
     Rel(cli, tui, "Launches")
     Rel(mcp, landscape, "Queries audit trail")
+    Rel(web, engine, "Validates and starts runs")
+    Rel(web, plugins, "Builds policy-bound catalogs and runtime configurations")
+    Rel(web, landscape, "Records authoring and web-run evidence")
+    Rel(web, sessiondb, "Persists sessions and fenced operations")
     Rel(engine, landscape, "Records audit trail")
     Rel(engine, plugins, "Executes plugins")
     Rel(engine, telemetry, "Emits events")
@@ -151,21 +158,24 @@ C4Container
 | Container | Technology | LOC | Purpose |
 |-----------|------------|-----|---------|
 | **CLI** | Typer | ~2,200 | User commands: `run`, `explain`, `validate`, `resume` |
+| **Web app + Composer** | FastAPI + React | ~133,700 Python | Authenticated sessions, guided/freeform authoring, validation, execution, and review |
 | **TUI** | Textual | ~800 | Interactive lineage exploration |
 | **MCP Server** | Python | ~3,600 | Read-only analysis API with domain-specific analyzers |
-| **Engine** | Python | ~12,000 | Run lifecycle, row processing, DAG execution |
-| **Plugins** | pluggy | ~20,600 | Extensible sources, transforms, sinks, LLM, clients |
-| **Landscape** | SQLAlchemy Core | ~8,300 | Audit recording (facade + 4 repositories) and querying, SQLCipher support |
+| **Engine** | Python | ~32,300 | Run lifecycle, durable scheduling, DAG execution, and effect coordination |
+| **Plugins** | pluggy | ~47,700 | Extensible sources, transforms, effect-safe sinks, LLM providers, and clients |
+| **Landscape** | SQLAlchemy Core | ~32,100 | Audit repositories, durable work/effect ledgers, querying, export, and SQLCipher support |
 | **Testing** (`src/elspeth/testing/`) | Python | ~900 | `elspeth-xdist-auto` pytest plugin shipped inside the `elspeth` package — distinct from the project's own `tests/` test suite, which is not part of the shipped package and is where the ChaosLLM / ChaosWeb / ChaosEngine test fixtures live |
 | **Telemetry** | Python | ~1,200 | Real-time event export (OTLP, Datadog, Azure Monitor) |
 | **Checkpoint** | Python | ~600 | Crash recovery with topology validation |
 | **Rate Limiting** | pyrate-limiter | ~300 | External call throttling with persistence |
 | **Core** | Python | ~5,000 | Config, canonical JSON, DAG package, payload store |
-| **Contracts** | Python | ~8,300 | Shared dataclasses, enums, protocols (leaf module) |
-| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail storage (29 tables; SQLite schema epoch 22) |
+| **Contracts** | Python | ~28,300 | Shared dataclasses, enums, protocols (leaf module) |
+| **Audit DB** | SQLite/SQLCipher/PostgreSQL | — | Complete audit trail and effect storage (41 tables; SQLite schema epoch 29) |
 | **Payload Store** | Filesystem | — | Content-addressable blob storage with retention |
 
-**Total Production LOC:** ~173,900 (447 Python files in `src/elspeth/`; frontend TSX/CSS not included) | **Total Test LOC:** ~448,300 (1,095 Python files) | **Test Ratio:** 2.6:1
+**Inventory measured from committed `HEAD` on 2026-07-23:** ~310,600 production
+Python lines across 667 files in `src/elspeth/`; ~727,300 test Python lines across 1,565 files
+(2.3:1). Frontend TypeScript and CSS are not included.
 
 ---
 
@@ -185,6 +195,8 @@ C4Component
         Component(navigator, "DAGNavigator", "Python Class", "DAG edge traversal and next-node resolution")
         Component(tokens, "TokenManager", "Python Class", "Token identity through forks/joins")
         Component(executors, "Executors", "Python Package", "Transform, gate, sink, aggregation execution")
+        Component(scheduler, "SchedulerDrainCoordinator", "Python Class", "Durable work claiming and crash recovery")
+        Component(effects, "SinkEffectCoordinator", "Python Class", "Fenced external publication and reconciliation")
         Component(retry, "RetryManager", "tenacity", "Retry logic with backoff")
         Component(spans, "SpanFactory", "OpenTelemetry", "Tracing integration")
         Component(triggers, "Triggers", "Python", "Aggregation trigger evaluation")
@@ -195,6 +207,8 @@ C4Component
     Rel(processor, navigator, "Resolves next nodes via")
     Rel(processor, tokens, "Manages tokens via")
     Rel(processor, executors, "Delegates to")
+    Rel(orchestrator, scheduler, "Drains durable work through")
+    Rel(executors, effects, "Publishes supported sink work through")
     Rel(executors, retry, "Uses for transient failures")
     Rel(orchestrator, spans, "Creates tracing spans")
     Rel(processor, triggers, "Evaluates aggregation via")
@@ -208,6 +222,8 @@ C4Component
 | **DAGNavigator** | `dag_navigator.py` | ~250 | DAG edge traversal and next-node resolution |
 | **TokenManager** | `tokens.py` | ~393 | Create, fork, coalesce, expand tokens |
 | **Executors** | `executors/` | ~2,190 | Transform, gate, sink, aggregation execution (5 modules) |
+| **SchedulerDrainCoordinator** | `scheduler_drain.py` | — | Claims durable work, repairs expired leases, and converges terminal handoff. |
+| **SinkEffectCoordinator** | `executors/sink_effects.py` | — | Reserves, prepares, fences, reconciles, and finalizes external publication. |
 | **CoalesceExecutor** | `coalesce_executor.py` | ~1,054 | Fork/join merge barrier with policy-driven merging |
 | **RetryManager** | `retry.py` | ~146 | Tenacity-based retry with exponential backoff |
 | **SpanFactory** | `spans.py` | ~298 | Create OpenTelemetry spans for observability |
@@ -218,63 +234,63 @@ C4Component
 
 ### 3.2 Landscape Components
 
-The Landscape records and queries the audit trail.
+Landscape records audit evidence and owns the durable ledgers used to recover
+scheduler, barrier, sink, and export work.
 
 ```mermaid
 C4Component
     title Landscape Component Diagram
 
     Container_Boundary(landscape, "Landscape Subsystem") {
-        Component(recorder, "LandscapeRecorder", "Python Class", "Pure facade delegating to repositories")
-        Component(lifecycle_repo, "RunLifecycleRepository", "Python Class", "Run creation, node/edge registration")
-        Component(execution_repo, "ExecutionRepository", "Python Class", "Node states, routing, outcomes")
-        Component(dataflow_repo, "DataFlowRepository", "Python Class", "Rows, tokens, calls, artifacts")
-        Component(query_repo, "QueryRepository", "Python Class", "explain(), lineage queries")
+        Component(factory, "RecorderFactory", "Composition Root", "Builds repository and plugin-audit surfaces")
+        Component(lifecycle_repo, "RunLifecycleRepository", "Python", "Runs, graph registration, sources, and policy evidence")
+        Component(dataflow_repo, "DataFlowRepository", "Python", "Rows, tokens, outcomes, barriers, and errors")
+        Component(execution_repo, "ExecutionRepository", "Python", "States, routing, calls, batches, artifacts, and effects")
+        Component(scheduler_repo, "SchedulerRepository", "Python", "Durable work claiming, leases, and recovery")
+        Component(query_repo, "QueryRepository", "Python", "Lineage and investigation queries")
+        Component(effect_repo, "SinkEffectRepository", "Python", "Effect reservation, fencing, attempts, and finalization")
         Component(database, "LandscapeDB", "SQLAlchemy Core", "Connection management")
-        Component(schema, "Schema", "SQLAlchemy Tables", "Table definitions")
-        Component(lineage, "Lineage", "Python", "explain() query implementation")
-        Component(exporter, "Exporter", "Python Class", "JSON/CSV export")
-        Component(formatters, "Formatters", "Python Classes", "CSV/JSON formatting")
-        Component(reproducibility, "Reproducibility", "Python", "Grade computation")
+        Component(schema, "Schema", "SQLAlchemy Core", "41 tables and epoch-29 invariants")
+        Component(exporter, "Exporter", "Python", "Audit exports and sealed snapshots")
+        Component(journal, "Journal Outbox", "Python", "Transaction-owned JSONL publication")
     }
 
     ContainerDb_Ext(db, "SQLite/SQLCipher/PostgreSQL")
 
-    Rel(recorder, lifecycle_repo, "Delegates run lifecycle")
-    Rel(recorder, execution_repo, "Delegates execution recording")
-    Rel(recorder, dataflow_repo, "Delegates data flow recording")
-    Rel(recorder, query_repo, "Delegates queries")
+    Rel(factory, lifecycle_repo, "Constructs")
+    Rel(factory, dataflow_repo, "Constructs")
+    Rel(factory, execution_repo, "Constructs")
+    Rel(factory, scheduler_repo, "Constructs")
+    Rel(factory, query_repo, "Constructs")
+    Rel(execution_repo, effect_repo, "Delegates effect lifecycle")
     Rel(lifecycle_repo, database, "Uses for operations")
-    Rel(execution_repo, database, "Uses for operations")
     Rel(dataflow_repo, database, "Uses for operations")
+    Rel(execution_repo, database, "Uses for operations")
+    Rel(scheduler_repo, database, "Uses for operations")
     Rel(query_repo, database, "Uses for operations")
+    Rel(effect_repo, database, "Uses for operations")
     Rel(database, db, "Connects to")
-    Rel(lineage, query_repo, "Queries via")
-    Rel(exporter, recorder, "Reads from")
-    Rel(exporter, formatters, "Uses for output")
-    Rel(recorder, reproducibility, "Computes grade via")
+    Rel(exporter, query_repo, "Reads through")
+    Rel(journal, database, "Commits outbox rows with audit writes")
 ```
 
-| Component | File | LOC | Responsibility |
-|-----------|------|-----|----------------|
-| **LandscapeRecorder** | `recorder.py` | ~1,040 | Pure facade (89 methods) delegating to 4 repositories |
-| **RunLifecycleRepository** | `run_lifecycle_repository.py` | ~645 | Run creation/completion, node/edge registration, config recording |
-| **ExecutionRepository** | `execution_repository.py` | ~1,480 | Node states, routing events, outcomes, batches |
-| **DataFlowRepository** | `data_flow_repository.py` | ~1,430 | Rows, tokens, calls, artifacts, validation/transform errors |
-| **QueryRepository** | `query_repository.py` | ~530 | `explain()`, row data retrieval, lineage queries |
-| **LandscapeDB** | `database.py` | ~500 | Connection management, schema validation, SQLCipher support |
-| **Schema** | `schema.py` | ~520 | SQLAlchemy table definitions (29 tables; SQLite schema epoch 22) |
-| **Model Loaders** | `model_loaders.py` | ~600 | Row→Object conversion with Tier 1 validation |
-| **Lineage** | `lineage.py` | ~235 | `explain()` queries for complete lineage |
-| **Exporter** | `exporter.py` | ~594 | Audit data export (JSON, CSV) |
-| **Formatters** | `formatters.py` | ~246 | Data serialization, datetime handling |
-| **Journal** | `journal.py` | ~286 | JSONL change journaling backup stream |
-| **Reproducibility** | `reproducibility.py` | ~147 | Grade computation (FULL → ATTRIBUTABLE_ONLY) |
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| **RecorderFactory** | `factory.py` | Composition root for repositories and plugin audit adapters. |
+| **RunLifecycleRepository** | `run_lifecycle_repository.py` | Run lifecycle, graph registration, per-source state, attribution, and web plugin-policy evidence. |
+| **DataFlowRepository** | `data_flow_repository.py` | Rows, tokens, ancestry, outcomes, validation errors, and durable coalesce effects. |
+| **ExecutionRepository** | `execution_repository.py` | Node states, routing, calls, operations, batches, artifacts, exports, and sink effects. |
+| **SchedulerRepository** | `scheduler_repository.py` | Durable work items, compare-and-swap leases, recovery, and run coordination. |
+| **QueryRepository** | `query_repository.py` | Operator lineage and investigation queries. |
+| **LandscapeDB** | `database.py` | Connection handling, schema validation, SQLite/SQLCipher/PostgreSQL support. |
+| **Schema** | `schema.py` | Authoritative 41-table, epoch-29 schema and constraints. |
+| **Exporter** | `exporter.py` | Complete audit export, including effect streams and attempts. |
+| **Journal** | `journal.py` | Transaction-owned sidecar-journal outbox and recovery drain. |
 
-### Audit Trail Tables (29 Total)
+### Audit Trail Tables (41 Total)
 
 ```
-runs (run lifecycle) → run_attributions / preflight_results / run_sources
+runs (run lifecycle) → run_attributions / preflight_results / run_sources / run_web_plugin_policy
   ↓
 nodes (DAG nodes) → edges (DAG edges)
   ↓
@@ -282,27 +298,32 @@ rows (source data) → tokens (row instances) → token_parents (lineage)
          ↓
     node_states (processing) → routing_events (gate decisions)
          ↓                           ↓
-      calls / operations        batches → batch_members
-                                   ↓
-                              batch_outputs
-                                   ↓
-                               artifacts (sink outputs)
+      calls / operations        batches → batch_members → batch_outputs
+              ↓                              ↓
+      sink_effect_streams → sink_effects → sink_effect_members / sink_effect_attempts
+              ↓                              ↓
+      sink_effect_export_snapshots       artifacts (sink outputs)
+
+coalesce_effects → coalesce_effect_members
+audit_export_snapshots → audit_export_snapshot_chunks
+sidecar_journal_outbox (transaction-owned JSONL publication)
 
 validation_errors, transform_errors (error tracking)
 token_outcomes (terminal states)
 secret_resolutions (Key Vault usage)
-field_resolutions (header normalization)
 token_work_items / scheduler_events (durable scheduler)
 run_coordination / run_coordination_events / run_workers
 coalesce_branch_losses
 checkpoints, auth_events
 ```
 
-**Critical Pattern:** Composite PK `(node_id, run_id)` on `nodes` and run-scoped
-`routing_events` require using denormalized `run_id` fields directly in queries.
-As of SQLite schema epoch 22, `routing_events` carries `run_id` and composite
-foreign keys to `node_states(state_id, run_id)` and `edges(edge_id, run_id)` so
-gate decisions cannot cross audit-run boundaries.
+**Critical pattern:** identity and recovery are run-scoped. Composite keys bind
+nodes, edges, states, rows, tokens, ancestry, validation errors, routing, and
+sink-effect members to one run. Epoch 29 also persists canonical node output
+contract hashes, durable batch-expansion claims, and the sidecar-journal outbox.
+A sink or export result is not complete until its effect reaches `FINALIZED`;
+an uncertain external result remains durable and blocked rather than being
+silently replayed.
 
 ### 3.3 Plugins Components
 
@@ -432,24 +453,25 @@ This sequence shows how a row flows through the pipeline with audit recording at
 sequenceDiagram
     participant CLI
     participant Orchestrator
-    participant Recorder as LandscapeRecorder
+    participant Landscape as Landscape Repositories
     participant Processor as RowProcessor
     participant Source
     participant Transform
+    participant Effect as SinkEffectCoordinator
     participant Sink
     participant Telem as Telemetry
 
     CLI->>Orchestrator: run(PipelineConfig)
-    Orchestrator->>Recorder: begin_run(config)
-    Recorder-->>Orchestrator: Run
+    Orchestrator->>Landscape: begin_run(config)
+    Landscape-->>Orchestrator: Run
     Orchestrator->>Telem: emit(RunStarted)
 
     loop For each node
-        Orchestrator->>Recorder: register_node(...)
+        Orchestrator->>Landscape: register_node(...)
     end
 
     loop For each edge
-        Orchestrator->>Recorder: register_edge(...)
+        Orchestrator->>Landscape: register_edge(...)
     end
 
     Orchestrator->>Source: load(ctx)
@@ -457,14 +479,14 @@ sequenceDiagram
     loop For each row
         Source-->>Orchestrator: SourceRow
         Orchestrator->>Processor: process_row(row_data)
-        Processor->>Recorder: create_row(...)
-        Processor->>Recorder: create_token(...)
+        Processor->>Landscape: create_row(...)
+        Processor->>Landscape: create_token(...)
 
         loop For each transform
-            Processor->>Recorder: begin_node_state(...)
+            Processor->>Landscape: begin_node_state(...)
             Processor->>Transform: process(row, ctx)
             Transform-->>Processor: TransformResult
-            Processor->>Recorder: complete_node_state(...)
+            Processor->>Landscape: complete_node_state(...)
             Processor->>Telem: emit(TransformCompleted)
         end
 
@@ -472,12 +494,15 @@ sequenceDiagram
     end
 
     loop For each sink
-        Orchestrator->>Sink: write(rows, ctx)
-        Sink-->>Orchestrator: ArtifactDescriptor
-        Orchestrator->>Recorder: register_artifact(...)
+        Orchestrator->>Effect: execute(effect identity, members)
+        Effect->>Landscape: reserve effect and persist immutable plan
+        Effect->>Sink: inspect / reconcile / commit under fenced lease
+        Sink-->>Effect: exact result or UNKNOWN
+        Effect->>Landscape: finalize effect and artifact atomically
+        Effect-->>Orchestrator: Finalized effect result
     end
 
-    Orchestrator->>Recorder: complete_run(status)
+    Orchestrator->>Landscape: complete_run(status)
     Orchestrator->>Telem: emit(RunFinished)
     Orchestrator-->>CLI: RunResult
 ```
@@ -488,7 +513,8 @@ sequenceDiagram
 2. `register_node/edge` - DAG structure recorded
 3. `create_row/token` - Row identity established
 4. `begin/complete_node_state` - Transform input/output hashes recorded → Telemetry: TransformCompleted
-5. `register_artifact` - Sink output hash recorded
+5. `reserve/finalize sink effect` - External publication plan, attempts, exact
+   result, members, and artifact recorded; an uncertain result remains blocked
 6. `complete_run` - Final status and timestamps → Telemetry: RunFinished
 
 **Telemetry Pattern:** Events emitted AFTER Landscape recording (Landscape = source of truth, telemetry = operational visibility)
@@ -603,34 +629,51 @@ sequenceDiagram
 
 ```mermaid
 C4Deployment
-    title ELSPETH Deployment (Typical)
+    title ELSPETH Deployment (Local and Supported AWS ECS Profile)
 
     Deployment_Node(dev, "Developer Machine") {
         Deployment_Node(venv, "Python venv") {
             Container(cli_inst, "elspeth CLI", "Python", "Pipeline execution")
+            Container(web_inst, "elspeth web", "FastAPI + React", "Composer and web execution")
         }
         ContainerDb(sqlite, "landscape.db", "SQLite", "Local audit trail")
+        ContainerDb(session_sqlite, "sessions.db", "SQLite", "Local Composer sessions")
         Container(payloads_dir, "payloads/", "Filesystem", "Payload storage")
     }
 
-    Deployment_Node(prod, "Production Server") {
-        Deployment_Node(container, "Docker Container") {
-            Container(cli_prod, "elspeth CLI", "Python", "Pipeline execution")
+    Deployment_Node(aws, "AWS ECS / Fargate") {
+        Deployment_Node(task, "Single Web Task") {
+            Container(web_prod, "ELSPETH web", "Container", "Composer, validation, and execution")
         }
-        ContainerDb(postgres, "PostgreSQL", "PostgreSQL", "Shared audit trail")
-        Container(blob_store, "Blob Storage", "S3/Azure", "Payload storage")
+        ContainerDb(aurora, "Aurora PostgreSQL", "PostgreSQL", "Session and Landscape schemas")
+        Container(efs, "EFS", "Filesystem", "Durable local payload and effect spool")
+        Container(s3, "S3", "Object Store", "Task-role sources and sinks")
+        Container(cognito, "Cognito", "OIDC", "Authorization code with PKCE")
+        Container(bedrock, "Bedrock", "AWS API", "Model inference and guardrails")
+        Container(observability, "CloudWatch + X-Ray", "AWS", "Operator telemetry")
     }
 
     Rel(cli_inst, sqlite, "Writes to")
+    Rel(web_inst, session_sqlite, "Persists sessions")
+    Rel(web_inst, sqlite, "Writes audit evidence")
     Rel(cli_inst, payloads_dir, "Stores payloads")
-    Rel(cli_prod, postgres, "Writes to")
-    Rel(cli_prod, blob_store, "Stores payloads")
+    Rel(web_prod, aurora, "Persists sessions and audit evidence")
+    Rel(web_prod, efs, "Stores payloads and effect spool")
+    Rel(web_prod, s3, "Reads and publishes through task role")
+    Rel(web_prod, cognito, "Authenticates users")
+    Rel(web_prod, bedrock, "Calls approved models")
+    Rel(web_prod, observability, "Emits telemetry after audit writes")
 ```
 
-| Environment | Audit DB | Payload Store |
-|-------------|----------|---------------|
-| Development | SQLite/SQLCipher (`landscape.db`) | Local filesystem |
-| Production | PostgreSQL | S3/Azure Blob Storage |
+| Environment | Session store | Audit store | Payload/effect storage |
+|-------------|---------------|-------------|------------------------|
+| Development | SQLite | SQLite/SQLCipher | Local filesystem |
+| Supported AWS ECS profile | Aurora PostgreSQL | Aurora PostgreSQL | EFS plus task-role S3 |
+
+The 0.7.1 AWS profile supports one web task at a time. Validate-only startup,
+the deployment doctor, readiness checks, and schema-owner separation are part
+of the deployment contract; mixed-version rollout across the pre-1.0 schema
+cutover is not supported.
 
 ---
 
@@ -848,7 +891,7 @@ flowchart TB
     subgraph TIER1["TIER 1: Our Data (Full Trust)"]
         direction TB
         AuditDB[(Audit Database)]
-        Landscape[Landscape Recorder]
+        Landscape[Landscape Repositories and Effect Ledgers]
 
         Landscape --> AuditDB
         note1["Crash on any anomaly<br/>No coercion ever"]
@@ -1029,7 +1072,7 @@ ongoing CI enforcement.
 - Subsystems: 11 major (20+ including sub-components)
 - Plugins: registry-discovered via `discover_all_plugins()` — the same code path as `elspeth plugins list`
 - ADRs: 30+ accepted records (excluding the 000 template)
-- Status: Pre-release (0.7.0)
+- Status: Pre-release (0.7.1)
 
 All diagrams use Mermaid syntax for version control compatibility.
 

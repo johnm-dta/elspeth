@@ -181,8 +181,58 @@ class TokenSchedulerRepository:
         coalesce_node_id: str | None = None,
         coalesce_name: str | None = None,
     ) -> TokenWorkItem:
-        """Persist and claim a READY continuation in one audit transaction."""
+        """Persist and claim READY work for an active registered worker."""
         return self.queue.enqueue_ready_claimed(
+            run_id=run_id,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=node_id,
+            step_index=step_index,
+            ingest_sequence=ingest_sequence,
+            row_payload_json=row_payload_json,
+            available_at=available_at,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+            now=now,
+            attempt=attempt,
+            queue_key=queue_key,
+            barrier_key=barrier_key,
+            on_success_sink=on_success_sink,
+            branch_name=branch_name,
+            fork_group_id=fork_group_id,
+            join_group_id=join_group_id,
+            expand_group_id=expand_group_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name=coalesce_name,
+        )
+
+    def enqueue_ready_claimed_legacy_unfenced(
+        self,
+        *,
+        run_id: str,
+        token_id: str,
+        row_id: str,
+        node_id: str | None,
+        step_index: int,
+        ingest_sequence: int,
+        row_payload_json: str,
+        available_at: datetime,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+        attempt: int = 1,
+        queue_key: str | None = None,
+        barrier_key: str | None = None,
+        on_success_sink: str | None = None,
+        branch_name: str | None = None,
+        fork_group_id: str | None = None,
+        join_group_id: str | None = None,
+        expand_group_id: str | None = None,
+        coalesce_node_id: str | None = None,
+        coalesce_name: str | None = None,
+    ) -> TokenWorkItem:
+        """Compatibility enqueue-and-claim for N=0 repository test fixtures."""
+        return self.queue.enqueue_ready_claimed_legacy_unfenced(
             run_id=run_id,
             token_id=token_id,
             row_id=row_id,
@@ -341,21 +391,31 @@ class TokenSchedulerRepository:
     def recover_expired_leases(
         self,
         *,
-        run_id: str,
         now: datetime,
-        caller_owner: str,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         grace_seconds: float = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
         stall_budget_seconds: float = DEFAULT_ITEM_STALL_BUDGET_SECONDS,
     ) -> int:
         """Return expired LEASED work to READY (see :meth:`SchedulerLeaseRepository.recover_expired_leases`)."""
         return self.leases.recover_expired_leases(
-            run_id=run_id,
             now=now,
-            caller_owner=caller_owner,
             coordination_token=coordination_token,
             grace_seconds=grace_seconds,
             stall_budget_seconds=stall_budget_seconds,
+        )
+
+    def recover_expired_leases_legacy_unfenced(
+        self,
+        *,
+        run_id: str,
+        now: datetime,
+        caller_owner: str,
+    ) -> int:
+        """Recover expired leases for pre-coordination direct harnesses only."""
+        return self.leases.recover_expired_leases_legacy_unfenced(
+            run_id=run_id,
+            now=now,
+            caller_owner=caller_owner,
         )
 
     def heartbeat_lease(
@@ -366,6 +426,7 @@ class TokenSchedulerRepository:
         lease_owner: str,
         lease_seconds: int,
         now: datetime,
+        membership_fenced: bool,
     ) -> datetime:
         """Extend a held lease (see :meth:`SchedulerLeaseRepository.heartbeat_lease`)."""
         return self.leases.heartbeat_lease(
@@ -374,6 +435,7 @@ class TokenSchedulerRepository:
             lease_owner=lease_owner,
             lease_seconds=lease_seconds,
             now=now,
+            membership_fenced=membership_fenced,
         )
 
     def peer_active_leases(
@@ -428,6 +490,26 @@ class TokenSchedulerRepository:
             worker_id=worker_id,
         )
 
+    def mark_terminal_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and terminalize their parent."""
+        return self.dispositions.mark_terminal_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
     def mark_failed(
         self,
         *,
@@ -440,6 +522,26 @@ class TokenSchedulerRepository:
         """Mark a leased work item failed after retries are exhausted."""
         return self.dispositions.mark_failed(
             work_item_id=work_item_id,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
+    def mark_failed_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue child continuations and fail their parent."""
+        return self.dispositions.mark_failed_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
             now=now,
             expected_lease_owner=expected_lease_owner,
             branch_loss=branch_loss,
@@ -464,6 +566,38 @@ class TokenSchedulerRepository:
         """Move a claimed item to a durable sink handoff state."""
         return self.dispositions.mark_pending_sink(
             work_item_id=work_item_id,
+            row_payload_json=row_payload_json,
+            sink_name=sink_name,
+            outcome=outcome,
+            path=path,
+            error_hash=error_hash,
+            error_message=error_message,
+            now=now,
+            expected_lease_owner=expected_lease_owner,
+            branch_loss=branch_loss,
+            worker_id=worker_id,
+        )
+
+    def mark_pending_sink_with_ready_children(
+        self,
+        *,
+        work_item_id: str,
+        emitted_ready: Sequence[BarrierEmission],
+        row_payload_json: str,
+        sink_name: str,
+        outcome: str,
+        path: str,
+        error_hash: str | None,
+        error_message: str | None,
+        now: datetime,
+        expected_lease_owner: str,
+        branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
+    ) -> tuple[TokenWorkItem, tuple[TokenWorkItem, ...]]:
+        """Atomically enqueue children and durably park their parent for a sink."""
+        return self.dispositions.mark_pending_sink_with_ready_children(
+            work_item_id=work_item_id,
+            emitted_ready=emitted_ready,
             row_payload_json=row_payload_json,
             sink_name=sink_name,
             outcome=outcome,
@@ -573,7 +707,7 @@ class TokenSchedulerRepository:
         barrier_key: str,
         handoffs: Mapping[str, BlockedPendingSinkHandoff],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Move BLOCKED barrier work to PENDING_SINK before external sink writes."""
@@ -593,7 +727,7 @@ class TokenSchedulerRepository:
         barrier_key: str,
         token_ids: tuple[str, ...],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         release_context: Mapping[str, object] | None = None,
     ) -> int:
         """Mark BLOCKED work consumed by a resolved barrier as terminal."""

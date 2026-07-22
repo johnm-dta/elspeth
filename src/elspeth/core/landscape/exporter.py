@@ -14,8 +14,10 @@ import hmac
 import json
 from collections import defaultdict
 from collections.abc import Iterator
-from datetime import UTC, datetime
-from typing import Any, Protocol
+from contextlib import contextmanager
+from copy import copy
+from datetime import UTC
+from typing import Any, BinaryIO, Protocol, cast
 
 from elspeth.contracts import (
     BatchMember,
@@ -27,9 +29,19 @@ from elspeth.contracts import (
     TokenOutcome,
     TokenParent,
 )
+from elspeth.contracts.audit_export import (
+    AUDIT_EXPORT_MAX_CHUNKS,
+    AUDIT_EXPORT_MAX_TOTAL_BYTES,
+    AUDIT_EXPORT_MAX_TOTAL_RECORDS,
+    AUDIT_EXPORT_SERIALIZATION_VERSION,
+    AuditExportDerivationConfig,
+    AuditExportDerivedBundle,
+    AuditExportTerminalWitness,
+    derive_audit_export_bundle,
+    stream_audit_export_bundle_to_spool,
+)
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.export_records import (
-    ArtifactExportRecord,
     BatchExportRecord,
     BatchMemberExportRecord,
     CallExportRecord,
@@ -47,11 +59,20 @@ from elspeth.contracts.export_records import (
     TokenParentExportRecord,
     TransformErrorExportRecord,
     ValidationErrorExportRecord,
+    WebPluginPolicyExportRecord,
 )
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.export_mappers import node_state_to_export_record
+from elspeth.core.landscape.export_mappers import (
+    artifact_to_export_record,
+    node_state_to_export_record,
+    sink_effect_attempt_to_export_record,
+    sink_effect_member_to_export_record,
+    sink_effect_stream_to_export_record,
+    sink_effect_to_export_record,
+)
+from elspeth.core.landscape.export_read_model import open_export_read_transaction
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -61,6 +82,8 @@ class ExportReadModel(Protocol):
     def get_run(self, run_id: str) -> Any | None: ...
 
     def get_run_attribution(self, run_id: str) -> tuple[str, str] | None: ...
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> Any | None: ...
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]: ...
 
@@ -98,6 +121,14 @@ class ExportReadModel(Protocol):
 
     def get_artifacts(self, run_id: str) -> list[Any]: ...
 
+    def get_sink_effect_streams_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effects_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effect_members_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
+    def get_sink_effect_attempts_for_run(self, run_id: str) -> list[Any] | tuple[Any, ...]: ...
+
 
 class RecorderFactoryExportReadModel:
     """Adapter from the repository factory bundle to the exporter read model."""
@@ -110,6 +141,9 @@ class RecorderFactoryExportReadModel:
 
     def get_run_attribution(self, run_id: str) -> tuple[str, str] | None:
         return self._factory.run_lifecycle.get_run_attribution(run_id)
+
+    def get_web_plugin_policy_evidence(self, run_id: str) -> Any | None:
+        return self._factory.run_lifecycle.get_web_plugin_policy_evidence(run_id)
 
     def get_secret_resolutions_for_run(self, run_id: str) -> list[Any]:
         return self._factory.run_lifecycle.get_secret_resolutions_for_run(run_id)
@@ -164,6 +198,42 @@ class RecorderFactoryExportReadModel:
 
     def get_artifacts(self, run_id: str) -> list[Any]:
         return self._factory.execution.get_artifacts(run_id)
+
+    def get_sink_effect_streams_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_streams_for_run(run_id)
+
+    def get_sink_effects_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_effects_for_run(run_id)
+
+    def get_sink_effect_members_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_members_for_run(run_id)
+
+    def get_sink_effect_attempts_for_run(self, run_id: str) -> tuple[Any, ...]:
+        return self._factory.execution.sink_effects.get_attempts_for_run(run_id)
+
+
+class _DiscardSpool:
+    """Position-tracking byte sink for streaming exports (elspeth-4087266b7d).
+
+    The public ``export_run`` iterator reuses the bounded spooled derivation
+    but never reads the spooled bytes back — only the emitted records and the
+    final manifest matter. This sink satisfies the derivation's write/tell
+    surface while discarding content, keeping the public path free of both
+    full-bundle accumulation and temp-file I/O.
+    """
+
+    __slots__ = ("_position",)
+
+    def __init__(self) -> None:
+        self._position = 0
+
+    def tell(self) -> int:
+        return self._position
+
+    def write(self, data: bytes | bytearray | memoryview) -> int:
+        count = len(data)
+        self._position += count
+        return count
 
 
 class LandscapeExporter:
@@ -223,6 +293,14 @@ class LandscapeExporter:
         include_raw_error_rows: bool = False,
         row_batch_size: int = 500,
         read_model: ExportReadModel | None = None,
+        signer_key_id: str | None = None,
+        export_format: str = "json",
+        exporter_version: str = "landscape-exporter-v1",
+        serialization_version: str = AUDIT_EXPORT_SERIALIZATION_VERSION,
+        chunking_algorithm_version: str = "record-framing-v1",
+        per_chunk_byte_limit: int = 64 * 1024 * 1024,
+        per_chunk_record_limit: int = 1_000_000,
+        derivation_config: AuditExportDerivationConfig | None = None,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -243,7 +321,9 @@ class LandscapeExporter:
                 states, and related child records — are resident at once.
                 The exported record sequence is identical for every value.
             read_model: Optional narrow read surface for export queries.
-                Defaults to a read-model adapter over ``RecorderFactory(db)``.
+                When supplied, its transaction lifetime remains caller-owned.
+                Otherwise, each public export operation binds a dedicated
+                connection-bound snapshot for its full lifetime.
 
         Raises:
             ValueError: If row_batch_size < 1
@@ -252,9 +332,49 @@ class LandscapeExporter:
             raise ValueError(f"row_batch_size must be >= 1, got {row_batch_size}")
         self._db = db
         self._read_model = read_model if read_model is not None else RecorderFactoryExportReadModel(RecorderFactory(db))
+        self._read_model_is_caller_owned = read_model is not None
         self._signing_key = signing_key
         self._include_raw_error_rows = include_raw_error_rows
         self._row_batch_size = row_batch_size
+        self._signer_key_id = signer_key_id
+        self._export_format = export_format
+        self._exporter_version = exporter_version
+        self._serialization_version = serialization_version
+        self._chunking_algorithm_version = chunking_algorithm_version
+        self._per_chunk_byte_limit = per_chunk_byte_limit
+        self._per_chunk_record_limit = per_chunk_record_limit
+        self._derivation_config = derivation_config
+
+    @contextmanager
+    def _public_export_scope(
+        self,
+        run_id: str,
+    ) -> Iterator[tuple["LandscapeExporter", AuditExportTerminalWitness | None]]:
+        """Bind a default public export to one immutable database snapshot.
+
+        Explicitly injected read models remain caller-owned. The production
+        orchestrator already opens and owns its snapshot before constructing
+        the exporter; opening a nested transaction here would split that
+        authority. The default public constructor instead owns a snapshot for
+        the full generator lifetime and binds a shallow exporter copy to it so
+        concurrent calls cannot replace each other's read model.
+        """
+        if self._read_model_is_caller_owned:
+            yield self, None
+            return
+
+        with open_export_read_transaction(self._db.engine) as read_model:
+            try:
+                witness = read_model.get_export_terminal_witness(run_id)
+            except AuditIntegrityError as exc:
+                # Preserve the public exporter's established validation
+                # contract while deriving the result from the snapshot-bound
+                # terminal witness.
+                raise ValueError("Audit export requires an immutable export-terminal run") from exc
+            scoped = copy(self)
+            scoped._read_model = read_model
+            scoped._read_model_is_caller_owned = True
+            yield scoped, witness
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -299,6 +419,12 @@ class LandscapeExporter:
         Yields flat dict records with 'record_type' field.
         Order: run -> nodes -> edges -> rows -> tokens -> states -> batches -> artifacts
 
+        Streaming contract (elspeth-4087266b7d): records are yielded on the
+        bounded-memory path — the row family streams in O(row_batch_size)
+        batches and at most one derivation chunk is retained in RAM — while
+        the emitted record sequence, per-record signatures, and the final
+        manifest remain hash-identical to :meth:`derive_run_bundle` output.
+
         Args:
             run_id: The run ID to export
             sign: If True, add HMAC signature to each record and emit
@@ -313,34 +439,131 @@ class LandscapeExporter:
         """
         if sign and self._signing_key is None:
             raise ValueError("Signing requested but no signing_key provided")
+        with self._public_export_scope(run_id) as (exporter, terminal_witness):
+            derivation_config = exporter._resolve_derivation_config(
+                run_id,
+                sign=sign,
+                terminal_witness=terminal_witness,
+            )
+            stream = stream_audit_export_bundle_to_spool(
+                exporter._iter_records(run_id),
+                derivation_config,
+                cast(BinaryIO, _DiscardSpool()),
+                max_total_records=AUDIT_EXPORT_MAX_TOTAL_RECORDS,
+                max_total_bytes=AUDIT_EXPORT_MAX_TOTAL_BYTES,
+                max_chunks=AUDIT_EXPORT_MAX_CHUNKS,
+            )
+            while True:
+                try:
+                    record = next(stream)
+                except StopIteration as stop:
+                    bundle = stop.value
+                    break
+                yield deep_thaw(record)
+            yield deep_thaw(bundle.final_manifest)
 
-        running_hash = hashlib.sha256()
-        record_count = 0
+    def derive_run_bundle(
+        self,
+        run_id: str,
+        *,
+        sign: bool = False,
+        derivation_config: AuditExportDerivationConfig | None = None,
+    ) -> AuditExportDerivedBundle:
+        """Return the exact v2 byte graph for one immutable terminal run."""
+        if sign and self._signing_key is None:
+            raise ValueError("Signing requested but no signing_key provided")
+        with self._public_export_scope(run_id) as (exporter, terminal_witness):
+            derivation_config = exporter._resolve_derivation_config(
+                run_id,
+                sign=sign,
+                derivation_config=derivation_config,
+                terminal_witness=terminal_witness,
+            )
+            return derive_audit_export_bundle(exporter._iter_records(run_id), derivation_config)
 
-        for typed_record in self._iter_records(run_id):
-            # Widen to dict[str, Any] — export_run may add "signature" key
-            record: dict[str, Any] = typed_record  # type: ignore[assignment]
+    def _resolve_derivation_config(
+        self,
+        run_id: str,
+        *,
+        sign: bool,
+        derivation_config: AuditExportDerivationConfig | None = None,
+        terminal_witness: AuditExportTerminalWitness | None = None,
+    ) -> AuditExportDerivationConfig:
+        """Resolve and validate the derivation authority for one export request."""
+        if sign and self._signing_key is None:
+            raise ValueError("Signing requested but no signing_key provided")
+        if derivation_config is None:
+            derivation_config = self._derivation_config
+        if derivation_config is None:
+            if terminal_witness is None:
+                run = self._read_model.get_run(run_id)
+                if run is None:
+                    raise ValueError(f"Run not found: {run_id}")
+                completed_at = run.completed_at
+                source_status = run.status.value
+                if completed_at is None or source_status not in {"completed", "completed_with_failures", "empty"}:
+                    raise ValueError("Audit export requires an immutable export-terminal run")
+            else:
+                completed_at = terminal_witness.source_completed_at
+                source_status = terminal_witness.source_status.value
+            # SQLite drops timezone metadata when round-tripping SQLAlchemy
+            # DateTime values. Landscape timestamps are UTC by contract, so
+            # restore that storage-boundary metadata before canonicalization.
+            if completed_at.tzinfo is None or completed_at.utcoffset() is None:
+                completed_at = completed_at.replace(tzinfo=UTC)
+            completed_text = completed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             if sign:
-                record["signature"] = self._sign_record(record)
-                # Update running hash with signed record
-                running_hash.update(record["signature"].encode())
+                if self._signer_key_id is None:
+                    raise ValueError("Signed export requires an explicit signer_key_id")
+                signing_mode = "hmac_sha256"
+                signer_key_id = self._signer_key_id
+                signing_key = self._signing_key
+            else:
+                signing_mode = "unsigned"
+                signer_key_id = "UNSIGNED"
+                signing_key = None
+            derivation_config = AuditExportDerivationConfig(
+                source_run_id=run_id,
+                source_status=source_status,
+                source_completed_at=completed_text,
+                export_format=self._export_format,  # type: ignore[arg-type]
+                exporter_version=self._exporter_version,
+                serialization_version=self._serialization_version,
+                chunking_algorithm_version=self._chunking_algorithm_version,
+                include_raw_error_rows=self._include_raw_error_rows,
+                per_chunk_byte_limit=self._per_chunk_byte_limit,
+                per_chunk_record_limit=self._per_chunk_record_limit,
+                signing_mode=signing_mode,  # type: ignore[arg-type]
+                signer_key_id=signer_key_id,
+                signing_key=signing_key,
+            )
+        else:
+            # An explicitly supplied config (per-call or instance-level) must
+            # agree with the caller's sign request in BOTH directions
+            # (elspeth-f7d63e2d56): an unsigned config must not silently
+            # downgrade sign=True, and an HMAC config must not silently sign
+            # a sign=False export. Publication integrity fails closed.
+            if derivation_config.source_run_id != run_id:
+                raise ValueError("derivation config source_run_id does not match requested run")
+            if terminal_witness is not None:
+                completed_text = terminal_witness.source_completed_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                if (
+                    derivation_config.source_status != terminal_witness.source_status.value
+                    or derivation_config.source_completed_at != completed_text
+                ):
+                    raise AuditIntegrityError("derivation config does not match the snapshot-bound terminal witness")
+            expected_signing_mode = "hmac_sha256" if sign else "unsigned"
+            if derivation_config.signing_mode != expected_signing_mode:
+                raise ValueError(
+                    f"derivation config signing_mode {derivation_config.signing_mode!r} contradicts the "
+                    f"requested export (sign={sign} requires signing_mode {expected_signing_mode!r})"
+                )
+        return derivation_config
 
-            record_count += 1
-            yield record
-
-        # Emit manifest if signing
-        if sign:
-            manifest = {
-                "record_type": "manifest",
-                "run_id": run_id,
-                "record_count": record_count,
-                "final_hash": running_hash.hexdigest(),
-                "hash_algorithm": "sha256",
-                "signature_algorithm": "hmac-sha256",
-                "exported_at": datetime.now(UTC).isoformat(),
-            }
-            manifest["signature"] = self._sign_record(manifest)
-            yield manifest
+    def iter_unsigned_run_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield the deterministic unsigned record stream for bounded derivation."""
+        with self._public_export_scope(run_id) as (exporter, _terminal_witness):
+            yield from exporter._iter_records(run_id)
 
     def iter_run_records_by_type(
         self,
@@ -398,6 +621,25 @@ class LandscapeExporter:
             "reproducibility_grade": run.reproducibility_grade.value if run.reproducibility_grade is not None else None,
         }
         yield run_record
+
+        policy_evidence = self._read_model.get_web_plugin_policy_evidence(run_id)
+        if policy_evidence is not None:
+            policy_record: WebPluginPolicyExportRecord = {
+                "record_type": "web_plugin_policy",
+                "run_id": run_id,
+                "schema_version": policy_evidence.schema_version,
+                "policy_hash": policy_evidence.policy_hash,
+                "snapshot_hash": policy_evidence.snapshot_hash,
+                "authorized_plugin_ids": list(policy_evidence.authorized_plugin_ids),
+                "available_plugin_ids": list(policy_evidence.available_plugin_ids),
+                "control_modes": [list(item) for item in policy_evidence.control_modes],
+                "selected_implementations": [list(item) for item in policy_evidence.selected_implementations],
+                "selected_profile_aliases": [list(item) for item in policy_evidence.selected_profile_aliases],
+                "plugin_code_identities": [list(item) for item in policy_evidence.plugin_code_identities],
+                "binding_generation_fingerprint": policy_evidence.binding_generation_fingerprint,
+                "decision_codes": list(policy_evidence.decision_codes),
+            }
+            yield policy_record
 
         # Secret resolutions (run-level provenance for Key Vault secrets)
         for resolution in self._read_model.get_secret_resolutions_for_run(run_id):
@@ -471,6 +713,7 @@ class LandscapeExporter:
                 "operation_id": operation.operation_id,
                 "node_id": operation.node_id,
                 "operation_type": operation.operation_type,
+                "sink_effect_id": operation.sink_effect_id,
                 "status": operation.status,
                 "started_at": operation.started_at.isoformat() if operation.started_at else None,
                 "completed_at": operation.completed_at.isoformat() if operation.completed_at else None,
@@ -507,6 +750,8 @@ class LandscapeExporter:
                     "created_at": call.created_at.isoformat() if call.created_at else None,
                 }
                 yield op_call_record
+
+        yield from self._iter_sink_effect_records(run_id)
 
         # Source validation and transform error audit evidence.
         # Repository getters provide deterministic created_at ordering.
@@ -561,6 +806,33 @@ class LandscapeExporter:
             yield from self._iter_row_batch_records(run_id, row_batch)
 
         yield from self._iter_batch_and_artifact_records(run_id)
+
+    def _iter_sink_effect_records(self, run_id: str) -> Iterator[ExportRecord]:
+        """Yield complete safe recovery history in deterministic family order."""
+        # Preserve compatibility for narrow test/custom read models that
+        # predate epoch 26 and therefore cannot contain sink-effect rows.
+        stream_getter = getattr(self._read_model, "get_sink_effect_streams_for_run", None)
+        effect_getter = getattr(self._read_model, "get_sink_effects_for_run", None)
+        member_getter = getattr(self._read_model, "get_sink_effect_members_for_run", None)
+        attempt_getter = getattr(self._read_model, "get_sink_effect_attempts_for_run", None)
+        if stream_getter is None or effect_getter is None or member_getter is None or attempt_getter is None:
+            return
+
+        for stream in stream_getter(run_id):
+            yield sink_effect_stream_to_export_record(stream)
+        for effect in effect_getter(run_id):
+            yield sink_effect_to_export_record(effect)
+        for member in member_getter(run_id):
+            yield sink_effect_member_to_export_record(member)
+
+        current_effect_id: str | None = None
+        attempt_index = 0
+        for attempt in attempt_getter(run_id):
+            if attempt.effect_id != current_effect_id:
+                current_effect_id = attempt.effect_id
+                attempt_index = 0
+            yield sink_effect_attempt_to_export_record(run_id, attempt, attempt_index=attempt_index)
+            attempt_index += 1
 
     def _iter_row_batch_records(self, run_id: str, row_batch: list[Row]) -> Iterator[ExportRecord]:
         """Yield row-family records for one bounded batch of rows.
@@ -817,20 +1089,7 @@ class LandscapeExporter:
 
         # Artifacts
         for artifact in self._read_model.get_artifacts(run_id):
-            artifact_record: ArtifactExportRecord = {
-                "record_type": "artifact",
-                "run_id": run_id,
-                "artifact_id": artifact.artifact_id,
-                "sink_node_id": artifact.sink_node_id,
-                "produced_by_state_id": artifact.produced_by_state_id,
-                "artifact_type": artifact.artifact_type,
-                "path_or_uri": artifact.path_or_uri,
-                "content_hash": artifact.content_hash,
-                "size_bytes": artifact.size_bytes,
-                "idempotency_key": artifact.idempotency_key,
-                "created_at": artifact.created_at.isoformat(),
-            }
-            yield artifact_record
+            yield artifact_to_export_record(run_id, artifact)
 
     def export_run_grouped(
         self,

@@ -234,5 +234,9 @@ def _candidate_alternatives(field_path: str) -> list[object] | None:
 
 def _note_for_node_option(node: NodeSpec, field_path: str) -> str | None:
     if node.plugin == "web_scrape" and field_path in {"http.abuse_contact", "http.scraping_reason"}:
-        return "Wire-visible identity value; must come from the operator or deployment identity, never a fabricated default."
+        return (
+            "Wire-visible identity value; must come from the operator, deployment identity, "
+            "tool result, or the public-fetch fallback surfaced through a pipeline_decision "
+            "review per pipeline_composer.md."
+        )
     return None

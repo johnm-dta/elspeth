@@ -25,10 +25,11 @@ from sqlalchemy import select
 from sqlalchemy.engine.url import make_url
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.export_mappers import artifact_producer_kind, validate_artifact_publication_projection
 from elspeth.core.landscape.schema import artifacts_table
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
-from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputsResponse
+from elspeth.web.execution.schemas import RunOutputArtifact, RunOutputArtifactStorageKind, RunOutputsResponse
 from elspeth.web.paths import allowed_sink_directories
 
 _FILE_URI_PREFIX = "file://"
@@ -53,6 +54,59 @@ def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path, *, session_i
         return False
     allowed = allowed_sink_directories(str(data_dir), session_id=session_id)
     return any(resolved.is_relative_to(base) for base in allowed)
+
+
+def _classify_storage_kind(
+    fs_paths: tuple[Path, ...] | None,
+    data_dir: str | Path | None,
+    *,
+    payload_root: Path | None = None,
+) -> RunOutputArtifactStorageKind:
+    """Classify a file-backed artifact's path against elspeth's real
+    storage layouts, so the UI can tell "internal opaque storage" from
+    "a path a sink was configured to write to" — replaces a frontend
+    regex heuristic that matched a layout no repo code actually
+    produces (elspeth-52af16f9ae).
+
+    Recognised layouts, matched by directory (not by filename shape):
+
+    * ``{data_dir}/blobs/...``    — composer blob store; see
+      ``_blob_storage_path`` in ``web/composer/tools/blobs.py``.
+    * ``payload_root`` (default ``{data_dir}/payloads``) — content-
+      addressed payload store; see ``FilesystemPayloadStore`` in
+      ``core/payload_store.py``. Settings-driven callers pass
+      ``WebSettings.get_payload_store_path()`` so a configured
+      ``payload_store_path`` override is honoured.
+    * ``{data_dir}/outputs/...``  — the canonical sink output directory.
+
+    Anything else — a user-configured sink path outside those three
+    directories, an object-store URI (``fs_paths=None``), or a legacy
+    caller with no configured ``data_dir`` — classifies as ``"unknown"``:
+    the safe default that does not assert internal-storage status it
+    cannot verify.
+
+    Classification is independent of on-disk existence: ``Path.resolve()``
+    does not require the target to exist, so a purged blob-store path
+    still classifies as ``"blob"`` rather than silently degrading to
+    ``"unknown"`` (which would leak the raw path back into the UI via the
+    exact fallback this discriminator exists to close).
+    """
+    if fs_paths is None or data_dir is None:
+        return "unknown"
+    base = Path(data_dir).resolve()
+    payloads = payload_root.resolve() if payload_root is not None else base / "payloads"
+    for fs_path in fs_paths:
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            continue
+        if resolved.is_relative_to(base / "blobs"):
+            return "blob"
+        if resolved.is_relative_to(payloads):
+            return "payload"
+        if resolved.is_relative_to(base / "outputs"):
+            return "sink_file"
+    return "unknown"
 
 
 class RunOutputsAuditUnavailableError(RuntimeError):
@@ -129,6 +183,7 @@ def load_run_outputs_from_db(
     landscape_run_id: str,
     data_dir: str | Path | None = None,
     session_id: str | None = None,
+    payload_root: Path | None = None,
 ) -> RunOutputsResponse:
     """Read every sink-write artefact for a run and return the full manifest.
 
@@ -143,10 +198,14 @@ def load_run_outputs_from_db(
         select(
             artifacts_table.c.artifact_id,
             artifacts_table.c.sink_node_id,
+            artifacts_table.c.produced_by_state_id,
+            artifacts_table.c.sink_effect_id,
             artifacts_table.c.artifact_type,
             artifacts_table.c.path_or_uri,
             artifacts_table.c.content_hash,
             artifacts_table.c.size_bytes,
+            artifacts_table.c.publication_performed,
+            artifacts_table.c.publication_evidence_kind,
             artifacts_table.c.created_at,
         )
         .where(artifacts_table.c.run_id == landscape_run_id)
@@ -155,6 +214,15 @@ def load_run_outputs_from_db(
     artifacts: list[RunOutputArtifact] = []
     with db.read_only_connection() as conn:
         for row in conn.execute(stmt):
+            producer_kind = artifact_producer_kind(
+                produced_by_state_id=row.produced_by_state_id,
+                sink_effect_id=row.sink_effect_id,
+            )
+            validate_artifact_publication_projection(
+                producer_kind=producer_kind,
+                publication_performed=row.publication_performed,
+                publication_evidence_kind=row.publication_evidence_kind,
+            )
             fs_paths = filesystem_path_candidates(row.path_or_uri)
             exists_now = any(fs_path.exists() for fs_path in fs_paths) if fs_paths is not None else False
             downloadable = (
@@ -164,17 +232,24 @@ def load_run_outputs_from_db(
                 and fs_paths is not None
                 and any(fs_path.exists() and _is_path_in_sink_allowlist(fs_path, data_dir, session_id=session_id) for fs_path in fs_paths)
             )
+            storage_kind = _classify_storage_kind(fs_paths, data_dir, payload_root=payload_root)
             artifacts.append(
                 RunOutputArtifact(
                     artifact_id=row.artifact_id,
                     sink_node_id=row.sink_node_id,
+                    producer_kind=producer_kind,
+                    produced_by_state_id=row.produced_by_state_id,
+                    sink_effect_id=row.sink_effect_id,
                     artifact_type=row.artifact_type,
                     path_or_uri=row.path_or_uri,
                     content_hash=row.content_hash,
                     size_bytes=row.size_bytes,
+                    publication_performed=row.publication_performed,
+                    publication_evidence_kind=row.publication_evidence_kind,
                     created_at=row.created_at,
                     exists_now=exists_now,
                     downloadable=downloadable,
+                    storage_kind=storage_kind,
                 )
             )
     return RunOutputsResponse(
@@ -212,4 +287,5 @@ def load_run_outputs_for_settings(
             landscape_run_id=landscape_run_id,
             data_dir=settings.data_dir,
             session_id=session_id,
+            payload_root=settings.get_payload_store_path(),
         )

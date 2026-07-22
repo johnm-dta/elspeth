@@ -39,7 +39,7 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
     # Arrange: Setup database and payload store
     db_path = tmp_path / "test.db"
     payload_path = tmp_path / "payloads"
-    payload_path.mkdir()
+    payload_path.mkdir(mode=0o700)
 
     db = LandscapeDB.from_url(f"sqlite:///{db_path}")
     payload_store = FilesystemPayloadStore(payload_path)

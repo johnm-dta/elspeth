@@ -20,6 +20,15 @@ from types import MappingProxyType
 from typing import Any
 
 
+class FrozenJsonArray(tuple[Any, ...]):
+    """Immutable marker that preserves the JSON-array/tuple distinction.
+
+    Integrity boundaries may accept JSON arrays while rejecting caller-supplied
+    tuples.  ``deep_freeze`` preserves this exact carrier even when nested
+    mappings must be defensively detached again.
+    """
+
+
 def deep_freeze(value: Any) -> Any:
     """Recursively freeze mutable containers.
 
@@ -52,6 +61,11 @@ def deep_freeze(value: Any) -> Any:
     # Always create a fresh dict from the proxy's items to detach.
     if isinstance(value, MappingProxyType):
         return MappingProxyType({k: deep_freeze(v) for k, v in value.items()})
+    if type(value) is FrozenJsonArray:
+        frozen_array = FrozenJsonArray(deep_freeze(item) for item in value)
+        if all(a is b for a, b in zip(frozen_array, value, strict=True)):
+            return value
+        return frozen_array
     if isinstance(value, tuple):
         frozen_tup = tuple(deep_freeze(item) for item in value)
         if all(a is b for a, b in zip(frozen_tup, value, strict=True)):

@@ -37,6 +37,15 @@
         "name": "if_exists",
         "nullable": false,
         "required": false
+      },
+      {
+        "default": null,
+        "description": "Operator declaration for the provisioned target-side exactly-once effect ledger.",
+        "kind": "json-object",
+        "label": "Effect Ledger",
+        "name": "effect_ledger",
+        "nullable": true,
+        "required": false
       }
     ]
   },

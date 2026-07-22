@@ -97,7 +97,7 @@ def _mark_pending_sink(scheduler: TokenSchedulerRepository, work_item_id: str) -
         row_payload_json=_PAYLOAD,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=NOW + timedelta(seconds=1),

@@ -257,7 +257,7 @@ class _LeaseBusterTransform(BaseTransform):
             # constructor enforces heartbeat < lease) without sleeping.
             self._clock.advance(_LEASE_EXPIRY_ADVANCE)
             peer_repo = TokenSchedulerRepository(self._db.engine)
-            self.peer_recovered_count = peer_repo.recover_expired_leases(
+            self.peer_recovered_count = peer_repo.recover_expired_leases_legacy_unfenced(
                 run_id=ctx.run_id,
                 now=self._clock.now_utc(),
                 caller_owner=self._peer_owner,

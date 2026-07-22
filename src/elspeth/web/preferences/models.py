@@ -35,7 +35,7 @@ read guard.
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 ComposerMode = Literal["guided", "freeform"]
 
@@ -66,6 +66,7 @@ class ComposerPreferences(BaseModel):
 
     default_mode: ComposerMode
     banner_dismissed_at: datetime | None
+    freeform_intro_dismissed_at: datetime | None
     tutorial_completed_at: datetime | None
     # In-progress tutorial resume state. All four are NULL when no tutorial
     # is in progress. ``tutorial_run_id`` / ``tutorial_source_data_hash``
@@ -122,8 +123,22 @@ class UpdateComposerPreferencesRequest(BaseModel):
 
     default_mode: ComposerMode | None = None
     banner_dismissed_at: datetime | None = None
+    freeform_intro_dismissed_at: datetime | None = None
     tutorial_completed_at: datetime | None = None
     tutorial_stage: TutorialStage | None = None
     tutorial_session_id: str | None = None
     tutorial_run_id: str | None = None
     tutorial_source_data_hash: str | None = None
+    # Request-only telemetry discriminator (never persisted, not in the GET
+    # payload): qualifies a completion write as an explicit tutorial exit
+    # (the in-tutorial "Exit tutorial" / exit-to-freeform opt-out,
+    # elspeth-61591e64bb). Without it the server's payload-shape inference
+    # would bucket an exit as "skip". Only meaningful alongside a non-null
+    # ``tutorial_completed_at`` in the same PATCH — enforced below.
+    tutorial_completed_via: Literal["exit"] | None = None
+
+    @model_validator(mode="after")
+    def _via_requires_completion_write(self) -> "UpdateComposerPreferencesRequest":
+        if self.tutorial_completed_via is not None and self.tutorial_completed_at is None:
+            raise ValueError("tutorial_completed_via requires a non-null tutorial_completed_at in the same PATCH")
+        return self

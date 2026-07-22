@@ -127,6 +127,38 @@ describe("BlobRow structural self-disclosure (T-3)", () => {
     expect(summary).toHaveTextContent("keys: id, status");
   });
 
+  it("pretty-prints JSON previews and can switch to a table view", async () => {
+    (previewBlobContentSnippet as ReturnType<typeof vi.fn>).mockResolvedValue({
+      text: JSON.stringify([{ id: 1, status: "ok" }, { id: 2, status: "error" }]),
+      truncated: false,
+      limit: 5000,
+    });
+
+    const user = userEvent.setup();
+    const { container } = render(
+      <BlobRow
+        blob={makeBlob({ filename: "rows.json", mime_type: "application/json" })}
+        sessionId="session-1"
+        onDownload={vi.fn()}
+        onDelete={vi.fn()}
+        onUseAsInput={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /preview rows\.json/i }));
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-codeblock-format="json"]')?.textContent,
+      ).toContain('"id": 1,'),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Table view" }));
+    expect(screen.getByText("id")).toBeInTheDocument();
+    expect(screen.getByText("status")).toBeInTheDocument();
+    expect(screen.getByText("error")).toBeInTheDocument();
+  });
+
   it("HONESTY: ragged CSV rows surface a plain failure, never a guessed count", async () => {
     (previewBlobContentSnippet as ReturnType<typeof vi.fn>).mockResolvedValue({
       text: "name,age\nAlice,30\nBob\n",
@@ -207,7 +239,7 @@ describe("BlobRow structural self-disclosure (T-3)", () => {
 });
 
 describe("BlobRow status indicator (WCAG 1.4.1 non-colour cue)", () => {
-  it("exposes the status as an accessible image with a visible glyph, not colour alone", () => {
+  it("exposes the status as an accessible image with a visible icon, not colour alone", () => {
     render(
       <BlobRow
         blob={makeBlob({ status: "ready" })}
@@ -219,13 +251,13 @@ describe("BlobRow status indicator (WCAG 1.4.1 non-colour cue)", () => {
     );
 
     const dot = screen.getByRole("img", { name: "Ready" });
-    // A shape glyph carries the cue, so the status survives colour-vision
+    // A shape icon carries the cue, so the status survives colour-vision
     // deficiency rather than relying on hue.
-    expect(dot.textContent).not.toBe("");
+    expect(dot.querySelector("svg[data-icon='status-ready']")).not.toBeNull();
   });
 
-  it("renders a distinct glyph per status so ready/pending/error differ by shape", () => {
-    const glyphFor = (status: BlobMetadata["status"]): string => {
+  it("renders a distinct icon per status so ready/pending/error differ by shape", () => {
+    const iconFor = (status: BlobMetadata["status"]): string => {
       const { unmount } = render(
         <BlobRow
           blob={makeBlob({ status })}
@@ -236,16 +268,61 @@ describe("BlobRow status indicator (WCAG 1.4.1 non-colour cue)", () => {
         />,
       );
       const label = status.charAt(0).toUpperCase() + status.slice(1);
-      const glyph = screen.getByRole("img", { name: label }).textContent ?? "";
+      const icon =
+        screen
+          .getByRole("img", { name: label })
+          .querySelector("svg[data-icon]")
+          ?.getAttribute("data-icon") ?? "";
       unmount();
-      return glyph;
+      return icon;
     };
 
-    const glyphs = ["ready", "pending", "error"].map((s) =>
-      glyphFor(s as BlobMetadata["status"]),
+    const icons = ["ready", "pending", "error"].map((s) =>
+      iconFor(s as BlobMetadata["status"]),
     );
-    // All three glyphs must be distinct shapes (a colour-blind user can tell
+    // All three icons must be distinct shapes (a colour-blind user can tell
     // them apart without seeing the hue).
-    expect(new Set(glyphs).size).toBe(3);
+    expect(new Set(icons).size).toBe(3);
   });
+
+  it("uses the shared icon component for file-manager row actions", () => {
+    const { container } = render(
+      <BlobRow
+        blob={makeBlob({ status: "ready" })}
+        sessionId="session-1"
+        onDownload={vi.fn()}
+        onDelete={vi.fn()}
+        onUseAsInput={vi.fn()}
+      />,
+    );
+
+    const actionIcons = Array.from(
+      container.querySelectorAll(".blob-row-actions button svg[data-icon]"),
+    ).map((icon) => icon.getAttribute("data-icon"));
+    expect(actionIcons).toEqual(["eye", "play", "download", "trash"]);
+  });
+});
+
+describe("BlobRow creator badge", () => {
+  it.each([
+    ["user", "Created by user", "user"],
+    ["assistant", "Created by assistant", "assistant"],
+    ["pipeline", "Created by pipeline", "pipeline"],
+  ] as const)(
+    "exposes the %s creator cue to assistive tech",
+    (createdBy, label, iconName) => {
+      render(
+        <BlobRow
+          blob={makeBlob({ created_by: createdBy })}
+          sessionId="session-1"
+          onDownload={vi.fn()}
+          onDelete={vi.fn()}
+          onUseAsInput={vi.fn()}
+        />,
+      );
+
+      const creator = screen.getByRole("img", { name: label });
+      expect(creator.querySelector(`svg[data-icon='${iconName}']`)).not.toBeNull();
+    },
+  );
 });

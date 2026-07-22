@@ -28,7 +28,7 @@ def _settings(data_dir: Path, **overrides: Any) -> WebSettings:
 
 
 def _service(tmp_path: Path, **settings_overrides: Any) -> ComposerServiceImpl:
-    return ComposerServiceImpl(
+    return ComposerServiceImpl.for_trained_operator(
         catalog=MagicMock(spec=CatalogService),
         settings=_settings(tmp_path, **settings_overrides),
     )

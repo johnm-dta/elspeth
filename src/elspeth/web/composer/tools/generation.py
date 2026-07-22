@@ -43,13 +43,14 @@ from elspeth.web.composer.state import (
     _source_options_have_schema,
     _validate_gate_expression,
 )
-from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
     ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
+    _plugin_policy_failure,
+    _validate_plugin_name,
     diff_states,
 )
 from elspeth.web.composer.tools.blobs import (
@@ -62,6 +63,10 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.composer.tools.sessions import (
     _authoring_validation_payload,
+)
+from elspeth.web.interpretation_state import (
+    RAW_HTML_CLEANUP_REVIEW_DRAFT,
+    RAW_HTML_CLEANUP_USER_TERM,
 )
 
 _AUTHORING_VALIDATION_COUNTER = metrics.get_meter("elspeth.web.composer.tools").create_counter(
@@ -234,11 +239,13 @@ def _handle_get_plugin_schema(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
+    plugin_type = arguments["plugin_type"]
+    name = arguments["name"]
+    policy_error = _validate_plugin_name(context, plugin_type, name)
+    if policy_error is not None:
+        return _plugin_policy_failure(state, policy_error)
     try:
-        schema = context.catalog.get_schema(arguments["plugin_type"], arguments["name"])
-        unavailable = schema_secret_unavailable_message(schema, context)
-        if unavailable is not None:
-            return _failure_result(state, unavailable)
+        schema = context.catalog.get_schema(plugin_type, name)
         return _discovery_result(state, schema)
     except (ValueError, KeyError) as exc:
         # ValueError: catalog contract for "unknown plugin/type"
@@ -342,12 +349,24 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Update the coalesce node with upsert_node, providing the missing field.",
     ),
     (
-        r"Aggregation '(.+)' is missing required field 'plugin'",
+        r"aggregation_missing_plugin|Aggregation '(.+)' is missing required field 'plugin'",
         "An aggregation node needs a plugin to define its aggregation behaviour.",
         "Update the aggregation with upsert_node, specifying the plugin name.",
     ),
     (
-        r"input '(.+)' is not reachable",
+        r"coalesce_branch_unreachable|branches .* are not reachable",
+        "A coalesce branches mapping names an incoming connection that no runtime routing field produces. The usual cause is "
+        "the WIRING AROUND the coalesce, not the coalesce itself: a branch transform's on_success routes past the coalesce "
+        "(e.g. straight to a sink), so nothing arrives under the connection name the branches value claims. The rejection's "
+        "connectivity facts list each unreachable branches value and every connection the pipeline actually produces.",
+        "Wire each fork branch end-to-end: the gate fork_to name is the branch transform's input; that transform's on_success "
+        "must be a unique connection name (NOT a sink); the coalesce branches VALUE for that branch is exactly that connection. "
+        "A branch with no transforms uses its fork branch name as the value. If a branches value names a connection nothing "
+        "produces, repair that branch's transform — point its on_success at the branches value — rather than merely swapping "
+        "the branches value for one of the produced_connections.",
+    ),
+    (
+        r"node_input_not_reachable|input '(.+)' is not reachable",
         "A node's input connection point is not produced by the runtime routing fields.",
         "Set source.on_success or an upstream node's on_success/on_error/route/fork_to so it matches this node's input.",
     ),
@@ -386,16 +405,367 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "A sink output has invalid configuration. A required option may be missing (e.g. path for file-based sinks).",
         "Use get_pipeline_state to see the output's current options, then use patch_output_options to fix.",
     ),
+    # Contract-family entries are ORDER-SENSITIVE: the extras (locked-input)
+    # messages and the sink-edge messages both start with "Schema contract
+    # violation:", so the more specific patterns must precede the generic one.
     (
-        r"Schema contract violation: '.*' -> 'output:[^']+'",
-        "A sink schema requires fields that its upstream producer does not guarantee.",
+        r"sink_locked_extras|Extra fields rejected by sink input contract",
+        "The sink schema is locked (mode: fixed) and the upstream producer emits extra fields the sink does not accept. "
+        "The rejection's contract facts name the producer, the sink, and the extra field names.",
+        "Change ONLY that edge: relax the sink schema (mode: flexible), add the extra field names to the sink schema fields, "
+        "or insert a field_mapper with select_only: true before the sink to drop them.",
+    ),
+    (
+        r"locked_input_extras|Extra fields rejected by consumer input contract",
+        "The consumer node's input schema is locked (mode: fixed) and the upstream producer emits extra fields it does not accept. "
+        "The rejection's contract facts name the producer, the consumer, and the extra field names.",
+        "Change ONLY that edge: relax the consumer schema (mode: flexible), add the extra field names to the consumer schema fields, "
+        "or insert a field_mapper with select_only: true upstream to drop them.",
+    ),
+    (
+        r"transform_contract_violation|Transform contract violation:",
+        "A transform's declared output schema promises fields its own configuration cannot emit "
+        "(e.g. field_mapper with select_only: true only emits its mapping targets). "
+        "The rejection's contract facts name the node and the declared-but-unemitted field names.",
+        "Change ONLY that node: remove the missing field names from its schema declaration, extend its mapping so they are "
+        "actually produced, or set select_only: false.",
+    ),
+    (
+        r"semantic_contract_violation|Semantic contract violation:|Semantic contract:",
+        "A consumer requires a field to satisfy a semantic contract (content kind, framing, or value type) that its upstream "
+        "producer does not declare or actively conflicts with. The rejection's contract facts name the producer and consumer.",
+        "Call get_plugin_assistance for the consumer plugin to see which producers satisfy its semantic requirements, then "
+        "change ONLY that edge: swap the producer, or route through a transform that produces the required content kind.",
+    ),
+    (
+        r"contract_config_invalid|Invalid contract config:",
+        "A schema or contract declaration failed to parse — malformed fields spec, required_fields/required_input_fields with "
+        "the wrong shape (must be a list of strings), or an invalid mode.",
+        "Re-emit ONLY the offending component's schema options. Field specs are single-key dicts like {'field_name': 'str'} or "
+        "strings like 'field_name: str'; required_input_fields is a list of field-name strings; mode is one of observed, "
+        "flexible, fixed.",
+    ),
+    (
+        r"sink_contract_violation|Schema contract violation: '.*' -> 'output:[^']+'",
+        "A sink schema requires fields that its upstream producer does not guarantee. "
+        "The rejection's contract facts name the producer, the sink, and the missing field names.",
         "Call preview_pipeline to inspect edge_contracts, then either relax the sink schema with patch_output_options or update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
     ),
     (
-        r"Schema contract violation:",
-        "A downstream node requires fields that its upstream producer does not guarantee.",
+        r"schema_contract_violation|Schema contract violation:",
+        "A downstream node requires fields that its upstream producer does not guarantee. "
+        "The rejection's contract facts name the producer, the consumer, and the missing field names.",
         "Call preview_pipeline to inspect edge_contracts, then update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
     ),
+    # ── Closed structural node-shape codes ──────────────────────────────────
+    # The planner repair feedback strips validation messages; these codes are
+    # the only signal it carries, so each must be explainable here.
+    (
+        r"unknown[ _]node_type",
+        "The node_type is not one of the composer's node kinds: aggregation, coalesce, gate, queue, transform. There is no 'fork' node_type.",
+        "Keep your current pipeline shape and change ONLY the invalid node: forking is expressed with a GATE node — node_type='gate', condition='True', routes={'true': 'fork', 'false': 'fork'}, fork_to=['branch_a', 'branch_b']; each branch node reads one branch name as its input, and branches rejoin at a COALESCE node (branches + policy + merge). A node after the coalesce consumes it by setting input='<coalesce id>' — the coalesce's own on_success may only name a sink.",
+    ),
+    (
+        r"coalesce_on_success_must_be_sink|coalesce_on_success_unknown_sink|Coalesce on_success must point to a sink|Coalesce '(.+)' on_success references unknown sink",
+        "A coalesce node's on_success may only name an existing sink; merged rows otherwise flow to whichever node reads the coalesce id as its input.",
+        "Either set the coalesce on_success to a sink name from outputs[], or leave on_success null and give the downstream node input='<coalesce node id>'.",
+    ),
+    (
+        r"coalesce_missing_policy|Coalesce '(.+)' is missing required field 'policy'",
+        "A coalesce node must declare how it settles branches.",
+        "Set policy='require_all' (wait for every branch) and merge='union' (combine branch fields into one row); branches maps "
+        "each fork branch name to the connection ARRIVING at the coalesce — the branch's last transform on_success (e.g. "
+        "branches={'branch_a': 'a_done', 'branch_b': 'b_done'}), or the fork branch name itself only when that branch has no transforms.",
+    ),
+    (
+        r"coalesce_missing_branches|Coalesce '(.+)' is missing required field 'branches'",
+        "A coalesce node must name the branch connections it rejoins.",
+        "Set branches to a mapping of fork branch name -> the connection ARRIVING at the coalesce: the branch's last transform "
+        "on_success (e.g. branches={'branch_a': 'a_done', 'branch_b': 'b_done'}), or the fork branch name itself only when that "
+        "branch has no transforms. Add policy='require_all' and merge='union'.",
+    ),
+    (
+        r"transform_missing_on_success|Transform '(.+)' is missing required field 'on_success'",
+        "Every transform must route its successful rows somewhere.",
+        "Set the transform's on_success to the next connection or sink name; use on_error='discard' unless failed rows need a "
+        "quarantine sink. A transform on a fork branch that rejoins at a coalesce must publish the connection named by that "
+        "coalesce's branches value for its branch — not a sink.",
+    ),
+    (
+        r"transform_missing_on_error|Transform '(.+)' is missing required field 'on_error'",
+        "Every transform must declare where failed rows go.",
+        "Set the transform's on_error — 'discard' is the simplest safe choice, or route to a quarantine sink name.",
+    ),
+    (
+        r"gate_missing_condition|Gate '(.+)' is missing required field 'condition'",
+        "A gate node needs a boolean row expression to route on.",
+        "Set condition to a row expression (call get_expression_grammar for syntax); a pure fan-out gate uses condition='True'.",
+    ),
+    (
+        r"gate_missing_routes|Gate '(.+)' is missing required field 'routes'",
+        "A gate node needs a routes mapping for its condition outcomes.",
+        "Set routes={'true': <connection-or-'fork'>, 'false': <connection-or-'fork'>}; use 'fork' with fork_to=[...] to fan a row out to several branches.",
+    ),
+    (
+        r"fork_branch_no_destination|fork branch '(.+)' with no destination",
+        "Every gate fork_to branch name must land somewhere: as a KEY in a coalesce 'branches' mapping, or as an exact sink name.",
+        "Key the coalesce branches by the gate's fork branch names — e.g. fork_to=['branch_a','branch_b'] pairs with branches={'branch_a': '<connection arriving from that branch>', 'branch_b': '<connection>'} — where each value is the connection reaching the coalesce after any per-branch transforms (the transform's on_success).",
+    ),
+    (
+        r"coalesce_policy_invalid|coalesce_merge_invalid",
+        "Coalesce policy and merge use the engine's closed vocabularies.",
+        "Set policy to one of: require_all, quorum, best_effort, first — and merge to one of: union, nested, select. For an A/B rejoin that combines branch fields into one row: policy='require_all', merge='union'.",
+    ),
+    (
+        r"pipeline_decision_unregistered",
+        "A pipeline_decision interpretation review may only use one of the registered decision kinds — novel decision terms can never be reviewed or resolved.",
+        "Remove the pipeline_decision entry from the node's interpretation_requirements (record the rationale in metadata.description instead), or use an llm_prompt_template review for prompt-shaped decisions. Registered kinds: drop_raw_html_fields, web_scrape_http_identity, prompt_injection_shield_recommendation.",
+    ),
+    (
+        r"interpretation_requirements_invalid",
+        "A node's interpretation_requirements entry is malformed. interpretation_requirements is a list of review entry objects, each carrying string fields kind, user_term, and draft; the server-owned id and status fields are filled automatically.",
+        'Simplest fix: omit interpretation_requirements entirely — the required LLM reviews (prompt template, model choice) are auto-staged by the server, and the prompt-injection-shield recommendation is advisory. If you must stage a review, re-emit each entry as an object {kind, user_term, draft} with non-empty string values — e.g. {"kind": "pipeline_decision", "user_term": "prompt_injection_shield_recommendation", "draft": "<recommendation text>"} — and never author id, status, or resolved review metadata.',
+    ),
+    (
+        r"plugin_options_invalid",
+        "One or more of the component's options failed its plugin schema (missing required option, wrong shape, flexible schema without fields, or — for llm — a missing/invalid operator profile alias).",
+        "Call get_plugin_schema(<plugin_type>, <plugin_name>) for the exact option shapes and allowed values (the llm transform's 'profile' enum lists the operator-approved aliases), fix only the offending options, and re-emit. For schema options: use {mode: observed} to infer types, or provide explicit fields with mode fixed/flexible.",
+    ),
+    (
+        r"transform_on_success_dangling|aggregation_on_success_dangling|source_on_success_dangling|is neither a sink nor a known connection",
+        "An on_success destination must be an existing sink name or a connection another node reads as its input.",
+        "Point on_success at one of outputs[].sink_name exactly, or at the connection name a downstream node declares as its input. Call get_pipeline_state to list the current sink names and node input connections, then re-emit with a matching destination.",
+    ),
+    (
+        r"transform_on_error_unknown_sink|references unknown sink",
+        "An on_error destination may only be 'discard' or an existing sink name.",
+        "Set on_error='discard', or point it at one of outputs[].sink_name exactly.",
+    ),
+    (
+        r"gate_route_labels_mismatch|route labels don't match",
+        'A boolean gate condition routes on exactly the labels "true" and "false" — both must be present even when they share a destination.',
+        'Use routes={"true": <destination>, "false": <destination>}. For a pure fan-out gate: condition=\'True\', routes={"true": "fork", "false": "fork"}, fork_to=[<branch connections>]. Only string-returning conditions may use custom route labels.',
+    ),
+    (
+        r"proposal_missing_requested_transforms",
+        "The revision candidate contains no transform or aggregation nodes, but the operator's revision instruction asked for processing — a bare source-to-sink pass-through would ship a pipeline that silently performs none of the requested work behind a confident name.",
+        "Re-emit with the transform nodes the revision instruction requests, as a minimal delta: keep the reviewed source and sink wiring unchanged and add only the processing nodes. "
+        "If a pass-through with no transforms is genuinely what the instruction calls for, re-emit the same pipeline unchanged to confirm the deliberate no-transform intent — the confirmation will be accepted.",
+    ),
+    (
+        r"interpretation_review_draft_malformed|cleanup review draft is malformed",
+        "The cleanup node's interpretation_requirements row IS present and its user_term matches the registered decision kind, but the draft text fails marker recognition — the contract recognizes the draft only when it contains both 'raw html' and 'fingerprint'. Do NOT add another row; the fix is the draft text alone.",
+        "On the existing cleanup row, replace ONLY the draft string with the canonical draft, copied verbatim without rephrasing: "
+        f'"{RAW_HTML_CLEANUP_REVIEW_DRAFT}". '
+        "Keep the row's user_term and every other pipeline detail unchanged, and re-emit the FULL set_pipeline call.",
+    ),
+    (
+        r"interpretation_review_contract_unsatisfied|drops web-scrape raw field",
+        "A cleanup node that drops web-scrape raw fields (field_mapper with select_only=true) must stage an interpretation review recording that decision before the pipeline is accepted. "
+        "The row is recognized ONLY when user_term is the registered decision kind and the draft text names both the raw HTML and the fingerprint fields — a paraphrased draft is NOT recognized and this same code fires again.",
+        # The literal minimal delta (tutorial op 18b4cee7: four generations
+        # looped on this code because free-text drafts fail the contract's
+        # marker recognition). Quote the registered user_term and the
+        # canonical draft VERBATIM so a copy-paste repair always lands.
+        "On the cleanup field_mapper node, add options.interpretation_requirements — a SIBLING of mapping, never inside it — containing exactly this entry: "
+        f'{{"kind": "pipeline_decision", "user_term": "{RAW_HTML_CLEANUP_USER_TERM}", "draft": "{RAW_HTML_CLEANUP_REVIEW_DRAFT}"}}. '
+        "Copy the user_term and draft strings verbatim — do not rephrase the draft. "
+        "Then re-emit the FULL set_pipeline call with that requirement in place; rejected set_pipeline calls do not persist partial nodes.",
+    ),
+    (
+        r"file_sink_write_policy_invalid|must set collision_policy explicitly|must set mode explicitly",
+        "File sinks require an explicit write policy: options.mode and options.collision_policy must both be present and consistent.",
+        "Set options.mode='write' with collision_policy='auto_increment' (or 'fail_if_exists'), or options.mode='append' with collision_policy='append_or_create', on every file-based outputs[] entry.",
+    ),
+    (
+        r"no_source_configured|No source configured",
+        "The pipeline has no source; every pipeline reads rows from exactly one configured source (or named sources).",
+        "Include a source block in the set_pipeline call — plugin, on_success connection, and options with a schema.",
+    ),
+    (
+        r"no_sinks_configured|No sinks configured",
+        "The pipeline has no outputs; rows must land in at least one sink.",
+        "Include at least one outputs[] entry — sink_name, plugin, and options (file-based sinks need a path under outputs/).",
+    ),
+    (
+        r"source_name_invalid",
+        "A named source uses an invalid name.",
+        "Source names must be short lowercase identifiers; rename the source key and re-emit.",
+    ),
+    (
+        r"reserved_node_id|Reserved node id|reserved source producer namespace",
+        "The id 'source' and the 'source:<name>' namespace are reserved for pipeline sources; no node or queue may use them.",
+        "Rename the node to a descriptive id (e.g. 'clean_rows') and update every routing field that referenced the old id.",
+    ),
+    (
+        r"duplicate_node_id|Duplicate node ID",
+        "Two nodes share the same id; node ids must be unique.",
+        "Rename one of the nodes and update the routing fields that reference it.",
+    ),
+    (
+        r"duplicate_output_name|Duplicate output name",
+        "Two outputs share the same sink name; sink names must be unique.",
+        "Rename one of the outputs and update any on_success/on_error/route that targets it.",
+    ),
+    (
+        r"duplicate_edge_id|Duplicate edge ID",
+        "Two edges share the same id.",
+        "Edges are UI-only; drop the duplicate edge entry (runtime routing uses the connection fields, not edges).",
+    ),
+    (
+        r"edge_unknown_node|references unknown node",
+        "An edge names a from_node or to_node that does not exist in the pipeline.",
+        "Edges are UI-only; drop the stale edge or fix its node reference — runtime routing uses the connection fields.",
+    ),
+    (
+        r"duplicate_connection_producer|Duplicate producer for connection",
+        "Two different components publish rows to the same connection name; every connection has exactly one producer.",
+        "Rename one producer's on_success (or route/fork_to target) to a distinct connection name and point the intended "
+        "consumer's input at it. To merge branches, use a coalesce node — not a shared connection name.",
+    ),
+    (
+        r"duplicate_connection_consumer|Duplicate consumer for connection",
+        "Two different nodes read the same connection as their input; every connection has exactly one consumer.",
+        "Give each consumer its own input connection (fan out with a gate fork_to if both need the same rows).",
+    ),
+    (
+        r"connection_sink_name_overlap|Connection names overlap with sink names|collides with a sink of the same name",
+        "A connection name and a sink name are identical; connection and sink names must be disjoint so routing is unambiguous.",
+        "Rename the connection (the node id or on_success value) so it no longer matches any outputs[].sink_name.",
+    ),
+    (
+        r"gate_condition_invalid",
+        "A gate's condition expression failed to parse or uses disallowed syntax.",
+        "Set condition to a valid row expression (call get_expression_grammar for the syntax); a pure fan-out gate uses condition='True'.",
+    ),
+    (
+        r"aggregation_missing_on_error|Aggregation '(.+)' is missing required field 'on_error'",
+        "Every aggregation must declare where failed rows go.",
+        "Set the aggregation's on_error — 'discard' is the simplest safe choice, or route to a quarantine sink name.",
+    ),
+    (
+        r"aggregation_output_mode_invalid",
+        "An aggregation's output_mode is not one of the allowed values.",
+        "Set output_mode to 'passthrough' or 'transform' (or omit it for the default).",
+    ),
+    (
+        r"batch_transform_misplaced",
+        "A batch-aware plugin is configured as a row-level transform; batch plugins only run as aggregations.",
+        "Re-emit the node with node_type='aggregation' and a trigger (e.g. trigger={'count': N}), or pick a row-level transform plugin.",
+    ),
+    (
+        r"batch_required_fields_invalid",
+        "A batch-aware aggregation's required_input_fields declaration is invalid for its plugin.",
+        "Call get_plugin_schema('transform', <plugin>) for the exact option shapes and re-emit only the offending options.",
+    ),
+    (
+        r"batch_value_field_not_numeric",
+        "batch_distribution_profile.value_field must reference a numeric (int/float) field, but the upstream schema declares a non-numeric type.",
+        "Point value_field at a numeric field, or use batch_top_k for categorical distributions.",
+    ),
+    (
+        r"queue_config_invalid",
+        "A queue node's shape is invalid — a queue's id must equal its input, with no plugin, routing, or options beyond a description.",
+        "Re-emit the queue with id == input and only a description in options, or remove the queue node.",
+    ),
+    (
+        r"queue_no_consumer",
+        "A queue has no downstream consumer; a queue must feed exactly one ordinary node.",
+        "Give one downstream node input='<queue id>', or remove the queue.",
+    ),
+    (
+        r"queue_name_collision|collides with a source of the same name",
+        "A queue's id collides with a source name; source and queue names must be globally unique.",
+        "Rename the queue node (its id and the consumer's input) so it no longer matches any source name.",
+    ),
+    (
+        r"aggregation_trigger_invalid|trigger is invalid",
+        "An aggregation's trigger failed to parse.",
+        "Set trigger to a valid shape, e.g. trigger={'count': N} to aggregate every N rows, or omit it to aggregate at end of source.",
+    ),
+    (
+        r"web_scrape_http_identity_invalid",
+        "web_scrape.http identity fields (abuse_contact, scraping_reason) carry a placeholder or undeliverable value; these ship "
+        "as HTTP headers to the scraped host and must be real operator-supplied identity.",
+        "Ask the operator for the deployment's abuse contact email and scraping reason, or leave the http block for the operator "
+        "to fill — never invent an email or domain.",
+    ),
+)
+
+
+# The closed validation codes the planner's redacted repair feedback can carry
+# (see ``pipeline_planner._allowlisted_candidate_feedback``). Every entry MUST
+# resolve through :func:`explain_validation_code` — the explain tool's fallback
+# advertises this list and its fuzzy route scans for these substrings, so a
+# dead entry would route the model to a code that then explains nothing
+# (test_closed_code_catalogue_is_fully_explainable pins the invariant).
+_CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
+    "unknown_node_type",
+    "coalesce_on_success_must_be_sink",
+    "coalesce_missing_policy",
+    "coalesce_missing_branches",
+    "coalesce_policy_invalid",
+    "coalesce_merge_invalid",
+    "transform_missing_on_success",
+    "transform_missing_on_error",
+    "transform_on_success_dangling",
+    "transform_on_error_unknown_sink",
+    "aggregation_on_success_dangling",
+    "source_on_success_dangling",
+    "gate_missing_condition",
+    "gate_missing_routes",
+    "gate_route_labels_mismatch",
+    "fork_branch_no_destination",
+    "pipeline_decision_unregistered",
+    "interpretation_requirements_invalid",
+    "plugin_options_invalid",
+    # ── Schema-contract family (2026-07-22 codeless-rejection closure) ──────
+    # Emitted with a SchemaContractDetail naming producer/consumer/fields so
+    # the planner's redacted repair feedback carries actionable structure.
+    "schema_contract_violation",
+    "sink_contract_violation",
+    "locked_input_extras",
+    "sink_locked_extras",
+    "transform_contract_violation",
+    "semantic_contract_violation",
+    "contract_config_invalid",
+    # ── Structural rejections (same closure sweep) ──────────────────────────
+    "no_source_configured",
+    "no_sinks_configured",
+    "source_name_invalid",
+    "reserved_node_id",
+    "duplicate_node_id",
+    "duplicate_output_name",
+    "duplicate_edge_id",
+    "edge_unknown_node",
+    "duplicate_connection_producer",
+    "duplicate_connection_consumer",
+    "connection_sink_name_overlap",
+    "gate_condition_invalid",
+    "aggregation_missing_plugin",
+    "aggregation_missing_on_error",
+    "aggregation_output_mode_invalid",
+    "batch_transform_misplaced",
+    "batch_required_fields_invalid",
+    "batch_value_field_not_numeric",
+    "queue_config_invalid",
+    "queue_no_consumer",
+    "queue_name_collision",
+    "coalesce_branch_unreachable",
+    "node_input_not_reachable",
+    "coalesce_on_success_unknown_sink",
+    "aggregation_trigger_invalid",
+    "web_scrape_http_identity_invalid",
+    # ── Pre-application semantic rejections (tutorial op 1152d7e3 closure) ──
+    # Previously codeless _failure_result sites: the planner saw only the
+    # 'validation_error' placeholder while the actionable message was redacted.
+    "interpretation_review_contract_unsatisfied",
+    "interpretation_review_draft_malformed",
+    "file_sink_write_policy_invalid",
+    # ── Nodeless-revision guard (same closure; proposal 3cb6532e) ──────────
+    # A revision candidate netting zero transform nodes drew one coded nudge
+    # instead of silently shipping a passthrough with aspirational metadata.
+    "proposal_missing_requested_transforms",
 )
 
 
@@ -435,20 +805,48 @@ def _augment_with_expected_hint(fix: str, error_text: str) -> str:
     return f"{fix} {hint}"
 
 
+def explain_validation_code(code: str) -> tuple[str, str] | None:
+    """Resolve a closed validation ``error_code`` to ``(explanation, suggested_fix)``.
+
+    The one-shot pipeline planner's repair feedback strips raw validation
+    messages before returning a rejection to the model — a redaction boundary,
+    since a raw message can quote plugin names, option values, or row content
+    (see ``pipeline_planner._allowlisted_candidate_feedback``). The closed
+    ``error_code`` is the only signal that survives. The "Closed structural
+    node-shape codes" entries in :data:`_VALIDATION_ERROR_PATTERNS` deliberately
+    embed those codes as regex alternations precisely so the *code alone*
+    resolves to the same guidance the ``explain_validation_error`` tool returns
+    for the full message — this accessor is what lets the planner feedback carry
+    that fix (e.g. "there is no 'fork' node_type; fork with a gate") without
+    re-opening the message boundary.
+
+    Returns ``None`` when no pattern matches, so callers attach nothing rather
+    than a misleading generic. The ``_augment_with_expected_hint`` span is
+    intentionally NOT applied: there is no error_text to mine an ``Expected …``
+    hint from — only the bare code.
+    """
+    if type(code) is not str or not code:
+        return None
+    for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
+        if re.search(pattern, code):
+            return explanation, fix
+    return None
+
+
 def _execute_explain_validation_error(
     args: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     """Explain a validation error with human-readable diagnosis and fix."""
-    del context  # unused; signature uniformity with the other handlers.
+    validation = context.catalog.validate_composition_state(state).validation
     error_text = args["error_text"]
     for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
         if re.search(pattern, error_text):
             return ToolResult(
                 success=True,
                 updated_state=state,
-                validation=state.validate(),
+                validation=validation,
                 affected_nodes=(),
                 data={
                     "error_text": error_text,
@@ -456,19 +854,46 @@ def _execute_explain_validation_error(
                     "suggested_fix": _augment_with_expected_hint(fix, error_text),
                 },
             )
-    # No match — return a generic response
+    # Fuzzy route: live planners pass junk like "ValidationError" or
+    # "node:X ValidationError validation_error" instead of the message or the
+    # bare code. A closed code buried in noise (any case) still resolves —
+    # the direct pattern pass above is case-sensitive, so this catches e.g.
+    # an upper-cased code echoed from a log line.
+    lowered = error_text.lower()
+    for code in _CLOSED_VALIDATION_ERROR_CODES:
+        if code in lowered:
+            guidance = explain_validation_code(code)
+            if guidance is None:  # pragma: no cover — catalogue invariant is test-pinned
+                continue
+            explanation, fix = guidance
+            return ToolResult(
+                success=True,
+                updated_state=state,
+                validation=validation,
+                affected_nodes=(),
+                data={
+                    "error_text": error_text,
+                    "error_code": code,
+                    "explanation": explanation,
+                    "suggested_fix": _augment_with_expected_hint(fix, error_text),
+                },
+            )
+    # No match at all — teach usage instead of an unhelpful generic. The codes
+    # are a public static catalogue, so listing them leaks nothing.
     return ToolResult(
         success=True,
         updated_state=state,
-        validation=state.validate(),
+        validation=validation,
         affected_nodes=(),
         data={
             "error_text": error_text,
-            "explanation": "This error is not in the known pattern catalogue.",
+            "explanation": "The text does not match any known validation message or closed error_code.",
             "suggested_fix": _augment_with_expected_hint(
-                "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+                "Call explain_validation_error with the exact error_code string from the rejection "
+                "feedback's validation.errors[].error_code. Closed codes: " + ", ".join(_CLOSED_VALIDATION_ERROR_CODES) + ".",
                 error_text,
             ),
+            "known_codes": list(_CLOSED_VALIDATION_ERROR_CODES),
         },
     )
 
@@ -553,13 +978,13 @@ def _execute_get_plugin_assistance(
         )
     plugin_type: PluginKind = plugin_type_raw
 
+    policy_error = _validate_plugin_name(context, plugin_type, plugin_name)
+    if policy_error is not None:
+        return _plugin_policy_failure(state, policy_error)
     try:
-        schema = context.catalog.get_schema(plugin_type, plugin_name)
+        context.catalog.get_schema(plugin_type, plugin_name)
     except (ValueError, KeyError) as exc:
         return _failure_result(state, str(exc))
-    unavailable = schema_secret_unavailable_message(schema, context)
-    if unavailable is not None:
-        return _failure_result(state, unavailable)
 
     manager = get_shared_plugin_manager()
     try:
@@ -1695,7 +2120,7 @@ def _execute_preview_pipeline(
     blob). The presence of any blocking ``proof_diagnostics`` entry means
     ``is_valid=False`` even when authoring + runtime checks pass.
     """
-    validation = state.validate()
+    validation = context.catalog.validate_composition_state(state).validation
     _AUTHORING_VALIDATION_COUNTER.add(
         1,
         {"outcome": "valid" if validation.is_valid else "invalid"},
@@ -1791,7 +2216,13 @@ def _execute_diff_pipeline(
             },
         )
 
-    changes = diff_states(baseline, state, current_validation=current_validation)
+    baseline_validation = context.catalog.validate_composition_state(baseline).validation
+    changes = diff_states(
+        baseline,
+        state,
+        baseline_validation=baseline_validation,
+        current_validation=current_validation,
+    )
     return _discovery_result(state, changes)
 
 

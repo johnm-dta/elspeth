@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { useTheme, type Theme } from "@/hooks/useTheme";
 import type { ComposerMode } from "@/types/api";
 
 /**
@@ -16,13 +17,20 @@ import type { ComposerMode } from "@/types/api";
  * banner's timing watermark is set if the user opts out from settings
  * while a session is active.
  */
-export function ComposerPreferencesForm(): JSX.Element | null {
+interface ComposerPreferencesFormProps {
+  onResetTutorialComplete?: () => void;
+}
+
+export function ComposerPreferencesForm({
+  onResetTutorialComplete,
+}: ComposerPreferencesFormProps = {}): JSX.Element | null {
   const defaultMode = usePreferencesStore((s) => s.defaultMode);
   const loaded = usePreferencesStore((s) => s.loaded);
   const writing = usePreferencesStore((s) => s.writing);
   const writeError = usePreferencesStore((s) => s.writeError);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
   const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
+  const { theme, setTheme } = useTheme();
 
   // TODO(hidden-jobs-settings): Add a user-settings view for hidden jobs
   // (run-bearing sessions archived from the switcher). The session switcher
@@ -47,10 +55,18 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const onResetTutorial = useCallback(async () => {
     try {
       await resetTutorial();
+      onResetTutorialComplete?.();
     } catch (err) {
       console.error("[preferences] resetTutorial failed:", err);
     }
-  }, [resetTutorial]);
+  }, [onResetTutorialComplete, resetTutorial]);
+
+  const onThemeChange = useCallback(
+    (nextTheme: Theme) => {
+      setTheme(nextTheme);
+    },
+    [setTheme],
+  );
 
   if (!loaded || defaultMode === null) return null;
 
@@ -79,6 +95,39 @@ export function ComposerPreferencesForm(): JSX.Element | null {
             onChange={() => void onChange("freeform")}
           />
           <span>Freeform</span>
+        </label>
+      </fieldset>
+      <fieldset style={{ marginTop: 16 }}>
+        <legend>Theme</legend>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="system"
+            checked={theme === "system"}
+            onChange={() => onThemeChange("system")}
+          />
+          <span>System</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="light"
+            checked={theme === "light"}
+            onChange={() => onThemeChange("light")}
+          />
+          <span>Light</span>
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="composer-theme"
+            value="dark"
+            checked={theme === "dark"}
+            onChange={() => onThemeChange("dark")}
+          />
+          <span>Dark</span>
         </label>
       </fieldset>
       {writeError !== null && (
@@ -116,6 +165,7 @@ export function ComposerPreferencesForm(): JSX.Element | null {
 
 interface ComposerPreferencesPanelProps {
   onClose: () => void;
+  onResetTutorialComplete?: () => void;
 }
 
 /**
@@ -126,6 +176,7 @@ interface ComposerPreferencesPanelProps {
  */
 export function ComposerPreferencesPanel({
   onClose,
+  onResetTutorialComplete,
 }: ComposerPreferencesPanelProps): JSX.Element {
   const modalRef = useRef<HTMLDivElement>(null);
   useFocusTrap(
@@ -202,7 +253,9 @@ export function ComposerPreferencesPanel({
           </button>
         </div>
         <div className="secrets-panel-body">
-          <ComposerPreferencesForm />
+          <ComposerPreferencesForm
+            onResetTutorialComplete={onResetTutorialComplete ?? onClose}
+          />
         </div>
       </div>
     </>

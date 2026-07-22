@@ -136,6 +136,32 @@ class TestAllocateCallIndex:
         idx = factory2.execution.allocate_call_index(state_id)
         assert idx == 4
 
+    def test_collision_remap_advances_local_state_counter(self):
+        """A DB-remapped allocation advances the losing recorder's cache."""
+        db, first, state_id = _setup()
+        second = make_factory(db)
+        first_index = first.execution.allocate_call_index(state_id)
+        second_index = second.execution.allocate_call_index(state_id)
+        assert (first_index, second_index) == (0, 0)
+
+        first.execution.record_call(
+            state_id,
+            first_index,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"worker": "first"}),
+        )
+        remapped = second.execution.record_call(
+            state_id,
+            second_index,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"worker": "second"}),
+        )
+
+        assert remapped.call_index == 1
+        assert second.execution.allocate_call_index(state_id) == 2
+
     def test_seeds_operation_call_index_on_factory_recreation(self):
         """Simulate resume: new factory seeds operation call indices from DB."""
         db, factory, _state_id, operation_id = _setup_with_operation()
@@ -156,6 +182,32 @@ class TestAllocateCallIndex:
         # New factory should seed from DB and continue at index 2
         idx = factory2.execution.allocate_operation_call_index(operation_id)
         assert idx == 2
+
+    def test_collision_remap_advances_local_operation_counter(self):
+        """Operation-call remapping also advances the losing recorder cache."""
+        db, first, _state_id, operation_id = _setup_with_operation()
+        second = make_factory(db)
+        first_index = first.execution.allocate_operation_call_index(operation_id)
+        second_index = second.execution.allocate_operation_call_index(operation_id)
+        assert (first_index, second_index) == (0, 0)
+
+        first.execution.record_operation_call(
+            operation_id,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"worker": "first"}),
+            call_index=first_index,
+        )
+        remapped = second.execution.record_operation_call(
+            operation_id,
+            CallType.HTTP,
+            CallStatus.SUCCESS,
+            request_data=RawCallPayload({"worker": "second"}),
+            call_index=second_index,
+        )
+
+        assert remapped.call_index == 1
+        assert second.execution.allocate_operation_call_index(operation_id) == 2
 
     def test_fresh_state_id_starts_at_zero_with_db_seeding(self):
         """A state_id with no DB entries still starts at 0."""
@@ -1246,7 +1298,7 @@ class TestGetCallResponseData:
         import shutil
 
         shutil.rmtree(tmp_path / "payloads")
-        (tmp_path / "payloads").mkdir()
+        (tmp_path / "payloads").mkdir(mode=0o700)
 
         result = factory.execution.get_call_response_data(call.call_id)
         assert result.state == CallDataState.PURGED

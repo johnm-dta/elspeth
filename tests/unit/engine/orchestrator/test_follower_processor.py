@@ -54,6 +54,7 @@ from elspeth.contracts.coordination import (
 )
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FollowerSeatDeadError, RunWorkerEvictedError
+from elspeth.contracts.plugin_capabilities import WebConfigAuthority
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.engine.orchestrator.follower import FollowerProcessor, _SeatDeadError
 
@@ -117,6 +118,8 @@ class _UncalledBatchTransform:
         self.usage_when_not_to_use = None
         self.example_use = None
         self.capability_tags: tuple[str, ...] = ()
+        self.web_config_authority = WebConfigAuthority.USER_CONFIGURABLE
+        self.policy_capabilities = frozenset()
         self.audit_characteristics = frozenset()
         self.discovery_secret_requirements = MappingProxyType({})
         self._on_start_called = True

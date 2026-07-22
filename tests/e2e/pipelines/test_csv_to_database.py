@@ -10,7 +10,7 @@ import csv
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import Column, MetaData, Table, Text, create_engine, func, select, text
 
 from elspeth.contracts import RunStatus
 from elspeth.core.config import SourceSettings
@@ -19,7 +19,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import rows_table, token_outcomes_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-from elspeth.plugins.sinks.database_sink import DatabaseSink
+from elspeth.plugins.sinks.database_sink import DatabaseSink, database_effect_ledger_table
 from elspeth.plugins.sources.csv_source import CSVSource
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
 from tests.fixtures.factories import wire_transforms
@@ -32,6 +32,23 @@ def _write_csv(path: Path, headers: list[str], rows: list[list[str]]) -> None:
         writer = csv.writer(f)
         writer.writerow(headers)
         writer.writerows(rows)
+
+
+_EFFECT_LEDGER = {
+    "table": "_elspeth_sink_effects",
+    "schema_version": 1,
+    "permissions": ["select", "insert"],
+}
+
+
+def _provision_database_effect_target(url: str, *, table_name: str, columns: list[str]) -> None:
+    """Provision the operator-owned target table and recovery ledger."""
+    engine = create_engine(url)
+    metadata = MetaData()
+    Table(table_name, metadata, *(Column(name, Text) for name in columns))
+    database_effect_ledger_table(metadata, "_elspeth_sink_effects")
+    metadata.create_all(engine)
+    engine.dispose()
 
 
 class TestCSVToDatabase:
@@ -53,6 +70,7 @@ class TestCSVToDatabase:
             ["5", "Eve", "88"],
         ]
         _write_csv(input_csv, headers, input_rows)
+        _provision_database_effect_target(output_db_url, table_name="pipeline_output", columns=headers)
 
         # DatabaseSink needs ELSPETH_ALLOW_RAW_SECRETS for non-env-var URLs in tests
         env_patch = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS")
@@ -75,7 +93,8 @@ class TestCSVToDatabase:
                     "url": output_db_url,
                     "table": "pipeline_output",
                     "schema": {"mode": "observed"},
-                    "if_exists": "replace",
+                    "if_exists": "append",
+                    "effect_ledger": _EFFECT_LEDGER,
                 }
             )
 
@@ -136,6 +155,7 @@ class TestCSVToDatabase:
             ["3", "gamma"],
         ]
         _write_csv(input_csv, headers, input_rows)
+        _provision_database_effect_target(output_db_url, table_name="test_output", columns=headers)
 
         env_patch = os.environ.get("ELSPETH_ALLOW_RAW_SECRETS")
         os.environ["ELSPETH_ALLOW_RAW_SECRETS"] = "true"
@@ -157,7 +177,8 @@ class TestCSVToDatabase:
                     "url": output_db_url,
                     "table": "test_output",
                     "schema": {"mode": "observed"},
-                    "if_exists": "replace",
+                    "if_exists": "append",
+                    "effect_ledger": _EFFECT_LEDGER,
                 }
             )
 

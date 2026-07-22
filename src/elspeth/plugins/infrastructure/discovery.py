@@ -6,6 +6,7 @@ Scans plugin directories for classes that:
 3. Are not abstract (no @abstractmethod methods without implementation)
 """
 
+import importlib
 import importlib.util
 import inspect
 import logging
@@ -138,6 +139,22 @@ def _canonical_module_name(py_file: Path) -> str | None:
     return None
 
 
+def _bind_canonical_module_to_parent(canonical_name: str, module: object) -> None:
+    """Complete the package binding performed by ordinary imports.
+
+    Inserting a dotted name directly into ``sys.modules`` does not expose the
+    child on its parent package.  Dotted monkeypatch/import traversal expects
+    both registrations to identify the same module object.
+    """
+    parent_name, separator, child_name = canonical_name.rpartition(".")
+    if not separator:
+        return
+    parent = importlib.import_module(parent_name)
+    if sys.modules.get(canonical_name) is not module:
+        raise RuntimeError(f"Canonical module identity changed while binding {canonical_name!r}")
+    setattr(parent, child_name, module)
+
+
 def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
     """Discover plugin classes in a single Python file.
 
@@ -152,6 +169,8 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
     # If the module was already imported canonically (e.g. by another plugin's
     # module-level imports), reuse it to avoid dual class objects.
     canonical_name = _canonical_module_name(py_file)
+    registered_name: str | None = None
+    canonical_registered = False
     if canonical_name is not None and canonical_name in sys.modules:
         module = sys.modules[canonical_name]
     else:
@@ -194,6 +213,17 @@ def _discover_in_file(py_file: Path, base_class: type) -> list[type]:
         # find the same module object rather than loading a duplicate.
         if canonical_name is not None and canonical_name not in sys.modules:
             sys.modules[canonical_name] = module
+            canonical_registered = True
+
+    if canonical_name is not None:
+        try:
+            _bind_canonical_module_to_parent(canonical_name, module)
+        except Exception:
+            if canonical_registered and sys.modules.get(canonical_name) is module:
+                del sys.modules[canonical_name]
+            if registered_name is not None and sys.modules.get(registered_name) is module:
+                del sys.modules[registered_name]
+            raise
 
     # Find classes that inherit from base_class
     discovered: list[type] = []
@@ -256,7 +286,7 @@ def _get_base_classes() -> dict[str, type]:
 # See "System Operations (NOT Plugins)" section in the plugin protocol.
 PLUGIN_SCAN_CONFIG: dict[str, list[str]] = {
     "sources": ["sources"],
-    "transforms": ["transforms", "transforms/azure", "transforms/llm", "transforms/rag"],
+    "transforms": ["transforms", "transforms/aws", "transforms/azure", "transforms/llm", "transforms/rag"],
     "sinks": ["sinks"],
 }
 

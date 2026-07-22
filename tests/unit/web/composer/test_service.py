@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import threading
 from dataclasses import dataclass, replace
@@ -19,17 +20,31 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_progress import ComposerProgressEvent
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import stable_hash
+from elspeth.core.canonical import canonical_json
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+from elspeth.web.composer.guided.prompts import load_step_planner_skill
+from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.pipeline_planner import PlannerOriginatingMessage
+from elspeth.web.composer.pipeline_proposal import PlannerSurface, PresentBase
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,
     ComposerResult,
     ComposerRuntimePreflightError,
     ComposerServiceError,
+    PipelineCommitIntent,
     ToolArgumentError,
 )
+from elspeth.web.composer.recipes import recipe_catalog_content_hash
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
     ComposerAvailability,
@@ -38,13 +53,14 @@ from elspeth.web.composer.service import (
 )
 from elspeth.web.composer.state import (
     CompositionState,
+    EdgeSpec,
     OutputSpec,
     PipelineMetadata,
     SourceSpec,
     ValidationSummary,
 )
 from elspeth.web.composer.tools import ToolResult
-from elspeth.web.composer.tools import execute_tool as _execute_tool
+from elspeth.web.composer.tools import execute_tool as _strict_execute_tool
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.schemas import (
     ValidationCheck,
@@ -56,8 +72,10 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
+from elspeth.web.sessions.protocol import GuidedOperationFence
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -73,6 +91,213 @@ from tests.unit.web.composer._helpers import (
     _mock_catalog,
     _stub_advisor_end_gate_clean,  # noqa: F401  (autouse end-gate CLEAN stub)
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected_surface", "expected_profile"),
+    (
+        (EMPTY_PROFILE, PlannerSurface.GUIDED_STAGED, "ordinary"),
+        (TUTORIAL_PROFILE, PlannerSurface.TUTORIAL_PROFILE, "tutorial"),
+    ),
+)
+async def test_guided_service_routes_step3_through_the_planner_only_capability_prompt(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Any,
+    expected_surface: PlannerSurface,
+    expected_profile: str,
+) -> None:
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        # A root intent keeps this on the provider planner path: rootless 1x1
+        # step-3 entries now server-synthesize the starting sketch without a
+        # provider call, and this test asserts the provider prompt rendering.
+        root_intent_message_id="33333333-3333-4333-8333-333333333333",
+        profile=profile,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    captured: list[dict[str, Any]] = []
+    sentinel_plan = object()
+
+    async def capture_plan_pipeline(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return sentinel_plan
+
+    monkeypatch.setattr("elspeth.web.composer.service.plan_pipeline", capture_plan_pipeline)
+    current_state = _empty_state()
+    session_id = uuid4()
+    custody_fence = GuidedOperationFence(
+        session_id=session_id,
+        operation_id=str(uuid4()),
+        lease_token=uuid4().hex,
+        attempt=1,
+    )
+    result, _catalog_ids = await composer_service_with_real_sessions.plan_guided_pipeline(
+        intent="Build the reviewed pipeline.",
+        current_state=current_state,
+        guided=guided,
+        originating_message=PlannerOriginatingMessage(
+            session_id=str(session_id),
+            message_id=str(uuid4()),
+            content="Build the reviewed pipeline.",
+            user_id="test-user",
+        ),
+        base=PresentBase(state_id=uuid4(), composition_content_hash="0" * 64),
+        user_id="test-user",
+        supersedes_draft_hash=None,
+        recorder=BufferingRecorder(),
+        operation_fence=custody_fence,
+    )
+
+    assert result is sentinel_plan
+    assert len(captured) == 1
+    assert captured[0]["surface"] is expected_surface
+    assert captured[0]["profile"] == expected_profile
+    assert captured[0]["rendered_skill"] == load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS)
+    assert captured[0]["custody_config"].write_fence == BlobGuidedOperationWriteFence(
+        session_id=custody_fence.session_id,
+        operation_id=custody_fence.operation_id,
+        lease_token=custody_fence.lease_token,
+        attempt=custody_fence.attempt,
+    )
+
+
+@pytest.mark.asyncio
+async def test_actual_step3_staged_and_tutorial_adapters_render_identical_provider_requests(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    sessions = cast(SessionServiceImpl | None, composer_service_with_real_sessions._sessions_service)
+    assert sessions is not None
+    actual_service = ComposerServiceImpl.for_trained_operator(
+        composer_service_with_real_sessions._catalog,
+        composer_service_with_real_sessions._settings,
+        sessions_service=sessions,
+        session_engine=sessions._engine,
+    )
+    session = await sessions.create_session("test-user", "Planner parity", "local")
+    source_id = "11111111-1111-4111-8111-111111111111"
+    output_id = "22222222-2222-4222-8222-222222222222"
+    ordinary = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        # Root intent: keep both adapters on the provider path (see above).
+        root_intent_message_id="33333333-3333-4333-8333-333333333333",
+        profile=EMPTY_PROFILE,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="input",
+                plugin="csv",
+                options={"path": "/data/input.csv"},
+                observed_columns=("id",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="results",
+                plugin="json",
+                options={"path": "/data/results.jsonl"},
+                required_fields=("id",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    manifests: list[Any] = []
+    requests: list[dict[str, Any]] = []
+    real_builder = planner_module.build_planner_capability_manifest  # type: ignore[attr-defined]
+
+    def capture_manifest(**kwargs: Any) -> Any:
+        manifest = real_builder(**kwargs)
+        manifests.append(manifest)
+        return manifest
+
+    async def mutating_completion(**kwargs: Any) -> Any:
+        kwargs["messages"][0]["content"] += "\nprovider-side mutation"
+        requests.append(kwargs)
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)  # type: ignore[attr-defined]
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
+
+    for guided in (ordinary, replace(ordinary, profile=TUTORIAL_PROFILE)):
+        with pytest.raises(AuditIntegrityError, match="planner call inputs changed"):
+            await actual_service.plan_guided_pipeline(
+                intent="Build the reviewed pipeline.",
+                current_state=_empty_state(),
+                guided=guided,
+                originating_message=PlannerOriginatingMessage(
+                    session_id=str(session.id),
+                    message_id=None,
+                    content="Build the reviewed pipeline.",
+                    user_id="test-user",
+                ),
+                base=PresentBase(state_id=UUID("55555555-5555-4555-8555-555555555555"), composition_content_hash="0" * 64),
+                user_id="test-user",
+                supersedes_draft_hash=None,
+                recorder=BufferingRecorder(),
+                operation_fence=GuidedOperationFence(
+                    session_id=session.id,
+                    operation_id=str(uuid4()),
+                    lease_token=uuid4().hex,
+                    attempt=1,
+                ),
+            )
+
+    assert len(manifests) == len(requests) == 2
+    assert [manifest.surface for manifest in manifests] == [PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE]
+    assert [manifest.profile for manifest in manifests] == ["ordinary", "tutorial"]
+    assert manifests[0].rendered_prompt_hash == manifests[1].rendered_prompt_hash
+    assert manifests[0].effective_tool_hash == manifests[1].effective_tool_hash
+    assert requests[0]["messages"] == requests[1]["messages"]
+    assert requests[0]["tools"] == requests[1]["tools"]
+
+
+def _execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: Any,
+    **kwargs: Any,
+) -> ToolResult:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _strict_execute_tool(
+        tool_name,
+        arguments,
+        state,
+        PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _execution_ready() -> ValidationReadiness:
@@ -320,7 +545,7 @@ class TestComposerTextOnlyResponse:
         """Non-build text-only replies still terminate without mutation."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
         )
@@ -341,7 +566,7 @@ class TestComposerTextOnlyResponse:
         """A build request cannot end with conceptual prose when no mutation ran."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         model_prose = "I set up the workflow conceptually and can continue."
         llm_response = _make_llm_response(content=model_prose)
@@ -370,7 +595,7 @@ class TestComposerTextOnlyResponse:
         """A failed mutation followed by final prose must surface the tool error."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         failed_set_pipeline = _make_llm_response(
             tool_calls=[
@@ -405,84 +630,13 @@ class TestComposerTextOnlyResponse:
         assert "MissingRequiredPaths" in result.message
         assert "source.plugin" in result.message
 
-    @pytest.mark.asyncio
-    async def test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker(self, tmp_path: Path) -> None:
-        """A blob-side success is not a successful CompositionState mutation."""
-        catalog = _mock_catalog()
-        engine, session_id = _session_engine_with_session()
-        user_message_id = str(uuid4())
-        user_message_content = "Build a runnable pipeline from this text."
-        now = datetime.now(UTC)
-        with engine.begin() as conn:
-            conn.execute(
-                chat_messages_table.insert().values(
-                    id=user_message_id,
-                    session_id=session_id,
-                    role="user",
-                    content=user_message_content,
-                    raw_content=None,
-                    tool_calls=None,
-                    tool_call_id=None,
-                    sequence_no=1,
-                    writer_principal="route_user_message",
-                    created_at=now,
-                    composition_state_id=None,
-                    parent_assistant_id=None,
-                )
-            )
-        settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(
-            catalog=catalog,
-            settings=settings,
-            sessions_service=_test_sessions_service(engine, tmp_path),
-            session_engine=engine,
-        )
-        state = _empty_state()
-        create_blob_turn = _make_llm_response(
-            tool_calls=[
-                {
-                    "id": "call_create_blob",
-                    "name": "create_blob",
-                    "arguments": {
-                        "filename": "seed.txt",
-                        "mime_type": "text/plain",
-                        "content": "hello",
-                    },
-                }
-            ],
-        )
-        final_prose = "I created the input blob, so the pipeline is ready."
-        text_response = _make_llm_response(content=final_prose)
-
-        with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.side_effect = [create_blob_turn, text_response]
-            result = await service.compose(
-                user_message_content,
-                [],
-                state,
-                session_id=session_id,
-                user_message_id=user_message_id,
-            )
-
-        assert result.state.version == state.version
-        assert result.raw_assistant_content == final_prose
-        assert result.runtime_preflight is not None
-        assert result.runtime_preflight.is_valid is False
-        # New contract: model prose preserved + system suffix with blocker.
-        assert result.message.startswith(final_prose)
-        assert "[ELSPETH-SYSTEM]" in result.message
-        assert "still empty" in result.message
-        assert "create_blob succeeded without mutating CompositionState" in result.message
-        assert "state_exists=false" in result.runtime_preflight.checks[0].detail
-        assert mock_llm.call_count == 2
-
 
 class TestComposerSingleToolCall:
     @pytest.mark.asyncio
     async def test_tool_dispatch_receives_configured_blob_quota(self) -> None:
         """Composer dispatch must thread WebSettings blob quota into tool execution."""
 
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(max_blob_storage_per_session_bytes=3),
         )
@@ -531,7 +685,7 @@ class TestComposerSingleToolCall:
     async def test_tool_dispatch_receives_composer_source_provenance_context(self) -> None:
         """Sync tool dispatch receives the user message and audited composer provenance."""
 
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(composer_model="gpt-5.5"),
         )
@@ -630,6 +784,38 @@ class TestComposerSingleToolCall:
         assert proposals[0].composer_skill_hash == composer_service_with_real_sessions._composer_skill_hash
         assert proposals[0].tool_arguments_hash == stable_hash(proposals[0].arguments_json)
         assert result.tool_outcomes[0].post_version == state.version
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_proposal_uses_profile_aware_validation(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+        fake_llm_one_set_pipeline_tool_call: Any,
+    ) -> None:
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        await sessions_service.update_composer_preferences(
+            UUID(result_session_id),
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        state = _empty_state()
+
+        result = await composer_service_with_real_sessions._run_one_turn_for_test(
+            llm=fake_llm_one_set_pipeline_tool_call,
+            session_id=result_session_id,
+            initial_state=state,
+        )
+
+        proposal_result = result.tool_outcomes[0].response
+        assert isinstance(proposal_result, ToolResult)
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(composer_service_with_real_sessions._catalog)
+        expected = PolicyCatalogView.for_trained_operator(
+            composer_service_with_real_sessions._catalog,
+            snapshot,
+        ).validate_composition_state(state)
+        assert proposal_result.validation == expected.validation
 
     @pytest.mark.asyncio
     async def test_create_composition_proposal_normalizes_composer_provenance(
@@ -740,8 +926,7 @@ class TestComposerSingleToolCall:
         proposals = await sessions_service.list_composition_proposals(session_uuid)
         proposal_tools = sorted(p.tool_name for p in proposals)
         # create_blob is NOT intercepted — it executes immediately and the
-        # resulting blob is available to set_pipeline at proposal-creation
-        # time.
+        # set_pipeline is independently prevalidated before proposal creation.
         assert "create_blob" not in proposal_tools
         # set_pipeline IS still intercepted — it advances composition state
         # and represents the meaningful operator approval.
@@ -755,7 +940,7 @@ class TestComposerSingleToolCall:
         """update_blob is a destructive blob-store mutation and must require approval."""
         engine, session_id = _session_engine_with_session()
         sessions_service = _test_sessions_service(engine, tmp_path)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(data_dir=tmp_path),
             sessions_service=sessions_service,
@@ -808,7 +993,7 @@ class TestComposerSingleToolCall:
         """delete_blob is a destructive blob-store mutation and must require approval."""
         engine, session_id = _session_engine_with_session()
         sessions_service = _test_sessions_service(engine, tmp_path)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(data_dir=tmp_path),
             sessions_service=sessions_service,
@@ -939,7 +1124,7 @@ class TestComposerSingleToolCall:
         """LLM makes one tool call, then responds with text."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: tool call to set_source
@@ -979,7 +1164,7 @@ class TestComposerSingleToolCall:
         """Progress summaries derive from visible lifecycle/tool names, not raw args."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         progress_events: list[ComposerProgressEvent] = []
 
@@ -1025,12 +1210,12 @@ class TestComposerSingleToolCall:
         assert "checking available secret references" in progress_text.lower()
 
     @pytest.mark.asyncio
-    async def test_inline_complete_pipeline_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
-        """Fake-model replay for simple inline-data builds stays provider-bounded."""
+    async def test_inline_complete_pipeline_incremental_replay_uses_atomic_tool_shape(self, tmp_path: Path) -> None:
+        """Incremental inline full replacement retains the atomic tool shape."""
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
         settings = _make_settings(data_dir=tmp_path)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(engine, tmp_path),
@@ -1045,7 +1230,19 @@ class TestComposerSingleToolCall:
             return AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN")
 
         service._run_advisor_checkpoint = _clean_advisor_checkpoint  # type: ignore[method-assign]
-        state = _empty_state()
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="existing_rows",
+                options={"path": str(tmp_path / "existing.csv"), "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(name="Existing pipeline"),
+            version=1,
+        )
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
@@ -1150,7 +1347,7 @@ class TestComposerMultiTurnToolCalls:
         """Multiple tool calls across turns — state accumulates."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: set_source
@@ -1200,7 +1397,7 @@ class TestComposerConvergence:
         """Discovery-only turns exhaust the discovery budget."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_discovery_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Two different discovery tools to avoid cache hits
@@ -1222,7 +1419,7 @@ class TestComposerConvergence:
         """Mutation turns exhaust the composition budget."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         mut = _make_llm_response(
@@ -1256,7 +1453,7 @@ class TestComposerConvergence:
         """B-4D-3: LLM makes mutation on final turn, then text on bonus call."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         mut = _make_llm_response(
@@ -1293,7 +1490,7 @@ class TestComposerConvergence:
             composer_max_composition_turns=2,
             composer_max_discovery_turns=2,
         )
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: discovery (list_sources) — discovery counter = 1
@@ -1337,7 +1534,7 @@ class TestFailedMutationBudgetClassification:
             composer_max_composition_turns=1,
             composer_max_discovery_turns=10,
         )
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: set_source with missing required key → KeyError
@@ -1379,7 +1576,7 @@ class TestFailedMutationBudgetClassification:
             composer_max_composition_turns=1,
             composer_max_discovery_turns=10,
         )
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Build a tool call with invalid JSON manually
@@ -1419,7 +1616,7 @@ class TestFailedMutationBudgetClassification:
             composer_max_composition_turns=10,
             composer_max_discovery_turns=1,
         )
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # list_sources with invalid JSON → still a discovery turn
@@ -1451,7 +1648,7 @@ class TestComposerErrorHandling:
         """Unknown tool name returns error message, LLM can retry."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: invalid tool
@@ -1480,7 +1677,7 @@ class TestComposerErrorHandling:
         """Malformed tool arguments return error, not crash."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: set_source with missing required field
@@ -1518,7 +1715,7 @@ class TestComposerErrorHandling:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: tool call that triggers ToolArgumentError from Tier 3 type guard
@@ -1570,7 +1767,7 @@ class TestComposerErrorHandling:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         bad_call = _make_llm_response(
@@ -1646,7 +1843,7 @@ class TestComposerErrorHandling:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         good_call = _make_llm_response(
@@ -1728,7 +1925,7 @@ class TestComposerErrorHandling:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         partial_call = _make_llm_response(
@@ -1800,7 +1997,7 @@ class TestComposerErrorHandling:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Provide all required arguments so pre-validation passes,
@@ -1842,7 +2039,7 @@ class TestComposerErrorHandling:
         """Missing required arguments should produce a clear error listing the keys."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # set_source requires plugin, on_success, options, on_validation_failure
@@ -1873,7 +2070,7 @@ class TestComposerErrorHandling:
         """Non-object mutation arguments are Tier-3 tool errors, not plugin crashes."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         bad_call = _make_llm_response(
@@ -1913,7 +2110,7 @@ class TestComposerErrorHandling:
         """Non-object discovery arguments are rejected before cache lookup or execution."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         bad_call = _make_llm_response(
@@ -2147,7 +2344,7 @@ class TestProviderCacheTokenAudit:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         response = self._response_with_usage(
@@ -2177,7 +2374,7 @@ class TestBuildMessages:
         """_build_messages must return a new list on every call."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         msgs1 = service._build_messages([], state, "Hello")
@@ -2206,7 +2403,7 @@ class TestBuildMessages:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         secret_path = "/var/lib/elspeth/users/alice/skills/secret-deployment.md"
@@ -2244,7 +2441,7 @@ class TestComposerMultipleToolCallsPerTurn:
         """LLM returns multiple tool calls in one response — all executed."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: two tool calls in one response
@@ -2287,12 +2484,63 @@ class TestDiscoveryCache:
     """Tests for the discovery cache (F1)."""
 
     @pytest.mark.asyncio
+    async def test_one_compose_call_threads_one_snapshot_object(self) -> None:
+        """Prompt and every tool dispatch share one principal snapshot."""
+        from unittest.mock import MagicMock
+
+        from elspeth.web.composer import service as service_module
+        from elspeth.web.composer import tool_batch as tool_batch_module
+        from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+        from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+
+        catalog = _mock_catalog()
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        factory_calls: list[str] = []
+        prompt_snapshots: list[PluginAvailabilitySnapshot] = []
+        tool_snapshots: list[PluginAvailabilitySnapshot] = []
+
+        def snapshot_factory(user_id: str) -> PluginAvailabilitySnapshot:
+            factory_calls.append(user_id)
+            return snapshot
+
+        service = ComposerServiceImpl(
+            catalog=catalog,
+            settings=_make_settings(),
+            plugin_snapshot_factory=snapshot_factory,
+            operator_profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        )
+        real_build_messages = service_module.build_messages
+        real_execute_tool = tool_batch_module.execute_tool
+
+        def capture_prompt(*args: Any, **kwargs: Any) -> Any:
+            prompt_snapshots.append(kwargs["plugin_snapshot"])
+            return real_build_messages(*args, **kwargs)
+
+        def capture_tool(*args: Any, **kwargs: Any) -> Any:
+            tool_snapshots.append(kwargs["plugin_snapshot"])
+            return real_execute_tool(*args, **kwargs)
+
+        discovery = _make_llm_response(tool_calls=[{"id": "c1", "name": "list_sources", "arguments": {}}])
+        final = _make_llm_response(content="Done.")
+        with (
+            patch.object(service, "_call_llm", new_callable=AsyncMock, side_effect=[discovery, final]),
+            patch.object(service_module, "build_messages", side_effect=capture_prompt),
+            patch.object(tool_batch_module, "execute_tool", side_effect=capture_tool),
+        ):
+            await service.compose("List sources", [], _empty_state(), user_id="user-1")
+
+        assert factory_calls == ["user-1"]
+        assert prompt_snapshots == [snapshot]
+        assert tool_snapshots == [snapshot]
+        assert prompt_snapshots[0] is tool_snapshots[0]
+
+    @pytest.mark.asyncio
     async def test_cacheable_tool_returns_cached_result(self) -> None:
         """Repeated cacheable discovery calls return cached results
         without incrementing any budget counter."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_discovery_turns=2)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: list_sources (first call — executes, charges discovery: 1/2)
@@ -2312,18 +2560,19 @@ class TestDiscoveryCache:
 
         # Should NOT have raised — second list_sources was a cache hit
         assert result.message == "Found sources."
-        # Catalog list_sources is called once by build_messages (prompt
-        # context) and once by execute_tool (first discovery call).
+        # Catalog list_sources is called once by snapshot construction,
+        # twice by build_messages (visible list + capability grouping),
+        # and once by execute_tool (first discovery call).
         # The second discovery call is a cache hit — no catalog call.
-        # Total: 2, not 3.
-        assert catalog.list_sources.call_count == 2
+        # Total: 4, not 5.
+        assert catalog.list_sources.call_count == 4
 
     @pytest.mark.asyncio
     async def test_cache_hit_rebuilds_result_envelope_from_current_state(self) -> None:
         """Cacheable discovery data is reused, but validation/version stay current."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         disc1 = _make_llm_response(
@@ -2367,14 +2616,14 @@ class TestDiscoveryCache:
             affected_nodes=(),
         ).to_dict()["validation"]
         assert cached_payload["validation"] == expected_validation
-        assert catalog.list_sources.call_count == 2
+        assert catalog.list_sources.call_count == 4
 
     @pytest.mark.asyncio
     async def test_cache_key_includes_arguments(self) -> None:
         """Different arguments = different cache entries = both execute."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         schema1 = _make_llm_response(
@@ -2402,14 +2651,14 @@ class TestDiscoveryCache:
             await service.compose("Get schemas", [], state)
 
         # Both calls should have executed (different arguments)
-        assert catalog.get_schema.call_count == 2
+        assert catalog.get_schema.call_count == 4
 
     @pytest.mark.asyncio
     async def test_mutation_tools_never_cached(self) -> None:
         """Mutation tool results are never cached — always execute."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         mut1 = _make_llm_response(
@@ -2450,7 +2699,7 @@ class TestComposeTimeout:
 
         catalog = _mock_catalog()
         settings = _make_settings(composer_timeout_seconds=0.1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         async def slow_llm(*args: Any, **kwargs: Any) -> Any:
@@ -2477,7 +2726,7 @@ class TestComposeTimeout:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         call_count = 0
@@ -2572,7 +2821,7 @@ class TestConvergenceProgressDispatch:
     async def test_composition_budget_emits_distinct_failure_event(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         progress_events: list[ComposerProgressEvent] = []
 
@@ -2613,7 +2862,7 @@ class TestConvergenceProgressDispatch:
     async def test_discovery_budget_emits_distinct_failure_event(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_discovery_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         progress_events: list[ComposerProgressEvent] = []
 
@@ -2644,7 +2893,7 @@ class TestConvergenceProgressDispatch:
 
         catalog = _mock_catalog()
         settings = _make_settings(composer_timeout_seconds=0.1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         progress_events: list[ComposerProgressEvent] = []
 
@@ -2678,7 +2927,7 @@ class TestConvergenceProgressDispatch:
             llm_side_effect: Any,
         ) -> str | None:
             catalog = _mock_catalog()
-            service = ComposerServiceImpl(catalog=catalog, settings=settings)
+            service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
             state = _empty_state()
             events: list[ComposerProgressEvent] = []
 
@@ -2732,7 +2981,7 @@ class TestPartialStatePreservation:
         partial_state is attached to the exception."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Turn 1: mutation (set_source) — composition budget exhausted (1/1)
@@ -2776,7 +3025,7 @@ class TestPartialStatePreservation:
         """When no mutations occurred, partial_state is None."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_discovery_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         disc1 = _make_llm_response(
@@ -2806,7 +3055,7 @@ class TestComposerSamplingConfig:
     async def test_call_llm_sends_configured_temperature_and_seed(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_temperature=0.0, composer_seed=42)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Single text-only response converges the loop immediately.
@@ -2833,7 +3082,7 @@ class TestComposerSamplingConfig:
     async def test_call_llm_omits_sampling_when_operator_leaves_it_unset(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         completion = _make_llm_response(content="acknowledged")
 
         with patch(
@@ -2851,7 +3100,7 @@ class TestComposerSamplingConfig:
     async def test_call_text_llm_sends_configured_temperature_and_seed(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_temperature=0.0, composer_seed=42)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
 
         completion = _make_llm_response(content="diagnostic text")
 
@@ -2871,7 +3120,7 @@ class TestComposerSamplingConfig:
     async def test_call_text_llm_omits_sampling_when_operator_leaves_it_unset(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings(composer_model="anthropic/claude-3-5-sonnet-20241022")
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         completion = _make_llm_response(content="diagnostic text")
 
         with patch(
@@ -2899,7 +3148,7 @@ class TestEmptyChoicesValidation:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Patch the lazy LiteLLM wrapper (not _call_llm) so the validation
@@ -2926,7 +3175,7 @@ class TestEmptyChoicesValidation:
         # Budget of 1 composition turn — first mutation exhausts it,
         # then the bonus _call_llm returns empty choices.
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # First call: valid response with a mutation tool call
@@ -2969,7 +3218,7 @@ class TestComposerAvailabilityAndBadRequest:
     async def test_unavailable_composer_short_circuits_before_llm_call(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         service._availability = ComposerAvailability(
             available=False,
             model="bad-model",
@@ -2992,7 +3241,7 @@ class TestComposerAvailabilityAndBadRequest:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         bad_request = LiteLLMBadRequestError(
             message="bad model leaked-detail",
@@ -3014,6 +3263,66 @@ class TestComposerAvailabilityAndBadRequest:
         assert "leaked-detail" not in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_bedrock_bad_request_raises_redacted_service_error(self) -> None:
+        """Bedrock provider detail stays off every default/public surface."""
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+        from structlog.testing import capture_logs
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings(composer_model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        state = _empty_state()
+        access_key = "AKIA" + ("Z" * 16)
+        sentinels = (
+            "BEDROCK-RAW-DETAIL-SENTINEL",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/example",
+            "123456789012",
+            "bedrock-request-7d3c2b1a",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/example/invoke",
+            access_key,
+        )
+        bad_request = LiteLLMBadRequestError(
+            message=" ".join(sentinels),
+            model="bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
+            llm_provider="bedrock",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            capture_logs() as captured_logs,
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        exc = exc_info.value
+        assert str(exc) == "LLM request rejected (BadRequestError)"
+        public_surfaces = [str(exc), repr(exc), repr(captured_logs)]
+        llm_calls = exc.__dict__["llm_calls"]
+        assert isinstance(llm_calls, tuple)
+        assert len(llm_calls) == 1
+        public_surfaces.extend(
+            [
+                llm_calls[0].error_class or "",
+                llm_calls[0].error_message or "",
+            ]
+        )
+        for sentinel in sentinels:
+            assert all(sentinel not in surface for surface in public_surfaces)
+
+        assert llm_calls[0].error_class == "BadRequestError"
+        assert llm_calls[0].error_message == "BadRequestError"
+        # Raw detail remains available only through the existing explicit
+        # operator-facing opt-in path; it is not part of default rendering.
+        assert exc.provider_detail is not None
+        assert all(sentinel in exc.provider_detail for sentinel in sentinels)
+
+    @pytest.mark.asyncio
     async def test_bad_request_llm_error_preserves_provider_detail(self) -> None:
         """``_BadRequestLLMError`` carries the underlying provider message.
 
@@ -3030,7 +3339,7 @@ class TestComposerAvailabilityAndBadRequest:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         bad_request = LiteLLMBadRequestError(
             message="provider says bad",
@@ -3066,7 +3375,7 @@ class TestComposerAvailabilityAndBadRequest:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         # LiteLLM's BadRequestError formats the message into a longer string;
         # passing an empty message still yields a non-empty rendered str.
@@ -3098,7 +3407,7 @@ class TestComposerAvailabilityAndBadRequest:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         transient_error = LiteLLMAPIError(
             status_code=503,
@@ -3141,7 +3450,7 @@ class TestComposerAvailabilityAndBadRequest:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         bad_request = LiteLLMBadRequestError(
             message="model gpt-foo does not exist",
@@ -3183,7 +3492,7 @@ class TestPluginBugCrashesFromToolExecution:
     async def test_plugin_value_error_is_not_swallowed(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         valid_call = _make_llm_response(
@@ -3221,7 +3530,7 @@ class TestPluginBugCrashesFromToolExecution:
     async def test_plugin_type_error_is_not_swallowed(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         valid_call = _make_llm_response(
@@ -3258,7 +3567,7 @@ class TestPluginBugCrashesFromToolExecution:
     async def test_plugin_unicode_error_is_not_swallowed(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         valid_call = _make_llm_response(
@@ -3307,7 +3616,7 @@ class TestPluginBugCrashesFromToolExecution:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         initial_version = state.version
 
@@ -3380,7 +3689,7 @@ class TestPluginBugCrashesFromToolExecution:
         """Positive case: ToolArgumentError IS caught, error fed back for LLM retry."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         valid_call = _make_llm_response(
@@ -3438,7 +3747,7 @@ class TestPluginBugCrashesFromToolExecution:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         secret_path = "/etc/elspeth/secrets/bootstrap.key"
@@ -3543,7 +3852,7 @@ class TestPluginCrashSessionPersistence:
 
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -3632,7 +3941,7 @@ class TestPluginCrashSessionPersistence:
 
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -3720,7 +4029,7 @@ class TestPluginCrashSessionPersistence:
 
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -3792,7 +4101,7 @@ class TestPluginCrashSessionPersistence:
 
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -3865,7 +4174,7 @@ class TestPluginCrashSessionPersistence:
 
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -3937,7 +4246,7 @@ class TestToolExecutionThreadOffloading:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         event_loop_thread = threading.current_thread()
@@ -4025,7 +4334,7 @@ class TestToolExecutionThreadOffloading:
 
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         # Blocking duration must be much larger than the gap threshold
@@ -4313,7 +4622,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         """
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -4375,11 +4684,9 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         boundary now fires earlier and that message no longer reaches
         the LLM.
         """
-        from elspeth.web.composer.tools import execute_tool
-
         catalog = _mock_catalog()
         settings = _make_settings(data_dir=self.data_dir)
-        service = ComposerServiceImpl(
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(self.engine, self.data_dir),
@@ -4387,7 +4694,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
         )
         state = _empty_state()
 
-        create_result = execute_tool(
+        create_result = _execute_tool(
             "create_blob",
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},
             state,
@@ -4562,7 +4869,7 @@ class TestComposerErrorConstructionInvariants:
 class TestComposerRuntimePreflightCacheAndTimeout:
     @pytest.mark.asyncio
     async def test_runtime_preflight_cache_reuses_same_state_version_and_settings_hash(self) -> None:
-        service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+        service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=_make_settings())
         state = _empty_state()
         cache = service._new_runtime_preflight_cache()
         preflight = ValidationResult(is_valid=True, checks=[], errors=[])
@@ -4592,7 +4899,7 @@ class TestComposerRuntimePreflightCacheAndTimeout:
     @pytest.mark.asyncio
     async def test_runtime_preflight_timeout_is_cached_for_compose_call(self) -> None:
         settings = _make_settings(composer_runtime_preflight_timeout_seconds=0.01)
-        service = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
         state = _empty_state()
         cache = service._new_runtime_preflight_cache()
         started = threading.Event()
@@ -4676,7 +4983,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_changed_state_completion_is_replaced_when_runtime_preflight_fails(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         changed_state = state.with_source(
             SourceSpec(
@@ -4741,7 +5048,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_pending_interpretation_handoff_is_not_augmented_as_invalid_config(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state().with_source(
             SourceSpec(
                 plugin="csv",
@@ -4797,7 +5104,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_unchanged_text_without_preview_does_not_run_preflight(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
 
         with patch.object(service, "_runtime_preflight") as mock_preflight:
@@ -4821,7 +5128,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_unchanged_state_reuses_preview_preflight_without_rerun(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         preview_preflight = ValidationResult(
             is_valid=False,
@@ -4873,7 +5180,7 @@ class TestComposerRuntimePreflightFinalGate:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         passing_preview_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
@@ -4898,7 +5205,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_passing_preflight_preserves_original_message_verbatim(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         changed_state = replace(state, version=state.version + 1)
         passed_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
@@ -4923,7 +5230,7 @@ class TestComposerRuntimePreflightFinalGate:
     async def test_unexpected_preflight_exception_preserves_partial_state(self) -> None:
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         changed_state = replace(state, version=state.version + 1)
 
@@ -4951,6 +5258,18 @@ class TestComposerRuntimePreflightFinalGate:
 
         with pytest.raises(AttributeError):
             error.original_exc = RuntimeError("replacement")
+
+
+def test_pipeline_commit_intent_is_frozen_and_hash_bound() -> None:
+    proposal_id = uuid4()
+    intent = PipelineCommitIntent(proposal_id=proposal_id, draft_hash="a" * 64)
+
+    assert intent.proposal_id == proposal_id
+    assert intent.draft_hash == "a" * 64
+    with pytest.raises(AttributeError):
+        intent.draft_hash = "b" * 64  # type: ignore[misc]
+    with pytest.raises(ValueError, match="SHA-256"):
+        PipelineCommitIntent(proposal_id=proposal_id, draft_hash="not-a-hash")
 
 
 class TestEmptyStateFinalizePassthrough:
@@ -4999,6 +5318,21 @@ class TestEmptyStateFinalizePassthrough:
                 name="main", plugin="csv", options={"path": "/tmp/y.csv", "schema": {"mode": "observed"}}, on_write_failure="discard"
             )
         )
+        assert _state_is_structurally_empty(state) is False
+
+    def test_state_is_structurally_empty_false_with_edge(self) -> None:
+        from elspeth.web.composer.service import _state_is_structurally_empty
+
+        state = _empty_state().with_edge(
+            EdgeSpec(
+                id="orphan-edge",
+                from_node="source",
+                to_node="out",
+                edge_type="on_success",
+                label=None,
+            )
+        )
+
         assert _state_is_structurally_empty(state) is False
 
     def test_compose_empty_state_message_appends_system_suffix(self) -> None:
@@ -5247,7 +5581,7 @@ class TestEmptyStateFinalizePassthrough:
         subsequent turns) the model's own state model."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         model_prose = (
             "I picked 5 Australian Government agency pages and prepared the workflow, "
@@ -5285,7 +5619,7 @@ class TestEmptyStateFinalizePassthrough:
         must NOT fire."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         invalid_preflight = ValidationResult(
             is_valid=False,
@@ -5345,7 +5679,7 @@ class TestEmptyStateFinalizePassthrough:
         the empty-state branch fires if the resulting state is empty."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         # Simulate state.version bump without populating any state fields
         # (e.g., the model called a mutation that net-emptied the state).
@@ -5397,7 +5731,7 @@ class TestEmptyStateFinalizePassthrough:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = (
             _empty_state()
             .with_source(
@@ -5476,7 +5810,7 @@ class TestEmptyStateFinalizePassthrough:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = (
             _empty_state()
             .with_source(
@@ -5542,7 +5876,7 @@ class TestEmptyStateFinalizePassthrough:
         empty-state suffix."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state()
         valid_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
 
@@ -5579,7 +5913,7 @@ class TestEmptyStateFinalizePassthrough:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         # State already has the fix applied: on_validation_failure == "rejected_records".
         state = (
             _empty_state()
@@ -5639,7 +5973,7 @@ class TestEmptyStateFinalizePassthrough:
         """
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         # State is the same as the prior turn — no mutation happened this turn.
         state = (
             _empty_state()
@@ -5692,7 +6026,7 @@ class TestEmptyStateFinalizePassthrough:
         through verbatim. Critical to avoid corrupting honest reports."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = (
             _empty_state()
             .with_source(
@@ -5752,7 +6086,7 @@ class TestEmptyStateFinalizePassthrough:
         category catches the prose."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = (
             _empty_state()
             .with_source(
@@ -5811,7 +6145,7 @@ class TestEmptyStateFinalizePassthrough:
         ensures the check actually runs."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = (
             _empty_state()
             .with_source(
@@ -5863,7 +6197,7 @@ class TestEmptyStateFinalizePassthrough:
         which exercises the same control-flow path with empty state."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state().with_source(
             SourceSpec(
                 plugin="csv",
@@ -5905,7 +6239,7 @@ class TestEmptyStateFinalizePassthrough:
         acted in the same turn."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
         state = _empty_state().with_source(
             SourceSpec(
                 plugin="csv",
@@ -5984,7 +6318,7 @@ class TestAttemptProofRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(
+        self.service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(engine, tmp_path),
@@ -5993,12 +6327,10 @@ class TestAttemptProofRepair:
 
     def _state_with_blocking_csv(self):
         """Build a state whose preview emits csv_fixed_schema_omits_observed_columns."""
-        from elspeth.web.composer.tools import execute_tool as exec_tool
-
         state = _empty_state()
         catalog = _mock_catalog()
         # Wire the source via set_source_from_blob (canonical path).
-        result = exec_tool(
+        result = _execute_tool(
             "set_source_from_blob",
             {
                 "blob_id": self.blob_id,
@@ -6014,7 +6346,7 @@ class TestAttemptProofRepair:
         assert result.success, result.data
         state = result.updated_state
 
-        result = exec_tool(
+        result = _execute_tool(
             "set_output",
             {
                 "sink_name": "out",
@@ -6035,11 +6367,9 @@ class TestAttemptProofRepair:
 
     def _state_without_blob(self):
         """A path-based source has nothing for proof_diagnostics to inspect."""
-        from elspeth.web.composer.tools import execute_tool as exec_tool
-
         state = _empty_state()
         catalog = _mock_catalog()
-        result = exec_tool(
+        result = _execute_tool(
             "set_pipeline",
             {
                 "sources": {
@@ -6244,7 +6574,7 @@ class TestComposeLoopForcedRepair:
                 )
             )
 
-        self.service = ComposerServiceImpl(
+        self.service = ComposerServiceImpl.for_trained_operator(
             catalog=catalog,
             settings=settings,
             sessions_service=_test_sessions_service(engine, tmp_path),
@@ -6909,10 +7239,11 @@ class TestComposeLoopFreeformRecipeIntentRouting:
     @pytest.mark.asyncio
     async def test_fork_coalesce_truncate_intent_applies_recipe_before_llm(self, tmp_path: Path) -> None:
         engine, session_id = _session_engine_with_session()
-        service = ComposerServiceImpl(
+        sessions_service = _test_sessions_service(engine, tmp_path)
+        service = ComposerServiceImpl.for_trained_operator(
             catalog=_mock_catalog(),
             settings=_make_settings(data_dir=tmp_path),
-            sessions_service=_test_sessions_service(engine, tmp_path),
+            sessions_service=sessions_service,
             session_engine=engine,
         )
         prompt = (
@@ -6947,12 +7278,101 @@ class TestComposeLoopFreeformRecipeIntentRouting:
             )
 
         assert mock_llm.call_count == 0
-        assert result.state.validate().is_valid is True
-        assert result.state.sources["source"] is not None
-        assert result.state.sources["source"].plugin == "csv"
-        assert result.state.sources["source"].options["blob_ref"]
-        assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
-        assert any(node.plugin == "truncate" for node in result.state.nodes)
-        assert result.state.outputs[0].name == "merged_rows"
-        assert result.state.outputs[0].options["path"] == "outputs/merged.jsonl"
-        assert "fork-coalesce-truncate-jsonl" in result.message
+        assert result.state == _empty_state()
+        assert result.llm_calls == ()
+        assert result.pipeline_commit_intent is not None
+
+        proposals = await sessions_service.list_composition_proposals(UUID(session_id))
+        assert len(proposals) == 1
+        proposal = proposals[0]
+        assert proposal.status == "pending"
+        assert proposal.id == result.pipeline_commit_intent.proposal_id
+        assert proposal.pipeline_metadata is not None
+        assert proposal.pipeline_metadata.draft_hash == result.pipeline_commit_intent.draft_hash
+        assert proposal.composer_model_identifier == "composer-server-recipe-router"
+        assert proposal.composer_model_version == "composer.server-recipe-router.v1"
+        assert proposal.composer_provider == "server"
+        recipe_contract = canonical_json(
+            {
+                "schema": "composer.server-recipe-router.v1",
+                "recipe": "fork-coalesce-truncate-jsonl",
+                "recipe_catalog_content_hash": recipe_catalog_content_hash(),
+            }
+        )
+        assert proposal.composer_skill_hash == hashlib.sha256(recipe_contract.encode()).hexdigest()
+
+        pipeline = proposal.arguments_json
+        source = cast(dict[str, Any], pipeline["source"])
+        assert source["plugin"] == "csv"
+        assert UUID(cast(str, source["blob_id"]))
+        assert proposal.pipeline_metadata.custody_result == "ready"
+        assert "inline_blob" not in source
+        assert {cast(dict[str, Any], node)["node_type"] for node in cast(list[Any], pipeline["nodes"])} >= {
+            "gate",
+            "coalesce",
+        }
+        assert any(cast(dict[str, Any], node).get("plugin") == "truncate" for node in cast(list[Any], pipeline["nodes"]))
+        output = cast(dict[str, Any], cast(list[Any], pipeline["outputs"])[0])
+        assert output["sink_name"] == "merged_rows"
+        assert cast(dict[str, Any], output["options"])["path"] == "outputs/merged.jsonl"
+        with engine.connect() as conn:
+            audit_messages = conn.execute(
+                select(chat_messages_table).where(
+                    chat_messages_table.c.session_id == session_id,
+                    chat_messages_table.c.role == "audit",
+                )
+            ).all()
+        assert audit_messages == []
+
+
+def test_log_guided_planner_failure_emits_typed_disposition() -> None:
+    """A guided planner failure logs its closed code + deduped rejection codes.
+
+    Parity with the freeform ``planner_failure_disposition`` (which carries
+    ``planner_code`` + ``rejection_codes``): the guided route's terminal slog
+    records only ``exc_class`` + frames, so a churned guided failure
+    (REPAIR_EXHAUSTED after the escape hatch, tutorial run 7 / session
+    cbb00f4b) was opaque. This is the one in-fence emit that names the wall.
+    """
+    from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+    from elspeth.web.composer.service import _log_guided_planner_failure
+
+    exc = PipelinePlannerError(
+        "planner repair budget exhausted",
+        code="REPAIR_EXHAUSTED",
+        # Unsorted with a duplicate: the emit must dedupe and sort.
+        detail_codes=("web_scrape_http_identity", "plugin_options_invalid", "web_scrape_http_identity"),
+    )
+
+    with structlog.testing.capture_logs() as events:
+        _log_guided_planner_failure(
+            exc,
+            session_id="cbb00f4b-b7b7-4e95-9068-29db1dccb0c9",
+            operation_id="d3ea675b-84f2-41aa-99f3-68ca54082ab4",
+            surface="tutorial_profile",
+        )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event"] == "composer.guided_planner_failure"
+    assert event["log_level"] == "error"
+    assert event["planner_code"] == "REPAIR_EXHAUSTED"
+    assert event["rejection_codes"] == ["plugin_options_invalid", "web_scrape_http_identity"]
+    assert event["session_id"] == "cbb00f4b-b7b7-4e95-9068-29db1dccb0c9"
+    assert event["operation_id"] == "d3ea675b-84f2-41aa-99f3-68ca54082ab4"
+    assert event["surface"] == "tutorial_profile"
+
+
+def test_log_guided_planner_failure_empty_rejection_codes_on_non_rejection_failure() -> None:
+    """A non-rejection failure (timeout/provider) carries no rejection codes."""
+    from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+    from elspeth.web.composer.service import _log_guided_planner_failure
+
+    exc = PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT")
+
+    with structlog.testing.capture_logs() as events:
+        _log_guided_planner_failure(exc, session_id="s", operation_id="o", surface="guided_staged")
+
+    assert len(events) == 1
+    assert events[0]["planner_code"] == "TIMEOUT"
+    assert events[0]["rejection_codes"] == []

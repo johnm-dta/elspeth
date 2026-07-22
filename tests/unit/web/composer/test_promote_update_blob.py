@@ -21,6 +21,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import func, insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -31,7 +32,8 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_update_blob
-from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools._common import ToolContext as _ToolContext
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -50,6 +52,15 @@ def _empty_state() -> CompositionState:
 
 def _mock_catalog() -> MagicMock:
     return MagicMock(spec=CatalogService)
+
+
+def ToolContext(*, catalog: CatalogService, **kwargs: Any) -> _ToolContext:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _session_engine_with_session() -> tuple[Any, str]:

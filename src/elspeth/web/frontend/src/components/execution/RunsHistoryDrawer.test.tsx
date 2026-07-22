@@ -60,6 +60,9 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
         operation_id: "op-1",
         node_id: "rate_colours",
         operation_type: "runtime_preflight",
+        // Only sink_write operations may carry a sink_effect_id
+        // (ck_operations_sink_effect_type); preflight ops are null.
+        sink_effect_id: null,
         status: "failed",
         duration_ms: 12,
         started_at: "2026-05-17T00:00:00Z",
@@ -107,6 +110,49 @@ describe("RunsHistoryDrawer", () => {
     expect(screen.getByText(/r2/)).toBeInTheDocument();
   });
 
+  it("labels runs by stable ordinal and local start time, newest first", () => {
+    const firstId = "c5f713ed-3bef-40d1-adda-7669d573efad";
+    const secondId = "ec7f8f38-df73-4f55-ba8a-75c5c138733e";
+    const firstStartedAt = "2026-07-12T01:15:00Z";
+    const secondStartedAt = "2026-07-12T02:45:00Z";
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: firstId,
+          status: "completed",
+          started_at: firstStartedAt,
+        } as never,
+        {
+          id: secondId,
+          status: "completed",
+          started_at: secondStartedAt,
+        } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    expect(
+      screen.getByRole("heading", { name: "Run history · 2" }),
+    ).toBeVisible();
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent(
+      `Run 2 · ${formatter.format(new Date(secondStartedAt))}`,
+    );
+    expect(items[0]).toHaveTextContent(secondId);
+    expect(items[1]).toHaveTextContent(
+      `Run 1 · ${formatter.format(new Date(firstStartedAt))}`,
+    );
+    expect(items[1]).toHaveTextContent(firstId);
+  });
+
   // elspeth-e1c5ad0b53: run status renders through ui/StatusBadge so the
   // completed_with_failures / empty distinction carries the ⚠ / ∅ glyphs
   // rather than colour alone, and underscores read as spaces.
@@ -132,7 +178,7 @@ describe("RunsHistoryDrawer", () => {
   it("calls onClose when the Close button is clicked", async () => {
     const onClose = vi.fn();
     render(<RunsHistoryDrawer onClose={onClose} />);
-    await userEvent.click(screen.getByRole("button", { name: /close/i }));
+    await userEvent.click(screen.getByRole("button", { name: /close runs/i }));
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -269,6 +315,49 @@ describe("RunsHistoryDrawer", () => {
     );
     expect(screen.getByText("token-1")).toBeInTheDocument();
     expect(screen.getByTestId("run-outputs-panel")).toHaveAttribute("data-run-id", "r2");
+  });
+
+  it("shows the stored run failure cause immediately before diagnostics load", async () => {
+    const loadRunDiagnostics = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: "r2",
+          status: "failed",
+          error: "HTTP 400: max_output_tokens below minimum value",
+        } as never,
+      ],
+      loadRunDiagnostics,
+      diagnosticsByRunId: {},
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail for r2/i }));
+
+    expect(screen.getByTestId("run-stored-failure-detail")).toHaveTextContent(
+      "max_output_tokens below minimum value",
+    );
+  });
+
+  it("keeps the stored run failure cause visible when diagnostics have no failure_detail", async () => {
+    useExecutionStore.setState({
+      runs: [
+        {
+          id: "r2",
+          status: "failed",
+          error: "Pipeline aborted before runtime diagnostics were written.",
+        } as never,
+      ],
+      diagnosticsByRunId: { r2: makeDiagnostics({ failure_detail: null }) },
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /show detail for r2/i }));
+
+    expect(screen.queryByTestId("run-failure-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-stored-failure-detail")).toHaveTextContent(
+      "Pipeline aborted before runtime diagnostics were written.",
+    );
   });
 
   it("renders the diagnostics working view while explanation is pending", async () => {

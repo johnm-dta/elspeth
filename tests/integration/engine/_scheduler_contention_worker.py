@@ -225,7 +225,7 @@ def _run_hammer(args: argparse.Namespace) -> dict[str, Any]:
                 try:
                     recovered = timed(
                         VERB_RECOVER,
-                        lambda: repo.recover_expired_leases(
+                        lambda: repo.recover_expired_leases_legacy_unfenced(
                             run_id=args.run_id,
                             now=datetime.now(UTC),
                             caller_owner=args.owner,

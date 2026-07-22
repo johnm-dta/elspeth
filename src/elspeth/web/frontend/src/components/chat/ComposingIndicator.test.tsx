@@ -1,11 +1,13 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ComposingIndicator, formatElapsed } from "./ComposingIndicator";
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: {},
     nodes: [],
@@ -39,6 +41,8 @@ describe("ComposingIndicator", () => {
 
     expect(screen.getByText("Working on...")).toBeInTheDocument();
     expect(screen.getByText("The model requested plugin schemas.")).toBeInTheDocument();
+    expect(screen.queryByText("What ELSPETH can see")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("What ELSPETH can see")).toBeInTheDocument();
     expect(screen.getByText("Checking available source, transform, and sink tools.")).toBeInTheDocument();
     expect(screen.getByText("Likely next")).toBeInTheDocument();
@@ -60,6 +64,10 @@ describe("ComposingIndicator", () => {
 
     expect(screen.getByText("Working on...")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Working on: convert HTML into JSON");
+    expect(
+      screen.queryByText("Request focus: turn HTML content into structured JSON."),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("Request focus: turn HTML content into structured JSON.")).toBeInTheDocument();
     expect(screen.getByText("Current setup: no input yet, no processing steps, no outputs.")).toBeInTheDocument();
     expect(
@@ -80,6 +88,8 @@ describe("ComposingIndicator", () => {
     );
 
     expect(screen.getByText("(estimated)")).toBeInTheDocument();
+    expect(screen.queryByText("Best guess from your request")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("Best guess from your request")).toBeInTheDocument();
     expect(screen.queryByText("What ELSPETH can see")).not.toBeInTheDocument();
     expect(
@@ -116,8 +126,65 @@ describe("ComposingIndicator", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("Current setup: input configured, 1 processing step, 1 output.")).toBeInTheDocument();
     expect(screen.getByText("Request focus: produce or update saved output.")).toBeInTheDocument();
+  });
+
+  it("keeps long-running details collapsed until requested", () => {
+    render(
+      <ComposingIndicator
+        latestRequest="Save the rows to a JSON artifact"
+        compositionState={makeState()}
+      />,
+    );
+
+    expect(screen.getByText("Working on: saved output")).toBeInTheDocument();
+    expect(screen.queryByText("Likely next")).not.toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: "Show details" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(screen.getByText("Likely next")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Hide details" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps requested details open when the backend snapshot arrives for the same request", () => {
+    const { rerender } = render(
+      <ComposingIndicator
+        latestRequest="Save the rows to a JSON artifact"
+        compositionState={makeState()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getByText("Likely next")).toBeInTheDocument();
+
+    const progress: ComposerProgressSnapshot = {
+      session_id: "session-1",
+      request_id: "message-1",
+      phase: "using_tools",
+      headline: "Saving the JSON artifact.",
+      evidence: ["Choosing the output sink."],
+      likely_next: "ELSPETH will save the file.",
+      reason: null,
+      updated_at: "2026-04-26T10:00:00Z",
+    };
+    rerender(
+      <ComposingIndicator
+        latestRequest="Save the rows to a JSON artifact"
+        compositionState={makeState()}
+        composerProgress={progress}
+      />,
+    );
+
+    expect(screen.getByText("What ELSPETH can see")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Hide details" }),
+    ).toHaveAttribute("aria-expanded", "true");
   });
 
   it("renders terminal progress as a retained last update", () => {
@@ -198,14 +265,16 @@ describe("formatElapsed", () => {
 });
 
 describe("ComposingIndicator live region scope", () => {
-  it("carries its own role=status but no explicit aria-live", () => {
+  it("keeps role=status on a non-interactive summary subregion", () => {
     // The indicator is mounted OUTSIDE ChatPanel's role="log" container
     // (elspeth-76a0cc485e) so its implicit role="status" politeness is the
     // single live region announcing compose progress. ChatPanel.test.tsx pins
     // the outside-the-log placement; this pins the region's own attributes.
     const { container } = render(<ComposingIndicator />);
     const root = container.firstChild as HTMLElement;
-    expect(root.getAttribute("aria-live")).toBeNull();
-    expect(root.getAttribute("role")).toBe("status");
+    const status = screen.getByRole("status");
+    expect(root.getAttribute("role")).toBeNull();
+    expect(status.getAttribute("aria-live")).toBeNull();
+    expect(status.querySelector("button")).toBeNull();
   });
 });

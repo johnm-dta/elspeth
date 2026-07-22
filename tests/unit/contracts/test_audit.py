@@ -308,6 +308,7 @@ class TestArtifact:
             content_hash="abc123",
             size_bytes=1024,
             created_at=now,
+            publication_evidence_kind="legacy_returned",
         )
 
         assert artifact.artifact_id == "art-123"
@@ -326,6 +327,7 @@ class TestArtifact:
             content_hash="abc123",
             size_bytes=2048,
             created_at=datetime.now(UTC),
+            publication_evidence_kind="legacy_returned",
         )
 
         # User-defined type, accepts any string
@@ -1449,6 +1451,7 @@ class TestHashFields:
             content_hash=self.VALID_SHA256,
             size_bytes=1024,
             created_at=datetime.now(UTC),
+            publication_evidence_kind="legacy_returned",
         )
         assert len(artifact.content_hash) == 64
 
@@ -1901,6 +1904,7 @@ class TestPropertyBasedAuditContracts:
             content_hash=content_hash,
             size_bytes=size_bytes,
             created_at=datetime.now(UTC),
+            publication_evidence_kind="legacy_returned",
         )
         assert artifact.artifact_id == artifact_id
         assert len(artifact.content_hash) == 64

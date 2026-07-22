@@ -60,6 +60,7 @@ class ProducerResolver:
     __slots__ = (
         "_node_by_id",
         "_producer_map",
+        "_queue_predecessors",
         "duplicate_connections",
     )
 
@@ -68,10 +69,15 @@ class ProducerResolver:
         producer_map: dict[str, ProducerEntry],
         node_by_id: dict[str, NodeSpec],
         duplicate_connections: frozenset[str],
+        queue_predecessors: Mapping[str, tuple[ProducerEntry, ...]] | None = None,
     ) -> None:
         self._producer_map = producer_map
         self._node_by_id = node_by_id
         self.duplicate_connections = duplicate_connections
+        # Queue fan-in predecessors, keyed by queue id, tuple sorted by
+        # producer_id (elspeth-a5b86149d4). Absent for queue-free compositions;
+        # every ordinary connection resolves through _producer_map as before.
+        self._queue_predecessors: Mapping[str, tuple[ProducerEntry, ...]] = queue_predecessors or {}
 
     @classmethod
     def build(
@@ -86,12 +92,28 @@ class ProducerResolver:
         duplicates: set[str] = set()
         node_by_id = {node.id: node for node in nodes}
 
+        # Declared queue fan-in (elspeth-a5b86149d4): a queue's id names the
+        # connection its upstream producers publish to. Discover every queue
+        # before registering producers so their fan-in is routed into a
+        # per-queue predecessor set instead of contending in producer_map.
+        queue_nodes = {node.id: node for node in nodes if node.node_type == "queue"}
+        queue_predecessors: dict[str, dict[str, ProducerEntry]] = {queue_id: {} for queue_id in queue_nodes}
+
         def register(connection_name: str | None, entry: ProducerEntry) -> None:
             if connection_name is None or connection_name == "discard":
                 return
             if connection_name in sink_names:
                 # Direct-to-sink edges aren't producers for downstream
                 # walk-back; schema-contract code handles them separately.
+                return
+            if connection_name in queue_nodes and entry.producer_id != connection_name:
+                # A producer publishing to a declared queue is a queue
+                # predecessor, not an ordinary single-producer registration —
+                # so declared fan-in never trips the duplicate rule. Dedup by
+                # producer_id (a gate routing two labels to one queue is one
+                # predecessor). The queue itself is installed as the canonical
+                # producer for its id after the ordinary scan.
+                queue_predecessors[connection_name].setdefault(entry.producer_id, entry)
                 return
             if connection_name in producer_map:
                 # Same node registering multiple times against the same
@@ -132,12 +154,34 @@ class ProducerResolver:
             register(node.on_error, entry)
             if node.routes is not None:
                 for target in node.routes.values():
+                    if target == "fork":
+                        # Reserved fork-mode keyword: the DAG builder resolves it
+                        # to RouteDestination.fork(), never a connection, so any
+                        # number of fork gates may use it without contending.
+                        continue
                     register(target, entry)
             if node.fork_to is not None:
                 for target in node.fork_to:
                     register(target, entry)
 
-        return cls(producer_map, node_by_id, frozenset(duplicates))
+        # Install each queue as the canonical, observed-schema producer of its
+        # own connection id. The queue publishes implicitly under its id
+        # (on_success is None), so it never registered itself in the loop above;
+        # downstream walk-back therefore stops at the queue (not an arbitrary
+        # predecessor). Freeze predecessors as producer_id-sorted tuples so the
+        # result is independent of source/node insertion order.
+        for queue_id, queue_node in queue_nodes.items():
+            producer_map[queue_id] = ProducerEntry(
+                producer_id=queue_id,
+                plugin_name=queue_node.plugin,
+                options=queue_node.options,
+            )
+        frozen_predecessors = {
+            queue_id: tuple(sorted(entries.values(), key=lambda entry: entry.producer_id))
+            for queue_id, entries in queue_predecessors.items()
+        }
+
+        return cls(producer_map, node_by_id, frozenset(duplicates), frozen_predecessors)
 
     def find_producer_for(self, connection_name: str) -> ProducerEntry | None:
         """Return the immediate producer for a connection, or None.
@@ -150,6 +194,18 @@ class ProducerResolver:
         if connection_name not in self._producer_map:
             return None
         return self._producer_map[connection_name]
+
+    def queue_predecessors(self, queue_id: str) -> tuple[ProducerEntry, ...]:
+        """Return the producers feeding a declared queue, sorted by producer_id.
+
+        Empty tuple for a non-queue connection or an unknown id. These are the
+        queue's upstream fan-in predecessors — deliberately kept OUT of the
+        ordinary single-producer map so declared fan-in does not read as a
+        duplicate. Every predecessor-aware walker (fanout, prompt-shield) must
+        traverse all of these conservatively rather than the single canonical
+        producer.
+        """
+        return self._queue_predecessors.get(queue_id, ())
 
     def walk_to_real_producer(self, connection_name: str) -> ProducerEntry | None:
         """Walk back through structural gates to the true producer.

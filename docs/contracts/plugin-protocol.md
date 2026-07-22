@@ -901,11 +901,14 @@ name: str
 config_model: type[PluginConfig] | None
 input_schema: type[PluginSchema]
 node_id: str | None
-idempotent: bool                # Can this sink handle duplicate writes safely?
+idempotent: bool                # Legacy metadata; not recovery authority
 determinism: Determinism
 plugin_version: str
 source_file_hash: str | None
 declared_required_fields: frozenset[str]
+effect_protocol_version: ClassVar[str]  # Must be "sink-effect-v1"
+supported_effect_modes: ClassVar[frozenset[str]]
+supported_effect_input_kinds: ClassVar[frozenset[SinkEffectInputKind]]
 ```
 
 #### Required Methods
@@ -914,42 +917,33 @@ declared_required_fields: frozenset[str]
 def __init__(self, config: dict[str, Any]) -> None:
     """Initialize with configuration."""
 
-def write(self, rows: list[dict[str, Any]], ctx: PluginContext) -> SinkWriteResult:
-    """Receive rows and return proof of work.
+def inspect_effect(
+    self,
+    request: SinkEffectInspectionRequest,
+    ctx: RestrictedSinkEffectContext,
+) -> SinkEffectInspection:
+    """Inspect the target before planning, or return NO_INSPECTION_REQUIRED."""
 
-    The sink controls its own internal processing:
-    - May write immediately (CSV, database)
-    - May queue internally and process later (satellite, async API)
-    - May batch for efficiency
+def prepare_effect(
+    self,
+    request: SinkEffectPrepareRequest,
+    ctx: RestrictedSinkEffectContext,
+) -> SinkEffectPlan:
+    """Return the complete immutable plan; this method performs no publication."""
 
-    MUST return SinkWriteResult describing what was produced/queued.
-    SHOULD NOT block for slow operations - queue internally, confirm in on_complete().
+def reconcile_effect(
+    self,
+    plan: SinkEffectPlan,
+    ctx: RestrictedSinkEffectContext,
+) -> SinkEffectReconcileResult:
+    """Prove NOT_APPLIED, APPLIED_WITH_EXACT_DESCRIPTOR, or UNKNOWN."""
 
-    Returns:
-        SinkWriteResult with ArtifactDescriptor content_hash and size_bytes
-        (REQUIRED for audit) plus optional row diversions
-    """
-
-def flush(self) -> None:
-    """Ensure all buffered writes are durable.
-
-    MUST guarantee that when this method returns:
-    - All data passed to write() is persisted
-    - Data survives process crash
-    - Data survives power loss (for file/block storage)
-
-    This method MUST block until durability is guaranteed.
-
-    For file-based sinks: Call file.flush() + os.fsync(file.fileno())
-    For database sinks: Call connection.commit()
-    For async sinks: Await flush completion
-
-    This is called by the orchestrator BEFORE creating checkpoints.
-    If this method returns successfully, the checkpoint system assumes
-    all data is durable and will NOT replay these writes on resume.
-
-    Called periodically and before on_complete().
-    """
+def commit_effect(
+    self,
+    plan: SinkEffectPlan,
+    ctx: RestrictedSinkEffectContext,
+) -> SinkEffectCommitResult:
+    """Apply exactly the persisted plan and return its exact descriptor/outcomes."""
 
 def close(self) -> None:
     """Release resources.
@@ -957,6 +951,18 @@ def close(self) -> None:
     Called after on_complete() or on error.
     """
 ```
+
+`write()` and `flush()` remain on the base compatibility interface for plugin
+construction and older tests. They are not the production publication path and
+do not provide recovery authority. Pipeline preflight rejects a sink unless its
+class declares the exact `sink-effect-v1` version, a non-empty exact frozenset
+of modes, the required input kind, and callable implementations of all four
+effect methods. Third-party sinks fail closed until they implement that whole
+contract.
+
+`SinkEffectInputKind.PIPELINE_MEMBERS` carries ordered pipeline rows.
+`SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT` carries a restricted, sealed audit
+snapshot reader. An adapter must declare each kind it actually supports.
 
 #### Required Lifecycle Hooks
 
@@ -982,18 +988,23 @@ def on_complete(self, ctx: PluginContext) -> None:
     """
 ```
 
-#### SinkWriteResult and ArtifactDescriptor Contract
+#### Sink effect result and ArtifactDescriptor contract
 
-`write()` returns `SinkWriteResult`. Its `artifact` is the primary audit proof;
-its `diversions` tuple carries per-row write failures recorded with
-`BaseSink._divert_row()`.
+`prepare_effect()` returns a `SinkEffectPlan` bound to the effect ID, protocol
+version, input kind, target, plan/payload hashes, descriptor mode, inspection
+mode, and bounded safe evidence. `commit_effect()` returns the exact
+`ArtifactDescriptor`, bounded evidence, and disjoint accepted/diverted member
+ordinals. Reconciliation returns a value from a closed result set:
 
-```python
-@dataclass(frozen=True)
-class SinkWriteResult:
-    artifact: ArtifactDescriptor
-    diversions: tuple[RowDiversion, ...] = ()
-```
+| Result | Meaning | Coordinator action |
+|---|---|---|
+| `NOT_APPLIED` | The exact plan is proven absent. | Commit once, then finalize the returned descriptor. |
+| `APPLIED_WITH_EXACT_DESCRIPTOR` | The exact plan is proven applied. | Finalize from that descriptor without committing again. |
+| `UNKNOWN` | Exact absence and exact application are both unprovable. | Stop; keep the effect and successors blocked for operator diagnosis. |
+
+`NO_INSPECTION_REQUIRED` is an inspection mode, not a reconcile result. It is
+valid only where the adapter does not need target state to prepare an exact
+plan. It does not waive reconciliation after a response-lost commit.
 
 ```python
 @dataclass(frozen=True)
@@ -1027,43 +1038,63 @@ The `content_hash` field is REQUIRED and proves what was written. Hash computati
 
 **Key principle:** Hash what YOU control, not what the destination does with it. For databases, you hash the payload you're sending, not what the DB stores (it may add timestamps, auto-increment IDs, etc.). This proves intent.
 
-#### Lifecycle
+#### Recoverable publication lifecycle
 
 ```
 __init__(config)
     │
     ▼
-on_start(ctx)               ← Open connections, prepare
+on_start(ctx)               ← Open connections; no publication
     │
     ▼
-┌──────────────────────────────────────────────┐
-│ write(rows, ctx) → SinkWriteResult          │  ← May be called multiple times
-│     │                                        │
-│     ▼                                        │
-│ (sink processes on its own schedule)         │
-└──────────────────────────────────────────────┘
+reserve effect              ← Durable identity, members, stream predecessor
     │
     ▼
-flush()                     ← Flush any buffers
+inspect_effect()            ← Target state or NO_INSPECTION_REQUIRED
     │
     ▼
-on_complete(ctx)            ← BLOCKS until truly done
-    │                         (satellite confirms, transaction commits)
+prepare_effect()            ← Exact plan persisted as PREPARED
+    │
+    ▼
+acquire lease               ← IN_FLIGHT, generation-fenced
+    │
+    ▼
+reconcile_effect()
+    ├── NOT_APPLIED ───────► commit_effect()
+    ├── APPLIED_WITH_EXACT_DESCRIPTOR ──► finalize
+    └── UNKNOWN ───────────► stop; no speculative commit
+    │
+    ▼
+finalize                    ← Artifact + member outcomes, FINALIZED
+    │
+    ▼
+on_complete(ctx)            ← Lifecycle completion only
+    │
     ▼
 close()                     ← Release resources
 ```
 
-#### Idempotency
+The durable sequence is `RESERVED -> PREPARED -> IN_FLIGHT -> FINALIZED`.
+Every inspect, commit, and reconcile call records intent before external I/O.
+After a response-lost commit or expired-lease takeover, recovery reuses the
+stored plan and reconciles before it may commit.
 
-Sinks declare `idempotent: bool`:
-- `True`: Safe to retry writes with same data (uses idempotency key)
-- `False`: Retry may cause duplicates (append-only files, non-idempotent APIs)
+#### Effect identity and target authority
 
-Idempotency key format: `{run_id}:{token_id}:{sink_name}`
+The deterministic effect ID, plan hash, member effect IDs, and predecessor
+stream are the recovery identities. The legacy `idempotent` boolean and
+`{run_id}:{token_id}:{sink_name}` key are not enough to authorize replay.
+
+Adapters must provide target-side authority appropriate to the destination:
+conditional object-store mutation, verifiable file locking/atomic replacement,
+or a database target-side ledger whose unique effect claim commits with the
+data mutation. A timeout is never proof that the target was not changed.
 
 #### Resume Capability
 
-Sinks declare `supports_resume: bool` to indicate they can append to existing output on resume:
+`supports_resume` describes whether a pipeline configuration may reuse an
+existing output target. It is separate from crash recovery, which always uses
+the sink-effect protocol:
 
 ```python
 supports_resume: bool   # Can this sink append to existing output on resume?
@@ -1081,9 +1112,16 @@ Sinks that don't support resume (`supports_resume=False`) will never have these 
 
 #### Audit Records
 
-- Each `write()`: SinkWriteResult with ArtifactDescriptor (type, path, hash, size) and any diversions
-- `on_complete` timestamp (confirms delivery)
-- Idempotency key if applicable
+- Durable stream, effect, ordered-member, and inspect/commit/reconcile attempt
+  records.
+- Exact plan and result descriptor hashes, without credentials.
+- Artifact `publication_performed` plus evidence kind: `returned`,
+  `reconciled`, `inherited`, or `virtual`.
+- Disjoint, complete accepted/diverted member outcomes and terminal scheduler
+  evidence.
+
+Operational recovery is defined in the [Sink Effect Recovery
+runbook](../runbooks/sink-effect-recovery.md).
 
 ---
 

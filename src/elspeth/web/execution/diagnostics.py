@@ -15,6 +15,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.engine import Connection
 
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.export_mappers import artifact_producer_kind, validate_artifact_publication_projection
 from elspeth.core.landscape.schema import (
     artifacts_table,
     node_states_table,
@@ -277,6 +278,7 @@ def load_run_diagnostics_from_db(
                 operations_table.c.operation_id,
                 operations_table.c.node_id,
                 operations_table.c.operation_type,
+                operations_table.c.sink_effect_id,
                 operations_table.c.status,
                 operations_table.c.duration_ms,
                 operations_table.c.started_at,
@@ -292,6 +294,7 @@ def load_run_diagnostics_from_db(
                 operation_id=row.operation_id,
                 node_id=row.node_id,
                 operation_type=row.operation_type,
+                sink_effect_id=row.sink_effect_id,
                 status=row.status,
                 duration_ms=row.duration_ms,
                 started_at=row.started_at,
@@ -345,26 +348,45 @@ def load_run_diagnostics_from_db(
             select(
                 artifacts_table.c.artifact_id,
                 artifacts_table.c.sink_node_id,
+                artifacts_table.c.produced_by_state_id,
+                artifacts_table.c.sink_effect_id,
                 artifacts_table.c.artifact_type,
                 artifacts_table.c.path_or_uri,
                 artifacts_table.c.size_bytes,
+                artifacts_table.c.publication_performed,
+                artifacts_table.c.publication_evidence_kind,
                 artifacts_table.c.created_at,
             )
             .where(artifacts_table.c.run_id == landscape_run_id)
             .order_by(artifacts_table.c.created_at.desc(), artifacts_table.c.artifact_id.asc())
             .limit(_ARTIFACT_PREVIEW_LIMIT)
         )
-        artifacts = [
-            RunDiagnosticArtifact(
-                artifact_id=row.artifact_id,
-                sink_node_id=row.sink_node_id,
-                artifact_type=row.artifact_type,
-                path_or_uri=row.path_or_uri,
-                size_bytes=row.size_bytes,
-                created_at=row.created_at,
+        artifacts: list[RunDiagnosticArtifact] = []
+        for row in conn.execute(artifact_stmt):
+            producer_kind = artifact_producer_kind(
+                produced_by_state_id=row.produced_by_state_id,
+                sink_effect_id=row.sink_effect_id,
             )
-            for row in conn.execute(artifact_stmt)
-        ]
+            validate_artifact_publication_projection(
+                producer_kind=producer_kind,
+                publication_performed=row.publication_performed,
+                publication_evidence_kind=row.publication_evidence_kind,
+            )
+            artifacts.append(
+                RunDiagnosticArtifact(
+                    artifact_id=row.artifact_id,
+                    sink_node_id=row.sink_node_id,
+                    producer_kind=producer_kind,
+                    produced_by_state_id=row.produced_by_state_id,
+                    sink_effect_id=row.sink_effect_id,
+                    artifact_type=row.artifact_type,
+                    path_or_uri=row.path_or_uri,
+                    size_bytes=row.size_bytes,
+                    publication_performed=row.publication_performed,
+                    publication_evidence_kind=row.publication_evidence_kind,
+                    created_at=row.created_at,
+                )
+            )
 
         latest_candidates: list[datetime | None] = [
             conn.execute(select(func.max(tokens_table.c.created_at)).where(tokens_table.c.run_id == landscape_run_id)).scalar_one_or_none(),

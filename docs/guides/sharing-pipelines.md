@@ -67,12 +67,17 @@ accept this trade-off.
 
 ## First-deploy operator action
 
-For 0.7.0, shareable-review state is part of the broader web session database
-contract. The release expects `SESSION_SCHEMA_EPOCH=26` and
-`SQLITE_SCHEMA_EPOCH=22`. Before first start on 0.7.0, stop the web service,
-archive and remove both the configured session DB and the configured Landscape
-audit DB, then restart so fresh databases are created with the current schema
-sentinels.
+For 0.7.1, shareable-review state is part of the broader web session database
+contract. The release expects `SESSION_SCHEMA_EPOCH=30` and
+`SQLITE_SCHEMA_EPOCH=28`. Epoch 29 introduced durable guided operations and
+epoch 30 adds the closed `quota_exceeded` terminal failure code used for stable
+HTTP 413 fork replay. When upgrading from an older pre-1.0 build, stop and
+uninstall the web service, archive/export evidence when required, recreate the
+configured session and Landscape databases, then reinstall and initialize this
+ELSPETH version. No SQLite or PostgreSQL predecessor schema is transformed in
+place; PostgreSQL recreation remains a schema-owner operation. Deployments
+crossing from an older release must account for the historical 0.7.0 boundary
+as well.
 
 Use [the staging session DB recreation runbook](../runbooks/staging-session-db-recreation.md)
 as the operational source of truth. It covers the matched SQLite sidecars,
@@ -226,8 +231,13 @@ with `openssl rand -base64 32` and replace.
 
 ### Service refuses to start with a `SESSION_SCHEMA_EPOCH` mismatch
 
-The sessions DB predates the running code. For 0.7.0, follow the two-database
-reset procedure above rather than deleting only `sessions.db`.
+The sessions DB predates the running code. Archive/export evidence when
+required, stop and uninstall the deployment, recreate both stale databases,
+then reinstall. Writable, read-only, and inspection opens do not migrate any
+predecessor Landscape epoch. PostgreSQL recreation requires the schema-owner
+path. Do not roll older code over a database initialized by newer code; restore
+is not a supported repair path. Keep the service drained, repair the current
+release forward, recreate fresh state, and retry.
 
 ### `POST /mark-ready-for-review` returns 409 with "composition validation failed"
 

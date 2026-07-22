@@ -394,9 +394,21 @@ def _outcome_item(*, run_id: str, token: TokenDisplayInfo, depth: int) -> TuiLin
                 "artifact_path_or_uri": artifact["path_or_uri"],
                 "artifact_hash": artifact["content_hash"],
                 "artifact_size_bytes": artifact["size_bytes"],
-                "state_id": artifact["produced_by_state_id"],
+                "artifact_producer_kind": artifact["producer_kind"],
+                "artifact_publication_performed": artifact["publication_performed"],
+                "artifact_publication_evidence_kind": artifact["publication_evidence_kind"],
             }
         )
+        if artifact["producer_kind"] == "node_state":
+            state_id = artifact["produced_by_state_id"]
+            if state_id is None:
+                raise ValueError("node-state artifact is missing produced_by_state_id")
+            selection["state_id"] = state_id
+        else:
+            sink_effect_id = artifact["sink_effect_id"]
+            if sink_effect_id is None:
+                raise ValueError("sink-effect artifact is missing sink_effect_id")
+            selection["sink_effect_id"] = sink_effect_id
     return TuiLineageItem(
         label=_outcome_label(outcome),
         selection=selection,

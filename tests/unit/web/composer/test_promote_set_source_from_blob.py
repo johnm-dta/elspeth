@@ -25,7 +25,9 @@ from sqlalchemy import insert
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSummary
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -35,8 +37,9 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_patch_source_options, _execute_set_source_from_blob
-from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools._common import ToolContext as _ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -57,8 +60,20 @@ def _mock_catalog() -> MagicMock:
     """A minimal catalog whose ``get_schema`` accepts ``text`` (the plugin
     set_source_from_blob defaults to for ``text/plain`` MIME)."""
     catalog = MagicMock(spec=CatalogService)
+    catalog.list_sources.return_value = [
+        PluginSummary(name=name, description=name, plugin_type="source", config_fields=[]) for name in ("csv", "json", "text")
+    ]
     catalog.get_schema.return_value = {"properties": {}}
     return catalog
+
+
+def ToolContext(*, catalog: CatalogService, **kwargs: Any) -> _ToolContext:
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _session_engine_with_session() -> tuple[Any, str]:
@@ -296,8 +311,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             composer_model_identifier="openai/gpt-5-mini",
             composer_model_version="gpt-5-mini-2026-05-01",
             composer_provider="openai",
-            composer_skill_hash="sha256:composer-skill",
-            tool_arguments_hash="sha256:tool-arguments",
+            composer_skill_hash="a" * 64,
+            tool_arguments_hash="b" * 64,
         )
         create_result = _execute_create_blob(
             {"filename": "generated.txt", "mime_type": "text/plain", "content": "generated row text"},

@@ -20,6 +20,9 @@ vi.mock("@/api/client", () => ({
 
 describe("ComposerPreferencesForm", () => {
   beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.style.colorScheme = "";
     resetStore(usePreferencesStore);
     usePreferencesStore.setState({
       loaded: true,
@@ -42,6 +45,20 @@ describe("ComposerPreferencesForm", () => {
     render(<ComposerPreferencesForm />);
     expect(screen.getByLabelText(/freeform/i)).toBeChecked();
     expect(screen.getByLabelText(/guided/i)).not.toBeChecked();
+  });
+
+  it("exposes reversible theme controls in Composer preferences", async () => {
+    localStorage.setItem("elspeth_theme", "light");
+    render(<ComposerPreferencesForm />);
+
+    expect(screen.getByRole("group", { name: /theme/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /system/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /light/i })).toBeChecked();
+
+    await userEvent.click(screen.getByRole("radio", { name: /dark/i }));
+
+    expect(localStorage.getItem("elspeth_theme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
   it("writes the new default-mode on selection (forwards activeSessionId watermark)", async () => {
@@ -109,6 +126,30 @@ describe("ComposerPreferencesForm", () => {
     expect(resetTutorial).toHaveBeenCalledTimes(1);
   });
 
+  it("closes the preferences panel after a successful tutorial reset", async () => {
+    const resetTutorial = vi
+      .spyOn(usePreferencesStore.getState(), "resetTutorial")
+      .mockResolvedValueOnce(undefined);
+    const onClose = vi.fn();
+
+    render(<ComposerPreferencesPanel onClose={onClose} />);
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    expect(resetTutorial).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the preferences panel open when tutorial reset fails", async () => {
+    vi.spyOn(usePreferencesStore.getState(), "resetTutorial")
+      .mockRejectedValueOnce(new Error("backend unavailable"));
+    const onClose = vi.fn();
+
+    render(<ComposerPreferencesPanel onClose={onClose} />);
+    await userEvent.click(screen.getByRole("button", { name: /reset tutorial/i }));
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("shows Reset tutorial while a tutorial is IN PROGRESS (the wedged-resume escape hatch)", () => {
     // Completion-gating hid the escape hatch from exactly the users who
     // needed it: a wedged mid-tutorial resume (persisted session swept out
@@ -142,6 +183,9 @@ describe("ComposerPreferencesForm", () => {
 // transitively covered by E2E — fast unit feedback was missing.
 describe("ComposerPreferencesPanel — modal chrome", () => {
   beforeEach(() => {
+    localStorage.clear();
+    document.documentElement.removeAttribute("data-theme");
+    document.documentElement.style.colorScheme = "";
     resetStore(usePreferencesStore);
     usePreferencesStore.setState({
       loaded: true,

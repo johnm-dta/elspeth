@@ -216,6 +216,80 @@ class TestComposerProgressRegistry:
         assert latest.phase == "calling_model"
 
     @pytest.mark.asyncio
+    async def test_inflight_request_count_enriches_snapshots(self) -> None:
+        """Snapshots report the session's live in-flight compose request count.
+
+        The count is the SPA's correlated settlement signal after a client
+        abort: the phase alone cannot distinguish "the aborted route is
+        still running (queued on the compose lock / not yet published)"
+        from "everything settled" — the registry may hold the PREVIOUS
+        turn's terminal snapshot in both cases. Zero in-flight requests is
+        the only reliable quiescence condition.
+        """
+        registry = ComposerProgressRegistry()
+
+        assert (await registry.get_latest("session-1")).inflight_requests == 0
+
+        registry.begin_request("session-1")
+        assert (await registry.get_latest("session-1")).inflight_requests == 1
+
+        # A second tab's request queued on the compose lock counts too.
+        registry.begin_request("session-1")
+        assert (await registry.get_latest("session-1")).inflight_requests == 2
+        # Sessions are independent.
+        assert (await registry.get_latest("session-2")).inflight_requests == 0
+
+        registry.end_request("session-1")
+        registry.end_request("session-1")
+        assert (await registry.get_latest("session-1")).inflight_requests == 0
+
+        # Published snapshots are enriched at read time with the live count,
+        # not the count at publish time.
+        await registry.publish(
+            session_id="session-1",
+            request_id="message-1",
+            user_id="user-1",
+            event=ComposerProgressEvent(
+                phase="complete",
+                headline="The requested pipeline change is finished.",
+                evidence=("The state was saved.",),
+            ),
+        )
+        registry.begin_request("session-1")
+        enriched = await registry.get_latest("session-1")
+        assert enriched.phase == "complete"
+        assert enriched.inflight_requests == 1
+        registry.end_request("session-1")
+
+    @pytest.mark.asyncio
+    async def test_list_active_snapshots_carry_live_inflight_count(self) -> None:
+        """The operator /_active view reports the LIVE count, not publish-time zero.
+
+        Stored snapshots are created by publish() where inflight_requests
+        defaults to 0; serving them raw from list_active() would show an
+        actively composing session with a zero count, contradicting the
+        live-count contract the per-session GET provides.
+        """
+        registry = ComposerProgressRegistry()
+        await registry.publish(
+            session_id="session-1",
+            request_id="message-1",
+            user_id="user-1",
+            event=ComposerProgressEvent(
+                phase="using_tools",
+                headline="I'm applying the requested pipeline changes.",
+                evidence=("A tool call is running.",),
+            ),
+        )
+        registry.begin_request("session-1")
+        try:
+            active = await registry.list_active(user_id="user-1")
+            assert len(active) == 1
+            assert active[0].inflight_requests == 1
+        finally:
+            registry.end_request("session-1")
+
+    @pytest.mark.asyncio
     async def test_clear_removes_session_snapshot(self) -> None:
         registry = ComposerProgressRegistry()
         await registry.publish(

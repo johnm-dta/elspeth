@@ -2,7 +2,7 @@ import type { HTMLAttributes, ReactNode } from "react";
 
 export interface TypeBadgeProps extends HTMLAttributes<HTMLSpanElement> {
   /** Which pipeline primitive. @default "source" */
-  type?: "source" | "transform" | "gate" | "sink" | "aggregation" | "coalesce";
+  type?: "source" | "transform" | "gate" | "sink" | "aggregation" | "coalesce" | "queue";
   /** Override the label (defaults to the type name). */
   children?: ReactNode;
 }

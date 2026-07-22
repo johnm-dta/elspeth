@@ -11,6 +11,7 @@ from typing import Any, ClassVar
 
 from elspeth.contracts.enums import AuditCharacteristic, Determinism
 from elspeth.contracts.plugin_assistance import PluginAssistance
+from elspeth.contracts.plugin_capabilities import CapabilityDeclaration, WebConfigAuthority
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 
@@ -32,6 +33,8 @@ class _BareTransform:
     capability_tags: ClassVar[tuple[str, ...]] = ()
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
     discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: ClassVar[frozenset[CapabilityDeclaration]] = frozenset()
     config_model = None
     is_batch_aware = False
 
@@ -67,6 +70,8 @@ class _FilledSource:
     example_use: ClassVar[str | None] = "source:\n  plugin: filled"
     capability_tags: ClassVar[tuple[str, ...]] = ("file", "csv")
     discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: ClassVar[frozenset[CapabilityDeclaration]] = frozenset()
     # Declare both "coerce" (Tier-3 boundary trait) and "quarantine"
     # (runtime quarantine routing) explicitly; the catalog service does
     # not infer either, because `_on_validation_failure` is per-instance.
@@ -142,6 +147,8 @@ class _HintedTransform:
     capability_tags: ClassVar[tuple[str, ...]] = ()
     audit_characteristics: ClassVar[frozenset[AuditCharacteristic]] = frozenset()
     discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
+    web_config_authority = WebConfigAuthority.USER_CONFIGURABLE
+    policy_capabilities: ClassVar[frozenset[CapabilityDeclaration]] = frozenset()
     config_model = None
     is_batch_aware = False
 

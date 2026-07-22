@@ -27,20 +27,21 @@ from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
 )
-from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
+    ReviewedSourceAuthority,
     RuntimePreflight,
     ToolContext,
     ToolHandler,
     ToolResult,
     _failure_result,
     build_plugin_schemas_for_failure,
+    normalize_tool_result_validation,
 )
 from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
@@ -62,9 +63,11 @@ from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 __all__ = [
     "_inject_prior_validation",
+    "execute_discovery_tool_with_context",
     "execute_tool",
     "get_discovery_tool_definitions",
     "get_tool_definitions",
@@ -257,7 +260,7 @@ _REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 42 tools: 13 discovery + 13 mutation + 10 blob tools + 3 secret
+    Returns 43 tools: 13 discovery + 15 mutation + 10 blob tools + 3 secret
     tools + 1 advisor tool + 1 session-aware interpretation-review tool.
     ``request_advisor_hint`` is always part of the LLM-visible list —
     advisor is mandatory — see ``ComposerServiceImpl._get_litellm_tools``.
@@ -465,7 +468,7 @@ def _requires_secret_context(tool_name: str) -> bool:
 def _augment_with_plugin_schemas(
     result: ToolResult,
     tool_name: str,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
     context: ToolContext,
 ) -> ToolResult:
     """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
@@ -493,18 +496,35 @@ def _augment_with_plugin_schemas(
     schemas = build_plugin_schemas_for_failure(
         result,
         catalog,
-        schema_unavailable_message=lambda schema: schema_secret_unavailable_message(schema, context),
+        schema_unavailable_message=lambda _schema: None,
     )
     if schemas is None:
         return result
     return replace(result, plugin_schemas=schemas)
 
 
+def finalize_tool_result(
+    result: ToolResult,
+    *,
+    tool_name: str,
+    catalog: PolicyCatalogView,
+    context: ToolContext,
+    prior_validation: ValidationSummary,
+) -> ToolResult:
+    """Apply canonical prior-validation, repair-schema, and profile enrichment."""
+    if tool_name in _ALL_MUTATION_TOOL_NAMES:
+        result = _inject_prior_validation(result, prior_validation)
+    result = _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    return normalize_tool_result_validation(result, catalog)
+
+
 def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
+    catalog: PolicyCatalogView,
+    *,
+    plugin_snapshot: PluginAvailabilitySnapshot,
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
@@ -521,6 +541,7 @@ def execute_tool(
     composer_provider: str | None = None,
     composer_skill_hash: str | None = None,
     tool_arguments_hash: str | None = None,
+    reviewed_source_authority: ReviewedSourceAuthority | None = None,
     raise_schema_argument_errors: bool = False,
 ) -> ToolResult:
     """Execute a composition tool by name.
@@ -585,6 +606,9 @@ def execute_tool(
             routing. Direct callers keep the historical failed-``ToolResult``
             contract by leaving this false.
     """
+    if catalog.snapshot is not plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
         **_MUTATION_TOOLS,
@@ -595,7 +619,8 @@ def execute_tool(
     }
     handler = all_handlers.get(tool_name)
     if handler is None:
-        return _failure_result(state, f"Unknown tool: {tool_name}")
+        return normalize_tool_result_validation(_failure_result(state, f"Unknown tool: {tool_name}"), catalog)
+    current_validation = prior_validation or catalog.validate_composition_state(state).validation
 
     if tool_arguments_hash is not None:
         argument_error = _validate_tool_arguments(
@@ -605,10 +630,13 @@ def execute_tool(
             raise_on_error=raise_schema_argument_errors,
         )
         if argument_error is not None:
-            return argument_error
+            return normalize_tool_result_validation(argument_error, catalog)
 
     if _requires_secret_context(tool_name) and (secret_service is None or user_id is None):
-        return _failure_result(state, "Secret tools require secret service context.")
+        return normalize_tool_result_validation(
+            _failure_result(state, "Secret tools require secret service context."),
+            catalog,
+        )
 
     # ``current_validation`` carries the live state's ValidationSummary
     # into ``diff_pipeline`` so its delta against the baseline is computed
@@ -617,6 +645,7 @@ def execute_tool(
     # the field is unused.
     context = ToolContext(
         catalog=catalog,
+        plugin_snapshot=plugin_snapshot,
         data_dir=data_dir,
         require_data_dir_for_paths=tool_arguments_hash is not None,
         session_engine=session_engine,
@@ -624,7 +653,7 @@ def execute_tool(
         secret_service=secret_service,
         user_id=user_id,
         baseline=baseline,
-        current_validation=prior_validation,
+        current_validation=current_validation,
         runtime_preflight=runtime_preflight,
         max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         user_message_id=user_message_id,
@@ -634,21 +663,64 @@ def execute_tool(
         composer_provider=composer_provider,
         composer_skill_hash=composer_skill_hash,
         tool_arguments_hash=tool_arguments_hash,
+        reviewed_source_authority=reviewed_source_authority,
     )
 
-    if tool_name in _ALL_MUTATION_TOOL_NAMES:
-        prior = prior_validation if prior_validation is not None else state.validate()
-        result = handler(arguments, state, context)
-        result = _inject_prior_validation(result, prior)
-    else:
-        result = handler(arguments, state, context)
+    result = handler(arguments, state, context)
 
-    # Failure-response augmentation: when an option-shape mutation rejects,
-    # embed the get_plugin_schema payloads for every plugin named in the
-    # validation errors so the LLM avoids a follow-up discovery round-trip.
-    # No-op for non-augmentation-eligible tools or successful results
-    # (gated inside ``_augment_with_plugin_schemas``).
-    return _augment_with_plugin_schemas(result, tool_name, catalog, context)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=catalog,
+        context=context,
+        prior_validation=current_validation,
+    )
+
+
+def execute_discovery_tool_with_context(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Execute one declared read-only tool through a frozen request context.
+
+    This is the narrow execution seam for planners that advertise core, blob,
+    and secret discovery together.  Unlike :func:`execute_tool`, callers
+    cannot accidentally reach a mutation registry and the request-scoped
+    catalog/snapshot/context object is not reconstructed between calls.
+    """
+    if context.catalog.snapshot is not context.plugin_snapshot:
+        raise ValueError("plugin_snapshot_catalog_mismatch")
+    discovery_handlers: dict[str, ToolHandler] = {
+        **_DISCOVERY_TOOLS,
+        **_BLOB_DISCOVERY_TOOLS,
+        **_SECRET_DISCOVERY_TOOLS,
+    }
+    handler = discovery_handlers.get(tool_name)
+    if handler is None:
+        raise ToolArgumentError(
+            argument="tool_name",
+            expected="a declared read-only discovery tool",
+            actual_type="mutation_or_unknown",
+            code="DISCOVERY_ONLY",
+        )
+    argument_error = _validate_tool_arguments(tool_name, arguments, state, raise_on_error=True)
+    assert argument_error is None
+    if _requires_secret_context(tool_name) and (context.secret_service is None or context.user_id is None):
+        return normalize_tool_result_validation(
+            _failure_result(state, "Secret tools require secret service context."),
+            context.catalog,
+        )
+    prior_validation = context.current_validation or context.catalog.validate_composition_state(state).validation
+    result = handler(dict(arguments), state, context)
+    return finalize_tool_result(
+        result,
+        tool_name=tool_name,
+        catalog=context.catalog,
+        context=context,
+        prior_validation=prior_validation,
+    )
 
 
 # ---------------------------------------------------------------------------

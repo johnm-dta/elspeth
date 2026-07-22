@@ -19,6 +19,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
     ValidationEntry,
     ValidationSummary,
+    queue_node_contract_error,
 )
 
 
@@ -994,6 +995,79 @@ class TestStage1Validation:
             )
         )
         state = state.with_output(self._make_output("main"))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+
+    def test_multiple_fork_gates_do_not_collide_on_fork_route_keyword(self) -> None:
+        """Two gates routing to the reserved 'fork' keyword are not duplicate producers.
+
+        Regression test for elspeth-b6940369a7: route target 'fork' is the
+        fork-mode keyword, not a connection, so any number of gates may use it.
+        Before the fix the web validator reported "Duplicate producer for
+        connection 'fork'" and rejected multi-fork topologies the engine builds.
+
+        Topology mirrors an engine-valid build (verified via
+        from_plugin_instances): a boolean router gate splits into two fork
+        gates whose branches terminate directly at sinks — no coalesce, so the
+        only thing under test is the two gates both routing to 'fork'.
+        """
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="router_in"))
+        state = state.with_node(
+            NodeSpec(
+                id="router",
+                node_type="gate",
+                plugin=None,
+                input="router_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['x'] > 0",
+                routes={"true": "fa_in", "false": "fb_in"},
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="gate_a",
+                node_type="gate",
+                plugin=None,
+                input="fa_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("sink_a1", "sink_a2"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="gate_b",
+                node_type="gate",
+                plugin=None,
+                input="fb_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("sink_b1", "sink_b2"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        for sink_name in ("sink_a1", "sink_a2", "sink_b1", "sink_b2"):
+            state = state.with_output(self._make_output(sink_name))
 
         result = state.validate()
 
@@ -3005,12 +3079,14 @@ class TestSchemaContractValidation:
 
         result = state.validate()
 
-        assert not result.is_valid
+        # The probe failure surfaces as a warning, never a crash. The raw
+        # fallback for this mapper abstains (observed schema, no guarantees,
+        # no participation), so the sink required-fields check defers to
+        # runtime per-row validation — no error, no edge-contract verdict —
+        # mirroring validate_sink_required_fields' abstention clause.
+        assert result.is_valid, result.errors
         assert any("computed contract probe" in warning.message.lower() for warning in result.warnings)
-        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
-        assert sink_contract.producer_guarantees == ()
-        assert sink_contract.consumer_requires == ("body",)
-        assert sink_contract.satisfied is False
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
 
     def test_contract_probe_unexpected_constructor_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Framework bugs in transform constructors must not be certified by raw fallback."""
@@ -3171,6 +3247,7 @@ class TestSchemaContractValidation:
                 options={
                     "schema": {"mode": "observed"},
                     "mapping": {"text": "body"},
+                    "api_key": {"secret_ref": "CONSTRUCTION_PROBE_SECRET_SENTINEL"},
                 },
             )
         )
@@ -3195,6 +3272,7 @@ class TestSchemaContractValidation:
             "Authorization: Bearer sk-SUPER-SECRET-TOKEN-123",
             "postgres://admin:hunter2@db.internal:5432/prod",  # secret-scan: allow-this-line
             "/home/appuser/.ssh/id_rsa",
+            "CONSTRUCTION_PROBE_SECRET_SENTINEL",
         )
 
         class _LeakyManager:
@@ -3499,6 +3577,260 @@ class TestSchemaContractValidation:
         assert sink_contract.satisfied is False
         assert "text" in sink_contract.missing_fields
 
+    def test_sink_required_fields_abstaining_producer_defers_to_runtime(self) -> None:
+        """An abstaining producer must not fail the sink required-fields check.
+
+        Mirror of the runtime abstention clause in
+        ``core/dag/schema_validation.py::validate_sink_required_fields``:
+        when the producer's guarantee vote is (no fields, did not participate),
+        the static check defers to per-row runtime validation instead of
+        rejecting. A select_only field_mapper with an observed schema and no
+        local guaranteed_fields abstains exactly this way — the tutorial's
+        accepted transform chain (elspeth-3283f2eaec) was permanently blocked
+        because the composer hard-failed where the runtime would build and run.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url", "summary"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "schema": {"mode": "observed"},
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert result.is_valid, result.errors
+        # No static claim either way: the edge renders as "not yet checked",
+        # not as a satisfied contract the composer cannot actually vouch for.
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
+
+    @pytest.mark.parametrize(
+        ("proven_sources", "expected_targets", "expected_missing"),
+        [
+            (("raw_url", "raw_summary"), ("summary", "url"), ()),
+            (("raw_url",), ("url",), ("summary",)),
+        ],
+    )
+    def test_guided_select_only_mapper_declares_only_proven_guarantees(
+        self,
+        proven_sources: tuple[str, ...],
+        expected_targets: tuple[str, ...],
+        expected_missing: tuple[str, ...],
+    ) -> None:
+        """Guided cleanup earns a positive verdict without guessing missing fields."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": list(proven_sources)}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"raw_url": "url", "raw_summary": "summary"},
+                    "schema": {"mode": "observed", "guaranteed_fields": list(proven_sources)},
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url", "summary"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+
+        result = state.validate()
+        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
+        assert result.is_valid is (not expected_missing)
+        assert sink_contract.satisfied is (not expected_missing)
+        assert sink_contract.producer_guarantees == expected_targets
+        assert sink_contract.missing_fields == expected_missing
+
+    def test_sink_required_fields_inherited_participation_still_fails(self) -> None:
+        """A pass-through downstream of a participating producer cannot abstain.
+
+        Runtime parity (``walk_effective_guarantee_vote``): a pass-through
+        transform's participation is its OWN vote OR any predecessor's. Here
+        the source participates with explicit zero guarantees
+        (``guaranteed_fields: []``) and feeds an own-abstaining passthrough,
+        so the runtime marks the sink's upstream as participated-with-empty
+        and ``validate_sink_required_fields`` rejects the missing field. The
+        composer must reject too — treating this as abstention would pass
+        preview for a pipeline the runtime refuses to build.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": []}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="passthrough",
+                options={"schema": {"mode": "observed"}},
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["text"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert not result.is_valid
+        assert any("text" in e.message and "output:main" in e.message for e in result.errors)
+        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
+        assert sink_contract.satisfied is False
+        assert "text" in sink_contract.missing_fields
+
+    def test_contract_probe_ignores_authoring_metadata(self) -> None:
+        """Composer-only authoring keys must not break the contract probe.
+
+        The guided flow stages ``interpretation_requirements`` inside node
+        options; every plugin config rejects unknown keys, so probing with
+        unstripped options is a guaranteed ValueError -> a spurious
+        "Computed contract probe ... failed" warning surfaced to the user
+        (and a fail-closed Stage-1 rejection for pass-through plugins).
+        The probe must strip authoring metadata the same way YAML export does.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url", "summary"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url", "summary": "summary"},
+                    "schema": {"mode": "observed"},
+                    "interpretation_requirements": [
+                        {
+                            "id": "drop_raw_html_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_raw_html_fields",
+                            "status": "resolved",
+                            "draft": "Drop the scraped raw HTML fields.",
+                            "event_id": "e831b8ee-2c3e-449b-975e-d213fb7eecad",
+                            "accepted_value": "Drop the scraped raw HTML fields.",
+                            "accepted_artifact_hash": "871d0cf160b91d8dadc0f58504a86bbed14b9fe28d05bdd0a7c918b1e5b07aa9",
+                        }
+                    ],
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="json",
+                options={
+                    "path": "outputs/results.json",
+                    "schema": {"mode": "observed", "required_fields": ["url"]},
+                },
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert result.is_valid, result.errors
+        assert not any("contract probe" in w.message.lower() for w in result.warnings), [w.message for w in result.warnings]
+
+    def test_rule_c_self_consistency_fires_through_authoring_metadata(self) -> None:
+        """Rule C must not be silently skipped by composer-only option keys.
+
+        The per-node select_only self-consistency check probes the plugin
+        constructor; with ``interpretation_requirements`` left in options the
+        probe raised (extra keys forbidden) and Rule C silently skipped the
+        exact guided nodes it exists to check. The probe must strip authoring
+        metadata like every other contract probe.
+        """
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "t1",
+                "t1",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "select_only": True,
+                    "mapping": {"url": "url"},
+                    # Declares 'bogus' as a required output field the mapping
+                    # will never emit -> Rule C violation.
+                    "schema": {"mode": "fixed", "fields": ["url: str", "bogus: str"]},
+                    "interpretation_requirements": [
+                        {
+                            "id": "drop_fields_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_fields",
+                            "status": "resolved",
+                            "draft": "Keep only url.",
+                            "event_id": "00000000-0000-0000-0000-000000000001",
+                            "accepted_value": "Keep only url.",
+                            "accepted_artifact_hash": "0" * 64,
+                        }
+                    ],
+                },
+            )
+        )
+        state = state.with_output(self._make_output())
+        state = state.with_edge(self._make_edge("e1", "source", "t1"))
+        result = state.validate()
+        assert any("Transform contract violation" in e.message and "bogus" in e.message for e in result.errors), [
+            e.message for e in result.errors
+        ]
+
     def test_consumer_schema_required_fields_violation_fails(self) -> None:
         state = self._empty_state()
         state = state.with_source(
@@ -3695,7 +4027,7 @@ class TestSchemaContractValidation:
                 condition=None,
                 routes=None,
                 fork_to=None,
-                branches=("a_out", "b_out"),
+                branches={"branch_a": "a_out", "branch_b": "b_out"},
                 policy="require_all",
                 merge="nested",
             )
@@ -3827,7 +4159,7 @@ class TestSchemaContractValidation:
             self._make_transform(
                 "ta",
                 "path_a",
-                "out_a",
+                "mid_a",
                 options={"required_input_fields": ["text"]},
             )
         )
@@ -3835,12 +4167,28 @@ class TestSchemaContractValidation:
             self._make_transform(
                 "tb",
                 "path_b",
-                "out_b",
+                "mid_b",
                 options={"required_input_fields": ["text"]},
             )
         )
-        state = state.with_output(self._make_output("out_a"))
-        state = state.with_output(self._make_output("out_b"))
+        state = state.with_node(
+            NodeSpec(
+                id="rejoin",
+                node_type="coalesce",
+                plugin=None,
+                input="mid_a",
+                on_success="merged",
+                on_error=None,
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches={"path_a": "mid_a", "path_b": "mid_b"},
+                policy="require_all",
+                merge="union",
+            )
+        )
+        state = state.with_output(self._make_output("merged"))
         state = state.with_edge(self._make_edge("e1", "source", "g1"))
         state = state.with_edge(self._make_edge("e2", "g1", "ta"))
         state = state.with_edge(self._make_edge("e3", "g1", "tb"))
@@ -5229,6 +5577,75 @@ class TestPassThroughComposerParity:
         assert sink_contract.consumer_requires == ("body",)
         assert sink_contract.satisfied is True
 
+    def test_batch_replicate_propagates_upstream_guarantees_to_downstream_consumer(self) -> None:
+        """Replicated rows retain the fields guaranteed by their source."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="replicate_in",
+                plugin="csv",
+                options={
+                    "schema": {
+                        "mode": "observed",
+                        "guaranteed_fields": ["color_name", "hex"],
+                    }
+                },
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="replicate",
+                node_type="aggregation",
+                plugin="batch_replicate",
+                input="replicate_in",
+                on_success="score_in",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "include_copy_index": True,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+                trigger={"count": 10},
+                output_mode="transform",
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "score_variants",
+                "score_in",
+                "main",
+                plugin="passthrough",
+                options={
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": ["color_name", "hex"],
+                },
+            )
+        )
+        state = state.with_output(
+            OutputSpec(
+                name="main",
+                plugin="csv",
+                options={"path": "outputs/main.csv", "schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            )
+        )
+        state = state.with_edge(self._make_edge("e1", "source", "replicate"))
+        state = state.with_edge(self._make_edge("e2", "replicate", "score_variants"))
+        state = state.with_edge(self._make_edge("e3", "score_variants", "main"))
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+        consumer_contract = next(ec for ec in result.edge_contracts if ec.to_id == "score_variants")
+        assert set(consumer_contract.producer_guarantees) == {"color_name", "hex", "copy_index"}
+        assert consumer_contract.consumer_requires == ("color_name", "hex")
+        assert consumer_contract.satisfied is True
+
     def test_preview_inherits_upstream_guarantees_through_fork_gate_into_pass_through(self) -> None:
         """Pass-through preview must follow fork branches back to their producer."""
         state = self._empty_state()
@@ -5265,9 +5682,26 @@ class TestPassThroughComposerParity:
             self._make_transform(
                 "pt_node",
                 "path_a",
-                "main",
+                "pt_out",
                 plugin="passthrough",
                 options={"schema": {"mode": "observed"}},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="rejoin",
+                node_type="coalesce",
+                plugin=None,
+                input="pt_out",
+                on_success="main",
+                on_error=None,
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches={"path_a": "pt_out"},
+                policy="require_all",
+                merge="union",
             )
         )
         state = state.with_output(
@@ -5298,11 +5732,16 @@ class TestPassThroughComposerParity:
 
         result = state.validate()
 
+        # Engine-legal fork chains route branches through a coalesce (or a
+        # sink-named branch); preview deliberately defers coalesce-fed sink
+        # contracts to the runtime validator with an explicit skip warning
+        # rather than fabricating a contract row. The previous assertion
+        # (a satisfied contract at output:main) was reachable only in a
+        # fork-into-transform-into-sink shape the engine rejects at pre-run
+        # ("fork branch with no destination").
         assert result.is_valid, result.errors
-        sink_contract = next(ec for ec in result.edge_contracts if ec.to_id == "output:main")
-        assert set(sink_contract.producer_guarantees) == {"id", "body"}
-        assert sink_contract.consumer_requires == ("body",)
-        assert sink_contract.satisfied is True
+        assert any("coalesce" in w.message.lower() and "skipped" in w.message.lower() for w in result.warnings)
+        assert not any(ec.to_id == "output:main" for ec in result.edge_contracts)
 
     def test_preview_fails_closed_when_known_pass_through_constructor_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Probe failure on a known pass-through plugin → Stage 1 rejects pipeline.
@@ -5398,3 +5837,348 @@ class TestCompositionStateValidateEmitsSemanticContracts:
         # Other validation may pass or fail; what we assert is that
         # the semantic contract is SATISFIED.
         assert any(c.outcome.value == "satisfied" for c in result.semantic_contracts)
+
+
+class TestCompositionStateQueue:
+    """Structural queue fan-in exposure (elspeth-a5b86149d4).
+
+    A declared queue node legalises many-producer -> one-consumer interleave
+    (mirroring the runtime `queues:` contract) without relaxing the ordinary
+    single-producer / single-consumer rule anywhere else. Its canonical shape
+    is id == input, plugin/routing absent, implicit output under its id, and
+    description-only options.
+    """
+
+    def _queue(self, queue_id: str = "inbound", *, description: str | None = None, **overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": queue_id,
+            "node_type": "queue",
+            "plugin": None,
+            "input": queue_id,
+            "on_success": None,
+            "on_error": None,
+            "options": {} if description is None else {"description": description},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    def _source(self, on_success: str = "inbound") -> SourceSpec:
+        return SourceSpec(
+            plugin="csv",
+            on_success=on_success,
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    def _transform(self, node_id: str = "normalize", *, input: str = "inbound", on_success: str = "combined") -> NodeSpec:
+        return NodeSpec(
+            id=node_id,
+            node_type="transform",
+            plugin="passthrough",
+            input=input,
+            on_success=on_success,
+            on_error="discard",
+            options={"schema": {"mode": "observed"}},
+            condition=None,
+            routes=None,
+            fork_to=None,
+            branches=None,
+            policy=None,
+            merge=None,
+        )
+
+    def _sink(self, name: str = "combined") -> OutputSpec:
+        return OutputSpec(name=name, plugin="json", options={"schema": {"mode": "observed"}}, on_write_failure="discard")
+
+    def _state(self, *, sources: dict[str, SourceSpec], nodes: tuple[NodeSpec, ...], outputs: tuple[OutputSpec, ...]) -> CompositionState:
+        return CompositionState(
+            source=None,
+            sources=sources,
+            nodes=nodes,
+            edges=(),
+            outputs=outputs,
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def _valid_state(self, **queue_overrides: Any) -> CompositionState:
+        return self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(**queue_overrides), self._transform()),
+            outputs=(self._sink(),),
+        )
+
+    # --- Happy path + serialization ---
+
+    def test_valid_two_source_queue_pipeline(self) -> None:
+        result = self._valid_state().validate()
+        assert result.is_valid, result.errors
+
+    def test_queue_survives_serialization_round_trip(self) -> None:
+        state = self._valid_state(description="Orders and refunds interleave here")
+        restored = CompositionState.from_dict(state.to_dict())
+        assert restored == state
+        queue = next(n for n in restored.nodes if n.node_type == "queue")
+        assert queue.id == "inbound" and queue.input == "inbound"
+        assert queue.options == {"description": "Orders and refunds interleave here"}
+
+    # --- Intrinsic contract (pure helper parity) ---
+
+    def test_canonical_queue_has_no_intrinsic_error(self) -> None:
+        assert queue_node_contract_error(self._queue()) is None
+        assert queue_node_contract_error(self._queue(description="hi")) is None
+
+    def test_queue_input_must_equal_id(self) -> None:
+        assert "input must equal its id" in (queue_node_contract_error(self._queue(input="other")) or "")
+        result = self._valid_state(input="other").validate()
+        assert not result.is_valid
+
+    def test_queue_rejects_non_canonical_fields(self) -> None:
+        for field, value in (
+            ("plugin", "csv"),
+            ("on_success", "x"),
+            ("on_error", "x"),
+            ("condition", "True"),
+            ("routes", {"a": "b"}),
+            ("fork_to", ("a",)),
+            ("policy", "require_all"),
+            ("merge", "nested"),
+            ("trigger", {"kind": "count"}),
+            ("output_mode", "passthrough"),
+            ("expected_output_count", 2),
+        ):
+            error = queue_node_contract_error(self._queue(**{field: value}))
+            assert error is not None and field in error, f"{field} not rejected: {error}"
+
+    def test_queue_rejects_unknown_option_and_non_string_description(self) -> None:
+        assert "unknown option" in (queue_node_contract_error(self._queue(options={"buffer": 10})) or "")
+        assert "description must be a string" in (queue_node_contract_error(self._queue(options={"description": 5})) or "")
+
+    # --- Structural topology ---
+
+    def test_queue_requires_at_least_one_producer(self) -> None:
+        # No source targets the queue's id -> unreachable / no producer.
+        state = self._state(
+            sources={"orders": self._source(on_success="elsewhere")},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(),),
+        )
+        assert not state.validate().is_valid
+
+    def test_queue_requires_a_downstream_consumer(self) -> None:
+        # Producers exist but nothing consumes the queue's output.
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(),),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("downstream consumer" in e.message for e in result.errors)
+
+    def test_two_ordinary_consumers_of_a_queue_are_a_duplicate_consumer(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(
+                self._queue(),
+                self._transform("c1", input="inbound", on_success="combined"),
+                self._transform("c2", input="inbound", on_success="combined2"),
+            ),
+            outputs=(self._sink(), self._sink("combined2")),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("Duplicate consumer" in e.message for e in result.errors)
+
+    def test_queue_id_may_not_collide_with_a_sink(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(), self._sink("inbound")),
+        )
+        assert not state.validate().is_valid
+
+    def test_queue_id_may_not_collide_with_a_source_key(self) -> None:
+        state = self._state(
+            sources={"inbound": self._source(on_success="elsewhere"), "orders": self._source()},
+            nodes=(self._queue(), self._transform(input="inbound", on_success="combined")),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+
+    def test_undeclared_fan_in_without_a_queue_still_reports_duplicate_producer(self) -> None:
+        state = self._state(
+            sources={"orders": self._source(), "refunds": self._source()},
+            nodes=(self._transform(input="inbound", on_success="combined"),),
+            outputs=(self._sink(),),
+        )
+        result = state.validate()
+        assert not result.is_valid
+        assert any("Duplicate producer" in e.message for e in result.errors)
+
+
+def test_structural_node_shape_errors_carry_closed_error_codes() -> None:
+    """Node-shape validation entries must carry closed error codes.
+
+    The planner repair loop strips validation messages from candidate
+    feedback (leak-safety), so ``error_code`` is the only actionable repair
+    signal — and ``explain_validation_error`` can only explain what has a
+    code. Live regression: fork/coalesce A/B proposals were repaired blind
+    against entries whose error_code was None.
+    """
+
+    def _node(**overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": "n",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "rows",
+            "on_success": "out",
+            "on_error": "discard",
+            "options": {},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="rows", options={}, on_validation_failure="discard"),
+        nodes=(
+            _node(id="t_bad", on_success=None, on_error=None),
+            _node(id="c_bad", node_type="coalesce", plugin=None),
+            _node(
+                id="c_vocab",
+                node_type="coalesce",
+                plugin=None,
+                branches={"a": "a", "b": "b"},
+                policy="require_all_branches",
+                merge="union_fields",
+            ),
+            _node(id="g_bad", node_type="gate", plugin=None),
+            _node(id="g_half", node_type="gate", plugin=None, condition="True", routes={"true": "out"}),
+            _node(id="t_dangling", on_success="nowhere", on_error="missing_sink"),
+            _node(
+                id="t_novel_decision",
+                options={
+                    "interpretation_requirements": [
+                        {
+                            "id": "novel_decision_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "ab_reconciliation_retention",
+                            "status": "pending",
+                            "draft": "Retain both variants in the reconciled row.",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ]
+                },
+            ),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = state.validate()
+    codes = {(entry.component, entry.error_code) for entry in result.errors}
+    for expected in (
+        ("node:t_bad", "transform_missing_on_success"),
+        ("node:t_bad", "transform_missing_on_error"),
+        ("node:c_bad", "coalesce_missing_branches"),
+        ("node:c_bad", "coalesce_missing_policy"),
+        ("node:g_bad", "gate_missing_condition"),
+        ("node:g_bad", "gate_missing_routes"),
+        ("node:g_half", "gate_route_labels_mismatch"),
+        ("node:t_dangling", "transform_on_success_dangling"),
+        ("node:t_dangling", "transform_on_error_unknown_sink"),
+        ("node:t_novel_decision", "pipeline_decision_unregistered"),
+        ("node:c_vocab", "coalesce_policy_invalid"),
+        ("node:c_vocab", "coalesce_merge_invalid"),
+    ):
+        assert expected in codes, f"missing {expected}; got {sorted(c for c in codes if c[1])}"
+
+
+def test_gate_fork_branches_must_reach_a_coalesce_branch_or_sink() -> None:
+    """Mirror the engine's fork-branch destination rule at composition time.
+
+    Live session d4ea3d8a: committed pipeline failed engine pre-run because
+    the gate's fork_to names ('branch_a'/'branch_b') appeared nowhere in any
+    coalesce branches keys or sink names — the model keyed coalesce branches
+    by incoming connection instead of fork branch name. Composer validation
+    accepted it: valid-but-not-runnable.
+    """
+
+    def _node(**overrides: Any) -> NodeSpec:
+        defaults: dict[str, Any] = {
+            "id": "n",
+            "node_type": "transform",
+            "plugin": "passthrough",
+            "input": "rows",
+            "on_success": "out",
+            "on_error": "discard",
+            "options": {},
+            "condition": None,
+            "routes": None,
+            "fork_to": None,
+            "branches": None,
+            "policy": None,
+            "merge": None,
+        }
+        defaults.update(overrides)
+        return NodeSpec(**defaults)
+
+    state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="rows", options={}, on_validation_failure="discard"),
+        nodes=(
+            _node(
+                id="fork_rows",
+                node_type="gate",
+                plugin=None,
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=["branch_a", "branch_b"],
+                on_success=None,
+                on_error=None,
+            ),
+            _node(id="tone", input="branch_a", on_success="tone_out"),
+            _node(id="usage", input="branch_b", on_success="usage_out"),
+            _node(
+                id="reconcile",
+                node_type="coalesce",
+                plugin=None,
+                input="tone_out",
+                on_success=None,
+                on_error=None,
+                branches={"tone_out": "tone_out", "usage_out": "usage_out"},
+                policy="require_all",
+                merge="union",
+            ),
+            _node(id="finalize", input="reconcile", on_success="out"),
+        ),
+        edges=(),
+        outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = state.validate()
+    entries = [(e.component, e.error_code) for e in result.errors]
+    assert ("node:fork_rows", "fork_branch_no_destination") in entries, entries
+    offending = next(e for e in result.errors if e.error_code == "fork_branch_no_destination")
+    assert "branch_a" in offending.message
+    assert "tone_out" in offending.message

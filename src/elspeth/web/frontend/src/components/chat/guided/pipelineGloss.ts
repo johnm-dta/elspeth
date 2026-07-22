@@ -42,11 +42,29 @@ export const GLOSS_FALLBACK = "Your pipeline is taking shape…";
  */
 export const UNKNOWN_COMPONENT_PHRASE = "this step";
 
+// ── Shared phrase strings (elspeth-20bb1c3ac4) ──────────────────────────────
+// validationHumaniser.ts's id-substring fallback (a DIFFERENT detector —
+// it guesses from a generated component id rather than a typed plugin name,
+// for components no longer in the composition) renders the SAME copy for the
+// same csv/json/read/write concepts. Exporting the strings here gives both
+// detectors one source of truth for the literal wording, even though their
+// detection logic legitimately differs (typed SourceSpec/NodeSpec/OutputSpec
+// vs a bare id string) and stays independent.
+export const READ_CSV_PHRASE = "read your CSV";
+export const READ_JSON_PHRASE = "read your JSON file";
+export const READ_API_PHRASE = "read from an API";
+export const READ_DATA_PHRASE = "read your data";
+export const WRITE_CSV_PHRASE = "write a CSV";
+export const WRITE_JSON_PHRASE = "write a JSON file";
+export const WRITE_RESULTS_PHRASE = "write the results";
+export const SCRAPE_PAGE_PHRASE = "scrape each page";
+export const PROCESS_ROW_PHRASE = "process each row";
+
 function sourcePhrase(source: SourceSpec): string {
   const plugin = (source.plugin ?? "").toLowerCase();
-  if (plugin.includes("csv")) return "read your CSV";
-  if (/api|http|url|web|scrape/.test(plugin)) return "read from an API";
-  return "read your data";
+  if (plugin.includes("csv")) return READ_CSV_PHRASE;
+  if (/api|http|url|web|scrape/.test(plugin)) return READ_API_PHRASE;
+  return READ_DATA_PHRASE;
 }
 
 function transformPhrase(node: NodeSpec): string {
@@ -54,19 +72,23 @@ function transformPhrase(node: NodeSpec): string {
   if (node.node_type === "gate") return "filter the rows";
   if (node.node_type === "aggregation") return "summarise the rows";
   if (node.node_type === "coalesce") return "merge the branches";
+  // A queue is uncorrelated fan-in: many producers publish one connection name
+  // and the queue interleaves those rows. NEVER merge/join/union language — it
+  // does not correlate or combine schemas (contrast with coalesce above).
+  if (node.node_type === "queue") return "interleave the incoming rows";
   const plugin = (node.plugin ?? "").toLowerCase();
   if (/llm|rate|score|classif|grade/.test(plugin)) return "rate each row";
-  if (/scrape|fetch|http|web/.test(plugin)) return "scrape each page";
+  if (/scrape|fetch|http|web/.test(plugin)) return SCRAPE_PAGE_PHRASE;
   if (/map|reshape|field/.test(plugin)) return "reshape each row";
   if (/select|column|project/.test(plugin)) return "pick the columns you need";
-  return "process each row";
+  return PROCESS_ROW_PHRASE;
 }
 
 function outputPhrase(output: OutputSpec): string {
   const plugin = (output.plugin ?? "").toLowerCase();
-  if (plugin.includes("csv")) return "write a CSV";
-  if (plugin.includes("json")) return "write a JSON file";
-  return "write the results";
+  if (plugin.includes("csv")) return WRITE_CSV_PHRASE;
+  if (plugin.includes("json")) return WRITE_JSON_PHRASE;
+  return WRITE_RESULTS_PHRASE;
 }
 
 /** Join with an Oxford comma: [a] → "a"; [a,b] → "a and b"; [a,b,c] → "a, b, and c". */

@@ -6,8 +6,8 @@
    .message-sources-created*, .inline-source-created-turn*,
    .message-group-separator, .tool-call-*, .pending-proposals-banner*,
    .inline-source-fallback-prompt*, .pending-overlay-pill, .spec-pending-proposal,
-   .yaml-pending-summary, .runs-pending-proposal, .composing-*, .template-cards*,
-   .template-card*, .chat-model-chip*, .proposal-diff*.
+   .yaml-pending-summary, .runs-pending-proposal, .composing-*,
+   .freeform-introduction, .chat-model-chip*, .proposal-diff*.
    Tenants (execution-named but chat-mounted — they render inside the chat
    panel via inline run results):
      .inline-run-results*, .run-outputs-panel*, .run-output-artifact*. */
@@ -182,6 +182,19 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   max-height: min(260px, 32vh);
   overflow: auto;
+}
+
+/* The completed surface is a vertical evidence stack: Pipeline ready first,
+   then its run evidence. Keep the two cards visually adjacent while allowing
+   expanded results to consume the rest of the panel instead of leaving an
+   unstructured void below. The :not() preserves the collapse affordance's
+   content-height contract. */
+.chat-panel--completed > .inline-run-results:not(.inline-run-results--collapsed) {
+  flex: 1 1 auto;
+  min-height: 6rem;
+  max-height: none;
+  margin-top: var(--space-xs);
+  margin-bottom: 0;
 }
 
 .inline-run-results--collapsed {
@@ -412,6 +425,26 @@
   border: 1px solid var(--color-error-border);
 }
 
+/* Compose-timeout bootstrap notice: a soft, transient "connecting" status
+   shown while the backend wall clock is still landing. Muted (not error)
+   register — it explains why Send is briefly disabled without alarming. */
+.chat-input-bootstrapping {
+  padding: var(--space-1-5) var(--space-2-5);
+  margin-bottom: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* Compose-timeout stuck state: backend reachable but it reported no usable
+   compose wall clock, so Send can never ungate. Error register (not the muted
+   "connecting" one) — this is a misconfiguration to notice, not a transient. */
+.chat-input-composer-unavailable {
+  padding: var(--space-1-5) var(--space-2-5);
+  margin-bottom: var(--space-sm);
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+}
+
 .chat-input-row {
   display: flex;
   gap: var(--space-sm);
@@ -514,14 +547,41 @@
 }
 
 @media (max-width: 760px) {
+  .chat-input {
+    padding: var(--space-xs) var(--space-sm);
+  }
+
   .chat-input-row {
     flex-wrap: wrap;
     align-items: stretch;
+    gap: var(--space-xs);
   }
 
   .chat-input-textarea {
     flex: 1 0 100%;
-    min-height: 68px;
+    min-height: 54px;
+    max-height: 28vh;
+    padding: var(--space-xs) var(--space-sm);
+    overflow-y: auto;
+  }
+
+  .chat-input-icon-btn {
+    min-width: 44px;
+    min-height: var(--size-control);
+    padding: var(--space-xs);
+  }
+
+  .chat-input-send-btn,
+  .chat-input-cancel-btn {
+    flex: 1 1 7rem;
+    min-width: 0;
+    min-height: var(--size-control);
+    padding: var(--space-xs) var(--space-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .chat-input-hint {
+    text-align: left;
   }
 }
 
@@ -649,17 +709,54 @@
   border-color: var(--color-accent);
 }
 
-/* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
+/* Two-step confirm container: primary + Cancel, wraps if the header is tight.
+   Flex (not grid) is load-bearing: flex-wrap lets Confirm and Cancel break
+   onto independent lines as space shrinks. A `grid-template-columns: auto
+   auto` version (tried and reverted, elspeth-036e8ab365) anchors both
+   buttons to the same row every time — its "auto" columns can't fall below
+   the combined min-content width of BOTH buttons, so next to the
+   nowrap ModelChip in .chat-panel-header-actions the Cancel button was
+   clipped by .chat-panel's overflow:hidden on narrow viewports (~320-400px).
+   flex-wrap lets a single button occupy a line on its own, so the floor is
+   one button's min-content width, not the pair's. */
 .mode-switch-confirm {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: var(--space-sm);
+  gap: var(--space-xs) var(--space-sm);
   align-items: center;
+  max-width: min(34rem, 100%);
 }
 
-/* C-4b: terminal-guided "Switch to guided" — permanently un-reentrable
-   (solver_exhausted / protocol_violation, not the reversible user exit).
-   Disabled button + adjacent plain-language reason so the affordance never
+.mode-switch-confirm-card {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  box-shadow: var(--shadow-popover);
+}
+
+.mode-switch-confirm-title {
+  flex-basis: 100%;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  line-height: var(--line-height-tight);
+}
+
+/* Guided-direction consent disclosure ("fresh wizard + consent",
+   elspeth-e2c3dba6b5): the switch reseeds a fresh wizard and sets the current
+   pipeline aside (recoverable via version history). Muted, informational
+   register — same treatment as .mode-switch-disabled-reason; it explains an
+   expected consequence, not an error. Given a full row so it reads before the
+   confirm/cancel buttons in the wrapped flex layout. */
+.mode-switch-confirm-note {
+  flex-basis: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: var(--line-height-normal);
+}
+
+/* Disabled mode switch + adjacent plain-language reason so the affordance never
    reads as a silent no-op — same register as .chat-panel-error's inline
    explanation, without borrowing its alert-red treatment (this is expected,
    not a failure). */
@@ -1306,7 +1403,7 @@
   white-space: pre-wrap;
   word-break: break-word;
   /* Bound the response body so the Accept/Reject actions below the card
-     stay visible. Long set_pipeline / propose-chain responses can exceed
+     stay visible. Long set_pipeline / proposal responses can exceed
      several hundred lines; without a cap they push the action row off the
      viewport. */
   max-height: 320px;
@@ -1585,6 +1682,31 @@
   min-width: 0;
 }
 
+.composing-details-toggle {
+  justify-self: start;
+  min-height: var(--size-control-compact);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
+.composing-details-toggle:hover,
+.composing-details-toggle:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.composing-details {
+  display: grid;
+  gap: var(--space-1-5);
+}
+
 .composing-section {
   display: grid;
   gap: var(--space-2xs);
@@ -1621,146 +1743,78 @@
 
 
 /* ---------------------------------------------------------------------------
-   TemplateCards (onboarding empty state)
+   Freeform introduction (dismissible account-level empty state)
    --------------------------------------------------------------------------- */
-.template-cards-container {
-  padding: var(--space-xl) var(--space-2xl);
-  width: min(100%, 1120px);
-  max-width: 1120px;
-  margin: 0 auto;
-}
-
-.template-cards-heading {
-  text-align: center;
-  margin-bottom: var(--space-xl);
-}
-
-.template-cards-title {
-  margin: 0 0 var(--space-sm);
-  font-size: var(--font-size-xl);
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.template-cards-subtitle {
-  margin: 0;
-  font-size: var(--font-size-base);
-  color: var(--color-text-muted);
-}
-
-.template-cards-grid {
-  display: grid;
-  /* 4 x 3 desktop field of domain exemplars. */
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-md);
-}
-
-.template-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: var(--space-1-5);
-  aspect-ratio: 1 / 1;
-  min-width: 0;
-  padding: var(--space-md);
-  overflow: hidden;
-  /* Exemplar tiles keep faded chrome so the grid reads as reference
-     context; the explicit "Use this example" button inside each card is
-     the interactive affordance (elspeth-b948756c5a). min-height stays
-     auto so the action button can push a card past the square when the
-     content needs the room. */
-  background-color: color-mix(
-    in srgb,
-    var(--color-surface-elevated) 72%,
-    var(--color-bg)
-  );
-  border: 1px solid
-    color-mix(in srgb, var(--color-border) 68%, transparent);
+.freeform-introduction {
+  width: min(calc(100% - 2 * var(--space-lg)), 48rem);
+  margin: var(--space-xl) auto;
+  padding: var(--space-lg);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
+  background-color: var(--color-surface-elevated);
   text-align: left;
 }
 
-.template-card-action {
-  margin-top: var(--space-xs);
-  align-self: flex-start;
-}
-
-.template-card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1-5);
-}
-
-.template-card-icon {
+.freeform-introduction h2 {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-text);
   font-size: var(--font-size-lg);
-  opacity: 0.76;
+  font-weight: 600;
+  text-align: center;
 }
 
-.template-card-title {
+.freeform-introduction p {
+  margin: 0 0 var(--space-md);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+}
+
+.freeform-introduction-section {
+  margin: var(--space-lg) 0;
+}
+
+.freeform-introduction-section h3 {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.freeform-introduction-definitions {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+}
+
+.freeform-introduction-definition {
+  display: grid;
+  grid-template-columns: minmax(6.5rem, auto) 1fr;
+  gap: var(--space-md);
+}
+
+.freeform-introduction-definition dt {
+  color: var(--color-text);
   font-size: var(--font-size-sm);
   font-weight: 600;
-  color: var(--color-text);
-  line-height: 1.15;
-  opacity: 0.9;
 }
 
-.template-card-description {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: var(--font-size-xs);
-  /* No opacity dimming here (dark-contrast carry-over, ux-review-2026-07-02):
-     --color-text-muted itself passes AA, but the previous 0.82 dim
-     composited it below 4.5:1 against the card's color-mix background in
-     BOTH themes (~4.2:1 dark / ~4.3:1 light vs the #173942 dark card mix).
-     The card keeps its faded chrome via the background/border mix above;
-     text stays at full token strength. Pinned by TemplateCards.test.tsx. */
-  color: var(--color-text-muted);
-  line-height: 1.3;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-
-.template-card-sda {
-  margin-top: auto;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-xs);
-  font-size: var(--font-size-xs);
-  /* Same contrast discipline as .template-card-description above: the old
-     0.76 dim dropped this micro-text to ~3.9:1 on the dark card mix.
-     Muted/secondary tokens at full strength pass AA on the card surface. */
-  color: var(--color-text-muted);
-  line-height: 1.2;
-}
-
-.template-card-sda div {
-  min-width: 0;
-}
-
-.template-card-sda dt {
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.template-card-sda dd {
-  display: -webkit-box;
+.freeform-introduction-definition dd {
   margin: 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
 }
 
-@media (max-width: 760px) {
-  .template-cards-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.freeform-introduction > button {
+  display: block;
+  margin: 0 auto;
 }
 
 @media (max-width: 520px) {
-  .template-cards-grid {
+  .freeform-introduction-definition {
     grid-template-columns: 1fr;
+    gap: var(--space-2xs);
   }
 }
 

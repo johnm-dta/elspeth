@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import socket
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from elspeth.core.config import load_settings_from_yaml_string
+from elspeth.core.config import load_bounded_pipeline_yaml, load_settings_from_yaml_string
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode, plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 from elspeth.plugins.sinks.csv_sink import CSVSink
@@ -17,7 +18,20 @@ from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer.state import CompositionState, OutputSpec, PipelineMetadata, SourceSpec
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.execution.preflight import (
+    audit_safe_resolved_config,
+    build_validated_runtime_graph,
+    instantiate_runtime_plugins,
+    make_policy_bound_sink_factory,
+)
+from elspeth.web.execution.validation import validate_pipeline_for_trained_operator
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
 
 
 def _forbid_socket_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,6 +145,20 @@ sinks:
       schema:
         mode: observed
 """
+
+
+def _snapshot_without(plugin_id: PluginId) -> PluginAvailabilitySnapshot:
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    return PluginAvailabilitySnapshot.create(
+        policy_hash="runtime-policy",
+        principal_scope="test:alice",
+        available=unrestricted.available - {plugin_id},
+        unavailable=(PluginAvailability(plugin_id, PluginUnavailableReason.NOT_AUTHORIZED),),
+        selected=unrestricted.selected,
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="runtime-policy-generation",
+    )
 
 
 def _external_plugin_probe_pipeline_yaml(tmp_path: Path) -> str:
@@ -279,7 +307,7 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
     """Constructors see preflight mode through the production worker path.
 
     This pins the runtime contract, not the ContextVar implementation detail:
-    validate_pipeline() may run in a ThreadPoolExecutor via run_sync_in_worker(),
+    validate_pipeline_for_trained_operator() may run in a ThreadPoolExecutor via run_sync_in_worker(),
     and constructors must still observe preflight mode inside that worker.
     """
     observed: list[tuple[str, bool]] = []
@@ -298,7 +326,7 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
     monkeypatch.setattr(CSVSink, "__init__", sink_init)
 
     result = await run_sync_in_worker(
-        validate_pipeline,
+        validate_pipeline_for_trained_operator,
         _csv_worker_probe_state(tmp_path),
         _web_settings(tmp_path),
         yaml_generator,
@@ -309,7 +337,9 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
 
 
 def test_validate_pipeline_rejects_chroma_persist_directory_outside_data_dir(tmp_path: Path) -> None:
-    result = validate_pipeline(_chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator)
+    result = validate_pipeline_for_trained_operator(
+        _chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator
+    )
 
     assert result.is_valid is False
     assert result.checks[0].name == "path_allowlist"
@@ -350,6 +380,124 @@ def test_runtime_mode_default_does_not_enable_preflight_context(
         "instantiate plugins with plugin_preflight_mode_enabled() == False. "
         f"Observed: {observed}"
     )
+
+
+def test_web_runtime_rejects_disabled_plugin_before_any_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = load_settings_from_yaml_string(_minimal_csv_pipeline_yaml(tmp_path))
+    constructed: list[str] = []
+
+    monkeypatch.setattr(CSVSource, "__init__", lambda *_args, **_kwargs: constructed.append("source"))
+    monkeypatch.setattr(CSVSink, "__init__", lambda *_args, **_kwargs: constructed.append("sink"))
+
+    with pytest.raises(ValueError, match="frozen plugin snapshot"):
+        instantiate_runtime_plugins(
+            settings,
+            plugin_snapshot=_snapshot_without(PluginId("sink", "csv")),
+        )
+
+    assert constructed == []
+
+
+def test_delayed_sink_factory_uses_frozen_snapshot_before_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = load_settings_from_yaml_string(_minimal_csv_pipeline_yaml(tmp_path))
+    constructed: list[str] = []
+    monkeypatch.setattr(CSVSink, "__init__", lambda *_args, **_kwargs: constructed.append("sink"))
+
+    factory = make_policy_bound_sink_factory(
+        settings,
+        plugin_snapshot=_snapshot_without(PluginId("sink", "csv")),
+    )
+
+    with pytest.raises(ValueError, match="frozen plugin snapshot"):
+        factory("output")
+
+    assert constructed == []
+
+
+def test_profile_private_bindings_never_enter_run_or_node_audit_config(tmp_path: Path) -> None:
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    (tmp_path / "outputs").mkdir(exist_ok=True)
+    input_path = tmp_path / "blobs" / "profile_input.csv"
+    input_path.write_text("text\nAda\n", encoding="utf-8")
+    executable_yaml = f"""\
+sources:
+  primary:
+    plugin: csv
+    on_success: llm_step
+    options:
+      path: {input_path}
+      on_validation_failure: discard
+      schema:
+        mode: observed
+transforms:
+  - name: llm_step
+    plugin: llm
+    input: llm_step
+    on_success: output
+    on_error: discard
+    options:
+      provider: openrouter
+      api_key: probe-key
+      model: openai/gpt-4o
+      prompt_template: "Summarise {{{{ row.text }}}}"
+      schema:
+        mode: observed
+      required_input_fields: []
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+    options:
+      path: {tmp_path / "outputs" / "profile_output.csv"}
+      schema:
+        mode: observed
+"""
+    settings = load_settings_from_yaml_string(executable_yaml)
+    audit_safe = load_bounded_pipeline_yaml(executable_yaml)
+    assert isinstance(audit_safe, dict)
+    transforms = audit_safe["transforms"]
+    assert isinstance(transforms, list)
+    llm_options = transforms[0]["options"]
+    transforms[0]["options"] = {
+        "profile": "tutorial",
+        "prompt_template": llm_options["prompt_template"],
+        "schema": llm_options["schema"],
+        "required_input_fields": llm_options["required_input_fields"],
+    }
+    unrestricted = PluginAvailabilitySnapshot.for_trained_operator(create_catalog_service())
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="runtime-policy",
+        principal_scope="test:alice",
+        available=unrestricted.available,
+        unavailable=(),
+        selected=unrestricted.selected,
+        usable_profile_aliases=((PluginId("transform", "llm"), ("tutorial",)),),
+        selected_profile_aliases=((PluginId("transform", "llm"), "tutorial"),),
+        binding_generation_fingerprint="runtime-policy-generation",
+    )
+
+    runtime = build_validated_runtime_graph(
+        settings,
+        plugin_snapshot=snapshot,
+        audit_safe_settings=audit_safe,
+    )
+    run_config = audit_safe_resolved_config(
+        settings,
+        audit_safe_settings=audit_safe,
+        plugin_snapshot=snapshot,
+    )
+    node_configs = [runtime.graph.get_node_info(node_id).config for node_id in runtime.graph.topological_order()]
+    rendered = json.dumps({"run": run_config, "nodes": node_configs}, default=dict)
+
+    assert "tutorial" in rendered
+    assert "openai/gpt-4o" not in rendered
+    assert "probe-key" not in rendered
 
 
 @pytest.mark.asyncio

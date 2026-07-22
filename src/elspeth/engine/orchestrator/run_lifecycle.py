@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from elspeth.contracts import (
     ExportStatus,
     SecretResolutionInput,
-    SinkProtocol,
 )
 from elspeth.contracts.coordination import CoordinationToken, mint_worker_id
 from elspeth.contracts.errors import (
@@ -54,7 +53,9 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.orchestrator.bootstrap import prepare_for_run
 from elspeth.engine.orchestrator.export import (
+    _validate_audit_export_binding_provenance,
     export_landscape,
+    prepare_audit_export_binding,
 )
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.run_state import _RunFailedWithPartialResultError
@@ -69,8 +70,11 @@ if TYPE_CHECKING:
     import threading
     from collections.abc import Callable
 
+    from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.contracts.plugin_policy_audit import WebPluginPolicyEvidence
     from elspeth.contracts.preflight import PreflightResult
+    from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
     from elspeth.core.config import ElspethSettings
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.events import EventBusProtocol
@@ -95,6 +99,7 @@ class InitializeDatabasePhase(Protocol):
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]: ...
 
 
@@ -147,6 +152,7 @@ class RunLifecycleCoordinator:
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
         openrouter_catalog_source: str,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
     ) -> tuple[RecorderFactory, Any, CoordinationToken]:
         """Execute the DATABASE phase: create factory, begin run, record secrets.
 
@@ -208,6 +214,7 @@ class RunLifecycleCoordinator:
                 openrouter_catalog_sha256=openrouter_catalog_sha256,
                 openrouter_catalog_source=openrouter_catalog_source,
                 leader_worker_id=worker_id,
+                web_plugin_policy_evidence=web_plugin_policy_evidence,
             )
             coordination_token = CoordinationToken(run_id=run.run_id, worker_id=worker_id, leader_epoch=1)
 
@@ -241,7 +248,12 @@ class RunLifecycleCoordinator:
         factory: RecorderFactory,
         run_id: str,
         settings: ElspethSettings,
-        sink_factory: Callable[[str], SinkProtocol],
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding],
+        *,
+        payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver,
+        worker_id: str,
     ) -> None:
         """Execute the EXPORT phase: export Landscape data to configured sink.
 
@@ -256,6 +268,8 @@ class RunLifecycleCoordinator:
         """
 
         export_config = settings.landscape.export
+        binding, sink_effect_admission = prepare_audit_export_binding(settings, sink_factory)
+        _validate_audit_export_binding_provenance(settings, binding)
         factory.run_lifecycle.set_export_status(
             run_id,
             status=ExportStatus.PENDING,
@@ -277,7 +291,18 @@ class RunLifecycleCoordinator:
                 )
             )
 
-            export_landscape(self._db, run_id, settings, sink_factory)
+            export_landscape(
+                self._db,
+                run_id,
+                settings,
+                sink_factory,
+                prepared_binding=binding,
+                sink_effect_admission=sink_effect_admission,
+                payload_store=payload_store,
+                audit_export_content_store=audit_export_content_store,
+                audit_export_content_store_resolver=audit_export_content_store_resolver,
+                worker_id=worker_id,
+            )
 
             factory.run_lifecycle.set_export_status(run_id, status=ExportStatus.COMPLETED)
             self._events.emit(PhaseCompleted(phase=PipelinePhase.EXPORT, duration_seconds=time.perf_counter() - phase_start))
@@ -304,15 +329,18 @@ class RunLifecycleCoordinator:
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
+        audit_export_content_store: AuditExportContentStore | None = None,
+        audit_export_content_store_resolver: AuditExportContentStoreResolver | None = None,
         secret_resolutions: list[SecretResolutionInput] | None = None,
         preflight_results: PreflightResult | None = None,
         shutdown_event: threading.Event | None = None,
-        sink_factory: Callable[[str], SinkProtocol] | None = None,
+        sink_factory: Callable[[str], SinkEffectRuntimeBinding] | None = None,
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str | None = None,
         openrouter_catalog_source: str | None = None,
+        web_plugin_policy_evidence: WebPluginPolicyEvidence | None = None,
         initialize_database_phase: InitializeDatabasePhase,
         execute_run: ExecuteRun,
     ) -> RunResult:
@@ -329,6 +357,31 @@ class RunLifecycleCoordinator:
             raise OrchestrationInvariantError("ExecutionGraph is required. Build with ExecutionGraph.from_plugin_instances()")
         if payload_store is None:
             raise OrchestrationInvariantError("PayloadStore is required for audit compliance.")
+
+        # Fail fast on missing export resources (elspeth-749e75a59b): when
+        # export is enabled, the sink factory and durable content-store
+        # resources are REQUIRED and must be validated BEFORE any irreversible
+        # work — run-row creation, pipeline processing, terminal finalize,
+        # checkpoint deletion, and leader-seat release. The identical checks
+        # at the export-phase call site below remain as a fail-closed backstop
+        # (and narrow the Optional types for the execute_export_phase call).
+        if settings is not None and settings.landscape.export.enabled:
+            if sink_factory is None:
+                raise ValueError(
+                    "Export is enabled but no sink_factory was provided to orchestrator.run(). "
+                    "The caller must supply a sink_factory so the export phase can create "
+                    "a fresh sink instance (the pipeline's sinks are already closed)."
+                )
+            if audit_export_content_store is None:
+                raise ValueError(
+                    "Export is enabled but no audit_export_content_store was provided; "
+                    "the durable winning store must be resolved explicitly."
+                )
+            if audit_export_content_store_resolver is None:
+                raise ValueError(
+                    "Export is enabled but no audit_export_content_store_resolver was provided; "
+                    "prior immutable winning store IDs must remain resolvable."
+                )
 
         # ADR-010 §Decision 3: assert registry non-empty and freeze both
         # registries before any row is processed. prepare_for_run() is
@@ -365,6 +418,7 @@ class RunLifecycleCoordinator:
             auth_provider_type=auth_provider_type,
             openrouter_catalog_sha256=openrouter_catalog_sha256,
             openrouter_catalog_source=openrouter_catalog_source,
+            web_plugin_policy_evidence=web_plugin_policy_evidence,
         )
 
         # Record pre-flight results (deferred from bootstrap_and_run)
@@ -476,7 +530,26 @@ class RunLifecycleCoordinator:
                         "The caller must supply a sink_factory so the export phase can create "
                         "a fresh sink instance (the pipeline's sinks are already closed)."
                     )
-                self.execute_export_phase(factory, run.run_id, settings, sink_factory)
+                if audit_export_content_store is None:
+                    raise ValueError(
+                        "Export is enabled but no audit_export_content_store was provided; "
+                        "the durable winning store must be resolved explicitly."
+                    )
+                if audit_export_content_store_resolver is None:
+                    raise ValueError(
+                        "Export is enabled but no audit_export_content_store_resolver was provided; "
+                        "prior immutable winning store IDs must remain resolvable."
+                    )
+                self.execute_export_phase(
+                    factory,
+                    run.run_id,
+                    settings,
+                    sink_factory,
+                    payload_store=payload_store,
+                    audit_export_content_store=audit_export_content_store,
+                    audit_export_content_store_resolver=audit_export_content_store_resolver,
+                    worker_id=coordination_token.worker_id,
+                )
 
             # Emit RunSummary event with final metrics.  Map the new
             # terminal status onto the CLI exit-code taxonomy via

@@ -200,22 +200,3 @@ def test_collection_guard_accepts_singleton_annotated_registry(monkeypatch: pyte
     assert metafunc.argvalues == [PassThrough]
     assert metafunc.ids is not None
     assert metafunc.ids(PassThrough) == "PassThrough"
-
-
-def test_backward_invariant_accepts_batch_replicate_mixed_validity_shape() -> None:
-    """BatchReplicate's non-pass-through reason must be visible to the live harness.
-
-    ``BatchReplicate`` is non-pass-through because mixed-validity batches can
-    quarantine some inputs while still succeeding for the rest. The backward
-    invariant must therefore be able to drive a representative batch shape
-    rather than only scalar single-row probes, or the live governance harness
-    will misclassify the plugin as preserving every input field.
-    """
-    from elspeth.plugins.transforms.batch_replicate import BatchReplicate
-    from tests.invariants.test_pass_through_invariants import (
-        test_non_pass_through_transforms_do_drop_fields,
-    )
-
-    test_non_pass_through_transforms_do_drop_fields(
-        _non_pass_through_cls=BatchReplicate,
-    )

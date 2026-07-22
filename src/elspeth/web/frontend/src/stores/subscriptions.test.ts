@@ -360,7 +360,8 @@ describe("subscriptions — validation result side effects", () => {
       } as never,
     } as never);
 
-    const lastCall = injectSystemMessage.mock.calls.at(-1) as [string, string];
+    const calls = injectSystemMessage.mock.calls;
+    const lastCall = calls[calls.length - 1] as [string, string];
     expect(lastCall[0]).toContain("ready");
     expect(lastCall[0]).toContain("Run pipeline");
     expect(lastCall[1]).toBe("system-validation-current");
@@ -429,6 +430,42 @@ describe("subscriptions — validation result side effects", () => {
     // Humanised: no "[type] id:" prefix / raw internal id (elspeth-d9e5d157cb).
     expect(message).not.toContain("[transform]");
     expect(message).not.toContain("select_cols");
+  });
+
+  // ── elspeth-ede84df6b3: component_type threading reaches the rendered ────
+  // chat bullet's phrase, not just the phraseFor call signature.
+  it("threads component_type through to the chat bullet's possessive phrase for a role-less generated id", () => {
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: "source",
+            component_id: "csv_refunds_a1b2",
+            message: "Cannot resolve secret references: SOME_KEY",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    const [message] = injectSystemMessage.mock.calls[0] as [string, string];
+    // A role-less generated CSV id with no live-composition match must
+    // resolve via the component_type hint to the READ-direction phrase, not
+    // the write-direction guess the id substring alone (no role token) would
+    // otherwise fall back to.
+    expect(message).toContain("**read your CSV:**");
+    expect(message).not.toContain("write a CSV");
   });
 
   it("fires side effects exactly once when the same result reference is set twice (reference-equality guard)", () => {
@@ -980,13 +1017,14 @@ describe("per-user state resets on auth identity change (Fix C)", () => {
   });
 });
 
-// ── requestValidate: cache-aware manual validate entry point ──────────────────
+// ── requestValidate: forced manual validate entry point ───────────────────────
 //
-// Discrimination tests: requestValidate must respect the same guard conditions
-// as the auto-validate subscriber — cache hit, isExecuting, progress.status.
-// These tests also verify that requestValidate does NOT export or mutate the
-// module-level state directly; it is a controlled entry point only.
-describe("requestValidate — cache-aware manual validate entry point", () => {
+// Discrimination tests: requestValidate bypasses the automatic same-version
+// cache while preserving the auto-validate subscriber's execution guards
+// (isExecuting, progress.status). These tests also verify that requestValidate
+// does NOT export or mutate the module-level state directly; it is a controlled
+// entry point only.
+describe("requestValidate — forced manual validate entry point", () => {
   beforeEach(() => {
     _resetSubscriptionsForTesting();
     useAuthStore.setState({ token: "tok", user: { user_id: "user-a" } as never });
@@ -1030,7 +1068,7 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     expect(validate).not.toHaveBeenCalled();
   });
 
-  it("is a no-op at an already-validated version (cache hit)", async () => {
+  it("revalidates an already-validated version when explicitly requested", async () => {
     // Seed the cache by triggering an auto-validate for version 1.
     const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
@@ -1043,15 +1081,13 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     );
     expect(validate).toHaveBeenCalledTimes(1);
 
-    // Manual trigger at the same (already-validated) version — must be a no-op.
+    // An explicit user action is not an automatic cache probe: the visible
+    // Validate pipeline control must perform a fresh validation even when
+    // auto-validation has already populated this version's cache entry.
     requestValidate("sess-1", 1);
 
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    // Still exactly one call — requestValidate short-circuited on cache hit.
-    expect(validate).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(2));
+    expect(validate).toHaveBeenLastCalledWith("sess-1", { expectedVersion: 1 });
   });
 
   it("enqueues validate when version is unvalidated", async () => {

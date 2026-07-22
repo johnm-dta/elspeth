@@ -89,12 +89,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.composer.tools._common import normalize_tool_result_validation
 from elspeth.web.sessions.models import sessions_table
 
 from .conftest import (
@@ -333,6 +335,24 @@ async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
     )
 
 
+@pytest.mark.asyncio
+async def test_arm_discovery_cache_hit_uses_profile_aware_validation(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """A cache reconstruction crosses the shared adapter before it is returned."""
+    with patch(
+        "elspeth.web.composer.tool_batch.normalize_tool_result_validation",
+        wraps=normalize_tool_result_validation,
+    ) as normalize:
+        await test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
+            fake_composer_service,
+            result_session_id,
+        )
+
+    assert normalize.call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Task 3 — Advisor arms #7-#9
 # ---------------------------------------------------------------------------
@@ -380,7 +400,7 @@ async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhauste
     """
     settings = _make_settings(tmp_path, composer_advisor_max_calls_per_compose=0)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
-    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+    svc = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 
     # Insert a session so _run_one_turn_for_test has a valid session_id to work
     # with (mirrors the result_session_id fixture body in conftest.py).
@@ -467,7 +487,7 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
     """
     settings = _make_settings(tmp_path)
     sessions_svc = build_test_sessions_service(data_dir=tmp_path)
-    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+    svc = ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
 
     session_id = str(uuid4())
     now = datetime.now(UTC)

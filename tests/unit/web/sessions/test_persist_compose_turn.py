@@ -12,6 +12,7 @@ import pytest
 import structlog
 from sqlalchemy import text
 
+from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.sessions._persist_payload import StatePayload
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -47,6 +48,73 @@ def test_advisory_lock_sqlite_is_noop(service):
         service._acquire_session_advisory_lock(conn, "session_1")
 
 
+def test_advisory_lock_postgres_sql_is_pg_catalog_qualified(service, monkeypatch):
+    """The Postgres branch must emit the two-argument advisory-lock form
+    with every function ``pg_catalog``-qualified: an operator-set
+    ``search_path`` with a writable schema ahead of ``pg_catalog`` could
+    otherwise shadow ``hashtext``/``pg_advisory_xact_lock`` and silently
+    change the locked value (elspeth-09ba2972e2)."""
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    class _FakePostgresConnection:
+        def exec_driver_sql(self, statement, parameters):
+            statements.append((statement, parameters))
+
+    monkeypatch.setattr(service._engine.dialect, "name", "postgresql")
+    service._acquire_session_advisory_lock(_FakePostgresConnection(), "session_1")
+    assert statements == [
+        (
+            "SELECT pg_catalog.pg_advisory_xact_lock(%s, pg_catalog.hashtext(%s))",
+            (ELSPETH_SESSIONS_LOCK_CLASSID, "session_1"),
+        )
+    ]
+
+
+def test_shared_sqlite_session_lock_is_reused_by_session_service(service) -> None:
+    from elspeth.web.sessions.locking import sqlite_session_mutex
+
+    assert service._sqlite_lock_for_session("shared-session") is sqlite_session_mutex(service._engine, "shared-session")
+
+
+def test_postgres_session_advisory_lock_spans_transactions_and_unlocks() -> None:
+    from elspeth.web.sessions.locking import postgres_session_advisory_lock
+
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class _Result:
+        def scalar_one(self) -> bool:
+            return True
+
+    class _Connection:
+        def exec_driver_sql(self, statement: str, parameters: tuple[object, ...]):
+            calls.append((statement, parameters))
+            return _Result()
+
+        def commit(self) -> None:
+            calls.append(("COMMIT", ()))
+
+        def in_transaction(self) -> bool:
+            return False
+
+    connection = _Connection()
+    with postgres_session_advisory_lock(connection, "session-across-phases"):
+        calls.append(("PHASES", ()))
+
+    assert calls == [
+        (
+            "SELECT pg_catalog.pg_advisory_lock(%s, pg_catalog.hashtext(%s))",
+            (ELSPETH_SESSIONS_LOCK_CLASSID, "session-across-phases"),
+        ),
+        ("COMMIT", ()),
+        ("PHASES", ()),
+        (
+            "SELECT pg_catalog.pg_advisory_unlock(%s, pg_catalog.hashtext(%s))",
+            (ELSPETH_SESSIONS_LOCK_CLASSID, "session-across-phases"),
+        ),
+        ("COMMIT", ()),
+    ]
+
+
 def test_session_write_lock_sqlite_is_reentrant(service):
     """SQLite branch uses a process-wide per-session RLock so nested
     helper calls inside one transaction cannot deadlock.
@@ -70,16 +138,16 @@ def test_session_write_lock_sqlite_commit_removes_rollback_listener(
 ) -> None:
     """Commit release must remove the sibling rollback callback immediately."""
 
-    from elspeth.web.sessions import service as service_module
+    from elspeth.web.sessions import locking as locking_module
 
     removed: list[str] = []
-    real_remove = service_module.event.remove
+    real_remove = locking_module.event.remove
 
     def spy_remove(target, identifier, fn):
         removed.append(str(identifier))
         return real_remove(target, identifier, fn)
 
-    monkeypatch.setattr(service_module.event, "remove", spy_remove)
+    monkeypatch.setattr(locking_module.event, "remove", spy_remove)
 
     with service._engine.begin() as conn, service._session_write_lock(conn, "session_listener_commit"):
         pass
@@ -93,16 +161,16 @@ def test_session_write_lock_sqlite_rollback_removes_commit_listener(
 ) -> None:
     """Rollback release must remove the sibling commit callback immediately."""
 
-    from elspeth.web.sessions import service as service_module
+    from elspeth.web.sessions import locking as locking_module
 
     removed: list[str] = []
-    real_remove = service_module.event.remove
+    real_remove = locking_module.event.remove
 
     def spy_remove(target, identifier, fn):
         removed.append(str(identifier))
         return real_remove(target, identifier, fn)
 
-    monkeypatch.setattr(service_module.event, "remove", spy_remove)
+    monkeypatch.setattr(locking_module.event, "remove", spy_remove)
 
     with (
         pytest.raises(RuntimeError, match="force rollback"),

@@ -1,0 +1,62 @@
+{
+  "class": "multi_source_queue",
+  "intent": "Read two independent named CSV inputs — orders and refunds — and interleave both streams through one explicit shared queue fan-in point, then process the combined stream through a transform and write it to one JSON output.",
+  "canonical_arguments": {
+    "sources": {
+      "orders": {
+        "plugin": "csv",
+        "on_success": "inbound",
+        "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+        "on_validation_failure": "discard"
+      },
+      "refunds": {
+        "plugin": "csv",
+        "on_success": "inbound",
+        "options": {"path": "refunds.csv", "schema": {"mode": "observed"}},
+        "on_validation_failure": "discard"
+      }
+    },
+    "nodes": [
+      {
+        "id": "inbound",
+        "node_type": "queue",
+        "input": "inbound",
+        "options": {"description": "Orders and refunds interleave here"}
+      },
+      {
+        "id": "normalize",
+        "node_type": "transform",
+        "plugin": "passthrough",
+        "input": "inbound",
+        "on_success": "processed",
+        "on_error": "discard",
+        "options": {"schema": {"mode": "observed"}}
+      }
+    ],
+    "edges": [],
+    "outputs": [
+      {
+        "sink_name": "processed",
+        "plugin": "json",
+        "options": {"path": "outputs/processed.json", "format": "json", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
+        "on_write_failure": "discard"
+      }
+    ],
+    "metadata": {"name": "multi-source-queue", "description": "Two named sources fan into one explicit queue."}
+  },
+  "semantic_expectations": {
+    "sources": [{"name": "orders", "plugin": "csv", "on_success": "inbound"}, {"name": "refunds", "plugin": "csv", "on_success": "inbound"}],
+    "nodes": [
+      {"id": "inbound", "node_type": "queue", "input": "inbound"},
+      {"id": "normalize", "node_type": "transform", "plugin": "passthrough", "input": "inbound", "on_success": "processed"}
+    ],
+    "edges": [],
+    "outputs": [{"sink_name": "processed", "plugin": "json"}],
+    "topology": "{orders, refunds}(sources) -> inbound(queue) -> normalize(transform) -> processed(sink)"
+  },
+  "runtime_assertions": [
+    "Two distinct named sources both feed the shared 'inbound' connection.",
+    "The queue node is a real structural fan-in point (node_type queue, input equals its id) with no plugin.",
+    "Rows from both sources are interleaved through the single queue before the downstream transform."
+  ]
+}

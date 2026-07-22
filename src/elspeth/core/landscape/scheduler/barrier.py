@@ -13,11 +13,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import Connection, RowMapping
 
 from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
-from elspeth.contracts.enums import TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import (
     BarrierEmission,
@@ -29,13 +28,13 @@ from elspeth.contracts.scheduler import (
     TokenWorkItem,
     TokenWorkStatus,
 )
-from elspeth.core.canonical import canonical_json
-from elspeth.core.ids import generate_id
+from elspeth.core.landscape.data_flow.outcomes import record_buffered_outcome_guarded
 from elspeth.core.landscape.database import Tier1Engine, begin_write
+from elspeth.core.landscape.execution.batches import add_batch_member_guarded
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.scheduler.branch_losses import record_coalesce_branch_loss
 from elspeth.core.landscape.scheduler.events import SchedulerEventStore
-from elspeth.core.landscape.scheduler.fencing import fenced_or_plain_write
+from elspeth.core.landscape.scheduler.fencing import fenced_write, require_coordination_token
 from elspeth.core.landscape.scheduler.payload_codec import scrubbed_row_payload_json
 from elspeth.core.landscape.scheduler.work_items import (
     insert_work_item,
@@ -47,10 +46,7 @@ from elspeth.core.landscape.scheduler.work_items import (
     work_item_id as make_work_item_id,
 )
 from elspeth.core.landscape.schema import (
-    batch_members_table,
-    batches_table,
     blocked_barrier_hold_clause,
-    token_outcomes_table,
     token_work_items_table,
 )
 
@@ -176,6 +172,7 @@ class BarrierJournalRepository:
 
         Returns the number of consumed rows terminalized.
         """
+        coordination_token = require_coordination_token(coordination_token, verb="complete_barrier")
         if scope_row_id is not None and not require_exhaustive_release:
             raise AuditIntegrityError(
                 f"Scheduler barrier completion for run_id={run_id!r} barrier_key={barrier_key!r} received "
@@ -265,7 +262,7 @@ class BarrierJournalRepository:
         if scope_row_id is not None:
             blocked_select = blocked_select.where(token_work_items_table.c.row_id == scope_row_id)
 
-        with fenced_or_plain_write(self._engine, coordination_token=coordination_token, now=now, verb="complete_barrier") as conn:
+        with fenced_write(self._engine, coordination_token=coordination_token, now=now, verb="complete_barrier") as conn:
             blocked_rows = (
                 conn.execute(
                     blocked_select.order_by(
@@ -745,7 +742,7 @@ class BarrierJournalRepository:
         barrier_key: str,
         handoffs: Mapping[str, BlockedPendingSinkHandoff],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         pending_sink_lease_owner: str | None = None,
     ) -> int:
         """Move BLOCKED barrier work to PENDING_SINK before external sink writes.
@@ -756,6 +753,10 @@ class BarrierJournalRepository:
         handoff token without a BLOCKED row is refused (no fresh inserts), and
         handoff events keep the ``{"barrier_key"}``-only context.
         """
+        coordination_token = require_coordination_token(
+            coordination_token,
+            verb="mark_blocked_barrier_pending_sink_many",
+        )
         requested_token_ids = tuple(handoffs.keys())
         if not requested_token_ids:
             return 0
@@ -779,7 +780,7 @@ class BarrierJournalRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
+            coordination_token=coordination_token,
             pending_sink_lease_owner=pending_sink_lease_owner,
         )
         # complete_barrier raised unless every requested handoff transitioned.
@@ -792,7 +793,7 @@ class BarrierJournalRepository:
         barrier_key: str,
         token_ids: tuple[str, ...],
         now: datetime,
-        coordination_token: CoordinationToken | None = None,
+        coordination_token: CoordinationToken,
         release_context: Mapping[str, object] | None = None,
     ) -> int:
         """Mark BLOCKED work consumed by a resolved barrier as terminal.
@@ -809,6 +810,10 @@ class BarrierJournalRepository:
         "scope_row_id": ...}``. ``None`` (every pre-§E.3a caller) preserves
         the pinned ``{"barrier_key"}``-only legacy context exactly.
         """
+        coordination_token = require_coordination_token(
+            coordination_token,
+            verb="mark_blocked_barrier_terminal",
+        )
         if not token_ids:
             raise AuditIntegrityError(
                 f"Scheduler barrier terminalization for run_id={run_id!r} barrier_key={barrier_key!r} "
@@ -823,7 +828,7 @@ class BarrierJournalRepository:
             emitted_ready=(),
             now=now,
             require_exhaustive_release=False,
-            coordination_token=coordination_token,  # type: ignore[arg-type]  # legacy wrapper: stays Optional (slice-4 deferred)
+            coordination_token=coordination_token,
             release_context=release_context,
         )
 
@@ -955,34 +960,14 @@ class BarrierJournalRepository:
                 )
             outcome_id: str | None = None
             if membership is not None:
-                batch_run_id = conn.execute(
-                    select(batches_table.c.run_id).where(batches_table.c.batch_id == membership.batch_id)
-                ).scalar_one_or_none()
-                if batch_run_id is None:
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} cannot add batch "
-                        f"member: batch {membership.batch_id!r} not found."
-                    )
-                if batch_run_id != run_id:
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} cannot add batch "
-                        f"member: batch {membership.batch_id!r} belongs to run {batch_run_id!r}."
-                    )
-                conn.execute(
-                    insert(batch_members_table).values(
-                        batch_id=membership.batch_id,
-                        run_id=run_id,
-                        token_id=token_id,
-                        ordinal=membership.ordinal,
-                    )
+                add_batch_member_guarded(
+                    conn,
+                    batch_id=membership.batch_id,
+                    token_id=token_id,
+                    ordinal=membership.ordinal,
+                    expected_run_id=run_id,
                 )
             if buffered_outcome is not None:
-                if not buffered_outcome.batch_id:
-                    # ADR-019 BUFFERED rule replicated: batch_id REQUIRED for path='buffered'.
-                    raise AuditIntegrityError(
-                        f"Scheduler barrier adoption for run_id={run_id!r} token_id={token_id!r} requires a "
-                        "non-empty buffered_outcome.batch_id (ADR-019: (NULL, BUFFERED) requires batch_id)."
-                    )
                 barrier_blocked_at = conn.execute(
                     select(token_work_items_table.c.barrier_blocked_at).where(token_work_items_table.c.work_item_id == work_item_id)
                 ).scalar_one()
@@ -995,26 +980,18 @@ class BarrierJournalRepository:
                 if barrier_blocked_at.tzinfo is None:
                     barrier_blocked_at = barrier_blocked_at.replace(tzinfo=UTC)
                 caller_context = {} if buffered_outcome.context is None else dict(buffered_outcome.context)
-                outcome_id = f"out_{generate_id()[:12]}"
-                conn.execute(
-                    insert(token_outcomes_table).values(
-                        outcome_id=outcome_id,
-                        run_id=run_id,
-                        token_id=token_id,
-                        outcome=None,
-                        path=TerminalPath.BUFFERED.value,
-                        completed=0,
-                        recorded_at=barrier_blocked_at,
-                        batch_id=buffered_outcome.batch_id,
-                        context_json=canonical_json(
-                            {
-                                **caller_context,
-                                # Honest provenance — caller context cannot mask it.
-                                "adopted_epoch": epoch,
-                                "adopted_at": now.isoformat(),
-                            }
-                        ),
-                    )
+                outcome_id = record_buffered_outcome_guarded(
+                    conn,
+                    run_id=run_id,
+                    token_id=token_id,
+                    batch_id=buffered_outcome.batch_id,
+                    recorded_at=barrier_blocked_at,
+                    context={
+                        **caller_context,
+                        # Honest provenance — caller context cannot mask it.
+                        "adopted_epoch": epoch,
+                        "adopted_at": now.isoformat(),
+                    },
                 )
         return BarrierAdoptionResult(adopted=True, barrier_adopted_epoch=epoch, outcome_id=outcome_id)
 

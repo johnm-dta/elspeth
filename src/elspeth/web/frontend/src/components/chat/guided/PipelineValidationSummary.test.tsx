@@ -260,6 +260,235 @@ describe("PipelineValidationSummary", () => {
     expect(screen.getByText("Technical details")).toBeInTheDocument();
   });
 
+  // ── elspeth-ede84df6b3: component_type threading actually reaches the ────
+  // rendered phrase, not just the phraseFor call signature. A passthrough
+  // (non-contract-violation) message with a role-less generated CSV id and a
+  // "source" component_type must render the READ-direction possessive
+  // phrase, not the write-direction guess the id substring alone would
+  // produce with no role token.
+  it("threads component_type through to the rendered possessive phrase for a role-less generated id", () => {
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "csv_refunds_a1b2",
+          component_type: "source",
+          message: "Cannot resolve secret references: SOME_KEY",
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("'read your CSV':");
+    expect(status.textContent).not.toContain("'write a CSV':");
+  });
+
+  it("does not assign a short unmapped id to a substring-matching component", () => {
+    const rawDump =
+      "Schema contract violation: edge 'a' → 'out'\n" +
+      "  Consumer (csv) requires fields: ['score']\n" +
+      "  Producer (unknown) guarantees: ['body']\n" +
+      "  Missing fields: ['score']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "a",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/"this step" step's output/i);
+    expect(status.textContent).toMatch(/write a CSV/i);
+    expect(status.textContent).not.toMatch(/rate each row/i);
+  });
+
+  it("humanises generated edge ids instead of announcing two generic 'this step' placeholders", () => {
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        sources: {},
+        nodes: [],
+        outputs: [],
+      }),
+    } as never);
+    const rawDump =
+      "Schema contract violation: edge 'transform_guided_xform_0_abcd1234' → 'sink_guided_output_csv_abcd1234'\n" +
+      "  Consumer (csv) requires fields: ['score']\n" +
+      "  Producer (llm) guarantees: ['body']\n" +
+      "  Missing fields: ['score']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "sink_guided_output_csv_abcd1234",
+          component_type: "output",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    const { container } = render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/aren't connected correctly/i);
+    expect(status.textContent).toMatch(/process each row/i);
+    expect(status.textContent).toMatch(/write a CSV/i);
+    expect(status.textContent).not.toMatch(/"this step" step's output.*"this step"/i);
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+    expect(
+      container.querySelector(".pipeline-validation-summary-raw-text")?.textContent,
+    ).toBe(rawDump);
+  });
+
+  it("humanises generated CSV source ids as source steps before CSV output wording", () => {
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        sources: { refunds: { plugin: "csv", options: {} } },
+        nodes: [],
+        outputs: [],
+      }),
+    } as never);
+    const rawDump =
+      "Schema contract violation: edge 'source_csv_refunds_a1b2c3' → 'transform_guided_xform_0_abcd1234'\n" +
+      "  Consumer (llm) requires fields: ['body']\n" +
+      "  Producer (csv) guarantees: ['amount']\n" +
+      "  Missing fields: ['body']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "source_csv_refunds_a1b2c3",
+          component_type: "source",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/aren't connected correctly/i);
+    expect(status.textContent).toMatch(/read your CSV/i);
+    expect(status.textContent).toMatch(/process each row/i);
+    expect(status.textContent).not.toMatch(/the "write a CSV" step's output/i);
+  });
+
+  it("does not let a generic source id match hide a generated CSV source id", () => {
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        sources: {
+          source: { plugin: "text", options: {} },
+          refunds: { plugin: "csv", options: {} },
+        },
+        nodes: [],
+        outputs: [],
+      }),
+    } as never);
+    const rawDump =
+      "Schema contract violation: edge 'source_csv_refunds_a1b2c3' → 'transform_guided_xform_0_abcd1234'\n" +
+      "  Consumer (llm) requires fields: ['body']\n" +
+      "  Producer (csv) guarantees: ['amount']\n" +
+      "  Missing fields: ['body']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "source_csv_refunds_a1b2c3",
+          component_type: "source",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/read your CSV/i);
+    expect(status.textContent).not.toMatch(/the "read your data" step's output/i);
+  });
+
+  it("humanises plugin-first generated CSV source ids as source steps", () => {
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        sources: { refunds: { plugin: "csv", options: {} } },
+        nodes: [],
+        outputs: [],
+      }),
+    } as never);
+    const rawDump =
+      "Schema contract violation: edge 'csv_source_refunds_a1b2c3' → 'transform_guided_xform_0_abcd1234'\n" +
+      "  Consumer (llm) requires fields: ['body']\n" +
+      "  Producer (csv) guarantees: ['amount']\n" +
+      "  Missing fields: ['body']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "csv_source_refunds_a1b2c3",
+          component_type: "source",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/read your CSV/i);
+    expect(status.textContent).not.toMatch(/the "write a CSV" step's output/i);
+  });
+
+  it("humanises generated transform ids containing file formats as transform steps", () => {
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        sources: {},
+        nodes: [],
+        outputs: [],
+      }),
+    } as never);
+    const rawDump =
+      "Schema contract violation: edge 'transform_csv_normalize_a1b2c3' → 'sink_guided_output_json_a1b2c3'\n" +
+      "  Consumer (json) requires fields: ['normalized']\n" +
+      "  Producer (csv) guarantees: ['raw']\n" +
+      "  Missing fields: ['normalized']";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "transform_csv_normalize_a1b2c3",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/process each row/i);
+    expect(status.textContent).toMatch(/write a JSON file/i);
+    expect(status.textContent).not.toMatch(/the "write a CSV" step's output/i);
+  });
+
   it("humanises the edge-contract preflight dump (Edge contract violation between producer node …)", () => {
     // web/execution/validation.py _format_edge_contract_failure format.
     const rawDump =

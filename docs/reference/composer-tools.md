@@ -248,6 +248,17 @@ Add or update a pipeline node — transforms, gates, aggregations, or coalesces.
 | `aggregation` | `plugin` | Batches rows until trigger fires |
 | `coalesce` | `branches` | Merges tokens from parallel fork paths |
 
+**Not yet representable: queue fan-in.** The runtime supports multi-producer
+fan-in through pass-through queue nodes — a top-level `queues:` section in
+settings YAML (see [ADR-025](../architecture/adr/025-multi-source-ingestion.md)
+and [Queue Settings](configuration.md#queue-settings)) — but composer state has
+no `queue` node type. `upsert_node` and `set_pipeline` cannot create one, and
+YAML import drops a `queues:` section before validation, which then reports the
+fan-in as a duplicate-producer error. Until composer queue support lands
+(tracked as elspeth-a5b86149d4 and elspeth-6421ffa028), fan-in inside the
+composer is limited to sinks; cross-branch statistics need the wide-row pattern
+instead (fork → coalesce or multi-query LLM → per-field aggregations).
+
 ---
 
 ### `upsert_edge`

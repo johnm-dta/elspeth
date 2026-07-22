@@ -37,9 +37,11 @@ from elspeth.web.composer._producer_resolver import (
     ProducerResolver,
     is_source_producer_id,
 )
+from elspeth.web.composer._validation_probe import prepare_validation_probe_options
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
+    SchemaContractDetail,
     Severity,
     ValidationEntry,
 )
@@ -86,7 +88,6 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
     Unexpected exceptions PROPAGATE — a plugin method raising mid-construction
     is a system bug per CLAUDE.md plugin-as-system-code policy.
     """
-    from elspeth.contracts.freeze import deep_thaw
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
     if node.plugin is None:
@@ -96,7 +97,7 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
             "BaseTransform",
             get_shared_plugin_manager().create_transform(
                 node.plugin,
-                deep_thaw(node.options),
+                prepare_validation_probe_options(node.options),
             ),
         )
     except Exception as exc:
@@ -107,7 +108,6 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
 
 def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
     """Construct a producer transform/source instance to read its facts."""
-    from elspeth.contracts.freeze import deep_thaw
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
     if producer.plugin_name is None or producer.producer_id == "source":
@@ -118,7 +118,7 @@ def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
         "BaseTransform",
         get_shared_plugin_manager().create_transform(
             producer.plugin_name,
-            deep_thaw(producer.options),
+            prepare_validation_probe_options(producer.options),
         ),
     )
 
@@ -247,6 +247,7 @@ def validate_semantic_contracts(
                                 f"undeclared (coalesce, ambiguous, or unreachable)."
                             ),
                             cast(Severity, req.severity),
+                            "semantic_contract_violation",
                         )
                     )
             continue
@@ -316,6 +317,14 @@ def validate_semantic_contracts(
                         f"node:{node.id}",
                         message,
                         cast(Severity, req.severity),
+                        "semantic_contract_violation",
+                        # Producer/consumer node ids are pipeline identifiers,
+                        # never row content — safe for the planner's redacted
+                        # repair feedback (see SchemaContractDetail).
+                        contract=SchemaContractDetail(
+                            producer=upstream_producer.producer_id,
+                            consumer=node.id,
+                        ),
                     )
                 )
             elif outcome is SemanticOutcome.UNKNOWN and req.unknown_policy is UnknownSemanticPolicy.FAIL:
@@ -345,6 +354,11 @@ def validate_semantic_contracts(
                             f"{semantic_detail}"
                         ),
                         cast(Severity, req.severity),
+                        "semantic_contract_violation",
+                        contract=SchemaContractDetail(
+                            producer=upstream_producer.producer_id,
+                            consumer=node.id,
+                        ),
                     )
                 )
 

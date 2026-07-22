@@ -111,7 +111,9 @@ def build_drift_hint(failures: FailureDeque) -> str:
         "(a) compare the last failed payloads against the validator-named fields, "
         "(b) re-read the relevant schema or assistance result if the expected shape is unclear, "
         "(c) rebuild the complete requested topology in one coherent payload, or "
-        "(d) surface a named gap if the requested shape is unsupported by the available tools."
+        "(d) surface a named gap if the requested shape is unsupported by the available tools. "
+        "When the goal is a one-node linear insertion, switch to `splice_transform` instead of "
+        "varying full-replacement payloads."
     )
 
 

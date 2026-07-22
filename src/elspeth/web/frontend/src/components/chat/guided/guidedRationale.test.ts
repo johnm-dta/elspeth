@@ -20,9 +20,9 @@ describe("latestAssistantRationale", () => {
     const s = session({
       step: "step_1_source",
       chat_history: [
-        { role: "user", content: "go", seq: 1, step: "step_1_source", ts_iso: "t" },
-        { role: "assistant", content: "Source created as a 3-row CSV.", seq: 2, step: "step_1_source", ts_iso: "t" },
-        { role: "assistant", content: "Sink set.", seq: 4, step: "step_2_sink", ts_iso: "t" },
+        { role: "user", content: "go", seq: 1, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
+        { role: "assistant", content: "Source created as a 3-row CSV.", seq: 2, step: "step_1_source", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
+        { role: "assistant", content: "Sink set.", seq: 4, step: "step_2_sink", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
       ],
     });
     expect(latestAssistantRationale(s)).toBe("Source created as a 3-row CSV.");
@@ -31,7 +31,7 @@ describe("latestAssistantRationale", () => {
   it("returns null when no assistant turn exists for the step", () => {
     const s = session({
       step: "step_2_sink",
-      chat_history: [{ role: "user", content: "go", seq: 1, step: "step_2_sink", ts_iso: "t" }],
+      chat_history: [{ role: "user", content: "go", seq: 1, step: "step_2_sink", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null }],
     });
     expect(latestAssistantRationale(s)).toBeNull();
   });
@@ -45,6 +45,8 @@ describe("latestAssistantRationale", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "t",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
     });
@@ -54,7 +56,7 @@ describe("latestAssistantRationale", () => {
   it("rejects an over-long first line (falls back to the static step purpose)", () => {
     const s = session({
       chat_history: [
-        { role: "assistant", content: "x".repeat(300), seq: 2, step: "step_1_source", ts_iso: "t" },
+        { role: "assistant", content: "x".repeat(300), seq: 2, step: "step_1_source", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
       ],
     });
     expect(latestAssistantRationale(s)).toBeNull();
@@ -69,6 +71,8 @@ describe("latestAssistantRationale", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "t",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
     });
@@ -80,9 +84,9 @@ describe("latestAssistantRationale", () => {
   it("skips replies to the Explain question — an explanation is not a build rationale", () => {
     const s = session({
       chat_history: [
-        { role: "assistant", content: "Source created as a 3-row CSV.", seq: 2, step: "step_1_source", ts_iso: "t" },
-        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 3, step: "step_1_source", ts_iso: "t" },
-        { role: "assistant", content: "You're at Step 1 — here's everything set up so far.", seq: 4, step: "step_1_source", ts_iso: "t" },
+        { role: "assistant", content: "Source created as a 3-row CSV.", seq: 2, step: "step_1_source", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
+        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 3, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
+        { role: "assistant", content: "You're at Step 1 — here's everything set up so far.", seq: 4, step: "step_1_source", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
       ],
     });
     // The headline stays the BUILD rationale (seq 2), not the higher-seq
@@ -93,8 +97,8 @@ describe("latestAssistantRationale", () => {
   it("falls back to the static purpose when the ONLY assistant turn is an explain reply", () => {
     const s = session({
       chat_history: [
-        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 1, step: "step_1_source", ts_iso: "t" },
-        { role: "assistant", content: "You're at Step 1 — nothing configured yet.", seq: 2, step: "step_1_source", ts_iso: "t" },
+        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 1, step: "step_1_source", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
+        { role: "assistant", content: "You're at Step 1 — nothing configured yet.", seq: 2, step: "step_1_source", ts_iso: "t", assistant_message_kind: "assistant", synthetic_failure_reason: null },
       ],
     });
     expect(latestAssistantRationale(s)).toBeNull();
@@ -109,6 +113,8 @@ describe("latestAssistantRationale", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "t",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
     });
@@ -124,6 +130,8 @@ describe("latestAssistantRationale", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "t",
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
         {
           role: "assistant",
@@ -131,7 +139,8 @@ describe("latestAssistantRationale", () => {
           seq: 3,
           step: "step_1_source",
           ts_iso: "t",
-          assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+          synthetic_failure_reason: "unavailable",
         },
       ],
     });
@@ -144,14 +153,15 @@ describe("latestAssistantRationale", () => {
     const s = session({
       step: "step_2_sink",
       chat_history: [
-        { role: "user", content: "go", seq: 1, step: "step_2_sink", ts_iso: "t" },
+        { role: "user", content: "go", seq: 1, step: "step_2_sink", ts_iso: "t", assistant_message_kind: null, synthetic_failure_reason: null },
         {
           role: "assistant",
           content: "I'm unavailable right now; you can still use the wizard controls.",
           seq: 2,
           step: "step_2_sink",
           ts_iso: "t",
-          assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+          synthetic_failure_reason: "unavailable",
         },
       ],
     });
@@ -171,14 +181,15 @@ describe("latestAssistantRationale", () => {
           seq: 1,
           step: "step_1_source",
           ts_iso: "t",
-          assistant_message_kind: "synthetic_failure",
+assistant_message_kind: "synthetic_failure",
+          synthetic_failure_reason: "unavailable",
         },
       ],
     });
     expect(latestAssistantRationale(s)).toBeNull();
   });
 
-  it("legacy turns with no assistant_message_kind still count as real rationale (documented absent-field behaviour)", () => {
+  it("counts an explicitly classified assistant turn as real rationale", () => {
     const s = session({
       chat_history: [
         {
@@ -187,7 +198,8 @@ describe("latestAssistantRationale", () => {
           seq: 2,
           step: "step_1_source",
           ts_iso: "t",
-          // no assistant_message_kind — pre-discriminator persisted turn
+          assistant_message_kind: "assistant",
+          synthetic_failure_reason: null,
         },
       ],
     });

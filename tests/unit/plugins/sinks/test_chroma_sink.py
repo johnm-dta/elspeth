@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import create_autospec, patch
 
@@ -9,8 +11,23 @@ import chromadb
 import pytest
 from chromadb.api import ClientAPI
 
-from elspeth.contracts.enums import CallStatus, CallType
-from elspeth.contracts.errors import AuditIntegrityError, DuplicateDocumentError
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.hashing import canonical_json, stable_hash
+from elspeth.contracts.sink_effects import (
+    RestrictedSinkEffectContext,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspectionRequest,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileKind,
+)
+from elspeth.engine.orchestrator.preflight import (
+    SinkEffectCapabilityError,
+    validate_sink_effect_capability,
+    validate_sink_effect_type_capability,
+)
 from elspeth.plugins.sinks.chroma_sink import ChromaSink
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context, make_operation_context
@@ -166,318 +183,6 @@ class TestChromaSinkOnStart:
                 sink.on_start(ctx)
 
 
-class TestChromaSinkWriteOverwrite:
-    def test_upserts_rows_with_correct_mapping(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_sink_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "Hello world", "topic": "greeting"},
-            {"doc_id": "d2", "text": "Goodbye", "topic": "farewell"},
-        ]
-
-        result = sink.write(rows, ctx)
-
-        mock_collection.upsert.assert_called_once()
-        call_kwargs = mock_collection.upsert.call_args
-        assert call_kwargs.kwargs["ids"] == ["d1", "d2"]
-        assert call_kwargs.kwargs["documents"] == ["Hello world", "Goodbye"]
-        assert call_kwargs.kwargs["metadatas"] == [
-            {"topic": "greeting"},
-            {"topic": "farewell"},
-        ]
-        assert result is not None
-
-    def test_records_audit_call(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_mock_audit_ctx()
-
-        rows = [{"doc_id": "d1", "text": "Hello", "topic": "t"}]
-        sink.write(rows, ctx)
-
-        ctx.landscape.record_call.assert_called_once()
-        call_kwargs = ctx.landscape.record_call.call_args.kwargs
-        assert call_kwargs["call_type"] is CallType.VECTOR
-
-    def test_returns_artifact_with_content_hash(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_sink_ctx()
-
-        rows = [{"doc_id": "d1", "text": "Hello", "topic": "t"}]
-        result = sink.write(rows, ctx)
-
-        assert result.artifact.content_hash is not None
-        assert len(result.artifact.content_hash) == 64  # SHA-256 hex
-
-    def test_empty_rows_returns_empty_artifact(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_sink_ctx()
-
-        result = sink.write([], ctx)
-
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 0
-        mock_collection.upsert.assert_not_called()
-
-
-class TestChromaSinkWriteSkip:
-    def test_skip_filters_existing_ids(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
-
-        ctx = _make_sink_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "Existing", "topic": "t"},
-            {"doc_id": "d2", "text": "New", "topic": "t"},
-        ]
-        sink.write(rows, ctx)
-
-        mock_collection.add.assert_called_once()
-        add_kwargs = mock_collection.add.call_args.kwargs
-        assert add_kwargs["ids"] == ["d2"]
-        assert add_kwargs["documents"] == ["New"]
-
-    def test_skip_all_existing_does_not_call_add(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1", "d2"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
-
-        ctx = _make_sink_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "A", "topic": "t"},
-            {"doc_id": "d2", "text": "B", "topic": "t"},
-        ]
-        sink.write(rows, ctx)
-
-        mock_collection.add.assert_not_called()
-
-    def test_skip_audit_records_actual_rows_written(self) -> None:
-        """Skip mode must record only the rows actually sent to ChromaDB."""
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
-
-        ctx = _make_mock_audit_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "Existing", "topic": "t"},
-            {"doc_id": "d2", "text": "New", "topic": "t"},
-        ]
-        artifact = sink.write(rows, ctx)
-
-        # Artifact must reflect actual write, not full batch
-        assert artifact.artifact.metadata is not None
-        assert artifact.artifact.metadata["row_count"] == 1
-
-        # Audit call must include skip info — check request/response data
-        # passed through to landscape.record_call via RawCallPayload
-        ctx.landscape.record_call.assert_called_once()
-        call_kwargs = ctx.landscape.record_call.call_args.kwargs
-        request_data = call_kwargs["request_data"].to_dict()
-        response_data = call_kwargs["response_data"].to_dict()
-        assert request_data["row_count"] == 1  # Actual write, not full batch
-        assert request_data["batch_size"] == 2  # Full batch size
-        assert request_data["document_ids"] == ["d2"]  # Only written IDs
-        assert response_data["rows_written"] == 1
-        assert response_data["rows_skipped"] == 1
-        assert response_data["skipped_ids"] == ["d1"]
-
-    def test_skip_content_hash_reflects_actual_payload(self) -> None:
-        """Hash must be over the subset actually sent, not the full batch."""
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="skip")
-
-        ctx = _make_sink_ctx()
-        rows = [
-            {"doc_id": "d1", "text": "Existing", "topic": "t"},
-            {"doc_id": "d2", "text": "New", "topic": "t"},
-        ]
-        skip_artifact = sink.write(rows, ctx)
-
-        # Write only d2 in overwrite mode — should produce the same hash
-        mock_collection2 = _make_chroma_collection_double()
-        sink2 = _make_sink_with_collection(mock_collection2)
-        ctx2 = _make_sink_ctx()
-        overwrite_artifact = sink2.write([{"doc_id": "d2", "text": "New", "topic": "t"}], ctx2)
-
-        assert skip_artifact.artifact.content_hash == overwrite_artifact.artifact.content_hash
-
-
-class TestChromaSinkWriteError:
-    def test_error_mode_raises_on_duplicates(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1", "d3"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
-
-        ctx = _make_sink_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "A", "topic": "t"},
-            {"doc_id": "d2", "text": "B", "topic": "t"},
-            {"doc_id": "d3", "text": "C", "topic": "t"},
-        ]
-
-        with pytest.raises(DuplicateDocumentError) as exc_info:
-            sink.write(rows, ctx)
-
-        assert "d1" in exc_info.value.duplicate_ids
-        assert "d3" in exc_info.value.duplicate_ids
-        mock_collection.add.assert_not_called()
-
-    def test_error_mode_preflights_full_batch_no_partial_add(self) -> None:
-        """Error mode must preflight the full logical batch before any add.
-
-        Regression for elspeth-f56603c31a: a batch that splits into a metadata
-        sub-batch (d1, new) and a no-metadata sub-batch (d2, duplicate) must not
-        add d1 to ChromaDB before discovering d2's duplicate in the next
-        sub-batch — that would leave a partial external write with no success
-        audit. The full batch is duplicate-checked before any collection.add().
-        """
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d2"]}  # d2 already exists
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="error", schema={"mode": "observed"})
-
-        ctx = _make_sink_ctx()
-
-        rows = [
-            {"doc_id": "d1", "text": "A", "topic": "t"},  # metadata -> meta sub-batch (new)
-            {"doc_id": "d2", "text": "B"},  # no metadata -> no-metadata sub-batch (duplicate)
-        ]
-
-        with pytest.raises(DuplicateDocumentError) as exc_info:
-            sink.write(rows, ctx)
-
-        assert "d2" in exc_info.value.duplicate_ids
-        # No partial write: d1 (the new metadata row) must NOT have been added.
-        mock_collection.add.assert_not_called()
-
-    def test_error_mode_succeeds_when_no_duplicates(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": []}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
-
-        ctx = _make_sink_ctx()
-
-        rows = [{"doc_id": "d1", "text": "A", "topic": "t"}]
-        result = sink.write(rows, ctx)
-
-        mock_collection.add.assert_called_once()
-        assert result is not None
-
-    def test_error_mode_records_audit_before_raising(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
-
-        ctx = _make_mock_audit_ctx()
-
-        with pytest.raises(DuplicateDocumentError):
-            sink.write([{"doc_id": "d1", "text": "A", "topic": "t"}], ctx)
-
-        ctx.landscape.record_call.assert_called_once()
-        call_kwargs = ctx.landscape.record_call.call_args.kwargs
-        assert call_kwargs["status"] is CallStatus.ERROR
-        # Error details must include exception info (#4)
-        error_data = call_kwargs["error"].to_dict()
-        assert error_data["type"] == "DuplicateDocumentError"
-        assert "d1" in error_data["message"]
-
-    def test_duplicate_ids_stored_as_tuple(self) -> None:
-        """DuplicateDocumentError.duplicate_ids must be immutable."""
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": ["d1"]}
-        sink = _make_sink_with_collection(mock_collection, on_duplicate="error")
-
-        ctx = _make_sink_ctx()
-        with pytest.raises(DuplicateDocumentError) as exc_info:
-            sink.write([{"doc_id": "d1", "text": "A", "topic": "t"}], ctx)
-
-        assert isinstance(exc_info.value.duplicate_ids, tuple)
-
-
-class TestChromaSinkAuditIntegrity:
-    def test_audit_recording_failure_raises_audit_integrity_error(self) -> None:
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_sink_ctx()
-
-        def failing_record_call(**kwargs: Any) -> Any:
-            raise RuntimeError("DB write failed")
-
-        ctx.record_call = failing_record_call
-
-        rows = [{"doc_id": "d1", "text": "Hello", "topic": "t"}]
-
-        with pytest.raises(AuditIntegrityError, match="audit") as exc_info:
-            sink.write(rows, ctx)
-
-        # The ChromaDB write still happened
-        mock_collection.upsert.assert_called_once()
-        # Exception chain preserved (#13)
-        assert exc_info.value.__cause__ is not None
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-
-    def test_value_error_from_chroma_gets_audit_record(self) -> None:
-        """Chroma raises ValueError for invalid payloads (e.g. nested dict in metadata).
-
-        ValueError from Chroma API calls is wrapped as _ChromaPayloadRejection
-        so it can be distinguished from ValueError in our own code (which should
-        crash as a framework bug). The audit record captures the original error.
-        """
-        from elspeth.plugins.sinks.chroma_sink import _ChromaPayloadRejection
-
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.upsert.side_effect = ValueError("Expected str, int, float or bool, got dict")
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_mock_audit_ctx()
-
-        with pytest.raises(_ChromaPayloadRejection, match="Expected str"):
-            sink.write([{"doc_id": "d1", "text": "A", "topic": "t"}], ctx)
-
-        # Audit record must have been written before re-raising
-        ctx.landscape.record_call.assert_called_once()
-        call_kwargs = ctx.landscape.record_call.call_args.kwargs
-        assert call_kwargs["status"] is CallStatus.ERROR
-        error_data = call_kwargs["error"].to_dict()
-        assert error_data["type"] == "_ChromaPayloadRejection"
-
-    def test_error_path_audit_failure_raises_audit_integrity_error(self) -> None:
-        """If error-path record_call also fails, AuditIntegrityError is raised."""
-        import chromadb.errors
-
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.upsert.side_effect = chromadb.errors.ChromaError("write failed")  # type: ignore[abstract]
-        sink = _make_sink_with_collection(mock_collection)
-
-        ctx = _make_sink_ctx()
-
-        def failing_record_call(**kwargs: Any) -> Any:
-            raise RuntimeError("audit also broken")
-
-        ctx.record_call = failing_record_call
-
-        with pytest.raises(AuditIntegrityError, match="audit") as exc_info:
-            sink.write([{"doc_id": "d1", "text": "A", "topic": "t"}], ctx)
-
-        # Exception chain preserved — audit_exc is the cause
-        assert exc_info.value.__cause__ is not None
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-
-
 class TestChromaSinkFlush:
     def test_flush_is_noop(self) -> None:
         mock_collection = _make_chroma_collection_double()
@@ -502,477 +207,219 @@ class TestChromaSinkClose:
         mock_client.clear_system_cache.assert_called_once()
 
 
-class TestChromaSinkMetadataTypeValidation:
-    """Metadata values must be str|int|float|bool|None — ChromaDB's constraint."""
+def _chroma_effect_member(ordinal: int, row: dict[str, object]) -> SinkEffectMember:
+    row_json = canonical_json(row)
+    lineage_json = "[]"
+    return SinkEffectMember(
+        ordinal=ordinal,
+        token_id=f"token-{ordinal}",
+        row_id=f"row-{ordinal}",
+        ingest_sequence=ordinal,
+        lineage_json=lineage_json,
+        lineage_hash=hashlib.sha256(lineage_json.encode()).hexdigest(),
+        payload_hash=hashlib.sha256(row_json.encode()).hexdigest(),
+        row=row,
+        member_effect_id=stable_hash({"effect": "b" * 64, "ordinal": ordinal}),
+    )
 
-    def test_valid_scalar_types_pass(self) -> None:
-        """str, int, float, bool metadata values are accepted."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["s", "i", "f", "b"],
-            },
-            schema={
-                "mode": "flexible",
-                "fields": [
-                    "doc_id: str",
-                    "text: str",
-                    "s: str",
-                    "i: int",
-                    "f: float",
-                    "b: bool",
-                ],
-            },
+
+def _chroma_effect_context() -> RestrictedSinkEffectContext:
+    return RestrictedSinkEffectContext(
+        run_id="run-1",
+        run_started_at=datetime(2026, 7, 16, tzinfo=UTC),
+        operation_id="operation-1",
+        sink_node_id="sink-1",
+    )
+
+
+class _RecoverableChromaCollection:
+    def __init__(self) -> None:
+        self.documents: dict[str, tuple[str, dict[str, object] | None]] = {}
+        self.upsert_count_by_id: dict[str, int] = {}
+
+    def upsert(
+        self,
+        *,
+        ids: list[str],
+        documents: list[str],
+        metadatas: list[dict[str, object]] | None,
+    ) -> None:
+        for index, (document_id, document) in enumerate(zip(ids, documents, strict=True)):
+            metadata = None if metadatas is None else dict(metadatas[index])
+            self.documents[document_id] = (document, metadata)
+            self.upsert_count_by_id[document_id] = self.upsert_count_by_id.get(document_id, 0) + 1
+
+    def get(self, *, ids: list[str], include: list[str] | None = None) -> dict[str, object]:
+        del include
+        found = [document_id for document_id in ids if document_id in self.documents]
+        return {
+            "ids": found,
+            "documents": [self.documents[document_id][0] for document_id in found],
+            "metadatas": [self.documents[document_id][1] for document_id in found],
+        }
+
+
+class TestChromaMemberEffects:
+    def test_overwrite_declares_complete_member_effect_capability(self) -> None:
+        validate_sink_effect_type_capability(
+            ChromaSink,
+            "overwrite",
+            SinkEffectInputKind.PIPELINE_MEMBERS,
         )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
 
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hi", "s": "val", "i": 42, "f": 3.14, "b": True}]
-        sink.write(rows, ctx)
+    @pytest.mark.parametrize("mode", ["skip", "error"])
+    def test_non_reconcilable_modes_fail_preflight_before_construction(self, mode: str) -> None:
+        with pytest.raises(SinkEffectCapabilityError, match=r"on_duplicate=overwrite|overwrite"):
+            validate_sink_effect_type_capability(
+                ChromaSink,
+                mode,
+                SinkEffectInputKind.PIPELINE_MEMBERS,
+            )
 
-        mock_collection.upsert.assert_called_once()
+    def test_instance_shadowed_member_method_is_rejected_before_io(self) -> None:
+        sink = ChromaSink(_make_config())
+        sink.commit_member_effect = None  # type: ignore[method-assign,assignment]
+        with pytest.raises(SinkEffectCapabilityError, match="commit_member_effect"):
+            validate_sink_effect_capability(
+                sink,
+                "overwrite",
+                SinkEffectInputKind.PIPELINE_MEMBERS,
+            )
 
-    def test_none_metadata_value_passes(self) -> None:
-        """None is a valid ChromaDB metadata value."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
+    def test_overwrite_member_recovery_upserts_each_id_once(self) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(_make_config())
+        sink._collection = collection  # type: ignore[assignment]
+        members = tuple(
+            _chroma_effect_member(index, row)
+            for index, row in enumerate(
+                (
+                    {"doc_id": "d1", "text": "one", "topic": "alpha"},
+                    {"doc_id": "d2", "text": "two", "topic": "beta"},
+                    {"doc_id": "d3", "text": "three", "topic": "gamma"},
+                )
+            )
+        )
+        effect_input = SinkEffectPipelineMembersInput(members, members)
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
 
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hi", "topic": None}]
-        sink.write(rows, ctx)
+        sink.commit_member_effect(plan, members[0], effect_input, ctx)
 
-        mock_collection.upsert.assert_called_once()
-
-    def test_invalid_type_filtered_and_diverted(self) -> None:
-        """Rows with non-scalar metadata are diverted, not sent to ChromaDB."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "good", "topic": "science"},
-            {"doc_id": "d2", "text": "bad", "topic": {"nested": "dict"}},
-            {"doc_id": "d3", "text": "good", "topic": "math"},
+        recovered = ChromaSink(_make_config())
+        recovered._collection = collection  # type: ignore[assignment]
+        states = [recovered.reconcile_member_effect(plan, member, effect_input, ctx).kind for member in members]
+        assert states == [
+            SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR,
+            SinkEffectReconcileKind.NOT_APPLIED,
+            SinkEffectReconcileKind.NOT_APPLIED,
         ]
-        result = sink.write(rows, ctx)
+        for member, state in zip(members, states, strict=True):
+            if state is SinkEffectReconcileKind.NOT_APPLIED:
+                recovered.commit_member_effect(plan, member, effect_input, ctx)
 
-        # Only valid rows sent to ChromaDB
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["ids"] == ["d1", "d3"]
-        assert call_kwargs["documents"] == ["good", "good"]
+        assert collection.upsert_count_by_id == {"d1": 1, "d2": 1, "d3": 1}
 
-        # Diversion records the rejection
-        assert len(result.diversions) == 1
-        assert result.diversions[0].row_index == 1
-        assert "topic" in result.diversions[0].reason
-        assert result.diversions[0].row_data["doc_id"] == "d2"
+    def test_successful_member_commits_update_completion_totals(self) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(_make_config())
+        sink._collection = collection  # type: ignore[assignment]
+        rows = (
+            {"doc_id": "d1", "text": "one", "topic": "alpha"},
+            {"doc_id": "d2", "text": "two", "topic": "beta"},
+        )
+        members = tuple(_chroma_effect_member(index, row) for index, row in enumerate(rows))
+        effect_input = SinkEffectPipelineMembersInput(members, members)
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
 
-    def test_all_rows_rejected_returns_zero_write(self) -> None:
-        """When ALL rows have bad metadata, return zero-write artifact with diversions."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
+        for member in members:
+            sink.commit_member_effect(plan, member, effect_input, ctx)
+        events: list[object] = []
+        sink._telemetry_emit = events.append
+        sink.on_complete(_make_lifecycle_ctx())
 
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "bad", "topic": ["a", "list"]},
-            {"doc_id": "d2", "text": "bad", "topic": {"nested": "dict"}},
+        expected_bytes = sum(
+            len(
+                canonical_json(
+                    {
+                        "ids": [row["doc_id"]],
+                        "documents": [row["text"]],
+                        "metadatas": [{"topic": row["topic"]}],
+                    }
+                ).encode("utf-8")
+            )
+            for row in rows
+        )
+        assert events == [
+            {
+                "event": "chroma_sink_complete",
+                "collection": "test-collection",
+                "total_written": 2,
+                "total_bytes": expected_bytes,
+            }
         ]
-        result = sink.write(rows, ctx)
-
-        # Nothing sent to ChromaDB
-        mock_collection.upsert.assert_not_called()
-        mock_collection.add.assert_not_called()
-
-        # Diversions capture all rejections
-        assert len(result.diversions) == 2
-        assert result.diversions[0].row_index == 0
-        assert result.diversions[1].row_index == 1
-
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 0
 
     @pytest.mark.parametrize(
-        "bad_value, expected_type_name",
+        ("row", "stored_metadata", "metadata_fields"),
         [
-            ({"nested": "dict"}, "dict"),
-            (["a", "list"], "list"),
-            ((1, 2), "tuple"),
+            ({"doc_id": "d1", "text": "one", "topic": None}, None, ["topic"]),
+            (
+                {"doc_id": "d1", "text": "one", "topic": None, "category": "science"},
+                {"category": "science"},
+                ["topic", "category"],
+            ),
         ],
-        ids=["dict", "list", "tuple"],
     )
-    def test_diversion_reason_includes_type_name(self, bad_value: Any, expected_type_name: str) -> None:
-        """Diversion reason records the actual type name for diagnosis."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hi", "topic": bad_value}]
-        result = sink.write(rows, ctx)
-
-        assert len(result.diversions) == 1
-        assert expected_type_name in result.diversions[0].reason
-        assert "topic" in result.diversions[0].reason
-
-    def test_no_metadata_fields_skips_validation(self) -> None:
-        """When metadata_fields is empty, no validation needed (metadatas=None)."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": []},
+    def test_reconcile_accepts_chroma_normalized_null_metadata(
+        self,
+        row: dict[str, object],
+        stored_metadata: dict[str, object] | None,
+        metadata_fields: list[str],
+    ) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(
+            _make_config(
+                field_mapping={
+                    "document_field": "text",
+                    "id_field": "doc_id",
+                    "metadata_fields": metadata_fields,
+                },
+                schema={"mode": "observed"},
+            )
         )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
+        sink._collection = collection  # type: ignore[assignment]
+        member = _chroma_effect_member(0, row)
+        effect_input = SinkEffectPipelineMembersInput((member,), (member,))
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
+        collection.documents["d1"] = ("one", stored_metadata)
 
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hi"}]
-        sink.write(rows, ctx)
+        result = sink.reconcile_member_effect(plan, member, effect_input, ctx)
 
-        mock_collection.upsert.assert_called_once()
+        assert result.kind is SinkEffectReconcileKind.APPLIED_WITH_EXACT_DESCRIPTOR
 
+    def test_reconcile_returns_unknown_for_divergent_document_or_metadata(self) -> None:
+        collection = _RecoverableChromaCollection()
+        sink = ChromaSink(_make_config())
+        sink._collection = collection  # type: ignore[assignment]
+        member = _chroma_effect_member(0, {"doc_id": "d1", "text": "one", "topic": "alpha"})
+        effect_input = SinkEffectPipelineMembersInput((member,), (member,))
+        ctx = _chroma_effect_context()
+        inspection = sink.inspect_effect(SinkEffectInspectionRequest(effect_id="b" * 64, target="{}", predecessor_descriptor=None), ctx)
+        plan = sink.prepare_effect(SinkEffectPrepareRequest(effect_id="b" * 64, effect_input=effect_input, inspection=inspection), ctx)
+        collection.documents["d1"] = ("tampered", {"topic": "alpha"})
 
-class TestChromaSinkRequiredFieldTypeValidation:
-    """Required Chroma id/document fields must be strings at runtime."""
+        result = sink.reconcile_member_effect(plan, member, effect_input, ctx)
 
-    def test_observed_schema_non_string_required_fields_are_diverted(self) -> None:
-        """Observed schemas defer typing, so bad id/document values must divert per row."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": []},
-            schema={"mode": "observed"},
+        assert result.kind is SinkEffectReconcileKind.UNKNOWN
+
+    def test_effect_mode_resolver_reads_on_duplicate_without_io(self) -> None:
+        resolved = ChromaSink._resolve_sink_effect_mode(
+            _make_config(on_duplicate="overwrite"),
+            purpose=SinkEffectExecutionPurpose.FRESH,
         )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "valid"},
-            {"doc_id": 123, "text": "bad id"},
-            {"doc_id": "d3", "text": ["bad", "document"]},
-        ]
-        result = sink.write(rows, ctx)
-
-        mock_collection.upsert.assert_called_once()
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["ids"] == ["d1"]
-        assert call_kwargs["documents"] == ["valid"]
-        assert len(result.diversions) == 2
-        assert result.diversions[0].row_index == 1
-        assert "doc_id" in result.diversions[0].reason
-        assert "int" in result.diversions[0].reason
-        assert result.diversions[1].row_index == 2
-        assert "text" in result.diversions[1].reason
-        assert "list" in result.diversions[1].reason
-
-
-class TestChromaSinkDivertRow:
-    """Tests for _divert_row() integration with metadata validation."""
-
-    def test_invalid_metadata_diverted(self) -> None:
-        """Rows with non-primitive metadata types are diverted via _divert_row()."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "good", "topic": "science"},
-            {"doc_id": "d2", "text": "bad", "topic": {"nested": "dict"}},
-            {"doc_id": "d3", "text": "also bad", "topic": [1, 2, 3]},
-        ]
-        result = sink.write(rows, ctx)
-
-        # Only the valid row is written
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["ids"] == ["d1"]
-
-        # Two rows diverted
-        assert len(result.diversions) == 2
-        assert result.diversions[0].row_index == 1
-        assert result.diversions[0].row_data["doc_id"] == "d2"
-        assert "Invalid ChromaDB metadata types" in result.diversions[0].reason
-        assert result.diversions[1].row_index == 2
-        assert result.diversions[1].row_data["doc_id"] == "d3"
-
-    def test_all_valid_no_diversions(self) -> None:
-        """When all rows have valid metadata, no diversions are recorded."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows = [
-            {"doc_id": "d1", "text": "hello", "topic": "greeting"},
-            {"doc_id": "d2", "text": "goodbye", "topic": "farewell"},
-        ]
-        result = sink.write(rows, ctx)
-
-        assert len(result.diversions) == 0
-        mock_collection.upsert.assert_called_once()
-
-    def test_all_invalid_all_diverted(self) -> None:
-        """When all rows have bad metadata, all are diverted and nothing written."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "bad1", "topic": {"nested": True}},
-            {"doc_id": "d2", "text": "bad2", "topic": [1, 2]},
-            {"doc_id": "d3", "text": "bad3", "topic": (1, 2)},
-        ]
-        result = sink.write(rows, ctx)
-
-        # Nothing written to ChromaDB
-        mock_collection.upsert.assert_not_called()
-        mock_collection.add.assert_not_called()
-
-        # All rows diverted
-        assert len(result.diversions) == 3
-        assert result.diversions[0].row_index == 0
-        assert result.diversions[1].row_index == 1
-        assert result.diversions[2].row_index == 2
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 0
-
-
-class TestChromaSinkNonFiniteMetadata:
-    """Non-finite float metadata must be diverted before reaching ChromaDB or canonical hashing."""
-
-    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
-    def test_non_finite_metadata_diverted(self, bad_value: float) -> None:
-        """Row with non-finite float metadata is diverted, valid rows still written."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "good", "topic": "science"},
-            {"doc_id": "d2", "text": "bad", "topic": bad_value},
-        ]
-        result = sink.write(rows, ctx)
-
-        # Only valid row sent to ChromaDB
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["ids"] == ["d1"]
-        assert call_kwargs["documents"] == ["good"]
-
-        # Bad row diverted with descriptive reason
-        assert len(result.diversions) == 1
-        assert result.diversions[0].row_index == 1
-        assert "non-finite" in result.diversions[0].reason
-        assert "topic" in result.diversions[0].reason
-
-    @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
-    def test_all_non_finite_metadata_returns_zero_write(self, bad_value: float) -> None:
-        """When all rows have non-finite metadata, nothing is sent to ChromaDB."""
-        mock_collection = _make_chroma_collection_double()
-        sink = _make_sink_with_collection(mock_collection)
-        sink._on_write_failure = "csv_failsink"
-
-        ctx = _make_sink_ctx()
-        rows: list[dict[str, Any]] = [
-            {"doc_id": "d1", "text": "bad", "topic": bad_value},
-        ]
-        result = sink.write(rows, ctx)
-
-        mock_collection.upsert.assert_not_called()
-        assert len(result.diversions) == 1
-
-
-class TestChromaSinkEmptyMetadata:
-    """Empty metadata dicts {} crash ChromaDB — rows with all metadata fields absent
-    must be sent with metadatas=None, not metadatas=[{}]."""
-
-    def test_all_metadata_fields_absent_single_row(self) -> None:
-        """A row missing ALL configured metadata fields must not produce {}."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["topic", "category"],
-            },
-            schema={
-                "mode": "flexible",
-                "fields": ["doc_id: str", "text: str", "topic: str", "category: str"],
-            },
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-
-        ctx = _make_sink_ctx()
-        # Row has id and document but none of the configured metadata fields
-        rows = [{"doc_id": "d1", "text": "hello"}]
-        result = sink.write(rows, ctx)
-
-        # Row must be written (not diverted — missing metadata is not an error)
-        mock_collection.upsert.assert_called_once()
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["ids"] == ["d1"]
-        assert call_kwargs["documents"] == ["hello"]
-        # metadatas must be None, NOT [{}]
-        assert call_kwargs["metadatas"] is None
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 1
-        assert len(result.diversions) == 0
-
-    def test_mixed_batch_metadata_present_and_absent(self) -> None:
-        """Batch with some rows having metadata and others not — both are written."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["topic"],
-            },
-            schema={
-                "mode": "flexible",
-                "fields": ["doc_id: str", "text: str", "topic: str"],
-            },
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-
-        ctx = _make_sink_ctx()
-        rows = [
-            {"doc_id": "d1", "text": "with meta", "topic": "science"},
-            {"doc_id": "d2", "text": "no meta"},  # topic absent
-        ]
-        result = sink.write(rows, ctx)
-
-        # Both rows must be written — two sub-batch calls
-        assert mock_collection.upsert.call_count == 2
-
-        # First call: row with metadata
-        first_call = mock_collection.upsert.call_args_list[0].kwargs
-        assert first_call["ids"] == ["d1"]
-        assert first_call["metadatas"] == [{"topic": "science"}]
-
-        # Second call: row without metadata
-        second_call = mock_collection.upsert.call_args_list[1].kwargs
-        assert second_call["ids"] == ["d2"]
-        assert second_call["metadatas"] is None
-
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 2
-        assert len(result.diversions) == 0
-
-    def test_mixed_batch_content_hash_covers_aligned_payload(self) -> None:
-        """elspeth-b19ee26dc2: content_hash must cover a length-consistent payload.
-
-        A mixed metadata/no-metadata batch previously extended ids/documents for
-        all rows but metadatas only for metadata rows, hashing ids/docs length 2
-        with metadatas length 1 — a payload ChromaDB never received and that cannot
-        be replayed to verify the actual calls. The faithful aggregate aligns
-        metadatas to ids with None for no-metadata rows.
-        """
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": ["topic"]},
-            schema={"mode": "flexible", "fields": ["doc_id: str", "text: str", "topic: str"]},
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-        ctx = _make_sink_ctx()
-        rows = [
-            {"doc_id": "d1", "text": "with meta", "topic": "science"},
-            {"doc_id": "d2", "text": "no meta"},  # topic absent
-        ]
-        result = sink.write(rows, ctx)
-
-        expected_hash, _ = sink._compute_payload_hash(["d1", "d2"], ["with meta", "no meta"], [{"topic": "science"}, None])
-        assert result.artifact.content_hash == expected_hash
-
-    def test_all_metadata_fields_absent_skip_mode(self) -> None:
-        """Skip mode works correctly when metadata fields are absent."""
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": []}
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["topic"],
-            },
-            on_duplicate="skip",
-            schema={
-                "mode": "flexible",
-                "fields": ["doc_id: str", "text: str", "topic: str"],
-            },
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hello"}]
-        result = sink.write(rows, ctx)
-
-        # Row is new (not in existing), so it's added
-        mock_collection.add.assert_called_once()
-        call_kwargs = mock_collection.add.call_args.kwargs
-        assert call_kwargs["metadatas"] is None
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 1
-
-    def test_all_metadata_fields_absent_error_mode(self) -> None:
-        """Error mode works correctly when metadata fields are absent."""
-        mock_collection = _make_chroma_collection_double()
-        mock_collection.get.return_value = {"ids": []}
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["topic"],
-            },
-            on_duplicate="error",
-            schema={
-                "mode": "flexible",
-                "fields": ["doc_id: str", "text: str", "topic: str"],
-            },
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-
-        ctx = _make_sink_ctx()
-        rows = [{"doc_id": "d1", "text": "hello"}]
-        result = sink.write(rows, ctx)
-
-        mock_collection.add.assert_called_once()
-        call_kwargs = mock_collection.add.call_args.kwargs
-        assert call_kwargs["metadatas"] is None
-        assert result.artifact.metadata is not None
-        assert result.artifact.metadata["row_count"] == 1
-
-    def test_partial_metadata_fields_not_empty(self) -> None:
-        """Row with SOME metadata fields present produces a non-empty dict (not affected)."""
-        mock_collection = _make_chroma_collection_double()
-        config = _make_config(
-            field_mapping={
-                "document_field": "text",
-                "id_field": "doc_id",
-                "metadata_fields": ["topic", "category"],
-            },
-            schema={
-                "mode": "flexible",
-                "fields": ["doc_id: str", "text: str", "topic: str", "category: str"],
-            },
-        )
-        sink = inject_write_failure(ChromaSink(config))
-        sink._collection = mock_collection
-
-        ctx = _make_sink_ctx()
-        # Row has topic but not category — meta is {"topic": "science"}, not empty
-        rows = [{"doc_id": "d1", "text": "hello", "topic": "science"}]
-        result = sink.write(rows, ctx)
-
-        mock_collection.upsert.assert_called_once()
-        call_kwargs = mock_collection.upsert.call_args.kwargs
-        assert call_kwargs["metadatas"] == [{"topic": "science"}]
-        assert len(result.diversions) == 0
+        assert resolved is not None and resolved.value == "overwrite"

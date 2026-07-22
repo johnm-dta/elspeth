@@ -54,17 +54,22 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, text, update
 
-from elspeth.contracts import RunStatus
+from elspeth.contracts import PipelineRow, RunStatus
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.scheduler import TokenWorkStatus
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
 from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager
+from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.schema import (
+    node_states_table,
+    rows_table,
     run_coordination_table,
     run_workers_table,
     runs_table,
+    scheduler_events_table,
     token_outcomes_table,
+    token_work_items_table,
     tokens_table,
 )
 from elspeth.engine.clock import MockClock
@@ -82,6 +87,7 @@ from tests.e2e.recovery.harness import (
     _craft_crashed_lease,
     _duplicate_terminal_outcome_tokens,
     _node_state_identities,
+    _observed_contract,
     _recovery_events,
     _recovery_manager,
     _resume,
@@ -104,6 +110,216 @@ _GUARD_LIVE_SEAT_WINDOW_SECONDS = 10**9
 @pytest.mark.timeout(120)
 class TestMidClaimCrashResume:
     """Ticket item 1: mid-claim crash -> lease expiry -> sweep -> completion."""
+
+    def test_ts02_source_completion_gap_reconciles_once_before_plugin_execution(self, tmp_path: Path) -> None:
+        """The pre-fix post-TS-02 crash image gains one source witness on resume."""
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        old_leader = "source-completion-crash-worker"
+        old_token = _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=old_leader,
+            now=clock.now_utc(),
+            window_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+
+        data = {"id": 3, "value": 30}
+        row_id = "row-source-completion-seam"
+        token_id = "token-source-completion-seam"
+
+        def insert_pre_fix_ingress(conn: Any) -> tuple[Any, Any]:
+            # This closure is the exact pre-fix TS-02 body: row + token only.
+            # The process dies immediately after the composed scheduler verb
+            # commits and before its later standalone source-state insert.
+            return crashed.factory.data_flow.insert_row_with_token_on(
+                conn,
+                run_id=crashed.run_id,
+                source_node_id=crashed.source_node_id,
+                row_index=3,
+                data=data,
+                source_row_index=3,
+                ingest_sequence=3,
+                row_id=row_id,
+                token_id=token_id,
+            )
+
+        _row, _token, admitted = crashed.repo.ingest_row_with_initial_claim(
+            coordination_token=old_token,
+            now=clock.now_utc(),
+            insert_row_and_token=insert_pre_fix_ingress,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=crashed.journal_node_id,
+            step_index=crashed.journal_step_index,
+            ingest_sequence=3,
+            row_payload_json=crashed.repo.serialize_row_payload(PipelineRow(data, _observed_contract(data))),
+            lease_owner=old_leader,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        assert admitted.status is TokenWorkStatus.LEASED
+        assert admitted.attempt == 1
+
+        def crash_token_counts() -> tuple[int, int, int]:
+            with crashed.db.engine.connect() as conn:
+                return (
+                    len(conn.execute(select(rows_table.c.row_id).where(rows_table.c.row_id == row_id)).all()),
+                    len(conn.execute(select(tokens_table.c.token_id).where(tokens_table.c.token_id == token_id)).all()),
+                    len(
+                        conn.execute(
+                            select(token_work_items_table.c.work_item_id).where(
+                                token_work_items_table.c.run_id == crashed.run_id,
+                                token_work_items_table.c.token_id == token_id,
+                            )
+                        ).all()
+                    ),
+                )
+
+        def crash_token_states() -> list[tuple[str, str, int]]:
+            with crashed.db.engine.connect() as conn:
+                return [
+                    (str(row.node_id), str(row.status), int(row.attempt))
+                    for row in conn.execute(
+                        select(node_states_table.c.node_id, node_states_table.c.status, node_states_table.c.attempt).where(
+                            node_states_table.c.run_id == crashed.run_id,
+                            node_states_table.c.token_id == token_id,
+                        )
+                    ).all()
+                ]
+
+        def crash_token_events() -> list[tuple[str, int | None, int]]:
+            with crashed.db.engine.connect() as conn:
+                return [
+                    (str(row.event_type), row.from_attempt, int(row.to_attempt))
+                    for row in conn.execute(
+                        select(
+                            scheduler_events_table.c.event_type,
+                            scheduler_events_table.c.from_attempt,
+                            scheduler_events_table.c.to_attempt,
+                        )
+                        .where(
+                            scheduler_events_table.c.run_id == crashed.run_id,
+                            scheduler_events_table.c.token_id == token_id,
+                        )
+                        .order_by(text("rowid"))
+                    ).all()
+                ]
+
+        # Deterministic hard-kill image: TS-02 is durable, source step 0 is not.
+        assert crash_token_counts() == (1, 1, 1)
+        assert crash_token_states() == []
+        assert crash_token_events() == [
+            (SchedulerEventType.ENQUEUE.value, None, 1),
+            (SchedulerEventType.CLAIM_READY.value, 1, 1),
+        ]
+
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+        repair_point = _resume_point(crashed)
+        assert repair_point is not None
+
+        class _CrashAfterSourceRepair(BaseException):
+            pass
+
+        real_reconcile = ExecutionRepository.reconcile_source_completions_from_scheduler
+
+        def reconcile_then_crash(repo: ExecutionRepository, **kwargs: Any) -> int:
+            repaired = real_reconcile(repo, **kwargs)
+            assert repaired == 1
+            raise _CrashAfterSourceRepair
+
+        class _KilledProcessHeartbeat:
+            """No background beat: the simulated process dies at the repair seam."""
+
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def check_and_raise(self) -> None:
+                pass
+
+        config_crash, graph_crash, sink_crash, source_crash = _build_pipeline(_SOURCE_ROWS)
+        transform_crash = config_crash.transforms[0]
+        with (
+            patch.object(ExecutionRepository, "reconcile_source_completions_from_scheduler", new=reconcile_then_crash),
+            patch("elspeth.engine.orchestrator.resume.RunHeartbeatThread", _KilledProcessHeartbeat),
+            patch.object(transform_crash, "process", wraps=transform_crash.process) as crash_transform_process,
+            pytest.raises(_CrashAfterSourceRepair),
+        ):
+            crashed.resume_orchestrator().resume(
+                repair_point,
+                config_crash,
+                graph_crash,
+                payload_store=crashed.payload_store,
+            )
+
+        # The repair transaction committed, but the process died before the
+        # scheduler recovery sweep or any plugin call. A second public resume
+        # must validate that same source state idempotently, not duplicate it.
+        assert source_crash.load_invocations == 0
+        assert crash_transform_process.call_count == 0
+        assert sink_crash.results == []
+        assert crash_token_states() == [(crashed.source_node_id, "completed", 0)]
+        assert crash_token_events() == [
+            (SchedulerEventType.ENQUEUE.value, None, 1),
+            (SchedulerEventType.CLAIM_READY.value, 1, 1),
+        ]
+
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+        winner_point = _resume_point(crashed)
+        loser_point = _resume_point(crashed)
+        assert winner_point is not None and loser_point is not None
+
+        config_w, graph_w, sink_w, source_w = _build_pipeline(_SOURCE_ROWS)
+        transform_w = config_w.transforms[0]
+        with patch.object(transform_w, "process", wraps=transform_w.process) as winner_transform_process:
+            result = crashed.resume_orchestrator().resume(
+                winner_point,
+                config_w,
+                graph_w,
+                payload_store=crashed.payload_store,
+            )
+
+        assert result.status is RunStatus.COMPLETED
+        assert result.rows_processed == 4
+        assert source_w.load_invocations == 0
+        assert winner_transform_process.call_count == 1
+        assert sink_w.results == [data]
+        assert crash_token_counts() == (1, 1, 1)
+        states_after_winner = crash_token_states()
+        assert [state for state in states_after_winner if state[0] == crashed.source_node_id] == [(crashed.source_node_id, "completed", 0)]
+        transform_states = [state for state in states_after_winner if state[0].startswith("transform_")]
+        assert transform_states == [(transform_states[0][0], "completed", 1)]
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        assert token_id in _completed_outcome_tokens(crashed.db, crashed.run_id)
+
+        events_after_winner = crash_token_events()
+        assert [event[0] for event in events_after_winner].count(SchedulerEventType.ENQUEUE.value) == 1
+        assert [event[0] for event in events_after_winner].count(SchedulerEventType.CLAIM_READY.value) == 2
+        assert [event for event in events_after_winner if event[0] == SchedulerEventType.RECOVER_EXPIRED_LEASE.value] == [
+            (SchedulerEventType.RECOVER_EXPIRED_LEASE.value, 1, 2)
+        ]
+
+        # A stale third resume is refused at the terminal entry guard. The
+        # meaningful idempotency proof is the crash-after-repair resume above.
+        counts_after_winner = crash_token_counts()
+        events_after_winner = crash_token_events()
+        config_l, graph_l, sink_l, _source_l = _build_pipeline(_SOURCE_ROWS)
+        with pytest.raises(NonResumableRunError, match="terminal"):
+            crashed.resume_orchestrator().resume(
+                loser_point,
+                config_l,
+                graph_l,
+                payload_store=crashed.payload_store,
+            )
+        assert sink_l.results == []
+        assert crash_token_counts() == counts_after_winner
+        assert crash_token_states() == states_after_winner
+        assert crash_token_events() == events_after_winner
+        crashed.db.close()
 
     def test_mid_claim_crash_resume_recovers_leased_item_exactly_once(self, tmp_path: Path) -> None:
         """A LEASED journal row left by a dead worker is recovered exactly once.
@@ -235,7 +451,7 @@ class TestExpiredLeaseReclaimUnderContention:
         # re-claims at attempt=2 with a long lease... and dies holding it.
         clock.advance(120)  # token-4's 60s lease is expired; token-3's 300s is not
         assert (
-            crashed.repo.recover_expired_leases(
+            crashed.repo.recover_expired_leases_legacy_unfenced(
                 run_id=crashed.run_id,
                 now=clock.now_utc(),
                 caller_owner="row-processor:prior-attempt-sweeper",
@@ -444,9 +660,7 @@ class TestTwoResumesSameRunId:
         # ---- the winner completes normally under its token ----
         assert (
             crashed.repo.recover_expired_leases(
-                run_id=crashed.run_id,
                 now=clock.now_utc(),
-                caller_owner=winner_id,
                 coordination_token=winner_token,
             )
             == 1
@@ -1175,9 +1389,7 @@ class TestTwoResumesSameRunId:
         # finalizes.  The D quiescence predicate (no READY/LEASED/PENDING_SINK
         # rows except the crashed one recovered first) must be satisfied.
         recovered = crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=clock.now_utc(),
-            caller_owner=leader_id,
             coordination_token=leader_token,
         )
         assert recovered == 1, "exactly one expired lease recovered (crashed-worker-1)"

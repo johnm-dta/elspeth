@@ -8,6 +8,7 @@ Complete reference for ELSPETH pipeline configuration.
 
 - [Configuration File Format](#configuration-file-format)
 - [Top-Level Settings](#top-level-settings)
+- [Web Plugin Policy](#web-plugin-policy)
 - [Secrets Settings](#secrets-settings)
 - [Source Settings](#source-settings)
 - [Queue Settings](#queue-settings)
@@ -85,6 +86,124 @@ Nested environment variables use double underscore: `ELSPETH_LANDSCAPE__URL`.
 | `live` | Execute normally, make real external calls |
 | `replay` | Use recorded responses from a previous run |
 | `verify` | Compare new results against a previous run |
+
+---
+
+## Web Plugin Policy
+
+The web service compiles one operator-owned plugin policy at startup. Its
+required authorization set is:
+
+- sources: `source:csv`, `source:json`, `source:text`
+- transforms: `transform:field_mapper`, `transform:llm`,
+  `transform:web_scrape`
+- sinks: `sink:csv`, `sink:json`, `sink:text`
+
+The operator-profiled LLM is request-available only when that principal has at
+least one usable configured profile. Missing LLM or tutorial credentials do
+not hide CSV/JSON/text authoring.
+
+Authorize every optional web plugin with its kind-qualified ID in
+`plugin_allowlist`. An installed plugin that is absent from this list remains
+available to CLI and batch runs but is hidden from every web discovery,
+authoring, import, validation, and execution surface.
+
+### Environment configuration
+
+Collection and mapping values use JSON. This example enables the AWS Bedrock
+prompt and output controls, requires both controls, and selects a keyless
+Bedrock profile for the tutorial:
+
+```bash
+ELSPETH_WEB__PLUGIN_ALLOWLIST='["transform:aws_bedrock_prompt_shield","transform:aws_bedrock_content_safety"]'
+ELSPETH_WEB__PLUGIN_PREFERENCES='{"prompt_shield":["transform:aws_bedrock_prompt_shield"],"content_safety":["transform:aws_bedrock_content_safety"]}'
+ELSPETH_WEB__PLUGIN_CONTROL_MODES='{"prompt_shield":"required","content_safety":"required"}'
+ELSPETH_WEB__LLM_PROFILES='{"tutorial":{"provider":"bedrock","model":"bedrock/anthropic.claude-3-haiku-20240307-v1:0","region_name":"ap-southeast-2"}}'
+ELSPETH_WEB__TUTORIAL_LLM_PROFILE='tutorial'
+ELSPETH_WEB__BEDROCK_GUARDRAIL_PROFILES='[{"alias":"prompt-default","plugin":"aws_bedrock_prompt_shield","guardrail_identifier":"operatorpromptguardrail","guardrail_version":"7","region":"ap-southeast-2"},{"alias":"content-default","plugin":"aws_bedrock_content_safety","guardrail_identifier":"operatorcontentguardrail","guardrail_version":"4","region":"ap-southeast-2"}]'
+ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES='{"aws_bedrock_prompt_shield":"prompt-default","aws_bedrock_content_safety":"content-default"}'
+```
+
+AWS ECS acceptance treats those seven strings as one protected assignment.
+The controller hashes their exact raw values, stores the binding in the bound
+scenario inventory, and compares every returned candidate/verifier task
+definition byte-for-byte with that inventory, together with the live Bedrock
+model and AWS region. The Guardrail receipt and durable receipt store must
+match the same protected binding; a substituted bundle with a recomputed hash
+does not satisfy the contract.
+
+Preference arrays are ordered. When a capability has multiple authorized
+implementations, list every implementation exactly once in the desired order.
+`required` mode blocks a pipeline unless the selected implementation is
+available and covers every applicable path. `recommend` mode keeps the
+control advisory.
+
+An OpenRouter or Azure LLM profile must declare `credential_scope` and an
+operator-owned `credential_ref`. A server-scoped profile resolves only through
+the server store; a user-scoped profile resolves only through that principal's
+store. Web-authored pipeline state stores the opaque profile alias, not the
+provider, model, endpoint, or credential binding.
+
+Bedrock Guardrail profiles follow the same separation. Web authors select only
+an opaque `profile`, row `fields`, `schema`, and, for content safety, `source`.
+The operator-owned Guardrail identifier, immutable numeric version, and region
+are lowered only for validation and execution. When a plugin has multiple
+profiles, configure its choice explicitly in
+`ELSPETH_WEB__BEDROCK_GUARDRAIL_DEFAULT_PROFILES`; plugin preferences select the
+implementation, while this mapping selects that implementation's private
+binding. Credentials come from the AWS default SDK chain. On ECS, grant the
+required Bedrock permissions to the task role; never place access keys or
+custom endpoints in profile or pipeline configuration.
+
+### Startup, restart, and remediation
+
+Restart the web service after changing the allowlist, preferences, control
+modes, profile definitions, or tutorial profile. The process policy is frozen
+after startup; secret availability is recomputed per principal and again before
+execution.
+
+Startup fails with a sanitized configuration error when the core is missing,
+an ID is malformed or duplicated, an authorized plugin is not installed or
+locally usable, a required capability has no implementation, a preference
+order is incomplete, or an authorized plugin lacks canonical version/hash
+identity. Correct the named setting or plugin ID and restart; the error does
+not echo raw JSON or private profile bindings.
+
+Saved states that reference a now-disabled plugin remain readable and
+exportable in their authored form. Remove or replace each component using the
+web repair action before validation or execution. The server does not fetch a
+hidden plugin schema and does not silently re-enable the component.
+
+### Readiness and audit evidence
+
+`GET /api/system/status` exposes separate sanitized rows for policy
+compilation, required core, local capability configuration, live provider
+health, tutorial profile configuration, and tutorial required-control
+coverage. A missing tutorial profile disables the tutorial without hiding
+ordinary CSV/JSON/text authoring. The authenticated launch path rechecks the
+principal's profile credential and the complete tutorial candidate immediately
+before creating a run; a failed check returns a typed HTTP 409.
+
+Every web run records the policy hash, principal snapshot hash, authorized and
+available IDs, selected implementations, safe profile aliases, plugin code
+identities, and closed decision codes introduced in Landscape epoch 23 and
+retained in epoch 25. Readiness,
+errors, logs, telemetry, persisted state, and exports omit private profile
+bindings.
+
+Every validation or execution request receives a principal-scoped availability
+snapshot. Execution freezes one fresh snapshot before creating the run, and
+the same snapshot controls initial plugin construction and delayed export-sink
+construction. A saved pipeline whose plugin has since been disabled is rejected
+before a run or plugin instance is created.
+
+Operator-profiled web plugins expose only an opaque `profile` alias plus safe
+pipeline options. Provider, model, endpoint, and credential bindings are
+lowered in memory for execution; Landscape run/node configuration and exported
+audit data retain the authored alias form. CLI and batch configuration remain
+explicit and unrestricted by web policy: `instantiate_plugins_from_config()`
+and `make_sink_factory()` consume normal pipeline settings without `WebSettings`
+or a web availability snapshot.
 
 ---
 
@@ -359,11 +478,11 @@ sinks:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `database`, `azure_blob`, `dataverse`, `chroma_sink` |
+| `plugin` | string | **Yes** | Plugin name: `csv`, `json`, `text`, `database`, `azure_blob`, `dataverse`, `chroma_sink` |
 | `on_write_failure` | string | **Yes** | Per-row write failure handling: `discard` to drop with audit record, or a sink name to divert to a failsink |
 | `options` | object | No | Plugin-specific configuration |
 
-For local file sinks (`csv`, `json`), `options.collision_policy` can make output-path collisions explicit:
+For local file sinks (`csv`, `json`, `text`), `options.collision_policy` can make output-path collisions explicit:
 
 | Policy | Use with | Behavior |
 |--------|----------|----------|
@@ -377,10 +496,26 @@ For local file sinks (`csv`, `json`), `options.collision_policy` can make output
 |--------|---------|
 | `csv` | Write to CSV file |
 | `json` | Write to JSON file |
+| `text` | Write one configured string field per row as canonical LF-delimited text |
 | `database` | Write to SQL database |
 | `azure_blob` | Write to Azure Blob Storage |
 | `dataverse` | Write to Microsoft Dataverse via OData v4 REST API |
 | `chroma_sink` | Write to a ChromaDB vector database |
+
+### Text sink contract
+
+The `text` sink requires `path`, `schema`, and `field`. The named field must be
+present on every accepted row and its value must already be a string; the sink
+does not coerce other values. Embedded CR or LF characters are rejected so each
+row remains exactly one record, and every written record ends with canonical LF.
+Supported encodings are `utf-8`, `ascii`, `latin-1`, and `cp1252`.
+
+Use `mode: append` with `collision_policy: append_or_create` for append or
+resume. Before appending, ELSPETH verifies that existing bytes decode in the
+configured encoding, contain no CR separators, and end on an LF record
+boundary. The text sink is not eligible as a generic failure sink because it
+writes only one selected field and therefore cannot preserve an arbitrary
+rejected row losslessly.
 
 ---
 
@@ -454,10 +589,82 @@ fields = extract_jinja2_fields(template)  # frozenset({'customer_id', 'message_t
 | `batch_distribution_profile` | Numeric-only batch distribution statistics; use `batch_top_k` for categorical counts/frequencies |
 | `report_assemble` | Assemble a batch of text rows into one report/text row with pagination metadata |
 | `web_scrape` | HTML content extraction with SSRF prevention |
-| `llm` | Unified LLM transform (azure/openrouter providers, single/multi-query) |
+| `llm` | Unified LLM transform (azure/openrouter/bedrock providers, single/multi-query) |
 | `azure_content_safety` | Detect harmful content via Azure AI |
 | `azure_prompt_shield` | Detect prompt injection via Azure AI |
+| `aws_bedrock_content_safety` | Detect configured harmful-content categories through Bedrock Guardrails |
+| `aws_bedrock_prompt_shield` | Detect prompt attacks through Bedrock Guardrails |
 | `rag_retrieval` | Enriches rows with retrieval-augmented context from search providers |
+
+### AWS Bedrock LLM
+
+Bedrock uses LiteLLM with the ordinary AWS default credential chain. On ECS,
+grant Bedrock permissions to the task role; do not put access keys in plugin
+configuration.
+
+```yaml
+transforms:
+  - name: classify_with_bedrock
+    plugin: llm
+    input: classify_in
+    on_success: output
+    on_error: discard
+    options:
+      provider: bedrock
+      model: bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0
+      region_name: ap-southeast-2
+      prompt_template: "Classify: {{ row.text }}"
+      required_input_fields: [text]
+      schema:
+        mode: observed
+```
+
+### AWS Bedrock Guardrail shields
+
+CLI and batch pipelines use an explicit trained-operator binding. The Guardrail
+identifier, immutable numeric version, region, fields, and schema are required;
+there are no access-key or endpoint options. Prompt shielding always evaluates
+content as `INPUT`. Content safety accepts `source: INPUT` for inbound text or
+`source: OUTPUT` for generated text.
+
+```yaml
+transforms:
+  - name: screen_prompt
+    plugin: aws_bedrock_prompt_shield
+    input: prompt_in
+    on_success: generation_in
+    on_error: blocked
+    options:
+      guardrail_identifier: operatorpromptguardrail
+      guardrail_version: "7"
+      region: ap-southeast-2
+      fields: [prompt]
+      schema:
+        mode: observed
+
+  - name: screen_generated_text
+    plugin: aws_bedrock_content_safety
+    input: generated_in
+    on_success: output
+    on_error: blocked
+    options:
+      guardrail_identifier: operatorcontentguardrail
+      guardrail_version: "4"
+      region: ap-southeast-2
+      fields: [response]
+      source: OUTPUT
+      schema:
+        mode: observed
+```
+
+Each configured field must receive an explicit safe result. A detect-only
+positive is blocked even when the top-level Guardrail action is `NONE`, and an
+intervention, service failure, or malformed response also fails closed without
+including provider-generated text in row data or error details.
+
+The harmful-content categories required by this AWS plugin do not include
+Azure Content Safety's `self_harm` category. A deployment must not claim Azure
+coverage parity unless an additional approved control covers that category.
 
 ---
 
@@ -792,12 +999,34 @@ landscape:
     enabled: true
     sink: audit_archive
     format: json
-    sign: true
+    signing_mode: hmac_sha256
+    signer_key_id: audit-export-2026-q3-v1
+    signing_secret_ref: ELSPETH_AUDIT_EXPORT_SIGNING_KEY
+    signer_rotation_policy: multi_version
+    total_record_limit: 1000000
+    total_byte_limit: 1073741824
+    chunk_limit: 100
+    per_chunk_record_limit: 10000
+    per_chunk_byte_limit: 16777216
+    spool_root: .elspeth/audit-export-spool/primary
+    content_store:
+      content_store_id: audit-archive-v1
+      namespace: audit-exports
+      root: .elspeth/audit-export-content-store/primary
+      policy_version: retention-v1
+      retention_days: 2555
+      durability: replicated
   # Optional: JSONL change journal for emergency backup
   dump_to_jsonl: false
   dump_to_jsonl_path: ./runs/audit.journal.jsonl
   dump_to_jsonl_include_payloads: false
 ```
+
+Committed journal batches are bound to the canonical sidecar path that
+created them. Startup recovery only drains that path's backlog; changing a
+worker's journal path does not move or acknowledge batches owned by the old
+path. Reopen the database with the original path to recover that backlog.
+Concurrent drains for one path are serialized across processes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -808,9 +1037,77 @@ landscape:
 | `export` | object | (disabled) | Post-run audit export configuration |
 | `dump_to_jsonl` | bool | `false` | Write append-only JSONL change journal |
 | `dump_to_jsonl_path` | string | (derived from url) | Path for JSONL journal file |
-| `dump_to_jsonl_fail_on_error` | bool | `false` | Fail the run if journal write fails |
+| `dump_to_jsonl_fail_on_error` | bool | `false` | Fail database startup if a committed outbox batch cannot be published during recovery |
 | `dump_to_jsonl_include_payloads` | bool | `false` | Include request/response bodies in journal |
 | `dump_to_jsonl_payload_base_path` | string | (from payload_store) | Payload store path for inlining |
+
+### Landscape schema epoch 29
+
+Landscape epoch 26 added durable sink-effect streams, effects, ordered members,
+attempts, and sealed audit-export snapshots. Epoch 27 adds durable coalesce
+effects and normalized parent evidence so materialization and completion can be
+replayed safely after a crash. Epoch 28 moves primary-effect provenance onto
+each failsink effect member so recovered batches spanning more than one primary
+effect remain exactly attributable. Epoch 29 adds run-scoped token ancestry and
+validation-error links, canonical node output-contract hashes, durable batch
+expansion claims, and a transaction-owned sidecar-journal outbox. Each outbox
+batch records its
+canonical sidecar owner so another worker or path cannot publish or acknowledge
+it. See the
+[sink-effect recovery runbook](../runbooks/sink-effect-recovery.md).
+
+ELSPETH is pre-1.0. It does not transform an older Landscape schema into epoch
+29, either automatically at startup or through an operator migration command.
+Stop and uninstall the old deployment, archive or export evidence when policy
+requires it, delete/recreate the Landscape database, then reinstall and
+initialize this ELSPETH version. PostgreSQL schema-owner and runtime/DML roles
+remain separate; recreation is an operator action. Code that understands only
+an older epoch must not be rolled back over an epoch-29 database.
+
+Data-preserving, version-to-version schema migrations become a first-class
+compatibility obligation at 1.0. They are intentionally not a pre-1.0 promise.
+
+#### Historical epoch-25 artifact identity
+
+Landscape epoch 25 makes artifact logical-effect identity structural. Fresh
+SQLite and PostgreSQL schemas carry a partial unique index on
+`artifacts(run_id, idempotency_key)` for rows whose idempotency key is non-null.
+
+An older SQLite or PostgreSQL Landscape schema missing this index is stale and
+must be recreated under the pre-1.0 policy above. Read-only and inspection-only
+opens never alter schema. Code that only understands epoch 23 or 24 must not be
+rolled back over an epoch-25-or-newer database.
+
+#### Historical epoch-24 token ownership
+
+Landscape epoch 24 makes the persisted row authoritative for token run
+ownership. Fresh SQLite and PostgreSQL schemas enforce
+`tokens(row_id, run_id) -> rows(row_id, run_id)` in addition to the existing
+single-column references.
+
+An older SQLite or PostgreSQL Landscape schema missing this constraint is stale
+and must be recreated under the pre-1.0 policy above. Code that only
+understands epoch 23 must not be rolled back over an epoch-24-or-newer
+database.
+
+#### Historical epoch-23 boundary
+
+Landscape epoch 23 adds `run_web_plugin_policy`, an optional one-to-one audit
+row for each web-initiated run. The row records the immutable policy and
+request-snapshot hashes, authorized and available kind-qualified plugin IDs,
+control modes, selected implementations, safe profile aliases, plugin code
+identities, the binding-generation fingerprint, and bounded decision codes.
+It never records a principal ID, secret or secret-reference value, private
+profile binding, or remote response payload. CLI runs correctly have no row.
+
+Epoch 23 is a deliberate pre-1.0 one-way compatibility boundary for SQLite
+and PostgreSQL. ELSPETH does not add this table to an existing pre-23
+Landscape database. A database owner must obtain archive/export approval where
+retention applies, stop writers, drop/recreate the Landscape schema, and run
+the fresh schema-owner initialization path. Runtime/DML roles must not receive
+DDL. Rolling code back to epoch-22 code after an epoch-23 recreation is unsafe;
+deployment and rollback decisions must cite an approved release/schema
+compatibility record rather than relying on a structural probe alone.
 
 ### Export Settings
 
@@ -819,9 +1116,74 @@ landscape:
 | `enabled` | bool | `false` | Enable audit trail export after run |
 | `sink` | string | - | Sink name to export to (required when enabled) |
 | `format` | string | `csv` | Export format: `csv`, `json` |
-| `sign` | bool | `false` | HMAC sign each record for integrity |
+| `signing_mode` | string | `unsigned` | `unsigned` or `hmac_sha256` |
+| `signer_key_id` | string | `UNSIGNED` | Credential-free public signer key ID/version recorded in snapshot identity |
+| `signing_secret_ref` | string | - | Exact environment-variable name containing the HMAC key; required for `hmac_sha256` |
+| `signer_rotation_policy` | string | `multi_version` | `multi_version` allows a new signer identity for a new snapshot; `single_export` refuses a different signer identity for the same export lineage |
+| `exporter_version` | string | `landscape-exporter-v1` | Export implementation identity |
+| `serialization_version` | string | `audit-export-v2` | Canonical record serialization identity |
+| `chunking_algorithm_version` | string | `record-framing-v1` | Chunk-boundary algorithm identity |
+| `include_raw_error_rows` | bool | `false` | Include bounded raw error rows when policy permits |
+| `total_record_limit` | int | required when enabled | Maximum records derived for one snapshot |
+| `total_byte_limit` | int | required when enabled | Maximum serialized bytes derived for one snapshot |
+| `chunk_limit` | int | required when enabled | Maximum immutable chunks in one snapshot |
+| `per_chunk_record_limit` | int | required when enabled | Maximum records in one chunk |
+| `per_chunk_byte_limit` | int | required when enabled | Maximum serialized bytes in one chunk |
+| `spool_root` | path | required when enabled | Private path below `.elspeth/audit-export-spool`; absolute and parent-traversal paths are refused |
+| `content_store` | object | required when enabled | Explicit durable immutable-content policy |
+| `content_store.content_store_id` | string | required | Credential-free store identity persisted with snapshots |
+| `content_store.namespace` | string | required | Credential-free content namespace |
+| `content_store.root` | path | required | Private local content root below `.elspeth/audit-export-content-store` |
+| `content_store.policy_version` | string | required | Retention/durability policy version |
+| `content_store.retention_days` | int | required | Retention period |
+| `content_store.durability` | string | required | `fsync` or `replicated` |
 
-**Audit export signing:** For legal-grade audit trail integrity, enable export signing by setting `landscape.export.sign = true` in your pipeline settings. This produces cryptographically signed exports (HMAC) that can be independently verified. Requires `ELSPETH_SIGNING_KEY` to be set (see [Environment Variables](environment-variables.md)).
+Enabled export is deliberately all-explicit: total capacity must fit within
+`chunk_limit × per_chunk_*_limit`, and the spool must already be a private
+directory. Content-store retention never authorizes deletion of referenced
+snapshot objects.
+
+**Signing and rotation:** `signer_key_id` is a public, credential-free identity
+that includes the operator's key version. It participates in snapshot identity,
+so rotating a key means selecting a new key ID and secret reference together.
+`multi_version` preserves verification of old snapshots under their recorded
+IDs; `single_export` refuses an identity change within that export lineage.
+The value of `signing_secret_ref` is only the environment variable name. Key
+bytes, secret values, hashes of weak key material, and low-entropy key-derived identifiers
+are never persisted. See [Environment
+Variables](environment-variables.md) for secret provisioning.
+
+### Sink-effect resource and transport bounds
+
+Effect adapters apply bounds before external publication. The relevant
+settings and code-owned defaults are:
+
+| Scope | Limit or setting | Current contract |
+|---|---|---|
+| Local file staging | bytes / rows | Code-owned maximum: 1 GiB and 10,000,000 rows per prepared effect |
+| Local file target lock | lock wait | Code-owned bounded wait: 5 seconds; timeout aborts without publication |
+| S3 object | `max_object_bytes`, `max_record_chars` | Defaults: 256 MiB and 1,000,000 characters; hard maxima: 1 GiB and 8,000,000 characters |
+| Azure Blob object | `max_blob_bytes` | Default: 256 MiB; hard maximum: 1 GiB |
+| Effect ownership | lease TTL | Coordinator default: 5 minutes; takeover is allowed only after expiry and increments the generation |
+| Provider network | connect/read/request timeout | Must be bounded in the deployed provider client/SDK policy. These are not universal pipeline YAML fields; a transport failure becomes response-lost evidence and requires reconciliation, never assumed absence. |
+
+Do not extend a network timeout beyond the operational lease window without a
+coordinated lease/heartbeat policy. Do not raise staging or object limits by
+bypassing validation: split the workload or change the reviewed adapter
+contract.
+
+### Remote effect body spool
+
+S3 and Azure Blob effects stage their serialized bodies in a filesystem spool
+before the conditional publish. The location is `ELSPETH_EFFECT_SPOOL_DIR`
+when set, otherwise the project-local `.elspeth/sink-effect-spool/` (resolved
+against the working directory, like the audit-export spool). Place the spool
+on storage as durable as the landscape database — prepared plans reference
+their staged bodies across process restarts. A body lost anyway (reboot,
+tmp-cleaner) is re-derived from durable member payloads at commit time and
+verified against the plan's sealed hash; a divergent re-derivation fails
+closed. Do not repoint the spool while effects are in flight: plans seal their
+stage path and a moved spool fails closed until the location is restored.
 
 ### JSONL Change Journal
 
@@ -839,7 +1201,7 @@ landscape:
   # Include LLM/HTTP request and response bodies
   dump_to_jsonl_include_payloads: true
 
-  # Fail the pipeline if journal writes fail (strict mode)
+  # Fail startup if committed journal backlog cannot be published (strict mode)
   dump_to_jsonl_fail_on_error: false
 ```
 
@@ -852,9 +1214,20 @@ landscape:
 | Production (minimal I/O) | `dump_to_jsonl: false` (default) |
 
 **Notes:**
-- Journal is append-only (never modified after write)
-- Each line is a self-contained JSON record
-- Includes all database commits: rows, transforms, calls, outcomes
+- Complete published records are append-only. Recovery may truncate only a
+  recognized torn batch at EOF before replaying that batch from the outbox;
+  unrelated or mid-file corruption fails closed
+- Each line is a self-contained JSON record with durable `journal_batch_id`,
+  `journal_batch_ordinal`, and `journal_batch_size` fields
+- A transaction first stores its batch in `sidecar_journal_outbox`; only a
+  successful database commit makes it publishable
+- Publication fsyncs the sidecar before acknowledging the outbox row; startup
+  drains committed backlog and batch IDs prevent duplicate publication after
+  an append/ack crash window
+- Failed database commits publish no records. A live sidecar I/O failure does
+  not reverse an already successful database commit: the committed outbox row
+  remains recoverable. With `fail_on_error: true`, an unrecoverable backlog
+  fails the next database open instead of being silently skipped
 - With `include_payloads: true`, LLM prompts and responses are embedded
 
 ### PostgreSQL Example

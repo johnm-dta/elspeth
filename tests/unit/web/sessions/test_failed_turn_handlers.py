@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 
 from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerPluginCrashError, ComposerRuntimePreflightError
+from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.sessions.routes import _handle_convergence_error, _handle_plugin_crash, _handle_runtime_preflight_failure
+
+_CATALOG = create_catalog_service()
+_PLUGIN_SNAPSHOT = PluginAvailabilitySnapshot.for_trained_operator(_CATALOG)
+_PROFILE_REGISTRY = MagicMock(spec=OperatorProfileRegistry)
 
 
 @pytest.mark.asyncio
@@ -28,6 +36,9 @@ async def test_handle_convergence_error_returns_failed_turn() -> None:
         llm_composition_state_id=None,
         settings=object(),
         secret_service=None,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
+        profile_registry=_PROFILE_REGISTRY,
+        catalog=_CATALOG,
     )
 
     assert body["failed_turn"] == {
@@ -54,6 +65,9 @@ async def test_handle_plugin_crash_returns_failed_turn() -> None:
         llm_composition_state_id=None,
         settings=object(),
         secret_service=None,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
+        profile_registry=_PROFILE_REGISTRY,
+        catalog=_CATALOG,
     )
 
     assert body["failed_turn"] == {
@@ -91,6 +105,9 @@ async def test_handle_plugin_crash_counts_persisted_tool_responses() -> None:
         llm_composition_state_id=None,
         settings=object(),
         secret_service=None,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
+        profile_registry=_PROFILE_REGISTRY,
+        catalog=_CATALOG,
     )
 
     assert body["failed_turn"] == {
@@ -121,6 +138,9 @@ async def test_handle_runtime_preflight_failure_returns_failed_turn() -> None:
         llm_composition_state_id=None,
         settings=object(),
         secret_service=None,
+        plugin_snapshot=_PLUGIN_SNAPSHOT,
+        profile_registry=_PROFILE_REGISTRY,
+        catalog=_CATALOG,
     )
 
     assert body["failed_turn"] == {

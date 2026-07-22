@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 
@@ -23,6 +24,7 @@ class _SinkStub:
 class _SettingsStub:
     gates: list[object] = field(default_factory=list)
     coalesce: list[object] = field(default_factory=list)
+    landscape: object = field(default_factory=lambda: SimpleNamespace(export=SimpleNamespace(enabled=False, sink=None)))
 
     def model_dump(self, *, mode: str = "python") -> dict[str, object]:
         assert mode == "json"

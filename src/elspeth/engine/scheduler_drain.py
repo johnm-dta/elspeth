@@ -82,13 +82,14 @@ class ProcessorMode(enum.Enum):
     run_coordination is None and scheduler_lease_owner_registered``) that
     reverse-derived "is this a follower" from constructor sentinels — an
     invisible-default hazard: any future change to the None-sentinel meaning
-    would have silently flipped a follower into the unfenced legacy reap arm.
+    would have silently flipped a follower into leader maintenance.
 
-    LEADER (the default) covers every non-follower construction: the fenced
-    leader, the N=1 arm, and direct repository-level test construction.
-    Within LEADER mode, behavior still keys on the GENUINE presence/absence
-    of ``coordination_token`` / ``run_coordination`` (the §C.2 evict sweep
-    and the fenced-vs-legacy reap arm), exactly as before.
+    LEADER (the default) is the production maintenance role. Lease recovery
+    always requires ``coordination_token`` and uses the strict fenced API;
+    ``run_coordination`` presence only controls whether the §C.2 dead-member
+    eviction sweep precedes recovery. Pre-coordination repository and crash-
+    image harnesses bypass ``ProcessorMode`` and call the explicitly named
+    ``recover_expired_leases_legacy_unfenced`` adapter directly.
 
     FOLLOWER is drain-only (ADR-030 §C.3): ``claim_ready`` only, never
     pending-sink recovery, never the §C.2 housekeeping sweep, never
@@ -340,20 +341,17 @@ class SchedulerDrainCoordinator:
         ADR-030 §C.2/§C.3 (slice 5): followers run NO maintenance at all —
         the explicit ``ProcessorMode.FOLLOWER`` stored at construction
         (elspeth-577179bba1) returns 0 up front.  Followers must not run
-        ``recover_expired_leases``: their ``coordination_token`` is None, so
-        the call would take the UNFENCED/LEGACY arm — that arm
-        unconditionally reaps ALL expired non-caller leases, defeating the
-        liveness-aware gate that protects the leader's and peers' in-flight
-        item leases from spurious rotation (§A.5/§C.1).  Followers are
-        drain-only workers; lease recovery and eviction are the leader's
-        responsibility (§C.2 path 1, §C.3: "followers drain what is
+        ``recover_expired_leases``: the strict API now refuses their missing
+        token before any transaction, and the explicit mode guard preserves
+        the stronger policy that followers do not attempt maintenance at all.
+        Followers are drain-only workers; lease recovery and eviction are the
+        leader's responsibility (§C.2 path 1, §C.3: "followers drain what is
         claimable, then idle/exit").
 
-        Within LEADER mode, behavior keys on GENUINE presence: the evict
-        sweep is gated on ``_coordination_token`` + ``_run_coordination``
-        being set, and a None-token construction (N=1 test arm, direct repo
-        construction) still reaps via the legacy unfenced arm — exactly as
-        before the mode flag replaced the old triple-None follower inference.
+        Within LEADER mode the token is required before either maintenance
+        write. Pre-coordination repository/crash-image harnesses use the
+        explicitly named legacy recovery adapter directly; production
+        maintenance never selects an unfenced write from an optional token.
         """
         if self._mode is ProcessorMode.FOLLOWER:
             # Identical to the old post-evict-sweep skip: a follower's
@@ -363,22 +361,24 @@ class SchedulerDrainCoordinator:
             self._scheduler_drains_since_maintenance = 0
             return 0
 
+        coordination_token = self._processor._require_coordination_token()
+
         # §C.2 path 1: leader evicts dead non-leader members before reaping.
         # Individual, not bulk — one evict_worker call per dead member (§B.4,
         # §C.2 :233). evict_worker is idempotent (benign skip on CAS miss).
-        if self._coordination_token is not None and self._run_coordination is not None:
+        if self._run_coordination is not None:
             from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
 
             grace = DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
             dead_members = self._run_coordination.dead_non_leader_workers(
                 run_id=self._run_id,
-                leader_worker_id=self._coordination_token.worker_id,
+                leader_worker_id=coordination_token.worker_id,
                 now=now,
                 grace_seconds=grace,
             )
             for target_worker_id in dead_members:
                 self._run_coordination.evict_worker(
-                    token=self._coordination_token,
+                    token=coordination_token,
                     target_worker_id=target_worker_id,
                     now=now,
                     grace_seconds=grace,
@@ -386,10 +386,8 @@ class SchedulerDrainCoordinator:
                 )
 
         recovered = self._scheduler.recover_expired_leases(
-            run_id=self._run_id,
             now=now,
-            caller_owner=self._scheduler_lease_owner,
-            coordination_token=self._coordination_token,
+            coordination_token=coordination_token,
         )
         self._scheduler_drains_since_maintenance = 0
         return recovered
@@ -610,6 +608,16 @@ class SchedulerDrainCoordinator:
                     self._pending_branch_losses.clear()
                     exc.add_note("scheduler lease lost during row processing; in-flight token result was abandoned")
                     return results
+                except RunWorkerEvictedError as exc:
+                    # Membership loss is a coordination signal, not a plugin
+                    # processing failure.  Propagate it directly: the generic
+                    # arm below performs mark_failed bookkeeping, which would
+                    # either mutate the abandoned lease through the lenient
+                    # N=0 disposition fence or mask this signal behind an
+                    # AuditIntegrityError when another member remains.
+                    self._pending_branch_losses.clear()
+                    exc.add_note("worker membership lost during row processing; in-flight token result was abandoned")
+                    raise
                 except Exception as processing_exc:
                     try:
                         self._scheduler.mark_failed(
@@ -638,10 +646,9 @@ class SchedulerDrainCoordinator:
                 self._active_claim_work_item_id = None
                 self._last_heartbeat_at = None
 
-            for child_item in child_items:
-                self.enqueue_work_item(child_item, pending_items)
-
             if result is not None and is_buffered_scheduler_result(result):
+                for child_item in child_items:
+                    self.enqueue_work_item(child_item, pending_items)
                 self._mark_claimed_scheduler_work_blocked(
                     claimed,
                     item,
@@ -665,36 +672,90 @@ class SchedulerDrainCoordinator:
                 continue
 
             if (sink_bound_result := scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
-                self._scheduler.mark_pending_sink(
-                    work_item_id=claimed.work_item_id,
-                    row_payload_json=self._scheduler.serialize_row_payload(sink_bound_result.token.row_data),
-                    sink_name=require_scheduler_sink_name(sink_bound_result),
-                    outcome=require_scheduler_outcome(sink_bound_result).value,
-                    path=sink_bound_result.path.value,
-                    error_hash=scheduler_error_hash(sink_bound_result),
-                    error_message=scheduler_error_message(sink_bound_result),
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                row_payload_json = self._scheduler.serialize_row_payload(sink_bound_result.token.row_data)
+                sink_name = require_scheduler_sink_name(sink_bound_result)
+                outcome = require_scheduler_outcome(sink_bound_result).value
+                path = sink_bound_result.path.value
+                error_hash = scheduler_error_hash(sink_bound_result)
+                error_message = scheduler_error_message(sink_bound_result)
+                pending_sink_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_pending_sink_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        row_payload_json=row_payload_json,
+                        sink_name=sink_name,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        error_message=error_message,
+                        now=pending_sink_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_pending_sink(
+                        work_item_id=claimed.work_item_id,
+                        row_payload_json=row_payload_json,
+                        sink_name=sink_name,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        error_message=error_message,
+                        now=pending_sink_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
                 result = with_scheduler_pending_sink_handoff(result, claimed.token_id)
             elif scheduler_result_failed_claimed_token(result, claimed.token_id):
-                self._scheduler.mark_failed(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                failed_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_failed_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        now=failed_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_failed(
+                        work_item_id=claimed.work_item_id,
+                        now=failed_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
             else:
-                self._scheduler.mark_terminal(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                    branch_loss=self.take_claim_branch_loss(claimed.token_id),
-                    worker_id=self._disposition_fence_worker_id(),
-                )
+                terminal_now = self._clock.now_utc()
+                branch_loss = self.take_claim_branch_loss(claimed.token_id)
+                worker_id = self._disposition_fence_worker_id()
+                if child_items:
+                    _, scheduled_children = self._scheduler.mark_terminal_with_ready_children(
+                        work_item_id=claimed.work_item_id,
+                        emitted_ready=tuple(self._work_codec.ready_emission(child_item) for child_item in child_items),
+                        now=terminal_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
+                    self._retain_scheduled_children(child_items, scheduled_children, pending_items)
+                else:
+                    self._scheduler.mark_terminal(
+                        work_item_id=claimed.work_item_id,
+                        now=terminal_now,
+                        expected_lease_owner=claimed_lease_owner,
+                        branch_loss=branch_loss,
+                        worker_id=worker_id,
+                    )
 
             if result is not None:
                 if isinstance(result, tuple):
@@ -729,6 +790,7 @@ class SchedulerDrainCoordinator:
         ``mark_pending_sink`` MUST NOT be re-claimed here — see
         ``drain_claims`` docstring.
         """
+        coordination_token = self._processor._require_coordination_token()
         iterations = 0
         while True:
             iterations += 1
@@ -740,16 +802,14 @@ class SchedulerDrainCoordinator:
 
             now = self._clock.now_utc()
             self._scheduler.recover_expired_leases(
-                run_id=self._run_id,
                 now=now,
-                caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._coordination_token,
+                coordination_token=coordination_token,
             )
             repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(
                 run_id=self._run_id,
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
-                coordination_token=self._processor._require_coordination_token(),
+                coordination_token=coordination_token,
             )
             if repaired:
                 continue
@@ -927,6 +987,9 @@ class SchedulerDrainCoordinator:
                 issuing either would CAS-fail and cascade into a Tier-1
                 AuditIntegrityError, which is the exact failure mode this
                 primitive exists to eliminate.
+            RunWorkerEvictedError: the registered lease owner is no longer an
+                active run member. The existing eviction path propagates this
+                clean-abandon signal without a scheduler disposition mutation.
 
         **Single-plugin-call limitation.** This heartbeat fires *between*
         plugin calls, not *during* a single plugin call. If one plugin call
@@ -948,6 +1011,11 @@ class SchedulerDrainCoordinator:
             lease_owner=self._scheduler_lease_owner,
             lease_seconds=self._scheduler_lease_seconds,
             now=now,
+            # Explicit boundary: registered production workers require the
+            # strict active-membership EXISTS predicate. Legacy/N=0 processors
+            # select the unfenced compatibility arm deliberately; registry
+            # emptiness inside the repository never chooses that arm.
+            membership_fenced=self._scheduler_lease_owner_registered,
         )
         self._last_heartbeat_at = now
 
@@ -972,6 +1040,19 @@ class SchedulerDrainCoordinator:
     # READY work-item persistence
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _retain_scheduled_children(
+        self,
+        child_items: list[WorkItem],
+        scheduled_children: tuple[TokenWorkItem, ...],
+        pending_items: dict[str, WorkItem],
+    ) -> None:
+        """Retain live payloads for children made durable by an atomic disposition."""
+        for child_item, scheduled in zip(child_items, scheduled_children, strict=True):
+            if scheduled.status is TokenWorkStatus.READY or (
+                scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner
+            ):
+                pending_items[scheduled.work_item_id] = child_item
+
     def enqueue_work_item(
         self,
         item: WorkItem,
@@ -983,7 +1064,12 @@ class SchedulerDrainCoordinator:
         available_at = self._clock.now_utc()
         fields = self._work_codec.ready_fields(item)
         if claim_immediately:
-            scheduled = self._scheduler.enqueue_ready_claimed(
+            enqueue_claimed = (
+                self._scheduler.enqueue_ready_claimed
+                if self._scheduler_lease_owner_registered
+                else self._scheduler.enqueue_ready_claimed_legacy_unfenced
+            )
+            scheduled = enqueue_claimed(
                 run_id=self._run_id,
                 token_id=fields.token_id,
                 row_id=fields.row_id,

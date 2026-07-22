@@ -1,8 +1,20 @@
-import { useEffect, useRef, useState } from "react";
-import { getTutorialSample, startGuidedSession } from "@/api/client";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  getGuided,
+  getTutorialSample,
+  respondGuided,
+} from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import {
+  EXIT_TO_FREEFORM_ACTION,
+  useSessionStore,
+} from "@/stores/sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
-import { useSessionStore } from "@/stores/sessionStore";
+import {
+  acquireGuidedRetry,
+  clearGuidedRetry,
+  clearGuidedRetriesForSession,
+} from "@/stores/guidedOperationRetry";
 import type { GuidedStep } from "@/types/guided";
 import {
   TUTORIAL_SINK_PROMPT,
@@ -17,7 +29,7 @@ import {
  * URLs in its constant — the LLM cannot guess the runtime-served addresses, so
  * the resolved synthetic URLs (fetched per-session from the 8a GET surface) are
  * appended to the source prompt only (the sink/transforms phases don't need
- * them). Recipe and Wire are confirm-only (no chat prompt).
+ * them). Wire is confirm-only (no chat prompt).
  */
 function buildLockedPrompts(
   sampleUrls: string[],
@@ -33,16 +45,33 @@ interface TutorialGuidedShellProps {
   sessionId: string;
   onCompleted: (sessionId: string) => void;
   /**
+   * An observed live wizard terminated with `exited_to_freeform` (the
+   * wire-stage "Exit to freeform" button is reachable in tutorial mode and
+   * on blocked outcomes is the ONLY affordance). Without this hand-off the
+   * shell stays mounted over a terminal session and the learner dead-ends
+   * on ChatPanel's "Preparing your guided pipeline…" placeholder
+   * (elspeth-61591e64bb). The parent persists the tutorial opt-out and
+   * lets the shell unmount into the freeform composer.
+   */
+  onExited?: (sessionId: string) => void;
+  /**
    * The persisted resume session no longer exists server-side (404 from the
-   * start chain). Without this the shell dead-ends on a "Session not found"
+   * startup sequence). Without this the shell dead-ends on a "Session not found"
    * error with NO forward affordance — the tutorial suppresses skip/exit, so
    * the learner is stranded on an empty page. The parent resets to a fresh
    * Welcome and clears the stale resume fields.
    */
   onSessionMissing?: (deadSessionId: string) => void;
+  /**
+   * Set by the tutorial chrome when the learner exits during the startup
+   * window before GET /guided has populated guidedSession. The shell still
+   * owns the in-flight /guided/start promise, so it is the only layer that can
+   * reliably send the server-side exit once that start has actually landed.
+   */
+  exitRequestedRef?: MutableRefObject<boolean>;
 }
 
-/** The start chain 404s when the persisted resume session was swept/archived. */
+/** Startup 404s when the persisted resume session was swept or archived. */
 function isSessionMissingError(err: unknown): boolean {
   return (
     typeof err === "object" &&
@@ -66,19 +95,36 @@ function isSessionMissingError(err: unknown): boolean {
 export function TutorialGuidedShell({
   sessionId,
   onCompleted,
+  onExited,
   onSessionMissing,
+  exitRequestedRef,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
-  const startGuided = useSessionStore((s) => s.startGuided);
+  const seedGuided = useSessionStore((s) => s.seedGuided);
   const resetForTutorialSession = useSessionStore(
     (s) => s.resetForTutorialSession,
   );
+  // Pending interpretation-review count for THIS session. The wire-confirm
+  // commit surfaces the Accept cards AFTER the guided terminal lands (the
+  // event writer boundary validates nodes against the committed state), so a
+  // completed session may still carry unresolved reviews. The completion
+  // handoff below defers while any remain: handing off immediately would
+  // mount the run turn — which auto-fires POST /tutorial/run — and the run
+  // 409s (tutorial_interpretations_pending) with the guided surface already
+  // unmounted, leaving nothing that can resolve the cards. The learner
+  // resolves them on the completion surface (the review-before-run teaching
+  // moment); draining the last one releases the run.
+  const pendingReviewCount = useInterpretationEventsStore((s) =>
+    Object.keys(s.pendingBySession[sessionId] ?? {}).length,
+  );
   const startedRef = useRef(false);
-  const completedRef = useRef(false);
-  // True once this mount has OBSERVED a live (non-null, not-yet-completed)
-  // guidedSession. `onCompleted` may fire only for a completion this shell saw
-  // transition to while mounted — never when it mounts directly onto an
-  // already-completed session.
+  // A shell hands off exactly once per mount, whether the terminal it
+  // observed was a completion (onCompleted) or an exit (onExited).
+  const handedOffRef = useRef(false);
+  // True once this mount has OBSERVED a live (non-null, non-terminal)
+  // guidedSession. The terminal hand-offs may fire only for a terminal this
+  // shell saw transition to while mounted — never when it mounts directly
+  // onto an already-completed (or already-exited) session.
   const sawActiveRef = useRef(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +148,7 @@ export function TutorialGuidedShell({
       setStarting(true);
       setError(null);
       // Bind the store's activeSessionId to this tutorial session BEFORE
-      // startGuided. startGuided (sessionStore.ts) DISCARDS its fetched guided
+      // seedGuided. seedGuided (sessionStore.ts) DISCARDS its fetched guided
       // payload unless get().activeSessionId === the requested id, and ChatPanel
       // renders the empty-session surface (chat-panel--empty) whenever
       // activeSessionId is null. resetForTutorialSession clears the same
@@ -111,32 +157,39 @@ export function TutorialGuidedShell({
       // can make ChatPanel render the completed surface and fire onCompleted
       // before the new tutorial session has loaded.
       resetForTutorialSession(sessionId);
+      const exitIfRequested = async (): Promise<boolean> => {
+        if (exitRequestedRef?.current !== true) {
+          return false;
+        }
+        try {
+          const exit = await exitStartedGuidedSession(sessionId);
+          if (exit.status !== "complete") {
+            setError(exit.message);
+          }
+        } catch (err) {
+          console.error("[tutorial] startup exit-to-freeform failed:", err);
+        }
+        return true;
+      };
       try {
-        await startGuidedSession(sessionId, "tutorial");
+        await seedGuided(sessionId, "tutorial");
+        if (await exitIfRequested()) {
+          return;
+        }
         // Fetch the runtime-resolved synthetic URLs BEFORE entering the wizard.
         // The GET requires the TUTORIAL profile to be persisted (done by the
         // start above). Appended to the locked STEP_1 prompt; the box stays
         // gated (never editable) until they arrive.
         const sample = await getTutorialSample(sessionId);
+        if (await exitIfRequested()) {
+          return;
+        }
         // Only sample_urls are consumed client-side, appended to the locked
         // STEP_1 prompt. The synthetic pages are publicly hosted, so the
         // tutorial's web_scrape node carries no SSRF allowlist — it uses the
         // plugin default `allowed_hosts="public_only"`. The client must never
         // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
-        await startGuided(sessionId);
-        // Rehydrate the interpretation-event projection for THIS session.
-        // Every other route into a session goes through selectSession, which
-        // does this (Phase 5b Task 3) — the tutorial bridge bypasses it, so
-        // without this a mid-Build reload resumed with pendingBySession
-        // EMPTY: no acknowledgement cards rendered, the wire-stage Confirm
-        // was not blocked, and the run then failed server-side with
-        // UnresolvedInterpretationPlaceholderError (the backend run gate is
-        // the final guard; the ack-before-advance UX gate lives client-side).
-        // Awaited, not fire-and-forget: a resume can land DIRECTLY on the
-        // wire stage, where the gate must be up before the first paint of an
-        // enabled Confirm.
-        await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
         if (isSessionMissingError(err) && onSessionMissing !== undefined) {
           onSessionMissing(sessionId);
@@ -147,21 +200,30 @@ export function TutorialGuidedShell({
         setStarting(false);
       }
     })();
-  }, [sessionId, startGuided, resetForTutorialSession, onSessionMissing]);
+  }, [
+    sessionId,
+    seedGuided,
+    resetForTutorialSession,
+    onSessionMissing,
+    exitRequestedRef,
+  ]);
 
-  // Hand off to the run/audit/graduation tail when guided reaches completion —
-  // but ONLY on a completion this mount OBSERVED transition to. The back-nav
-  // GET path remounts this shell against the PERSISTED completed guided session
-  // (startGuided clears guidedSession to null, then sets it to the completed
-  // payload), so the shell mounts onto `terminal=completed` without ever seeing
-  // a live wizard. Firing onCompleted there bounces the user straight back to
-  // run (no-op flash from run-Back; guided skipped from audit-Back). Gate on
-  // sawActiveRef: a completed session that was never preceded by a live,
-  // not-yet-completed session during this mount must NOT graduate. Note the
-  // `terminal.kind === "completed"` guard also (deliberately) excludes
-  // `exited_to_freeform` — leaving the wizard for freeform is not a graduation.
+  // Hand off when guided reaches a terminal — but ONLY on a terminal this
+  // mount OBSERVED transition to. The back-nav GET path remounts this shell
+  // against the PERSISTED terminal guided session (the startup reset clears
+  // guidedSession to null, then seedGuided sets the terminal payload), so the
+  // shell mounts onto a terminal without ever seeing a live wizard. Firing
+  // there bounces the user straight back to run (completed) or re-PATCHes
+  // the opt-out on every remount (exited). Gate on sawActiveRef: a terminal
+  // session that was never preceded by a live, non-terminal session during
+  // this mount must NOT hand off.
+  //
+  // Two distinct hand-offs: `completed` graduates into the run/audit/
+  // graduation tail (onCompleted); `exited_to_freeform` is NOT a graduation
+  // — it leaves the tutorial for the freeform composer (onExited persists
+  // the opt-out so the shell unmounts, elspeth-61591e64bb).
   useEffect(() => {
-    if (completedRef.current) {
+    if (handedOffRef.current) {
       return;
     }
     const current = useSessionStore.getState();
@@ -172,18 +234,23 @@ export function TutorialGuidedShell({
       return;
     }
     const kind = guidedSession?.terminal?.kind;
-    // Record that we observed a live wizard: a non-null session that has not
-    // yet completed. The mount-effect's clear-to-null step leaves guidedSession
+    // Record that we observed a live wizard: a non-null session with no
+    // terminal yet. The mount-effect's clear-to-null step leaves guidedSession
     // null (not "active"), so requiring non-null here keeps the back-nav path
-    // from spuriously marking the wizard observed.
-    if (guidedSession !== undefined && guidedSession !== null && kind !== "completed") {
+    // from spuriously marking the wizard observed. Requiring terminal == null
+    // (not just "not completed") keeps a mount onto an already-exited session
+    // from arming the exit hand-off.
+    if (guidedSession !== undefined && guidedSession !== null && kind == null) {
       sawActiveRef.current = true;
     }
-    if (kind === "completed" && sawActiveRef.current) {
-      completedRef.current = true;
+    if (kind === "completed" && sawActiveRef.current && pendingReviewCount === 0) {
+      handedOffRef.current = true;
       onCompleted(sessionId);
+    } else if (kind === "exited_to_freeform" && sawActiveRef.current) {
+      handedOffRef.current = true;
+      onExited?.(sessionId);
     }
-  }, [guidedSession, onCompleted, sessionId]);
+  }, [guidedSession, onCompleted, onExited, sessionId, pendingReviewCount]);
 
   const bookends = guidedSession?.profile?.bookends ?? true;
 
@@ -242,4 +309,115 @@ function formatError(err: unknown): string {
     return err.message;
   }
   return "The guided tutorial could not be started.";
+}
+
+type TutorialExitResult =
+  | { status: "complete" }
+  | { status: "conflict"; message: string }
+  | { status: "refresh_required"; message: string };
+
+const TUTORIAL_EXIT_REFRESH_MESSAGE =
+  "The tutorial exit was accepted, but this view could not refresh. Refresh the page to continue.";
+
+async function applyTutorialExitWithResync(
+  sessionId: string,
+  response: Awaited<ReturnType<typeof getGuided>>,
+): Promise<boolean> {
+  try {
+    if (await useSessionStore.getState().applyGuidedResponse(sessionId, response)) {
+      return true;
+    }
+  } catch {
+    // The decoded response settled operation custody; recover from GET below.
+  }
+  try {
+    const authoritative = await getGuided(sessionId);
+    return await useSessionStore
+      .getState()
+      .applyGuidedResponse(sessionId, authoritative);
+  } catch {
+    return false;
+  }
+}
+
+async function exitStartedGuidedSession(sessionId: string): Promise<TutorialExitResult> {
+  const current = useSessionStore.getState();
+  if (
+    current.activeSessionId === sessionId &&
+    current.guidedSession?.terminal?.kind === "exited_to_freeform"
+  ) {
+    clearGuidedRetriesForSession("guided_respond", sessionId);
+    return { status: "complete" };
+  }
+  if (current.activeSessionId === sessionId && current.guidedSession !== null) {
+    const outcome = await current.exitToFreeform();
+    if (outcome.status === "applied") {
+      return { status: "complete" };
+    }
+    switch (outcome.reason) {
+      case "custody_conflict":
+        return { status: "conflict", message: outcome.message };
+      case "no_active_session":
+      case "no_current_turn":
+      case "pending":
+      case "stale":
+      case "unsettled":
+      case "rejected":
+      case "refresh_required":
+        return { status: "refresh_required", message: outcome.message };
+    }
+  }
+  // Not yet an active-with-loaded-guidedSession session (activeSessionId
+  // may not even be bound to this session yet, or the store hasn't fetched
+  // its GuidedSession) — store.respondGuided/exitToFreeform both key off
+  // get().activeSessionId and cannot serve that case, so call the raw API
+  // directly with the explicit sessionId, then apply the response through
+  // the SAME helper respondGuided's own success path uses (see
+  // applyGuidedResponse in sessionStore.ts), so the interpretation-event
+  // refresh and turn_not_emitted self-heal bookkeeping stay in lockstep with
+  // the store instead of forking into a separately-maintained copy.
+  const guided = await getGuided(sessionId);
+  if (guided.terminal?.kind === "exited_to_freeform") {
+    clearGuidedRetriesForSession("guided_respond", sessionId);
+    try {
+      if (await useSessionStore.getState().applyGuidedResponse(sessionId, guided)) {
+        return { status: "complete" };
+      }
+    } catch {
+      // The authoritative terminal remains settled; surface refresh guidance.
+    }
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
+  }
+  const turnToken = guided.terminal === null ? guided.next_turn?.turn_token : null;
+  if (guided.terminal === null && turnToken === undefined) {
+    throw new Error("Cannot exit guided tutorial without a current turn token");
+  }
+  const acquisition = acquireGuidedRetry("guided_respond", sessionId, [
+    turnToken ?? "terminal",
+    EXIT_TO_FREEFORM_ACTION,
+  ]);
+  if (acquisition.status === "conflict") {
+    return {
+      status: "conflict",
+      message:
+        "A previous guided response is unsettled. Retry the same action before exiting the tutorial.",
+    };
+  }
+  const retry = acquisition.handle;
+  const response = await respondGuided(sessionId, {
+    ...EXIT_TO_FREEFORM_ACTION,
+    operation_id: retry.operationId,
+    turn_token: turnToken ?? null,
+  });
+  clearGuidedRetry(retry);
+  if (!(await applyTutorialExitWithResync(sessionId, response))) {
+    return {
+      status: "refresh_required",
+      message: TUTORIAL_EXIT_REFRESH_MESSAGE,
+    };
+  }
+  return { status: "complete" };
 }

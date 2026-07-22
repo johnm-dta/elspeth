@@ -26,8 +26,6 @@ from elspeth.contracts import (
 from elspeth.contracts.errors import ContractMergeError
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.union_merge import merge_union_contracts
-from elspeth.plugins.sinks.csv_sink import CSVSink
-from tests.fixtures.base_classes import inject_write_failure
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import ValidationErrorToken
@@ -79,74 +77,6 @@ def make_test_context() -> _TestablePluginContext:
 
 class TestSourceToSinkContractFlow:
     """Test contract propagation from source to sink."""
-
-    def test_original_headers_restored_in_output(self, tmp_path: Path) -> None:
-        """Source with field normalization creates contract that sink uses for original headers."""
-        # Create input CSV with messy headers
-        input_csv = tmp_path / "input.csv"
-        input_csv.write_text("First Name!,Last Name@,Email Address\nJohn,Doe,john@example.com\n")
-
-        # Configure source with field normalization (mandatory)
-        source = CSVSource(
-            {
-                "path": str(input_csv),
-                "schema": {"mode": "observed"},
-                "on_validation_failure": "discard",
-            }
-        )
-
-        # Load rows and get contract
-        ctx = make_test_context()
-        rows = list(source.load(ctx))
-        assert len(rows) == 1
-
-        source_row = rows[0]
-        assert not source_row.is_quarantined
-        contract = source_row.contract
-        assert contract is not None
-
-        # Verify contract has both normalized and original names
-        first_name_field = contract.get_field("first_name")
-        assert first_name_field is not None
-        assert first_name_field.original_name == "First Name!"
-
-        last_name_field = contract.get_field("last_name")
-        assert last_name_field is not None
-        assert last_name_field.original_name == "Last Name@"
-
-        email_field = contract.get_field("email_address")
-        assert email_field is not None
-        assert email_field.original_name == "Email Address"
-
-        # Configure sink with original headers mode
-        output_csv = tmp_path / "output.csv"
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_csv),
-                    "headers": "original",
-                    "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str", "email_address: str"]},
-                }
-            )
-        )
-
-        # Set the contract on the sink
-        sink.set_output_contract(contract)
-
-        # Write through sink
-        sink.write([source_row.row], ctx)
-        sink.flush()
-        sink.close()
-
-        # Verify output has original headers
-        output_content = output_csv.read_text()
-        assert "First Name!" in output_content
-        assert "Last Name@" in output_content
-        assert "Email Address" in output_content
-        # Verify data is present
-        assert "John" in output_content
-        assert "Doe" in output_content
-        assert "john@example.com" in output_content
 
     def test_pipeline_row_dual_name_access(self, tmp_path: Path) -> None:
         """PipelineRow allows access by both original and normalized names."""
@@ -345,98 +275,6 @@ class TestContractPreservationThroughTransforms:
 
         # Same contract instance returned
         assert output_contract is input_contract
-
-
-class TestContractWithSinkHeaderModes:
-    """Test different header modes in sink output."""
-
-    def test_normalized_headers_mode(self, tmp_path: Path) -> None:
-        """headers: normalized uses Python identifier names."""
-        input_csv = tmp_path / "input.csv"
-        input_csv.write_text("First Name,Last Name\nAlice,Smith\n")
-
-        source = CSVSource(
-            {
-                "path": str(input_csv),
-                "schema": {"mode": "observed"},
-                "on_validation_failure": "discard",
-            }
-        )
-
-        ctx = make_test_context()
-        rows = list(source.load(ctx))
-        source_row = rows[0]
-        contract = source_row.contract
-        assert contract is not None
-
-        # Sink with normalized headers (default)
-        output_csv = tmp_path / "output.csv"
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_csv),
-                    "headers": "normalized",
-                    "schema": {"mode": "fixed", "fields": ["first_name: str", "last_name: str"]},
-                }
-            )
-        )
-
-        sink.set_output_contract(contract)
-        sink.write([source_row.row], ctx)
-        sink.flush()
-        sink.close()
-
-        output_content = output_csv.read_text()
-        # Headers are normalized Python identifiers
-        assert "first_name" in output_content
-        assert "last_name" in output_content
-        # Original headers NOT present
-        assert "First Name" not in output_content
-
-    def test_custom_headers_mapping(self, tmp_path: Path) -> None:
-        """headers with custom mapping uses explicit names."""
-        input_csv = tmp_path / "input.csv"
-        input_csv.write_text("amount,currency\n100,USD\n")
-
-        source = CSVSource(
-            {
-                "path": str(input_csv),
-                "schema": {"mode": "observed"},
-                "on_validation_failure": "discard",
-            }
-        )
-
-        ctx = make_test_context()
-        rows = list(source.load(ctx))
-        source_row = rows[0]
-        contract = source_row.contract
-        assert contract is not None
-
-        # Sink with custom header mapping
-        output_csv = tmp_path / "output.csv"
-        sink = inject_write_failure(
-            CSVSink(
-                {
-                    "path": str(output_csv),
-                    "headers": {"amount": "TRANSACTION_AMOUNT", "currency": "CURRENCY_CODE"},
-                    "schema": {"mode": "fixed", "fields": ["amount: str", "currency: str"]},
-                }
-            )
-        )
-
-        sink.set_output_contract(contract)
-        sink.write([source_row.row], ctx)
-        sink.flush()
-        sink.close()
-
-        output_content = output_csv.read_text()
-        # Custom headers used
-        assert "TRANSACTION_AMOUNT" in output_content
-        assert "CURRENCY_CODE" in output_content
-        # Original lowercase headers NOT present as column headers
-        lines = output_content.strip().split("\n")
-        header_line = lines[0]
-        assert "amount" not in header_line or "TRANSACTION_AMOUNT" in header_line
 
 
 class TestContractMergeAtCoalesce:

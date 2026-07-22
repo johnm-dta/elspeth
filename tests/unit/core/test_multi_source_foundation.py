@@ -632,7 +632,7 @@ def test_run_lifecycle_records_per_source_contract_and_resolution() -> None:
     run = factory.run_lifecycle.begin_run(config={}, canonical_version="test")
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for source_node_id in ("source_orders", "source_refunds"):
             conn.execute(
                 insert(nodes_table).values(
@@ -712,7 +712,7 @@ def test_data_flow_create_row_accepts_source_row_index_and_ingest_sequence() -> 
     run = factory.run_lifecycle.begin_run(config={}, canonical_version="test")
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for source_node_id in ("source_orders", "source_refunds"):
             conn.execute(
                 insert(nodes_table).values(
@@ -1418,7 +1418,7 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
 
     assert repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now) is None
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",
@@ -1510,7 +1510,7 @@ def test_scheduler_recover_expired_leases_skips_caller_owned_leases() -> None:
 
     # Both leases are now expired from the clock's perspective. The caller is
     # still mid-iteration — its lease must NOT be recovered.
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=caller_owner,
@@ -1630,7 +1630,7 @@ def test_scheduler_recover_expired_leases_skips_pending_sink_row_with_fresh_leas
             ),
         )
 
-    recovered = repo.recover_expired_leases(run_id="run-1", now=sweep_time, caller_owner="worker-sweeper")
+    recovered = repo.recover_expired_leases_legacy_unfenced(run_id="run-1", now=sweep_time, caller_owner="worker-sweeper")
     assert raced is True
     # With the fix, the UPDATE's ``lease_expires_at < now`` predicate spots the
     # peer's fresh lease and matches zero rows; without it, ``recovered`` would
@@ -1702,7 +1702,7 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
         )
         conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=120),
         caller_owner="worker-sweeper",
@@ -1742,7 +1742,7 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     assert first_claim is not None
     assert first_claim.work_item_id == item.work_item_id
 
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner="worker-b",
@@ -1848,8 +1848,10 @@ def test_scheduler_claim_ready_returns_none_when_selected_row_was_claimed_by_pee
 
 
 def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed_by_peer() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+    from elspeth.core.landscape.schema import scheduler_events_table
 
     engine = _make_tier1_engine()
     metadata.create_all(engine)
@@ -1874,7 +1876,7 @@ def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),
@@ -1912,8 +1914,15 @@ def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed
                 token_work_items_table.c.work_item_id == item.work_item_id
             )
         ).one()
+        caller_claim_events = conn.execute(
+            select(scheduler_events_table.c.event_id).where(
+                scheduler_events_table.c.run_id == "run-1",
+                scheduler_events_table.c.event_type == SchedulerEventType.CLAIM_PENDING_SINK.value,
+            )
+        ).all()
     assert row.status == TokenWorkStatus.LEASED.value
     assert row.lease_owner == "worker-racer"
+    assert caller_claim_events == []
 
 
 def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:
@@ -2494,6 +2503,7 @@ def test_scheduler_requeues_blocks_and_marks_terminal_with_leased_ownership() ->
         barrier_key="barrier:row-1",
         token_ids=("token-1",),
         now=retry_at,
+        coordination_token=_COORD_TOKEN_RUN1,
     )
     assert completed == 1
     assert restarted_repo.count_active_work(run_id="run-1") == 0
@@ -2585,6 +2595,7 @@ def test_scheduler_barrier_completion_only_terminalizes_consumed_tokens() -> Non
         barrier_key="merge",
         token_ids=("token-row-1-branch-a",),
         now=now,
+        coordination_token=_COORD_TOKEN_RUN1,
     )
 
     assert completed == 1
@@ -2623,7 +2634,7 @@ def test_scheduler_unresolved_work_excludes_durable_sink_handoffs() -> None:
         row_payload_json=payload,
         sink_name="sink-a",
         outcome="success",
-        path="completed",
+        path="default_flow",
         error_hash=None,
         error_message=None,
         now=now + timedelta(seconds=1),
@@ -2753,7 +2764,7 @@ def test_scheduler_schema_rejects_cross_run_token_reference() -> None:
     )
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError), db.connection() as conn:
+    with pytest.raises(IntegrityError), db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2809,7 +2820,7 @@ def test_scheduler_schema_rejects_cross_run_node_reference() -> None:
     token_b = factory.data_flow.create_token(row_b.row_id)
     now = datetime.now(UTC)
 
-    with pytest.raises(IntegrityError), db.connection() as conn:
+    with pytest.raises(IntegrityError), db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2853,7 +2864,7 @@ def test_scheduler_schema_allows_null_node_for_terminal_cursor() -> None:
     token = factory.data_flow.create_token(row.row_id)
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2897,7 +2908,7 @@ def test_scheduler_schema_rejects_duplicate_null_node_terminal_identity() -> Non
     token = factory.data_flow.create_token(row.row_id)
     now = datetime.now(UTC)
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             token_work_items_table.insert().values(
                 **_scheduler_work_values(
@@ -2968,6 +2979,7 @@ def test_scheduler_barrier_terminal_raises_when_live_tokens_missing_from_durable
             barrier_key="merge",
             token_ids=("token-a", "token-b", "token-c"),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:
@@ -3025,6 +3037,7 @@ def test_scheduler_barrier_terminal_raises_when_durable_blocked_token_set_is_dis
             barrier_key="merge",
             token_ids=("live-a", "live-b", "live-c"),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:
@@ -3083,6 +3096,7 @@ def test_scheduler_barrier_terminal_rejects_empty_live_token_set() -> None:
             barrier_key="merge",
             token_ids=(),
             now=now,
+            coordination_token=_COORD_TOKEN_RUN1,
         )
 
     with engine.connect() as conn:
@@ -3128,6 +3142,7 @@ def test_scheduler_heartbeat_lease_extends_expires_at_for_held_lease() -> None:
         lease_owner="worker-a",
         lease_seconds=30,
         now=later,
+        membership_fenced=False,
     )
     assert new_expires_at == later + timedelta(seconds=30)
 
@@ -3178,8 +3193,9 @@ def test_scheduler_heartbeat_lease_prevents_peer_reaper_from_reaping_alive_slow_
         lease_owner=caller_owner,
         lease_seconds=30,
         now=now + timedelta(seconds=25),
+        membership_fenced=False,
     )
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=28),
         caller_owner=peer_owner,
@@ -3222,7 +3238,7 @@ def test_scheduler_heartbeat_lease_does_not_block_reaping_dead_worker() -> None:
     assert claimed is not None
 
     # No heartbeat call — the dead worker never wakes up to extend its lease.
-    recovered = repo.recover_expired_leases(
+    recovered = repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=peer_owner,
@@ -3269,7 +3285,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> 
 
     # Peer reaps the lease while the (no-longer-dead, just slow) worker is
     # still in-flight. The reaper rewrites work_item_id under a bumped attempt.
-    repo.recover_expired_leases(
+    repo.recover_expired_leases_legacy_unfenced(
         run_id="run-1",
         now=now + timedelta(seconds=31),
         caller_owner=peer_owner,
@@ -3284,6 +3300,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> 
             lease_owner=dead_owner,
             lease_seconds=30,
             now=now + timedelta(seconds=32),
+            membership_fenced=False,
         )
     assert exc_info.value.work_item_id == item.work_item_id
     assert exc_info.value.lease_owner == dead_owner
@@ -3315,6 +3332,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_for_non_owner_caller() -> N
             lease_owner="worker-b",
             lease_seconds=30,
             now=now + timedelta(seconds=5),
+            membership_fenced=False,
         )
 
 
@@ -3357,6 +3375,7 @@ def test_scheduler_heartbeat_lease_composes_with_peer_active_leases() -> None:
         lease_owner=original_owner,
         lease_seconds=30,
         now=now + timedelta(seconds=28),
+        membership_fenced=False,
     )
 
     # At now+35s (after the original lease window would have expired),

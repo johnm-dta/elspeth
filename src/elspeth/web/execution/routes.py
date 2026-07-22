@@ -519,7 +519,7 @@ async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Reque
     except ValueError:
         raise HTTPException(status_code=404, detail="Run not found") from None
 
-    if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
+    if session.archived_at is not None or session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 
@@ -908,7 +908,7 @@ def create_execution_router() -> APIRouter:
             # them server-side but redact them from the HTTP response
             # because the path discloses internal storage layout to any
             # caller (including the LLM agent driving the composer in
-            # an MCP context).  See elspeth-07089fbaa3.
+            # an MCP context).
             # Per CLAUDE.md logging policy, slog is permitted for
             # audit-system failures.  Tier 1 corruption of
             # composition_states.source.options.path qualifies: the
@@ -923,20 +923,21 @@ def create_execution_router() -> APIRouter:
                 session_id=exc.session_id,
                 stored_path=exc.stored_path,
                 canonical_path=exc.canonical_path,
-                issue="elspeth-07089fbaa3",
+            )
+            public_detail = (
+                "Composer-stored blob source path is not "
+                "structurally valid for the bound blob.  This "
+                "indicates a bug in composer persistence; the "
+                "operator must investigate the captured "
+                "composition state."
             )
             raise HTTPException(
                 status_code=500,
                 detail={
+                    "error_type": "blob_source_path_mismatch",
+                    "detail": public_detail,
                     "kind": "blob_source_path_mismatch",
-                    "issue": "elspeth-07089fbaa3",
-                    "message": (
-                        "Composer-stored blob source path is not "
-                        "structurally valid for the bound blob.  This "
-                        "indicates a bug in composer persistence; the "
-                        "operator must investigate the captured "
-                        "composition state."
-                    ),
+                    "message": public_detail,
                 },
             ) from exc
         except ExecutionFanoutGuardRequired as exc:
@@ -964,6 +965,8 @@ def create_execution_router() -> APIRouter:
             raise HTTPException(
                 status_code=422,
                 detail={
+                    "error_type": "semantic_contract_violation",
+                    "detail": str(exc),
                     "kind": "semantic_contract_violation",
                     "errors": [
                         {
@@ -1004,6 +1007,8 @@ def create_execution_router() -> APIRouter:
             raise HTTPException(
                 status_code=422,
                 detail={
+                    "error_type": "interpretation_placeholder_unresolved",
+                    "detail": str(exc),
                     "kind": "interpretation_placeholder_unresolved",
                     "message": str(exc),
                     "placeholders": [{"node_id": node_id, "term": term} for node_id, term in exc.placeholders],
@@ -1029,6 +1034,8 @@ def create_execution_router() -> APIRouter:
             raise HTTPException(
                 status_code=422,
                 detail={
+                    "error_type": "pipeline_validation_failure",
+                    "detail": str(exc),
                     "kind": "pipeline_validation_failure",
                     "errors": [
                         {

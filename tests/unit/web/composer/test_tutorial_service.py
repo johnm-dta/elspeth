@@ -11,11 +11,13 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
-from elspeth.core.landscape.schema import calls_table
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.schema import calls_table, runs_table
 from elspeth.web.composer import tutorial_service as tutorial_service_module
 from elspeth.web.composer.tutorial_service import (
     TutorialRunIntegrityError,
@@ -24,6 +26,7 @@ from elspeth.web.composer.tutorial_service import (
     _count_discarded_rows,
     _parse_rows_content,
     _rows_from_artifacts,
+    _tutorial_launch_blocker,
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.protocol import RunRecord
@@ -41,6 +44,76 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
+
+
+def test_launch_blocker_names_empty_transforms_distinctly() -> None:
+    """A committed source→sink pipeline with NO nodes gets its own blocker.
+
+    Regression for tutorial run 18 (session 07e8a3a8, committed v11): a guided
+    walk that accepts the step-3 auto-proposal without the transforms
+    instruction commits a valid source→sink passthrough, and the launch gate
+    rejected it with the generic plugin-set message — indistinguishable from a
+    wrong-plugin build. Emptiness is a distinct, actionable state: name it.
+    """
+    from unittest.mock import MagicMock
+
+    from elspeth.web.composer.state import (
+        CompositionState,
+        OutputSpec,
+        PipelineMetadata,
+        SourceSpec,
+    )
+
+    state = CompositionState(
+        sources={
+            "source": SourceSpec(
+                plugin="csv",
+                on_success="output",
+                options={},
+                on_validation_failure="discard",
+            )
+        },
+        nodes=(),
+        edges=(),
+        outputs=(OutputSpec(name="output", plugin="json", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    blocker = _tutorial_launch_blocker(
+        state=state,
+        policy=MagicMock(),
+        snapshot=MagicMock(),
+        tutorial_profile="tutorial-default",
+        profile_registry=MagicMock(),
+        catalog=MagicMock(),
+    )
+    assert blocker is not None
+    code, detail = blocker
+    assert code == "tutorial_transforms_missing"
+    assert "no transform" in detail.lower()
+
+
+def test_tutorial_recipe_authors_only_opaque_llm_profile() -> None:
+    from elspeth.web.composer.recipes import apply_recipe, get_recipe
+
+    recipe = get_recipe("web-scrape-llm-rate-jsonl")
+    assert recipe is not None
+    assert "profile" in recipe.slots
+    assert {"provider", "model", "api_key_secret"}.isdisjoint(recipe.slots)
+
+    candidate = apply_recipe(
+        recipe.name,
+        {
+            "source_blob_id": "11111111-1111-1111-1111-111111111111",
+            "source_plugin": "json",
+            "profile": "tutorial-default",
+            "abuse_contact": "noreply@example.test",
+            "scraping_reason": "First-run tutorial",
+        },
+    )
+    llm_options = candidate["nodes"][1]["options"]
+    assert llm_options["profile"] == "tutorial-default"
+    assert {"provider", "model", "api_key", "api_key_secret"}.isdisjoint(llm_options)
 
 
 @pytest.mark.asyncio
@@ -99,6 +172,60 @@ async def test_failed_live_tutorial_run_response_omits_raw_run_error(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_pending_interpretation_reviews_block_tutorial_run_as_coded_409(tmp_path: Path) -> None:
+    """An unresolved interpretation review is a coded launch blocker, not a 500.
+
+    Session e1332b5a: the guided walk completed but the committed llm node
+    still carried a pending ``llm_prompt_template`` review, so
+    ``execution_service.execute`` raised
+    ``UnresolvedInterpretationPlaceholderError`` — which the tutorial route
+    surfaced as a raw 500 (and the run-turn UI rendered an EMPTY alert for the
+    unmapped shape). The run must answer 409 in the ``tutorial_not_ready``
+    family with a stable machine code and a user-facing message naming what to
+    resolve — and never leak raw site identifiers (planner-authored node ids).
+    """
+    from elspeth.contracts.composer_interpretation import InterpretationKind
+    from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+    from elspeth.web.interpretation_state import InterpretationReviewSite
+
+    session_id = uuid4()
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            raise UnresolvedInterpretationPlaceholderError(
+                sites=(
+                    InterpretationReviewSite(
+                        component_id="summarize_page_SENTINEL_NODE_ID",
+                        component_type="transform",
+                        user_term="llm_prompt_template:summarize_page_SENTINEL_NODE_ID",
+                        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+                    ),
+                ),
+            )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(tmp_path)
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id=session_id,
+            settings=settings,
+            session_service=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 409
+    detail = exc_info.value.detail
+    assert detail["error_type"] == "tutorial_not_ready"
+    assert detail["code"] == "tutorial_interpretations_pending"
+    assert "review" in detail["detail"].lower()
+    assert "SENTINEL_NODE_ID" not in repr(detail)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_live_tutorial_run_returns_409_with_machine_code(tmp_path: Path) -> None:
     """A run that terminates ``cancelled`` is a deliberate user action, not a
     failure: the route must answer 409 with the stable machine code
@@ -151,6 +278,52 @@ async def test_cancelled_live_tutorial_run_returns_409_with_machine_code(tmp_pat
     assert exc_info.value.status_code == 409
     detail = exc_info.value.detail
     assert detail["error_type"] == "tutorial_run_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_live_tutorial_wait_uses_transport_ceiling_minus_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The tutorial POST must outlive one slow LLM call without racing the proxy."""
+    captured_timeout: list[float | None] = []
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            return "run-1"
+
+    async def fake_wait_for_terminal_run(
+        session_service: Any,
+        requested_run_id: Any,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        del session_service
+        assert requested_run_id == "run-1"
+        captured_timeout.append(timeout_seconds)
+        return SimpleNamespace(status="cancelled")
+
+    monkeypatch.setattr(tutorial_service_module, "_wait_for_terminal_run", fake_wait_for_terminal_run)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(
+        tmp_path,
+        composer_timeout_seconds=120.0,
+        composer_transport_idle_ceiling_seconds=300.0,
+        composer_transport_headroom_seconds=30.0,
+    )
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException, match="409"):
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id="session-1",
+            settings=settings,
+            session_service=SimpleNamespace(),
+        )
+
+    assert captured_timeout == [270.0]
 
 
 def test_count_calls_for_run_counts_only_llm_calls() -> None:
@@ -269,6 +442,67 @@ def test_count_discarded_rows_counts_only_discard_destination() -> None:
     factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=other)
     with db.connection() as conn:
         assert _count_discarded_rows(conn, other) == 0
+
+
+def test_projection_opens_landscape_via_gated_factory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    landscape_url = f"sqlite:///{tmp_path / 'tutorial-landscape.db'}"
+    seed_db = LandscapeDB(landscape_url)
+    factory = make_factory(seed_db)
+    landscape_run_id = "tutorial-landscape-run"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=landscape_run_id)
+    source = factory.data_flow.register_node(
+        run_id=landscape_run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+    )
+    factory.data_flow.create_row_with_token(
+        run_id=landscape_run_id,
+        source_node_id=source.node_id,
+        row_index=0,
+        source_row_index=0,
+        ingest_sequence=0,
+        data={"title": "bounded source row"},
+    )
+    seed_db.close()
+
+    settings = _make_tutorial_settings(
+        tmp_path,
+        deployment_target="default",
+        landscape_url=landscape_url,
+    )
+    opened_with: list[WebSettings] = []
+    from elspeth.web.landscape_access import open_landscape_db as real_open_landscape_db
+
+    def _spy_open_landscape_db(candidate: WebSettings) -> LandscapeDB:
+        opened_with.append(candidate)
+        return real_open_landscape_db(candidate)
+
+    monkeypatch.setattr(tutorial_service_module, "open_landscape_db", _spy_open_landscape_db)
+    monkeypatch.setattr(
+        tutorial_service_module,
+        "_rows_from_artifacts",
+        lambda *args, **kwargs: [{"title": "bounded projection"}],
+    )
+
+    projection = tutorial_service_module._project_live_tutorial_output(
+        settings,
+        run_id="web-run-id",
+        landscape_run_id=landscape_run_id,
+        session_id="session-id",
+    )
+
+    assert opened_with == [settings]
+    assert projection.output.rows == ({"title": "bounded projection"},)
+    with LandscapeDB.from_url(landscape_url, create_tables=False) as persisted_db, persisted_db.connection() as conn:
+        persisted = conn.execute(
+            select(runs_table.c.llm_call_count, runs_table.c.seeded_from_cache, runs_table.c.cache_key).where(
+                runs_table.c.run_id == landscape_run_id
+            )
+        ).one()
+    assert persisted == (0, False, None)
 
 
 def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:

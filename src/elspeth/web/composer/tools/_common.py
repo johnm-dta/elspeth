@@ -24,10 +24,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, TypedDict, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
@@ -41,6 +41,7 @@ from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    parse_secret_ref_marker,
 )
 from elspeth.engine.orchestrator.preflight import check_config_value_sources
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
@@ -50,6 +51,7 @@ from elspeth.plugins.infrastructure.validation import (
     get_source_config_model,
     get_transform_config_model,
 )
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -57,7 +59,9 @@ from elspeth.web.composer.state import (
     CompositionState,
     EdgeSpec,
     NodeSpec,
+    NodeType,
     OutputSpec,
+    PipelineMetadata,
     SourceSpec,
     ValidationEntry,
     ValidationSummary,
@@ -70,6 +74,7 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     SOURCE_AUTHORING_KEY,
     InterpretationRequirement,
+    serialize_authoring_review_options,
     strip_authoring_options,
 )
 from elspeth.web.paths import (
@@ -80,6 +85,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
@@ -314,15 +320,15 @@ def _options_with_ascii_safe_scrape_headers(
     if not isinstance(http, Mapping):
         return options
     folded_http: dict[str, Any] | None = None
-    for field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
-        value = http.get(field)
+    for header_field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
+        value = http.get(header_field)
         if not isinstance(value, str):
             continue
         folded = value.translate(_TYPOGRAPHIC_TRANSLATION)
         if folded != value:
             if folded_http is None:
                 folded_http = dict(http)
-            folded_http[field] = folded
+            folded_http[header_field] = folded
     if folded_http is None:
         return options
     new_options = dict(options)
@@ -656,6 +662,7 @@ class ToolResult:
     runtime_preflight: ValidationResult | None = None
     post_call_hints: tuple[str, ...] = ()
     plugin_schemas: Mapping[str, Mapping[str, Any]] | None = None
+    _validation_snapshot_hash: str | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         freeze_fields(self, "affected_nodes", "post_call_hints")
@@ -868,6 +875,8 @@ def _discovery_result(state: CompositionState, data: Any) -> ToolResult:
 def _failure_result(
     state: CompositionState,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ToolResult:
     """Build a ToolResult for a failed mutation.
 
@@ -883,13 +892,16 @@ def _failure_result(
     with "No source configured." instead of the real option-shape
     error.
     """
-    validation = _prepend_rejection_entry(state.validate(), error_msg)
+    validation = _prepend_rejection_entry(state.validate(), error_msg, error_code=error_code)
+    data = {_DATA_ERROR_KEY: error_msg}
+    if error_code is not None:
+        data["error_code"] = error_code
     return ToolResult(
         success=False,
         updated_state=state,
         validation=validation,
         affected_nodes=(),
-        data={_DATA_ERROR_KEY: error_msg},
+        data=data,
     )
 
 
@@ -958,6 +970,8 @@ def build_plugin_schemas_for_failure(
 def _prepend_rejection_entry(
     base: ValidationSummary,
     error_msg: str,
+    *,
+    error_code: str | None = None,
 ) -> ValidationSummary:
     """Return a ValidationSummary with a leading rejected_mutation entry.
 
@@ -970,6 +984,7 @@ def _prepend_rejection_entry(
         component="rejected_mutation",
         message=error_msg,
         severity="high",
+        error_code=error_code,
     )
     return ValidationSummary(
         is_valid=False,
@@ -1188,7 +1203,13 @@ def _credential_wiring_contract_failure(
     inline_instruction = (
         "Set `<field>: {secret_ref: NAME}` directly in the node's options "
         "when calling set_pipeline / upsert_node. (The marker is stripped "
-        "before option validation and resolved at execution time.)"
+        "before option validation and resolved at execution time.) This "
+        "rejection left pipeline state unchanged: repair by re-issuing only "
+        "the rejected call with the marker substituted for the literal "
+        "value — do not rebuild the pipeline from scratch. For a component "
+        "already in state, patching just that component "
+        "(patch_source_options / patch_node_options / patch_output_options) "
+        "with the marker is the minimal correction."
     )
     post_hoc_instruction = f"Alternatively, after the node already exists in state, call {repair_text} to attach the marker post-hoc."
     error_msg = (
@@ -1229,17 +1250,106 @@ def _credential_wiring_contract_failure(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class PluginPolicyViolation:
+    error_code: PluginUnavailableReason
+    message: str
+
+
+# Plain-language cause per unavailability reason. Each names the DISTINCT
+# deployment reality (not installed vs installed-but-not-enabled vs missing
+# credential ...) so the composer model can tell the user exactly why a
+# capability cannot be used and what an operator would change — instead of
+# echoing a bare policy code.
+_PLUGIN_UNAVAILABLE_EXPLANATIONS: Final[dict[PluginUnavailableReason, str]] = {
+    PluginUnavailableReason.NOT_AUTHORIZED: (
+        "the plugin is installed but not turned on in this deployment's plugin policy; an operator must enable it"
+    ),
+    PluginUnavailableReason.NOT_INSTALLED: "no plugin with this name is installed in this deployment",
+    PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING: (
+        "the plugin is installed but a local requirement it depends on is missing in this deployment"
+    ),
+    PluginUnavailableReason.CREDENTIAL_MISSING: (
+        "the plugin is turned on but the credential it needs is not configured in this deployment"
+    ),
+    PluginUnavailableReason.PROFILE_UNAVAILABLE: (
+        "the plugin is installed but not turned on in this deployment — no operator profile is "
+        "configured for it; an operator must enable one before it can be used"
+    ),
+}
+
+
+def _plugin_unavailable_message(plugin_type: PluginKind, reason: PluginUnavailableReason) -> str:
+    return f"{plugin_type} plugin selection is unavailable ({reason.value}): {_PLUGIN_UNAVAILABLE_EXPLANATIONS[reason]}"
+
+
+# gate/coalesce/queue are built-in node_types wired with plugin=null — they do
+# not exist in the plugin registry, and answering a registry probe for them
+# with "not installed" invites a false honest decline ("this deployment cannot
+# merge branches"). These names are closed composer vocabulary, safe to echo.
+_STRUCTURAL_NODE_TYPE_GUIDANCE: Final[dict[str, str]] = {
+    "coalesce": (
+        "'coalesce' is not a plugin — it is a built-in node_type that needs no plugin. Wire it as a "
+        "node with node_type='coalesce', plugin=null, branches mapping each branch name to its "
+        "incoming connection, policy (e.g. 'require_all') and merge (e.g. 'union'); downstream nodes "
+        "read the coalesce node id as their input. For running several LLM assessments per row, "
+        "prefer ONE llm transform with a `queries` map instead of fork/coalesce."
+    ),
+    "gate": (
+        "'gate' is not a plugin — it is a built-in node_type that needs no plugin. Wire it as a node "
+        "with node_type='gate', plugin=null, a `condition` row expression and routes={'true': ..., "
+        "'false': ...}; route to 'fork' with fork_to=[...] to fan a row out to several branches."
+    ),
+    "queue": (
+        "'queue' is not a plugin — it is a built-in node_type that needs no plugin, used for fan-in: "
+        "a node with node_type='queue', plugin=null whose id doubles as its connection name; upstream "
+        "nodes point on_success at it and one downstream node reads it as input."
+    ),
+}
+
+
 def _validate_plugin_name(
-    catalog: CatalogService,
+    context: ToolContext,
     plugin_type: PluginKind,
     name: str,
-) -> str | None:
-    """Return an error message if the plugin name is not in the catalog, or None if valid."""
+) -> PluginPolicyViolation | None:
+    """Validate a new plugin selection against one request policy view."""
+    if plugin_type == "transform" and name in _STRUCTURAL_NODE_TYPE_GUIDANCE:
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.NOT_INSTALLED,
+            message=_STRUCTURAL_NODE_TYPE_GUIDANCE[name],
+        )
     try:
-        catalog.get_schema(plugin_type, name)
-    except (ValueError, KeyError) as exc:
-        return f"Unknown {plugin_type} plugin '{name}': {exc}"
+        plugin_id = PluginId(plugin_type, name)
+    except ValueError:
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.NOT_INSTALLED,
+            message=_plugin_unavailable_message(plugin_type, PluginUnavailableReason.NOT_INSTALLED),
+        )
+    reason = context.catalog.unavailable_reason(plugin_id)
+    if reason is not None:
+        return PluginPolicyViolation(
+            error_code=reason,
+            message=_plugin_unavailable_message(plugin_type, reason),
+        )
+    try:
+        context.catalog.get_schema(plugin_type, name)
+    except (ValueError, KeyError):
+        return PluginPolicyViolation(
+            error_code=PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING,
+            message=_plugin_unavailable_message(plugin_type, PluginUnavailableReason.LOCAL_REQUIREMENT_MISSING),
+        )
     return None
+
+
+def _plugin_policy_failure(
+    state: CompositionState,
+    violation: PluginPolicyViolation,
+    *,
+    component: str | None = None,
+) -> ToolResult:
+    message = violation.message if component is None else f"{component}: {violation.message}"
+    return _failure_result(state, message, error_code=violation.error_code.value)
 
 
 def _validate_aggregation_trigger(trigger: Any) -> str | None:
@@ -1439,12 +1549,15 @@ def _prevalidate_plugin_options(
         _mask_pending_interpretation_placeholders_for_authoring_validation(merged)
 
     # Strip secret_ref markers before validation.  A secret-ref'd field
-    # IS provisioned (the user called wire_secret_ref), just deferred to
+    # IS provisioned (the user called wire_secret_ref, or operator-profile
+    # lowering injected the credential as a scoped marker), just deferred to
     # execution time.  Stripping it may cause Pydantic to report
-    # "field required" — we filter those errors out below.
+    # "field required" — we filter those errors out below.  The canonical
+    # parser accepts both the bare {"secret_ref"} form and the scoped
+    # {"secret_ref", "secret_scope"} form profile lowering emits.
     secret_ref_keys: set[str] = set()
     for key, value in list(merged.items()):
-        if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"], str):
+        if parse_secret_ref_marker(value) is not None:
             secret_ref_keys.add(key)
             del merged[key]
 
@@ -1652,6 +1765,27 @@ def _missing_output_options_repair_error(
     validation_error: str | None,
 ) -> str:
     """Return an exact output-object repair hint for omitted sink options."""
+    if plugin_name == "text":
+        path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
+        repair_output = {
+            "sink_name": sink_name,
+            "plugin": plugin_name,
+            "options": {
+                "path": f"outputs/{path_fragment}.txt",
+                "schema": {"mode": "observed"},
+                "field": "line_text",
+                "mode": "write",
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": on_write_failure,
+        }
+        detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+        return (
+            f"Output '{sink_name}' is missing options. For the text file sink, include path, schema, field, mode, "
+            f"and collision_policy. Use this runnable output object and replace line_text with the actual selected "
+            f"string field: {json.dumps(repair_output)}.{detail}"
+        )
+
     if plugin_name in FILE_SINK_REPAIR_EXTENSIONS:
         path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
         extension = FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
@@ -1756,6 +1890,73 @@ def _prevalidate_transform(plugin_name: str, options: Mapping[str, Any]) -> str 
     return _prevalidate_plugin_options("transform", plugin_name, strip_authoring_options(options))
 
 
+def _prevalidate_transform_for_context(
+    context: ToolContext,
+    plugin_name: str,
+    options: Mapping[str, Any],
+) -> str | None:
+    """Validate one candidate transform through the shared profile adapter."""
+    candidate = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="profile_prevalidation_in",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        ),
+        nodes=(
+            NodeSpec(
+                id="profile_prevalidation",
+                node_type="transform",
+                plugin=plugin_name,
+                input="profile_prevalidation_in",
+                on_success="profile_prevalidation_out",
+                on_error="discard",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(
+            OutputSpec(
+                name="profile_prevalidation_out",
+                plugin="json",
+                options={"schema": {"mode": "observed"}},
+                on_write_failure="discard",
+            ),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    try:
+        profile_validation = context.catalog.validate_composition_state(candidate)
+    except ValueError as exc:
+        # The profile adapter dispatches provider-specific config models
+        # (llm get_config_model) BEFORE the guarded prevalidation core — a
+        # Tier-3-authored unknown provider raised straight through the
+        # candidate boundary (pack pressure-suite run 2 grader escape;
+        # planner path degraded it to the unrepairable
+        # CANDIDATE_CONSTRUCTION_ERROR, non-planner tool paths 500'd).
+        # Mirror the core's own idiom: surface it as an options message.
+        return f"Invalid options for transform '{plugin_name}': {exc}"
+    blocking = tuple(
+        finding for finding in profile_validation.policy_findings if finding.stage in {"plugin_enablement", "operator_profile_options"}
+    )
+    if blocking:
+        # Carry the finding's own explanation — the bare error_code alone
+        # (e.g. "profile_unavailable") tells neither the model nor the user
+        # what is actually switched off.
+        return f"Invalid options for transform '{plugin_name}': {blocking[0].error_code} — {blocking[0].message}"
+    alias = options["profile"] if "profile" in options else plugin_name
+    if not isinstance(alias, str):
+        return f"Invalid options for transform '{plugin_name}': profile_unavailable"
+    return _prevalidate_transform(plugin_name, profile_validation.executable_state.nodes[0].options)
+
+
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
     """Pre-validate sink options."""
     return _prevalidate_plugin_options("sink", plugin_name, options)
@@ -1765,6 +1966,41 @@ def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
 # needs to talk about runtime-preflight callables or generic tool handlers).
 
 RuntimePreflight = Callable[[CompositionState], ValidationResult]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedSourceAuthority:
+    """Session-bound private authority for reusing already-reviewed sources.
+
+    This object is deliberately not a serialisable planner or event payload.
+    Only the guided settlement path constructs it, and the candidate boundary
+    accepts it only for the same session and an exact reviewed source record.
+    """
+
+    session_id: str
+    reviewed_anchor_hash: str
+    reviewed_sources: Mapping[str, Any]
+    verified_blob_paths: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if type(self.session_id) is not str or not self.session_id:
+            raise TypeError("ReviewedSourceAuthority.session_id must be a non-empty exact str")
+        if type(self.reviewed_anchor_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", self.reviewed_anchor_hash):
+            raise TypeError("ReviewedSourceAuthority.reviewed_anchor_hash must be a SHA-256 hash")
+        if not isinstance(self.reviewed_sources, Mapping):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources must be a mapping")
+        if any(type(stable_id) is not str or not stable_id for stable_id in self.reviewed_sources):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources keys must be non-empty exact strings")
+        if any(not isinstance(source, Mapping) for source in self.reviewed_sources.values()):
+            raise TypeError("ReviewedSourceAuthority.reviewed_sources values must be mappings")
+        if not isinstance(self.verified_blob_paths, Mapping):
+            raise TypeError("ReviewedSourceAuthority.verified_blob_paths must be a mapping")
+        if any(
+            type(locator) is not str or not locator.startswith("blob:") or type(storage_path) is not str or not storage_path
+            for locator, storage_path in self.verified_blob_paths.items()
+        ):
+            raise TypeError("ReviewedSourceAuthority.verified_blob_paths is malformed")
+        freeze_fields(self, "reviewed_sources", "verified_blob_paths")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1829,9 +2065,13 @@ class ToolContext:
             for the request.
         tool_arguments_hash: Canonical audited hash of the tool-call
             arguments that produced an LLM-authored blob.
+        reviewed_source_authority: Private session-bound reviewed source
+            authority. Generic/manual callers leave this unset and therefore
+            remain subject to the normal fail-closed custody checks.
     """
 
-    catalog: CatalogService
+    catalog: PolicyCatalogView
+    plugin_snapshot: PluginAvailabilitySnapshot
     data_dir: str | None = None
     require_data_dir_for_paths: bool = False
     session_engine: Engine | None = None
@@ -1849,9 +2089,165 @@ class ToolContext:
     composer_provider: str | None = None
     composer_skill_hash: str | None = None
     tool_arguments_hash: str | None = None
+    reviewed_source_authority: ReviewedSourceAuthority | None = None
 
 
 ToolHandler = Callable[
     [dict[str, Any], CompositionState, ToolContext],
     ToolResult,
 ]
+
+
+def normalize_tool_result_validation(
+    result: ToolResult,
+    catalog: PolicyCatalogView,
+) -> ToolResult:
+    """Normalize a result through the request-scoped profile authority once.
+
+    Handlers remain small state-transition functions and may construct their
+    provisional envelope with ``CompositionState.validate()``. Candidate
+    builders may call this authority before dispatch so they can make an
+    honest accept/reject decision. The outward dispatch boundary calls it
+    again to verify the result, but reuses validation already produced for
+    the same immutable plugin-availability snapshot. A different snapshot
+    always revalidates.
+    """
+    snapshot_hash = catalog.snapshot.snapshot_hash
+    if result._validation_snapshot_hash == snapshot_hash:
+        return result
+    shared = catalog.validate_composition_state(result.updated_state).validation
+    rejections = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
+    if rejections:
+        shared = replace(
+            shared,
+            is_valid=False,
+            errors=(*rejections, *shared.errors),
+        )
+    return replace(result, validation=shared, _validation_snapshot_hash=snapshot_hash)
+
+
+class _SetPipelineNodePayload(TypedDict):
+    """Exact node shape reconstructed for a set_pipeline request."""
+
+    id: str
+    node_type: NodeType
+    plugin: str | None
+    input: str
+    on_success: str | None
+    on_error: str | None
+    options: dict[str, JsonValue]
+    condition: str | None
+    routes: dict[str, str] | None
+    fork_to: list[str] | None
+    branches: list[str] | dict[str, str] | None
+    policy: str | None
+    merge: str | None
+    trigger: dict[str, JsonValue] | None
+    output_mode: str | None
+    expected_output_count: int | None
+
+
+def _serialize_authoring_options(options: Mapping[str, Any]) -> dict[str, JsonValue]:
+    """Strip resolver-owned review evidence while retaining pending shells."""
+    return cast(dict[str, JsonValue], deep_thaw(serialize_authoring_review_options(options)))
+
+
+def _serialize_set_pipeline_node(node: NodeSpec) -> _SetPipelineNodePayload:
+    payload = cast(_SetPipelineNodePayload, _serialize_node(node))
+    payload["options"] = _serialize_authoring_options(node.options)
+    return payload
+
+
+def _serialize_set_pipeline_source(
+    source: SourceSpec,
+    *,
+    allow_blob_binding: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    options = _serialize_authoring_options(source.options)
+    blob_ref = source.options["blob_ref"] if "blob_ref" in source.options else None
+    if blob_ref is not None:
+        if not allow_blob_binding:
+            return None, "named or multiple blob-backed sources cannot round-trip through set_pipeline v1"
+        if type(blob_ref) is not str or not blob_ref.strip() or is_widened_blob_ref(blob_ref):
+            return None, "the default source has a non-scalar blob identity that set_pipeline v1 cannot bind safely"
+        for key in ("path", "blob_ref", "mode", SOURCE_AUTHORING_KEY):
+            if key in options:
+                del options[key]
+        return (
+            {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "blob_id": blob_ref,
+                "options": options,
+                "on_validation_failure": source.on_validation_failure,
+            },
+            None,
+        )
+    path_value = source.options["path"] if "path" in source.options else None
+    if (
+        "blob_ref" in source.options
+        or SOURCE_AUTHORING_KEY in source.options
+        or ("mode" in source.options and source.options["mode"] == "bind_source")
+        or (type(path_value) is str and "/blobs/" in path_value)
+    ):
+        return None, "the blob-backed source is missing a scalar blob identity that set_pipeline v1 can bind safely"
+    return (
+        {
+            "plugin": source.plugin,
+            "on_success": source.on_success,
+            "options": options,
+            "on_validation_failure": source.on_validation_failure,
+        },
+        None,
+    )
+
+
+def _serialize_set_pipeline_arguments(state: CompositionState) -> tuple[dict[str, Any] | None, str | None]:
+    """Build the exact public authoring payload accepted by set_pipeline."""
+    try:
+        payload: dict[str, Any] = {
+            "nodes": [_serialize_set_pipeline_node(node) for node in state.nodes],
+            "edges": [_serialize_edge(edge) for edge in state.edges],
+            "outputs": [
+                {
+                    **_serialize_output(output),
+                    "options": _serialize_authoring_options(output.options),
+                }
+                for output in state.outputs
+            ],
+            "metadata": {
+                "name": state.metadata.name,
+                "description": state.metadata.description,
+            },
+        }
+    except (KeyError, TypeError, ValueError):
+        return None, "resolved authoring review state is not safely reconstructible"
+    if set(state.sources) == {"source"}:
+        try:
+            source_payload, error = _serialize_set_pipeline_source(
+                state.sources["source"],
+                allow_blob_binding=True,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, "resolved authoring review state is not safely reconstructible"
+        if error is not None:
+            return None, error
+        assert source_payload is not None
+        payload["source"] = source_payload
+        return payload, None
+
+    serialized_sources: dict[str, dict[str, Any]] = {}
+    for source_name, source in state.sources.items():
+        try:
+            source_payload, error = _serialize_set_pipeline_source(
+                source,
+                allow_blob_binding=False,
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, "resolved authoring review state is not safely reconstructible"
+        if error is not None:
+            return None, error
+        assert source_payload is not None
+        serialized_sources[source_name] = source_payload
+    payload["sources"] = serialized_sources
+    return payload, None

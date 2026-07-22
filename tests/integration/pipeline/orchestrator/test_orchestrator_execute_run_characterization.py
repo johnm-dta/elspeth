@@ -176,6 +176,7 @@ class TestExecuteRunCharacterization:
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink, "errors": error_sink},
+            sink_effect_modes={"output": "write", "errors": "write"},
         )
         return source, transform, output_collect, error_collect, config
 
@@ -373,6 +374,7 @@ class TestExecuteRunCharacterization:
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
+            sink_effect_modes={"output": "write"},
         )
 
         graph = build_production_graph(config)
@@ -443,6 +445,7 @@ class TestResumePathCharacterization:
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
+            sink_effect_modes={"output": "write"},
         )
 
         graph = build_production_graph(config)
@@ -569,6 +572,7 @@ class TestResumePathCharacterization:
             sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
+            sink_effect_modes={"output": "write"},
         )
 
         graph = build_production_graph(config)
@@ -726,6 +730,7 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
         transforms=[transform],
         sinks={"output": output_sink},
         aggregation_settings={transform_node_id: agg_settings},
+        sink_effect_modes={"output": "write"},
     )
 
     return source, transform, output_collect, config, graph

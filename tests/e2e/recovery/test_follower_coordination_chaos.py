@@ -532,13 +532,12 @@ class TestFollowerChaos:
         # Advance clock past the item lease + grace window.
         clock.advance(_DEFAULT_LEASE_SECONDS + 100)
 
-        # Leader's reaper runs (no coordination_token needed for the test arm;
-        # None triggers the unfenced/test-arm contract documented in the method).
-        recovered = crashed.repo.recover_expired_leases(
+        # This direct crash-image harness has no leader seat, so it opts into
+        # the explicitly named legacy recovery adapter.
+        recovered = crashed.repo.recover_expired_leases_legacy_unfenced(
             run_id=crashed.run_id,
             now=clock.now_utc(),
             caller_owner=leader_id,
-            coordination_token=None,
         )
         assert recovered >= 1, "reaper must recover the follower's lapsed lease"
 
@@ -663,9 +662,7 @@ class TestFollowerChaos:
         # liveness-aware gate (§A.5) is active.  The follower's item lease IS
         # expired, but its run_workers row is still registry-live → reaper skips it.
         crashed.repo.recover_expired_leases(
-            run_id=crashed.run_id,
             now=clock.now_utc(),
-            caller_owner=leader_id,
             coordination_token=leader_token,
         )
         # The reaper skips items owned by registry-live workers.

@@ -293,7 +293,7 @@ class TestBranchLossHandOff:
         from tests.unit.engine.test_processor import _persist_token_for_scheduler
 
         _persist_token_for_scheduler(factory, losing_token, ingest_sequence=0)
-        item = factory.scheduler.enqueue_ready_claimed(
+        item = factory.scheduler.enqueue_ready_claimed_legacy_unfenced(
             run_id=processor.run_id,
             token_id="tok-lost",
             row_id="row-1",
@@ -355,7 +355,7 @@ class TestBranchLossHandOff:
         from tests.unit.engine.test_processor import _persist_token_for_scheduler
 
         _persist_token_for_scheduler(factory, losing_token, ingest_sequence=0)
-        item = factory.scheduler.enqueue_ready_claimed(
+        item = factory.scheduler.enqueue_ready_claimed_legacy_unfenced(
             run_id=bootstrap.run_id,
             token_id="tok-lost",
             row_id="row-1",

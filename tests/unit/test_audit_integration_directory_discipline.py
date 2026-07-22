@@ -10,6 +10,7 @@ REPOSITORY_AUDIT_ROOT = REPO_ROOT / "tests" / "unit" / "core" / "landscape" / "r
 
 PRODUCTION_PATH_AUDIT_TESTS = frozenset(
     {
+        "test_artifact_idempotency_contention.py",
         "test_audit_field_separation.py",
         "test_can_drop_rows_roundtrip.py",
         "test_export.py",
@@ -22,6 +23,7 @@ PRODUCTION_PATH_AUDIT_TESTS = frozenset(
 
 REPOSITORY_AUDIT_TESTS = frozenset(
     {
+        "test_call_index_process_contention.py",
         "test_contract_audit.py",
         "test_csv_sink_executor_audit.py",
         "test_declaration_contract_landscape_serialization_roundtrip.py",
@@ -44,6 +46,7 @@ REPOSITORY_AUDIT_TESTS = frozenset(
         "test_recorder_row_data.py",
         "test_recorder_runs.py",
         "test_recorder_tokens.py",
+        "test_routing_reason_atomicity.py",
         "test_schema_config_mode_serialization_roundtrip.py",
         "test_sink_required_fields_serialization_roundtrip.py",
         "test_source_guaranteed_fields_serialization_roundtrip.py",

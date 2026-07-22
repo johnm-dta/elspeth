@@ -75,6 +75,19 @@ class MockSource:
     on_success = "output"
 
 
+class MockFixedSource(MockSource):
+    """Mock source plugin with an explicit fixed schema."""
+
+    name = "mock_fixed_source"
+    config: ClassVar[dict[str, Any]] = {
+        "schema": {
+            "mode": "fixed",
+            "fields": ["source_field: str"],
+            "guaranteed_fields": ["source_field"],
+        }
+    }
+
+
 class MockSink:
     """Mock sink plugin."""
 
@@ -411,6 +424,7 @@ class TestGuaranteedFieldsWithSchemaConfig:
             plugin_name="csv",
             config={"schema": {"mode": "observed", "required_fields": ["result_template_hash"]}},
             output_schema_config=sink_schema,
+            declared_required_fields=frozenset({"result_template_hash"}),
         )
 
         graph.add_edge("source", "transform", label="continue")
@@ -837,6 +851,51 @@ class TestPassThroughNodesInheritComputedSchema:
         assert set(gate_schema.guaranteed_fields) == {"field_a", "field_b"}
         assert gate_schema.audit_fields is not None
         assert set(gate_schema.audit_fields) == {"field_c", "field_d"}
+
+    @pytest.mark.parametrize("source", [MockSource(), MockFixedSource()], ids=["observed", "fixed"])
+    def test_schema_propagates_through_nested_fork_coalesce_chain(self, source: MockSource) -> None:
+        """Alternating fork/coalesce nodes resolve schemas in dependency order."""
+        fork_a = GateSettings(
+            name="fork_a",
+            input="fork_a_input",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["branch_a1", "branch_a2"],
+        )
+        merge_a = CoalesceSettings(
+            name="merge_a",
+            branches=["branch_a1", "branch_a2"],
+            policy="require_all",
+            merge="nested",
+        )
+        fork_b = GateSettings(
+            name="fork_b",
+            input="merge_a",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["branch_b1", "branch_b2"],
+        )
+        merge_b = CoalesceSettings(
+            name="merge_b",
+            branches=["branch_b1", "branch_b2"],
+            policy="require_all",
+            merge="nested",
+            on_success="output",
+        )
+
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="fork_a_input", options={})},
+            transforms=[],
+            sinks={"output": MockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[fork_a, fork_b],
+            coalesce_settings=[merge_a, merge_b],
+        )
+
+        pass_through_nodes = [node for node in graph.get_nodes() if node.node_type in {NodeType.GATE, NodeType.COALESCE}]
+        assert len(pass_through_nodes) == 4
+        assert all(node.output_schema_config is not None for node in pass_through_nodes)
 
 
 class TestPassThroughNodesUseTypedSchema:

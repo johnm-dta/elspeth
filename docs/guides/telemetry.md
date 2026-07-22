@@ -132,6 +132,10 @@ telemetry:
         headers:
           Authorization: "Bearer ${OTEL_TOKEN}"
         batch_size: 100  # Events per batch (default: 100)
+        service_name: elspeth
+        service_version: "0.7.1"  # optional
+        deployment_environment: production  # optional
+        cloud_provider: aws  # optional, explicit; the generic exporter is vendor-neutral
 ```
 
 **Required dependency:**
@@ -142,8 +146,58 @@ uv pip install opentelemetry-exporter-otlp-proto-grpc
 **Span mapping:**
 - `span.name` = Event class name (e.g., "TransformCompleted")
 - `span.trace_id` = Derived from `run_id` (consistent within run)
-- `span.attributes` = All event fields
+- `span.attributes` = A bounded allowlist of non-content event fields. Request/
+  response payloads, provider endpoints, exception text, credentials, URLs,
+  local paths, and raw AWS identifiers are never exported.
 - `span.start_time` = Event timestamp (instant spans - events are points in time)
+
+The delivery health snapshot distinguishes attempted, delivered, failed,
+dropped, and still-pending events. Buffering is not delivery. OTLP transport,
+flush, and shutdown failures are operational telemetry failures and never
+become evidence that a pipeline action did or did not occur.
+
+#### AWS ECS operator profile
+
+The AWS ECS web service uses the same vendor-neutral OTLP exporter and sends to
+the task-local collector. ELSPETH does not call CloudWatch APIs, perform SigV4,
+or accept AWS credentials for telemetry; the CloudWatch Agent sidecar owns
+those responsibilities through the ECS task role.
+
+```yaml
+telemetry:
+  enabled: true
+  granularity: lifecycle
+  fail_on_total_exporter_failure: false
+  exporters:
+    - name: otlp
+      options:
+        endpoint: http://127.0.0.1:4317
+        headers: {}
+        service_name: elspeth-web
+        service_version: "git-deadbeef"
+        deployment_environment: production
+        cloud_provider: aws
+        aws_ecs_cluster_name: elspeth-production
+        aws_ecs_service_name: elspeth-web
+        aws_ecs_task_family: elspeth-web-task
+        aws_ecs_task_revision: "42"
+        batch_size: 100
+```
+
+The web deployment contract requires these bounded identities explicitly.
+`service_version` is the operator-approved release SHA or image digest for the
+running deployment; the ECS values are cluster/service names and task
+definition family/revision, never task/account ARNs or per-task IDs. The same
+resource attributes are applied to web metrics and pipeline lifecycle spans so
+dashboard filters correspond to labels that are actually delivered.
+
+Landscape remains permanent, authoritative, and must-fire. Telemetry is
+ephemeral, operational, and best-effort; a collector receipt is never audit or
+lineage evidence. CLI and batch authors retain the generic endpoint/header
+contract and may opt into `lifecycle`, `rows`, or `full` volume. In AWS ECS web
+execution, the operator-owned overlay is mandatory, ignores uploaded telemetry
+routing, and permits only `lifecycle` or `rows`; `full` can carry request and
+response content and is rejected for production AWS operation.
 
 ### Azure Monitor Exporter
 
@@ -392,6 +446,7 @@ The TelemetryManager exposes health metrics:
 |--------|-------------|-------------------|
 | `events_emitted` | Successfully delivered events | N/A |
 | `events_dropped` | Failed to deliver to any exporter | > 0 |
+| `queue_drops` | Enqueue/backpressure losses (excludes exporter delivery failures) | > 0 |
 | `exporter_failures` | Per-exporter failure counts | Trend increasing |
 | `consecutive_total_failures` | Current streak of all-exporter failures | > 5 |
 

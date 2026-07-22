@@ -8,12 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from elspeth.contracts import SourceRow
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.testing import make_field
-from tests.fixtures.landscape import make_recorder_with_run
+from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import make_test_step_resolver as _make_step_resolver
 
 
@@ -1019,17 +1019,11 @@ class TestTokenManagerBoundaryPaths:
         assert outcome_before is outcome_after is None, "Unlocked contract must not record parent EXPANDED outcome"
 
 
-class TestExpandTokenDefaultOutcome:
-    """Kill mutant: ``record_parent_outcome=True`` default → ``False``.
+class TestExpandTokenParentOutcome:
+    """Expansion always records an explicit parent terminal disposition."""
 
-    Line 330: expand_token(record_parent_outcome=True) is the default.
-    Callers relying on the default must get EXPANDED outcome recorded
-    for the parent. If the mutant flips the default to False, the
-    parent outcome is silently skipped.
-    """
-
-    def test_expand_without_explicit_record_parent_outcome_records_expanded(self) -> None:
-        """Call expand_token WITHOUT record_parent_outcome arg — parent gets EXPANDED."""
+    def test_expand_without_explicit_parent_path_records_expanded(self) -> None:
+        """The default parent path is the ordinary EXPAND_PARENT disposition."""
         manager, factory, run_id, source_node_id = _make_manager_context()
 
         parent = manager.create_initial_token(
@@ -1041,7 +1035,7 @@ class TestExpandTokenDefaultOutcome:
             ingest_sequence=0,
         )
 
-        # Deliberately omit record_parent_outcome — rely on default=True
+        # Deliberately omit parent_path — ordinary expansion is the default.
         _children, _expand_group_id = manager.expand_token(
             parent_token=parent,
             expanded_rows=[{"a": 1}, {"a": 2}],
@@ -1051,17 +1045,25 @@ class TestExpandTokenDefaultOutcome:
         )
 
         outcome = factory.data_flow.get_token_outcome(parent.token_id)
-        assert outcome is not None, (
-            "Parent token must have an outcome when using expand_token default. "
-            "If record_parent_outcome default mutant (True→False) is active, "
-            "outcome will be None."
-        )
+        assert outcome is not None
         assert outcome.outcome == TerminalOutcome.TRANSIENT
         assert outcome.path == TerminalPath.EXPAND_PARENT
 
-    def test_expand_with_explicit_false_skips_parent_outcome(self) -> None:
-        """Call expand_token with record_parent_outcome=False — no EXPANDED outcome."""
+    def test_expand_with_batch_parent_path_records_batch_consumed(self) -> None:
+        """Batch expansion records BATCH_CONSUMED instead of leaving a gap."""
         manager, factory, run_id, source_node_id = _make_manager_context()
+        aggregation_node_id = register_test_node(
+            factory.data_flow,
+            run_id,
+            "agg-expand",
+            node_type=NodeType.AGGREGATION,
+            plugin_name="batch-aggregator",
+        )
+        batch = factory.execution.create_batch(
+            run_id=run_id,
+            aggregation_node_id=aggregation_node_id,
+            batch_id="batch-expand",
+        )
 
         parent = manager.create_initial_token(
             run_id=run_id,
@@ -1071,6 +1073,7 @@ class TestExpandTokenDefaultOutcome:
             source_row_index=0,
             ingest_sequence=0,
         )
+        factory.execution.add_batch_member(batch.batch_id, parent.token_id, 0)
 
         _children, _expand_group_id = manager.expand_token(
             parent_token=parent,
@@ -1078,11 +1081,15 @@ class TestExpandTokenDefaultOutcome:
             output_contract=_make_observed_contract("a"),
             node_id=NodeID("expand_node"),
             run_id=run_id,
-            record_parent_outcome=False,
+            parent_path=TerminalPath.BATCH_CONSUMED,
+            parent_batch_id=batch.batch_id,
         )
 
         outcome = factory.data_flow.get_token_outcome(parent.token_id)
-        assert outcome is None, "Parent token must NOT have an outcome when record_parent_outcome=False."
+        assert outcome is not None
+        assert outcome.outcome == TerminalOutcome.TRANSIENT
+        assert outcome.path == TerminalPath.BATCH_CONSUMED
+        assert outcome.batch_id == batch.batch_id
 
 
 class TestExpandTokenStrictZip:

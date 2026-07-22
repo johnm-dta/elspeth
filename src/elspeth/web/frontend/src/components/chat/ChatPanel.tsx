@@ -25,7 +25,7 @@ import { groupIntoTurns, turnRepresentativeMessage, type ChatTurn } from "./turn
 import { ComposingIndicator } from "./ComposingIndicator";
 import { ModelChip } from "./ModelChip";
 import { ChatInput } from "./ChatInput";
-import { TemplateCards } from "./TemplateCards";
+import { FreeformIntroduction } from "./FreeformIntroduction";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { InlineRunResults } from "@/components/execution/InlineRunResults";
 import { CompletionSummary } from "./guided/CompletionSummary";
@@ -36,12 +36,13 @@ import { GuidedPendingStrip } from "./guided/GuidedPendingStrip";
 import { GUIDED_EXPLAIN_MESSAGE } from "./guided/explainPrompt";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
+import { GuidedDecisionPendingIndicator } from "./guided/GuidedDecisionPendingIndicator";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import { isGuidedBuildActive } from "./guided/guidedBuildActive";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
 import { PipelineValidationSummary } from "./guided/PipelineValidationSummary";
-import { humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
+import { clientWireBlockerMessages, humaniseValidationMessage, makePhraseFor } from "@/lib/validationHumaniser";
 import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
 import {
   AcknowledgementLiveRegion,
@@ -52,9 +53,10 @@ import {
 import { acknowledgementCardTitle } from "./AcknowledgementCard";
 import { humaniseStepLabel } from "./interpretationStepLabel";
 import {
-  COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TIMEOUT_MS,
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
   COMPOSE_USER_CANCEL_ABORT_REASON,
+  runComposeWithTimeout,
 } from "@/config/composer";
 import type { WireBlockerLink } from "./guided/WireStageTurn";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
@@ -73,11 +75,6 @@ import {
   type ChatTurn as GuidedChatTurn,
   type GuidedStep,
 } from "@/types/guided";
-import type { ExampleUseCase, RecommendedStartingPoint } from "./templates_data";
-
-function assertNever(value: never): never {
-  throw new Error(`Unhandled template starting point: ${value}`);
-}
 
 function isTerminalComposerPhase(
   phase: string | null | undefined,
@@ -112,6 +109,36 @@ function isEmptyRedactedOptions(value: unknown): boolean {
 }
 
 const DEFAULT_PIPELINE_METADATA_NAME = "Untitled Pipeline";
+
+const TUTORIAL_STEP_2_COMPOSING_SUBSTEPS = [
+  "Read output request",
+  "Choose sink shape",
+  "Prepare JSON file",
+] as const;
+
+function tutorialStep2ActiveSubstep(
+  phase: string | null | undefined,
+): number {
+  if (phase === null || phase === undefined || phase === "starting") {
+    return 0;
+  }
+  // calling_model and using_tools share substep 1 ("Choose sink shape"):
+  // the guided sink resolver (maybe_resolve_step_2_sink_chat) re-emits
+  // calling_model before EVERY provider round, including the round after
+  // a discovery tool call. Mapping calling_model to substep 0 (as this
+  // function used to) made the indicator jump backward mid-compose —
+  // 0 -> 1 (using_tools) -> 0 (next calling_model) -> 2 (complete) — for
+  // a ticket titled "never advances", a visible regression back to 0 is
+  // worse than the original bug. Folding both phases into substep 1 is
+  // monotonic regardless of how many discovery rounds run, and — the
+  // common case for the tutorial's one-line "Save ... to a JSON file"
+  // prompt — still lights up substep 1 even when the model resolves in a
+  // single shot with no discovery tool call at all (elspeth-a8eeebb3aa).
+  if (phase === "calling_model" || phase === "using_tools") {
+    return 1;
+  }
+  return 2;
+}
 
 /**
  * Best-effort row-count from CSV-like text content.
@@ -490,8 +517,6 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
     "Describe the source you have — e.g. a CSV, a store query, or pages to scrape…",
   step_2_sink:
     "Describe the output you want — the shape and fields the pipeline should produce…",
-  step_2_5_recipe_match:
-    "Describe how this recipe should change, or accept it as proposed…",
   step_3_transforms:
     "Describe what each row should become, or how to fix the proposed transforms…",
   // Names the real next action instead of circularly pointing at a possibly
@@ -522,7 +547,7 @@ interface ChatPanelProps {
    * learner steps through the normal staged flow without typing — each phase
    * gets only its stage's intent. Supplied by TutorialGuidedShell (per-stage
    * worked-example prompts; source carries the resolved synthetic URLs). Steps
-   * with no entry (recipe / wire) are confirm-only. Absent for a normal session
+   * with no entry (wire) is confirm-only. Absent for a normal session
    * (the input behaves as the editable freeform-intent box).
    */
   lockedChatPrompt?: Partial<Record<GuidedStep, string>>;
@@ -577,11 +602,21 @@ export function ChatPanel({
   // returns below decide which surface to render based on these values.
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
+  const guidedProposalReview = useSessionStore((s) => s.guidedProposalReview);
   const respondGuided = useSessionStore((s) => s.respondGuided);
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const startGuided = useSessionStore((s) => s.startGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
+  // Bootstrap-race gate (single source of truth): guided sends read the same
+  // readiness the shared runComposeWithTimeout enforces for freeform.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  // Stuck state (backend up but reported no compose timeout): drives the
+  // Explain button's disabled reason so it matches the main Send instead of
+  // saying "Connecting…" forever.
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
   const guidedSelfHealNotice = useSessionStore((s) => s.guidedSelfHealNotice);
   // Whether the CURRENT chat has any work — gates the mode-switch confirmation
   // (ModeSwitchButton). Freeform work = messages or a non-empty composition;
@@ -594,20 +629,7 @@ export function ChatPanel({
     (guidedSession !== null &&
       (guidedSession.chat_history.length > 0 ||
         guidedSession.history.length > 0));
-  // C-4b: once a guided session ends for a reason OTHER than the user's own
-  // "Exit to freeform" (i.e. solver_exhausted or protocol_violation — both
-  // still carry terminal.kind === "exited_to_freeform"; TerminalReason is
-  // the only field that distinguishes them), POST /guided/reenter refuses
-  // it permanently (routes/composer/guided.py's reenter guard: only
-  // user_pressed_exit is reversible). Offering the ordinary "Switch to
-  // guided" flow there used to re-fetch the same terminal state and land
-  // back in freeform with no feedback — a silent no-op. Disable the button
-  // and say why instead of letting the click do nothing.
-  const guidedSwitchDisabledReason =
-    guidedSession?.terminal?.kind === "exited_to_freeform" &&
-    guidedSession.terminal.reason !== "user_pressed_exit"
-      ? "Guided ended for this session — start a new session to use guided."
-      : undefined;
+  const guidedSwitchDisabledReason = undefined;
   // D12 / P3.6: block guided advancement while any pending user_approved
   // interpretation card remains in the store. Hook is unconditional (called at
   // the component top, not inside the conditional guided return); the empty
@@ -637,11 +659,15 @@ export function ChatPanel({
   // side): the persisted composition carries its Stage-1 errors; a non-empty
   // list means a confirm would be rejected server-side, so WireStageTurn
   // disables the button and names the issues instead of offering a dead click.
+  // The guided deferred-commit placeholder status is excluded: pre-commit
+  // guided states are empty-by-design until Confirm wiring commits the
+  // proposal, so that status is resolved by the confirm itself and gating on
+  // it deadlocks guided authoring (see clientWireBlockerMessages).
   // Messages route through the same humaniser the validation summary uses —
   // an engineer-grade contract dump must not land verbatim in the blockers
   // panel either (same error-rendering discipline).
-  const wireInvalidChainIssues = useMemo<string[]>(() => {
-    const raw = compositionState?.validation_errors ?? [];
+  const wireValidationIssues = useMemo<string[]>(() => {
+    const raw = clientWireBlockerMessages(compositionState?.validation_errors ?? []);
     if (raw.length === 0) return raw;
     const phraseFor = makePhraseFor(compositionState);
     return raw.map(
@@ -656,23 +682,15 @@ export function ChatPanel({
   // guidedChatPending so the turn can be retried.
   const guidedChatControllerRef = useRef<AbortController | null>(null);
   const sendGuidedChat = useCallback(
-    async (content: string) => {
-      const controller = new AbortController();
-      guidedChatControllerRef.current = controller;
-      const timer = setTimeout(
-        () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-        COMPOSE_TIMEOUT_MS,
-      );
-      try {
-        await chatGuided(content, controller.signal);
-      } finally {
-        clearTimeout(timer);
-        if (guidedChatControllerRef.current === controller) {
-          guidedChatControllerRef.current = null;
-        }
-      }
-    },
-    [chatGuided],
+    (content: string) =>
+      // Same shared primitive freeform's useComposer.runWithTimeout uses: one
+      // timer + readiness guard for both paths. Until the backend wall clock
+      // has landed at boot the guided send does not run (no request, no
+      // timer) — the guided input is disabled until readiness.
+      runComposeWithTimeout(guidedChatControllerRef, composeTimeoutReady, (signal) =>
+        chatGuided(content, signal),
+      ),
+    [chatGuided, composeTimeoutReady],
   );
   const cancelGuidedChat = useCallback(() => {
     guidedChatControllerRef.current?.abort(COMPOSE_USER_CANCEL_ABORT_REASON);
@@ -717,35 +735,45 @@ export function ChatPanel({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const guidedLogRef = useRef<HTMLDivElement>(null);
-  // Pending-swap focus contract (elspeth-6a9673ecd3). While a /guided/chat
-  // request is in flight the composer's ChatInput is UNMOUNTED and replaced
-  // by GuidedPendingStrip; unmounting the focused textarea/Send would strand
-  // focus at <body> (WCAG 2.4.3). composerFocusWithinRef tracks whether focus
-  // is inside the composer section via bubbled focus/blur on the section —
-  // event-driven, so it is already correct BEFORE the pending flag flips
-  // (checking document.activeElement after the swap is too late: the focused
-  // node is gone and focus already sits at body).
+  // Guided-chat pending focus contract (elspeth-6a9673ecd3, placement pass
+  // 2026-07-23). The input stays MOUNTED (disabled) while /guided/chat is in
+  // flight — the old unmount swap is retired — so into pending there is no
+  // programmatic move (yanking focus to the strip down in the conversation
+  // flow would be the disruption WCAG 2.4.3 guards against). An Enter-key
+  // send keeps focus in the textarea throughout; a mouse-click send drops
+  // focus to <body> mid-flight (Send clears the box synchronously → canSend
+  // flips false → the focused button disables under the pointer), which the
+  // out-of-pending restore below recovers. composerFocusWithinRef tracks
+  // whether focus is inside the composer section via bubbled focus/blur on
+  // the section — event-driven, so it is already correct BEFORE the pending
+  // flag flips.
   const composerSectionRef = useRef<HTMLElement | null>(null);
-  const pendingStripRef = useRef<HTMLDivElement>(null);
   const composerFocusWithinRef = useRef(false);
   const prevGuidedChatPendingRef = useRef(guidedChatPending);
   // useLayoutEffect (not useEffect) so no frame paints with focus at body.
-  // Into pending: focus the strip's tabIndex=-1 wrapper — NEVER the Stop
-  // button (a habitual double-Enter after Send would abort the request just
-  // started). Out of pending: restore to the textarea only if focus stayed
-  // inside the composer — a user who moved away to re-read the transcript
-  // must not be yanked back. Tutorial resolve renders the static "Sent" line
-  // instead of ChatInput (inputRef null — React clears detached refs before
-  // layout effects), so focus lands on the section; the step-advance effect
-  // then owns the move to the fresh decision card.
+  // Out of pending: restore into the composer — to the textarea, or to the
+  // section when the tutorial resolve has replaced ChatInput with the
+  // static "Sent" line on the same commit the flag drops (inputRef null —
+  // React clears detached refs before layout effects). Safe-to-restore
+  // mirrors the freeform isComposing restore above: focus stayed inside
+  // the composer (Enter path — usually a no-op), OR nobody holds focus at
+  // all (the mouse-click path's blur-to-body, which also flipped
+  // composerFocusWithinRef false via the section's null-relatedTarget blur).
+  // A user who moved away to re-read the transcript holds focus on a real
+  // element outside the composer and must not be yanked back. The
+  // step-advance effect then owns the move to the fresh decision card.
   useLayoutEffect(() => {
     const was = prevGuidedChatPendingRef.current;
     prevGuidedChatPendingRef.current = guidedChatPending;
     if (guidedChatPending === was) return;
-    if (!composerFocusWithinRef.current) return;
-    if (guidedChatPending) {
-      pendingStripRef.current?.focus({ preventScroll: true });
-    } else if (inputRef.current !== null) {
+    if (guidedChatPending) return;
+    const active = document.activeElement;
+    const safeToRestore =
+      composerFocusWithinRef.current ||
+      active === null ||
+      active === document.body;
+    if (!safeToRestore) return;
+    if (inputRef.current !== null) {
       inputRef.current.focus({ preventScroll: true });
     } else {
       composerSectionRef.current?.focus({ preventScroll: true });
@@ -1337,7 +1365,7 @@ export function ChatPanel({
   // Keyed on step_index AND turn type. Fires when the wizard advances to a new
   // step (step_index changes) OR when a same-step build replaces the turn with a
   // different type — e.g. a `/guided/chat` Send that resolves the source turns
-  // single_select → schema_form, or step_3's null → propose_chain. The latter
+  // single_select → schema_form, or a later server-authored stage transition. The latter
   // matters now the composer is docked at the BOTTOM for every session
   // (including the tutorial): the just-built decision lands ABOVE the box the
   // user just Sent from, so we scroll it into view + focus its first control
@@ -1408,37 +1436,6 @@ export function ChatPanel({
     [sendMessage],
   );
 
-  const handleSelectTemplate = useCallback(
-    (
-      seedPrompt: string,
-      recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
-    ) => {
-      const applyStartingPoint = (startingPoint: RecommendedStartingPoint) => {
-        switch (startingPoint) {
-          case "dynamic_source_from_chat":
-            setInputText("");
-            sendMessage(seedPrompt);
-            return;
-          case "csv_upload":
-            setInputText(seedPrompt);
-            setShowBlobManager(true);
-            inputRef.current?.focus();
-            return;
-          case "api_source":
-            setInputText(seedPrompt);
-            onOpenSecrets?.();
-            inputRef.current?.focus();
-            return;
-          default:
-            assertNever(startingPoint);
-        }
-      };
-
-      applyStartingPoint(recommendedStartingPoint);
-    },
-    [onOpenSecrets, sendMessage],
-  );
-
   // No active session: show prompt to select or create one
   if (!activeSessionId) {
     return (
@@ -1491,17 +1488,40 @@ export function ChatPanel({
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
+        {/* The guided wire-confirm commit surfaces interpretation events
+            AFTER the terminal lands (the writer boundary needs the committed
+            nodes), so the completion surface is the FIRST place the Accept
+            cards can render. Without the stack here the events are orphaned —
+            no surface offers resolution and the run gate (tutorial auto-run,
+            freeform-style execute) fails closed forever (session e1332b5a).
+            Same persistent-mount contract as the guided surface: the stack
+            returns null when empty; the live region is unconditional. */}
+        <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+        <AcknowledgementStack
+          sessionId={activeSessionId ?? ""}
+          isTutorial={isTutorial}
+          onResolved={(newState) => {
+            if (newState !== null) {
+              useSessionStore.setState({ compositionState: newState });
+            }
+          }}
+        />
+        {isTutorial && <PipelineValidationSummary isTutorial />}
         <CompletionSummary terminal={guidedSession.terminal} isTutorial={isTutorial} />
         <InlineRunResults />
       </div>
     );
   }
 
-  // STEP_3 begins with NO proposal: the per-stage transforms prompt drives the
-  // build via /guided/chat (cold-start intent=body.message), so there is no
-  // server turn yet. Render the guided surface — crucially the chat box — even
-  // without a next turn so the operator can describe the transforms; otherwise
-  // the panel falls through to the "Preparing…" flash and the build never starts.
+  // STEP_3 renders the guided surface — crucially the docked composer — so the
+  // operator can describe the transforms. The 7.1 planner auto-stages a pipeline
+  // proposal at Output→Transforms, so step_3 now begins WITH a propose_pipeline
+  // turn: a Send here goes through chatGuided, which forwards it to /guided/respond
+  // as a prose proposal revision (regenerate the pipeline following the
+  // instruction) instead of /guided/chat — /guided/chat rejects a step_3 send with
+  // no deferred intents to manage. Render even without a next turn (e.g. a
+  // transient proposal-generation failure returned next_turn=null) so the box
+  // survives for retry; otherwise the panel falls through to the "Preparing…" flash.
   //
   // The predicate is shared with App (isGuidedBuildActive), which suppresses
   // the freeform SideRail while this branch renders — the workspace rail
@@ -1531,7 +1551,7 @@ export function ChatPanel({
     // Only swap the locked box for the static "Sent" line when there is actually
     // a forward affordance to confirm below — the turn widget OR a pending
     // interpretation review. If a Send-driven step was sent but produced neither
-    // (e.g. a transient chain-solve failure at step_3 returns next_turn=null),
+    // (e.g. a transient proposal-generation failure returns next_turn=null),
     // keep the box so the learner can retry; hiding it would strand them with no
     // widget and no exit (the tutorial suppresses ExitToFreeform / opt-out).
     const tutorialStepBuilt =
@@ -1545,8 +1565,11 @@ export function ChatPanel({
     // "press Send → confirm what it built" reading order is preserved by the
     // step-advance/type focus effect, which scrolls the just-built decision
     // (above) into view after a Send.
-    // It routes plain English through `chatGuided` (/guided/chat), which applies
-    // the phase config in place; the caption is keyed on the live step via
+    // It routes plain English through the store's `chatGuided` action, which
+    // picks the endpoint by state: the first ordinary message uses /guided/start
+    // to establish the durable root; a step-3 proposal-review turn revises the
+    // staged proposal via /guided/respond; other later messages use /guided/chat
+    // against the existing checkpoint. The caption is keyed on the live step via
     // GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
@@ -1559,8 +1582,8 @@ export function ChatPanel({
         className="guided-step-chat"
         role="region"
         aria-label="Describe what you want"
-        // Pending-swap focus contract plumbing (see the useLayoutEffect by
-        // the ref declarations). tabIndex=-1 makes the section itself a legal
+        // Pending focus contract plumbing (see the useLayoutEffect by the
+        // ref declarations). tabIndex=-1 makes the section itself a legal
         // programmatic focus landing (tutorial resolve path). The focus/blur
         // pair track focus-within via bubbling; a null relatedTarget (window
         // blur, click on non-focusable page chrome) counts as "left" — erring
@@ -1596,42 +1619,30 @@ export function ChatPanel({
             Sent — your request is in the transcript above and the assistant
             has built this step. Review the decision, then continue.
           </p>
-        ) : guidedChatPending ? (
-          // Pending swap (elspeth-6a9673ecd3, UX-critic spec 2026-07-03): the
-          // composer's CHILD content swaps to a lean working strip while the
-          // /guided/chat build is in flight — the landmark section above stays
-          // mounted (AT navigation + staging e2e locators). The swap replaces
-          // the old arrangement (ChatInput with a gated Send but a fully
-          // alive-looking textarea, plus a detached ComposingIndicator card
-          // below that grew the dock and clipped at wide viewports). With no
-          // input mounted a second send cannot race the in-flight one.
-          // Deliberately gated on guidedChatPending ONLY, not
-          // guidedResponsePending: a respond in flight has its own adjacent
-          // "Saving decision..." status, nothing abortable (elspeth-fb4464cdf0),
-          // and — decisive — a live-guided user can have a typed draft in the
-          // textarea when they submit a decision card; unmounting it would
-          // destroy the draft.
-          <GuidedPendingStrip
-            composerProgress={composerProgress}
-            onStop={cancelGuidedChat}
-            stripRef={pendingStripRef}
-          />
         ) : (
           <ChatInput
             onSend={(content) => void sendGuidedChat(content)}
-            // `guidedResponsePending` blocks a chat WHILE a turn-respond is
-            // advancing the step — otherwise the chat captures the stale
-            // `guidedSession.step` and the backend rejects the step mismatch
-            // with 409 (guided.py step-match guard). A chat in flight needs no
-            // gate here: the pending swap above unmounts the input entirely.
-            // Stop moved into GuidedPendingStrip (it renders only while the
-            // abortable chat fetch exists).
-            disabled={guidedResponsePending}
+            // Both pendings gate Send. `guidedResponsePending` blocks a chat
+            // WHILE a turn-respond is advancing the step — otherwise the chat
+            // captures the stale `guidedSession.step` and the backend rejects
+            // the step mismatch with 409 (guided.py step-match guard).
+            // `guidedChatPending` blocks a second send racing the in-flight
+            // one (belt: ChatInput's handleSend returns early on disabled;
+            // braces: sendGuidedChat's own pending admission gate). The old
+            // pending SWAP — unmounting the input and mounting the working
+            // strip in its place (elspeth-6a9673ecd3) — is retired: it read
+            // as a large panel occluding the typing area (operator
+            // 2026-07-23). The strip now rides in the conversation flow (see
+            // the guided-workspace-scroll mount); the input keeps its place
+            // with its ordinary disabled state, which also preserves any
+            // typed draft. Stop stays in the strip (it renders only while
+            // the abortable chat fetch exists).
+            disabled={guidedResponsePending || guidedChatPending}
             inputRef={inputRef}
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
             maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
             // Tutorial: the box is locked read-only and prefilled with the
-            // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
+            // CURRENT phase's per-stage prompt (wire has none → empty,
             // confirm-only). Kept controlled (value defined) across all phases
             // to avoid controlled↔uncontrolled flips. Normal session: undefined
             // value → editable freeform-intent box.
@@ -1713,38 +1724,75 @@ export function ChatPanel({
                   hasPendingGuidedInterpretations
                 }
                 isTutorial={isTutorial}
+                proposalReviewState={guidedProposalReview}
                 wirePendingAcknowledgements={
                   hasPendingGuidedInterpretations
                     ? wirePendingAcknowledgements
                     : undefined
                 }
-                wireInvalidChainIssues={wireInvalidChainIssues}
+                wireValidationIssues={wireValidationIssues}
+                composerProgress={composerProgress}
               />
             )}
           </div>
-          {/* One-click "why am I seeing this?" — sends a canned question down
-              the NORMAL guided-chat path (user turn + assistant bubble in the
-              transcript; the pending strip shows while it runs). The backend
-              advisory prompt now carries the LLM-safe current-build context,
-              so the answer names the actual plugins/settings on screen. Only
-              offered when a decision is actually showing; disabled while any
-              chat/respond is in flight (same 409 guard as the composer). */}
-          {guidedNextTurn && (
+          {/* Card footer: anchors the card's ambient furniture on one seam —
+              the pending "Saving decision" status (left) and the one-click
+              "why am I seeing this?" Explain affordance (right) — instead of
+              a floating bottom-right button over dead space plus a bare
+              status paragraph (operator-reported). Explain sends a canned
+              question down the NORMAL guided-chat path (user turn + assistant
+              bubble in the transcript; the pending strip shows while it
+              runs). The backend advisory prompt carries the LLM-safe
+              current-build context, so the answer names the actual
+              plugins/settings on screen. Only offered when a decision is
+              actually showing; disabled while any chat/respond is in flight
+              (same 409 guard as the composer). */}
+          {(guidedNextTurn !== null || guidedResponsePending) && (
             <div className="guided-current-decision-footer">
-              <button
-                type="button"
-                className="btn btn-compact guided-explain-btn"
-                onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
-                disabled={guidedChatPending || guidedResponsePending}
-              >
-                Explain this step
-              </button>
+              {guidedResponsePending && (
+                <p
+                  className="guided-current-decision-pending guided-decision-pending"
+                  role="status"
+                >
+                  {/* Chat Send pending idiom (pulse + adaptive headline +
+                      elapsed readout): a decision submit can front a
+                      multi-minute planner run and must not read as stalled.
+                      The headline resolves to the live composer-progress
+                      phase when one is being published, else this copy. */}
+                  <GuidedDecisionPendingIndicator
+                    fallback="Saving decision..."
+                    composerProgress={composerProgress}
+                  />
+                </p>
+              )}
+              {guidedNextTurn && (
+                <button
+                  type="button"
+                  className="btn btn-compact guided-explain-btn"
+                  onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
+                  // Bootstrap race: Explain routes sendGuidedChat ->
+                  // runComposeWithTimeout, which no-ops until the backend wall
+                  // clock lands. A guided decision restores from server state on
+                  // reload before App.checkHealth latches readiness, so gate the
+                  // button (dead-button doctrine) rather than leave a silent
+                  // no-op — same as the primary Send.
+                  disabled={
+                    guidedChatPending || guidedResponsePending || !composeTimeoutReady
+                  }
+                  title={
+                    !guidedChatPending &&
+                    !guidedResponsePending &&
+                    !composeTimeoutReady
+                      ? composerTimeoutUnavailable
+                        ? COMPOSE_UNAVAILABLE_MESSAGE
+                        : COMPOSE_CONNECTING_MESSAGE
+                      : undefined
+                  }
+                >
+                  Explain this step
+                </button>
+              )}
             </div>
-          )}
-          {guidedResponsePending && (
-            <p className="guided-current-decision-pending" role="status">
-              Saving decision...
-            </p>
           )}
           {/* C-3 self-heal notice (turn_not_emitted): a calm resync message,
               deliberately role="status" (polite) rather than role="alert"
@@ -1850,7 +1898,14 @@ export function ChatPanel({
             <GuidedChatHistory
               chatHistory={guidedSession.chat_history}
               onRetrySyntheticFailure={handleRetrySyntheticFailure}
-              retryDisabled={guidedChatPending || guidedResponsePending}
+              // !composeTimeoutReady: the synthetic-failure turn restores from
+              // server-authoritative chat_history on reload, so its Retry can
+              // render before readiness latches. Retry routes sendGuidedChat ->
+              // runComposeWithTimeout, which no-ops when not ready; disable it
+              // so it is not a silent dead button (same gate as Explain).
+              retryDisabled={
+                guidedChatPending || guidedResponsePending || !composeTimeoutReady
+              }
             />
           );
           // Persistent-mount contract (AcknowledgementStack.tsx): the stack
@@ -1912,6 +1967,29 @@ export function ChatPanel({
                   {/* The decision rides LAST in the scroll region — the
                       action zone between the reply and the composer. */}
                   {decisionSection}
+                  {/* Chat-pending reply slot (operator 2026-07-23): the
+                      working strip rides in the conversation flow — the
+                      bottom of the column, where the build lands — matching
+                      the decision-submit indicator's placement, instead of
+                      swapping over the composer's typing area. Direct child
+                      of the scroll region: OUTSIDE both role=log containers
+                      (its role=status must not nest in a live log — same
+                      contract as elspeth-76a0cc485e) and pinned into view by
+                      the auto-scroll effect keyed on guidedChatPending. */}
+                  {guidedChatPending ? (
+                    <GuidedPendingStrip
+                      composerProgress={composerProgress}
+                      onStop={cancelGuidedChat}
+                      substeps={
+                        isTutorial === true && guidedSession.step === "step_2_sink"
+                          ? TUTORIAL_STEP_2_COMPOSING_SUBSTEPS
+                          : undefined
+                      }
+                      activeSubstepIndex={tutorialStep2ActiveSubstep(
+                        composerProgress?.phase,
+                      )}
+                    />
+                  ) : null}
                 </div>
                 {stepComposer}
               </div>
@@ -1940,27 +2018,29 @@ export function ChatPanel({
     );
   }
 
-  // ── Concern B: a tutorial must NEVER reach the panel-less freeform body ──
+  // ── Concern B: a tutorial shows the guided placeholder while loading ──
   //
   // Reaching this point means neither the completed branch nor the
   // guided-active branch matched. For a non-tutorial session that is the
-  // legitimate freeform surface (below). For a TUTORIAL session it is one of
-  // two states that must NOT show freeform:
-  //   (a) the TutorialGuidedShell startup flash, where guidedSession /
-  //       guidedNextTurn are transiently null before the async start resolves
-  //       (TutorialGuidedShell.tsx:61-81); and
-  //   (b) an `exited_to_freeform` terminal (which a tutorial can no longer
-  //       trigger after Task 2 removed the exit affordances, but is guarded
-  //       here defensively in case a stale persisted session carries it).
-  // Both are caught by this single guard; the completed branch above returns
-  // first, so a tutorial completion still graduates normally.
+  // legitimate freeform surface (below). For a TUTORIAL session, the
+  // placeholder covers the TutorialGuidedShell startup window: guidedSession
+  // is transiently null before the async start resolves, and a non-null
+  // pre-turn session is the gap during startGuided.
   //
-  // The rail reflects the ACTUAL session step when one is available
-  // (the exited_to_freeform case carries a real `guidedSession.step`); it
-  // falls back to "step_1_source" ONLY for the startup-flash case where
-  // `guidedSession === null` (no step exists yet). Hardcoding step_1 in the
-  // non-null case would show the wrong step in the rail — a fidelity gap.
-  if (isTutorial) {
+  // An `exited_to_freeform` terminal is deliberately EXCLUDED and falls
+  // through to the freeform body: the wire-stage "Exit to freeform" button
+  // IS reachable in tutorial mode (on blocked outcomes it is the only
+  // affordance), and the old always-placeholder guard turned that terminal
+  // into a permanent "Preparing…" dead-end — nothing ever cleared it
+  // (elspeth-61591e64bb). On exit the tutorial shell's onExited hand-off
+  // persists the opt-out and unmounts the shell; rendering the freeform
+  // body here is the correct surface for the brief in-flight window.
+  //
+  // The rail falls back to "step_1_source" ONLY for the startup-flash case
+  // where `guidedSession === null` (no step exists yet); a non-null session
+  // carries its real step. Hardcoding step_1 in the non-null case would
+  // show the wrong step in the rail — a fidelity gap.
+  if (isTutorial && guidedSession?.terminal?.kind !== "exited_to_freeform") {
     const placeholderStep: WorkflowStepId = guidedSession?.step ?? "step_1_source";
     return (
       <div
@@ -2097,7 +2177,7 @@ export function ChatPanel({
         tabIndex={0}
       >
         {messages.length === 0 ? (
-          <TemplateCards onSelectTemplate={handleSelectTemplate} />
+          <FreeformIntroduction />
         ) : (
           // Render one bubble per *turn*, not one per audit row. The compose
           // loop persists every LLM round-trip as its own assistant row
@@ -2302,8 +2382,7 @@ type WorkflowStepId = GuidedStep | "ready";
 const GUIDED_STEP_PURPOSES: Record<GuidedStep, string> = {
   step_1_source: "Choose the input and confirm what ELSPETH can read.",
   step_2_sink: "Choose the output shape and the fields the pipeline should produce.",
-  step_2_5_recipe_match: "Review the suggested recipe before ELSPETH builds the transforms.",
-  step_3_transforms: "Review the transform chain that turns source data into the output.",
+  step_3_transforms: "Review the transform stages that turn source data into the output.",
   step_4_wire: "Review and confirm the wiring between your pipeline steps.",
 };
 
@@ -2313,9 +2392,6 @@ const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
 }> = [
   { id: "step_1_source", label: GUIDED_STEP_LABELS.step_1_source },
   { id: "step_2_sink", label: GUIDED_STEP_LABELS.step_2_sink },
-  // step_2_5_recipe_match is a vestigial, collapsed step (the recipe-offer
-  // deviation was removed; the sink commit hops straight to transforms). It is
-  // intentionally NOT shown in the stepper.
   { id: "step_3_transforms", label: GUIDED_STEP_LABELS.step_3_transforms },
   { id: "step_4_wire", label: GUIDED_STEP_LABELS.step_4_wire },
   // "ready" is a stepper-only pseudo-step, not a GuidedStep — its label

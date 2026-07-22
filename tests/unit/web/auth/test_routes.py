@@ -12,8 +12,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy import select
 
+from elspeth.core.landscape import auth_audit_repository
 from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH, _bounded_principal
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import auth_events_table
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
@@ -31,6 +33,9 @@ _ENTRA_FIELDS = {**_OIDC_FIELDS, "entra_tenant_id": "test-tenant-id"}
 
 
 class _NoopAuthAuditRecorder:
+    def record_login_success_and_token_issued(self, *args, **kwargs) -> None:
+        return None
+
     def record_login_success(self, *args, **kwargs) -> None:
         return None
 
@@ -42,6 +47,24 @@ class _NoopAuthAuditRecorder:
 
     def record_auth_failure(self, *args, **kwargs) -> None:
         return None
+
+
+class _AuditWriteFailure(OSError):
+    pass
+
+
+class _RaisingAuthAuditRecorder(_NoopAuthAuditRecorder):
+    def __init__(self) -> None:
+        self.failures: list[dict[str, object]] = []
+
+    def record_auth_failure(self, *args, **kwargs) -> None:
+        self.failures.append(kwargs)
+        raise _AuditWriteFailure("audit persistence unavailable")
+
+
+class _RaisingTokenAuditRecorder(_NoopAuthAuditRecorder):
+    def record_token_issued(self, *args, **kwargs) -> None:
+        raise _AuditWriteFailure("token audit persistence unavailable")
 
 
 @dataclass
@@ -94,6 +117,7 @@ def _create_test_app(provider, auth_provider_type: str = "local", **settings_ove
         **settings_overrides,
     )
     app.state.oidc_authorization_endpoint = None
+    app.state.oidc_token_endpoint = None
     app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
     # Auth rate limiter — generous limit for tests that aren't testing rate limiting
     app.state.auth_rate_limiter = ComposerRateLimiter(limit=100)
@@ -240,6 +264,30 @@ class TestLoginEndpoint:
         serialized = repr(dict(event._mapping))
         assert token not in serialized
         assert "password123" not in serialized
+
+    async def test_login_success_and_token_audit_roll_back_together_on_second_insert_failure(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        audit_url = f"sqlite:///{tmp_path / 'audit.db'}"
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        provider.create_user("alice", "password123", display_name="Alice")
+        app = _create_test_app(provider, landscape_url=audit_url)
+        _enable_auth_audit(app)
+        monkeypatch.setattr(auth_audit_repository, "generate_id", lambda: "duplicate-event-id")
+
+        with pytest.raises(LandscapeRecordError):
+            async with _client_for(app) as client:
+                await client.post(
+                    "/api/auth/login",
+                    json={"username": "alice", "password": "password123"},
+                )
+
+        assert _read_auth_event_rows(audit_url) == []
 
     async def test_login_invalid_credentials(self, tmp_path) -> None:
         provider = LocalAuthProvider(
@@ -406,6 +454,32 @@ class TestRegisterEndpoint:
         assert token not in serialized
         assert "pw123" not in serialized
 
+    async def test_register_open_mode_audit_failure_compensates_user_creation(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="open")
+        app.state.auth_audit_recorder = _RaisingTokenAuditRecorder()
+
+        with pytest.raises(_AuditWriteFailure):
+            async with _client_for(app) as client:
+                await client.post(
+                    "/api/auth/register",
+                    json={"username": "bob", "password": "pw123", "display_name": "Bob"},
+                )
+
+        with pytest.raises(AuthenticationError, match="Invalid credentials"):
+            await provider.login("bob", "pw123")
+
+        app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
+        async with _client_for(app) as client:
+            retry_response = await client.post(
+                "/api/auth/register",
+                json={"username": "bob", "password": "pw123", "display_name": "Bob"},
+            )
+        assert retry_response.status_code == 200
+
     async def test_register_closed_mode_returns_404(self, tmp_path) -> None:
         provider = LocalAuthProvider(
             db_path=tmp_path / "auth.db",
@@ -468,6 +542,36 @@ class TestRegisterEndpoint:
                 json={"username": "bob", "password": "pw123"},
             )
             assert login_response.status_code == 200
+
+    async def test_verify_email_audit_failure_restores_retryable_verification_state(self, tmp_path) -> None:
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, registration_mode="email_verified", data_dir=tmp_path)
+
+        async with _client_for(app) as client:
+            register_response = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+            assert register_response.status_code == 202
+            outbox = tmp_path / "email-verifications.jsonl"
+            token = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])["token"]
+
+            app.state.auth_audit_recorder = _RaisingTokenAuditRecorder()
+            with pytest.raises(_AuditWriteFailure):
+                await client.post("/api/auth/verify-email", json={"token": token})
+
+            app.state.auth_audit_recorder = _NoopAuthAuditRecorder()
+            retry_response = await client.post("/api/auth/verify-email", json={"token": token})
+
+        assert retry_response.status_code == 200
 
     async def test_register_email_verified_mode_requires_email(self, tmp_path) -> None:
         provider = LocalAuthProvider(
@@ -931,6 +1035,8 @@ class TestAuthConfigEndpoint:
             oidc_audience="test-audience",
             oidc_client_id="my-client-id",
         )
+        app.state.oidc_authorization_endpoint = "https://login.example.com/oauth2/authorize"
+        app.state.oidc_token_endpoint = "https://login.example.com/oauth2/token"
 
         async with _client_for(app) as client:
             response = await client.get("/api/auth/config")
@@ -939,6 +1045,18 @@ class TestAuthConfigEndpoint:
         assert body["provider"] == "oidc"
         assert body["oidc_issuer"] == "https://login.example.com"
         assert body["oidc_client_id"] == "my-client-id"
+        assert body["authorization_endpoint"] == "https://login.example.com/oauth2/authorize"
+        assert body["token_endpoint"] == "https://login.example.com/oauth2/token"
+        assert set(body) == {
+            "provider",
+            "registration_mode",
+            "oidc_issuer",
+            "oidc_client_id",
+            "authorization_endpoint",
+            "token_endpoint",
+        }
+        assert "oidc_authorization_allowed_origins" not in body
+        assert "oidc_audience_claim" not in body
 
     async def test_config_endpoint_is_unauthenticated(self) -> None:
         """GET /api/auth/config must not require a Bearer token."""
@@ -949,6 +1067,17 @@ class TestAuthConfigEndpoint:
         async with _client_for(app) as client:
             response = await client.get("/api/auth/config")
         assert response.status_code == 200
+
+    async def test_config_endpoint_is_not_cacheable(self) -> None:
+        provider = _FakeAuthProvider()
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/config")
+
+        assert response.status_code == 200
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.headers["Pragma"] == "no-cache"
 
 
 @pytest.mark.asyncio
@@ -1076,6 +1205,23 @@ class TestMeErrorPath:
             )
         assert response.status_code == 401
         assert response.json()["detail"] == "Profile lookup failed"
+
+    async def test_me_profile_failure_propagates_audit_write_failure(self) -> None:
+        provider = _FakeAuthProvider(profile_error=AuthenticationError("Profile lookup failed"))
+        app = _create_test_app(provider, auth_provider_type="oidc", **_OIDC_FIELDS)
+        recorder = _RaisingAuthAuditRecorder()
+        app.state.auth_audit_recorder = recorder
+
+        async with _client_for(app) as client:
+            with pytest.raises(_AuditWriteFailure):
+                await client.get(
+                    "/api/auth/me",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+        assert len(recorder.failures) == 1
+        assert recorder.failures[0]["provider"] == "oidc"
+        assert recorder.failures[0]["failure_stage"] == "profile_lookup"
 
     async def test_me_get_user_info_failure_records_profile_lookup_classification_without_detail(self, tmp_path) -> None:
         audit_url = f"sqlite:///{tmp_path / 'audit.db'}"

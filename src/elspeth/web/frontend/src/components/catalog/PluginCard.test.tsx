@@ -510,6 +510,56 @@ describe("PluginCard — Phase 7B reshape", () => {
     expect(codeBlock.tagName.toLowerCase()).toBe("pre");
   });
 
+  it("preserves inline and fenced code formatting in details prose", async () => {
+    const { container } = render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_to_use:
+            "Use `options.path` when the file is local.\n\n```yaml\nsource:\n  plugin: csv\n```",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+
+    expect(screen.getByText("options.path").tagName.toLowerCase()).toBe("code");
+    // Fenced blocks render through MarkdownRenderer's Prism highlighter,
+    // which splits the code into per-token spans across multiple lines —
+    // the same reason MarkdownRenderer.test.tsx queries via the container
+    // rather than screen.getByText for fenced content.
+    const pre = container.querySelector("pre.code-block");
+    expect(pre).not.toBeNull();
+    const code = pre?.querySelector("code");
+    expect(code).not.toBeNull();
+    expect(code?.textContent).toContain("source:");
+    expect(code?.textContent).toContain("plugin:");
+  });
+
+  it("renders bullet-style prose as a list for scannability", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_not_to_use:
+            "- when rows are already structured\n- when credentials would be embedded",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+
+    const list = screen.getByRole("list");
+    expect(within(list).getByText("when rows are already structured")).toBeInTheDocument();
+    expect(within(list).getByText("when credentials would be embedded")).toBeInTheDocument();
+  });
+
   it("falls back to a generic message when prose fields are null in details", async () => {
     render(
       <PluginCard
@@ -527,6 +577,75 @@ describe("PluginCard — Phase 7B reshape", () => {
   it("does NOT render a 'Use in pipeline' button (toolkit affordance removed)", () => {
     render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
     expect(screen.queryByRole("button", { name: /use in pipeline/i })).not.toBeInTheDocument();
+  });
+
+  it("renders a numbered list as real list items, not a flattened paragraph", async () => {
+    // Regression coverage for elspeth-b7b1b62940: parseProseBlocks only
+    // recognised -/* bullets; numbered lines fell through to the paragraph
+    // branch and were flattened onto one line via lines.join(' ').
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_to_use: "1. First step\n2. Second step\n3. Third step",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "First step",
+      "Second step",
+      "Third step",
+    ]);
+    // The flattened single-paragraph rendering must not appear.
+    expect(
+      screen.queryByText(/1\. First step 2\. Second step 3\. Third step/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders bold prose as real emphasis, not literal asterisks", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_to_use: "This plugin is **not** recommended for production.",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+    const strong = screen.getByText("not");
+    expect(strong.tagName.toLowerCase()).toBe("strong");
+    // The literal markdown asterisks must not leak into the rendered text.
+    expect(screen.queryByText(/\*\*not\*\*/)).not.toBeInTheDocument();
+  });
+
+  it("renders a markdown link as a real anchor, not literal bracket syntax", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          usage_when_to_use:
+            "See the [reference guide](https://example.com/docs) for details.",
+        })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /reference details for example/i }),
+    );
+    const link = screen.getByRole("link", { name: "reference guide" });
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    // The literal markdown bracket/paren syntax must not leak into the text.
+    expect(
+      screen.queryByText(/\[reference guide\]\(https:\/\/example\.com\/docs\)/),
+    ).not.toBeInTheDocument();
   });
 
   it("calls onExpand when the 'Schema →' disclosure is activated", async () => {

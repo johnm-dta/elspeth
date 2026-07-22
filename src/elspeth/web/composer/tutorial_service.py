@@ -12,14 +12,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
 from elspeth.contracts import CallType
 from elspeth.core.canonical import stable_hash
-from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     artifacts_table,
     calls_table,
@@ -30,7 +29,9 @@ from elspeth.core.landscape.schema import (
     validation_errors_table,
 )
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tutorial_models import (
     TutorialCancelResponse,
     TutorialOrphanCleanupResponse,
@@ -38,10 +39,16 @@ from elspeth.web.composer.tutorial_models import (
     TutorialRunResponse,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
 from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
+from elspeth.web.landscape_access import open_landscape_db
 from elspeth.web.paths import allowed_sink_directories
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, WebPluginPolicy
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
+from elspeth.web.plugin_policy.validation import PolicyValidationStage, validate_plugin_policy
 from elspeth.web.preferences.service import PreferencesService
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
@@ -51,7 +58,6 @@ from elspeth.web.sessions.protocol import (
 )
 from elspeth.web.sessions.titles import abandoned_tutorial_session_title
 
-_TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
 # Mirrors HELLO_WORLD_PENDING_SESSION_TITLE in the frontend tutorial copy
 # (src/elspeth/web/frontend/src/components/tutorial/copy.ts). Sessions carry
@@ -62,6 +68,13 @@ _TUTORIAL_RUN_POLL_SECONDS = 0.25
 # RETAKE has reset ``tutorial_completed_at`` back to None.
 _TUTORIAL_PENDING_SESSION_TITLE = "First-run tutorial (in progress)"
 _TUTORIAL_RUN_FAILED_PUBLIC_DETAIL = "The tutorial run did not complete successfully."
+_TUTORIAL_BASE_TRANSFORMS = frozenset(
+    {
+        PluginId("transform", "web_scrape"),
+        PluginId("transform", "llm"),
+        PluginId("transform", "field_mapper"),
+    }
+)
 
 
 class TutorialRunIntegrityError(RuntimeError):
@@ -85,6 +98,116 @@ class _LiveTutorialRun:
 class _VerifiedArtifactBytes:
     path: Path
     content: bytes
+
+
+def _tutorial_launch_blocker(
+    *,
+    state: CompositionState,
+    policy: WebPluginPolicy,
+    snapshot: PluginAvailabilitySnapshot,
+    tutorial_profile: str | None,
+    profile_registry: OperatorProfileRegistry,
+    catalog: CatalogService,
+) -> tuple[str, str] | None:
+    """Return one sanitized launch blocker, or ``None`` when runnable."""
+    try:
+        source_ids = tuple(PluginId("source", source.plugin) for source in state.sources.values())
+        transform_ids = tuple(PluginId("transform", node.plugin) for node in state.nodes if node.plugin is not None)
+        output_ids = tuple(PluginId("sink", output.plugin) for output in state.outputs)
+    except ValueError:
+        return ("tutorial_plugin_set", "The saved tutorial pipeline does not match the supported tutorial plugin set.")
+    source_valid = len(source_ids) == 1 and source_ids[0] in {
+        PluginId("source", "csv"),
+        PluginId("source", "json"),
+    }
+    output_valid = len(output_ids) == 1 and output_ids[0] == PluginId("sink", "json")
+    if source_valid and output_valid and not state.nodes:
+        # A source→sink passthrough is a valid composition, so it can be
+        # committed (tutorial run 18: the step-3 auto-proposal accepted without
+        # the transforms instruction) — name the emptiness distinctly instead
+        # of blaming an unsupported plugin set.
+        return (
+            "tutorial_transforms_missing",
+            "The saved tutorial pipeline has no transform steps — it wires the source directly to the sink.",
+        )
+    if (
+        not source_valid
+        or not output_valid
+        or len(transform_ids) != len(_TUTORIAL_BASE_TRANSFORMS)
+        or set(transform_ids) != _TUTORIAL_BASE_TRANSFORMS
+        or any(node.plugin is None for node in state.nodes)
+    ):
+        return ("tutorial_plugin_set", "The saved tutorial pipeline does not match the supported tutorial plugin set.")
+    if not {*source_ids, *transform_ids, *output_ids} <= snapshot.available:
+        return ("tutorial_plugin_unavailable", "One or more tutorial plugins are not currently available.")
+    if tutorial_profile is None:
+        return ("tutorial_profile_unavailable", "The tutorial LLM profile is not configured.")
+    llm_nodes = tuple(node for node in state.nodes if node.plugin == "llm")
+    if len(llm_nodes) != 1 or llm_nodes[0].options.get("profile") != tutorial_profile:
+        return ("tutorial_profile_unavailable", "The saved tutorial pipeline does not select the configured tutorial profile.")
+
+    policy_validation = validate_plugin_policy(
+        state,
+        snapshot=snapshot,
+        profile_registry=profile_registry,
+        catalog=catalog,
+    )
+    stage_codes: tuple[tuple[PolicyValidationStage, str], ...] = (
+        ("plugin_enablement", "tutorial_plugin_unavailable"),
+        ("operator_profile_options", "tutorial_profile_unavailable"),
+        ("required_control_availability", "tutorial_required_control_unavailable"),
+        ("required_control_coverage", "tutorial_required_control_coverage"),
+    )
+    for stage, code in stage_codes:
+        findings = policy_validation.findings_for(stage)
+        if findings:
+            return (code, findings[0].message)
+
+    readiness = build_plugin_policy_readiness(
+        policy=policy,
+        snapshot=snapshot,
+        tutorial_profile=tutorial_profile,
+        tutorial_state=state,
+        profile_registry=profile_registry,
+        catalog=catalog,
+    )
+    if not readiness.tutorial_ready:
+        failing = next(row for row in readiness.rows if row.status == "error")
+        return (f"tutorial_{failing.id}", failing.summary)
+    return None
+
+
+async def _require_tutorial_launch_readiness(
+    *,
+    request: Request,
+    user: UserIdentity,
+    session_id: Any,
+    settings: WebSettings,
+    session_service: SessionServiceProtocol,
+) -> None:
+    """Recheck the principal-scoped tutorial candidate immediately pre-run."""
+    record = await session_service.get_current_state(session_id)
+    if record is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_type": "tutorial_not_ready", "code": "tutorial_state_missing", "detail": "The tutorial pipeline is not ready."},
+        )
+    state = state_from_record(record)
+    snapshot: PluginAvailabilitySnapshot = request.app.state.plugin_snapshot_factory(user)
+    blocker = _tutorial_launch_blocker(
+        state=state,
+        policy=request.app.state.web_plugin_policy,
+        snapshot=snapshot,
+        tutorial_profile=settings.tutorial_llm_profile,
+        profile_registry=request.app.state.operator_profile_registry,
+        catalog=request.app.state.catalog_service,
+    )
+    if blocker is not None:
+        code, detail = blocker
+        raise HTTPException(
+            status_code=409,
+            detail={"error_type": "tutorial_not_ready", "code": code, "detail": detail},
+        )
 
 
 async def run_tutorial_pipeline(
@@ -116,6 +239,14 @@ async def run_tutorial_pipeline(
     settings: WebSettings = request.app.state.settings
     session_service: SessionServiceProtocol = request.app.state.session_service
 
+    await _require_tutorial_launch_readiness(
+        request=request,
+        user=user,
+        session_id=session_uuid,
+        settings=settings,
+        session_service=session_service,
+    )
+
     live_run = await _run_live_tutorial(
         request=request,
         user=user,
@@ -135,12 +266,40 @@ async def _run_live_tutorial(
     session_service: SessionServiceProtocol,
 ) -> _LiveTutorialRun:
     execution_service: ExecutionService = request.app.state.execution_service
-    run_id = await execution_service.execute(
-        session_id,
-        user_id=user.user_id,
-        auth_provider_type=settings.auth_provider,
+    try:
+        run_id = await execution_service.execute(
+            session_id,
+            user_id=user.user_id,
+            auth_provider_type=settings.auth_provider,
+        )
+    except UnresolvedInterpretationPlaceholderError as exc:
+        # A pending interpretation review (e.g. the planner-authored LLM
+        # prompt awaiting its Accept card) is a launch blocker in the
+        # ``tutorial_not_ready`` family, not a server fault: answer the same
+        # coded 409 shape as ``_require_tutorial_launch_readiness`` so the
+        # run-turn UI renders a named, actionable message instead of the
+        # empty alert an unmapped 500 produced (session e1332b5a). Sanitized:
+        # site component ids are planner-authored node ids — name the count
+        # and the action, never the raw identifiers.
+        pending_count = len(exc.sites)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "tutorial_not_ready",
+                "code": "tutorial_interpretations_pending",
+                "detail": (
+                    f"{pending_count} review card{'s' if pending_count != 1 else ''} "
+                    "from the pipeline build still need your approval. Resolve the "
+                    "review cards shown in the composer, then run the tutorial again."
+                ),
+            },
+        ) from exc
+    run_timeout_seconds = settings.composer_transport_idle_ceiling_seconds - settings.composer_transport_headroom_seconds
+    run_record = await _wait_for_terminal_run(
+        session_service,
+        run_id,
+        timeout_seconds=run_timeout_seconds,
     )
-    run_record = await _wait_for_terminal_run(session_service, run_id)
     if run_record.status == "cancelled":
         # Cancellation is a deliberate user action (POST /api/tutorial/cancel),
         # not a failure: 409 with a stable machine code the frontend switches
@@ -178,8 +337,13 @@ async def _run_live_tutorial(
     return _LiveTutorialRun(response=response, run_record=run_record, projection=projection)
 
 
-async def _wait_for_terminal_run(session_service: SessionServiceProtocol, run_id: Any) -> RunRecord:
-    deadline = time.monotonic() + _TUTORIAL_RUN_TIMEOUT_SECONDS
+async def _wait_for_terminal_run(
+    session_service: SessionServiceProtocol,
+    run_id: Any,
+    *,
+    timeout_seconds: float,
+) -> RunRecord:
+    deadline = time.monotonic() + timeout_seconds
     while True:
         run_record = await session_service.get_run(run_id)
         if run_record.status in SESSION_TERMINAL_RUN_STATUS_VALUES:
@@ -201,10 +365,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
     # read-then-write shape on a DEFERRED BEGIN is exactly the
     # SQLITE_BUSY_SNAPSHOT hazard the write-intent discipline closes.
     with (
-        LandscapeDB.from_url(
-            settings.get_landscape_url(),
-            passphrase=settings.landscape_passphrase,
-        ) as db,
+        open_landscape_db(settings) as db,
         db.write_connection() as conn,
     ):
         llm_call_count = _count_calls_for_run(conn, landscape_run_id)
@@ -530,3 +691,7 @@ async def cleanup_tutorial_orphans(
             break
         offset += limit
     return TutorialOrphanCleanupResponse(deleted_count=deleted_count)
+
+
+if TYPE_CHECKING:
+    from elspeth.web.catalog.protocol import CatalogService

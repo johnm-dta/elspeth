@@ -6,21 +6,37 @@ IMPORTANT: Sinks use allow_coercion=False to enforce that transforms
 output correct types. Wrong types = upstream bug = crash.
 """
 
-import hashlib
-import io
+import codecs
 import json
-import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, model_validator
 
-from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema
+from elspeth.contracts import CallType, Determinism, PluginSchema
 from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.errors import SinkEffectCapabilityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.header_modes import HeaderMode
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
+    ResolvedSinkEffectMode,
+    RestrictedSinkEffectContext,
+    SinkEffectAuditExportSnapshotInput,
+    SinkEffectCommitResult,
+    SinkEffectExecutionPurpose,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionRequest,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileResult,
+)
 
 if TYPE_CHECKING:
     from elspeth.contracts.sink import OutputValidationResult
@@ -32,17 +48,44 @@ from elspeth.plugins.infrastructure.display_headers import (
     display_name_for,
     get_effective_display_headers,
     init_display_headers,
-    resolve_contract_from_context_if_needed,
-    resolve_display_headers_if_needed,
     set_resume_field_resolution,
 )
 from elspeth.plugins.infrastructure.output_paths import (
     resolve_output_collision_path,
-    should_create_exclusively,
     validate_output_collision_policy_mode,
 )
 from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode_enabled
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sinks._diversion_attribution import DiversionAttribution, build_diversion_attribution
+from elspeth.plugins.sinks._local_file_effects import (
+    commit_local_effect,
+    continuation_emission,
+    inspect_local_effect,
+    iter_path_chunks,
+    predecessor_local_path,
+    prepare_local_effect,
+    reconcile_local_effect,
+)
+
+
+def _iter_file_without_suffix(path: Path, suffix: bytes) -> Iterator[bytes]:
+    """Stream a file except for one exact structural suffix."""
+    pending = b""
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            combined = pending + chunk
+            if len(combined) > len(suffix):
+                yield combined[: -len(suffix)]
+                pending = combined[-len(suffix) :]
+            else:
+                pending = combined
+    if pending != suffix:
+        raise ValueError("Existing JSON array does not have the expected terminal boundary")
+
+
+def _indent_json_value(serialized: str, indent: int) -> str:
+    prefix = " " * indent
+    return "\n".join(prefix + line for line in serialized.splitlines())
 
 
 class JSONSinkConfig(SinkPathConfig):
@@ -104,8 +147,49 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:aaa586501df65381"
+    source_file_hash: str | None = "sha256:8eaa85553aae688d"
     config_model = JSONSinkConfig
+    effect_protocol_version = SINK_EFFECT_PROTOCOL_VERSION
+    effect_call_type = CallType.FILESYSTEM
+    supported_effect_modes = frozenset({"append", "write"})
+    supported_effect_input_kinds = frozenset({SinkEffectInputKind.PIPELINE_MEMBERS, SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT})
+    supported_audit_export_formats = frozenset({AuditExportFormat.JSON})
+
+    @classmethod
+    def _resolve_sink_effect_mode(
+        cls,
+        config: Mapping[str, object],
+        *,
+        purpose: SinkEffectExecutionPurpose,
+    ) -> ResolvedSinkEffectMode | None:
+        cfg = JSONSinkConfig.from_dict(dict(config), plugin_name=cls.name)
+        if purpose is SinkEffectExecutionPurpose.AUDIT_EXPORT:
+            cls._validate_audit_export_config(cfg)
+        if purpose is SinkEffectExecutionPurpose.RESUME:
+            # configure_for_resume() switches the live sink to canonical
+            # append before admission is issued; the resolved mode must claim
+            # the mode resume actually executes (elspeth-fc9906e398). A JSON
+            # array target never reaches admission under resume: its
+            # configure_for_resume() refusal aborts the flow first.
+            return ResolvedSinkEffectMode("append")
+        return ResolvedSinkEffectMode(cfg.mode)
+
+    @classmethod
+    def _validate_audit_export_config(cls, cfg: JSONSinkConfig) -> None:
+        if cfg.mode != "write" or cfg.collision_policy not in {None, "fail_if_exists"}:
+            raise SinkEffectCapabilityError("JSON audit export requires mode='write' and collision policy 'fail_if_exists' or null")
+
+    def _validate_sink_effect_capability_configuration(
+        self,
+        *,
+        mode: str,
+        required_input_kind: SinkEffectInputKind,
+    ) -> None:
+        if mode != self._mode:
+            raise SinkEffectCapabilityError("JSON sink effect mode does not match configured mode")
+        if required_input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT:
+            self._validate_audit_export_config(JSONSinkConfig.from_dict(dict(self.config), plugin_name=self.name))
+
     # determinism inherited from BaseSink (IO_WRITE)
 
     # Note: supports_resume is set per-instance in __init__ based on format.
@@ -243,7 +327,6 @@ class JSONSink(BaseSink):
         self._indent = cfg.indent
         self._mode = cfg.mode
         self._collision_policy = cfg.collision_policy
-        self._write_target_claimed = False
         if self._mode != "append" and not plugin_preflight_mode_enabled():
             self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
 
@@ -278,249 +361,180 @@ class JSONSink(BaseSink):
         # Required-field enforcement (centralized in SinkExecutor)
         self.declared_required_fields = self._schema_config.get_effective_required_fields()
 
-        self._file: IO[str] | None = None
-        self._rows: list[dict[str, Any]] = []  # Buffer for json array format
+    def inspect_effect(
+        self,
+        request: SinkEffectInspectionRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectInspection:
+        del ctx
+        predecessor_path = predecessor_local_path(request)
+        if predecessor_path is not None:
+            self._path = predecessor_path
+        elif self._mode != "append":
+            self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
+        return inspect_local_effect(target_path=self._path, request=request)
 
-    def _claim_write_target(self) -> None:
-        """Apply write-mode collision policy before the first filesystem mutation."""
-        if self._write_target_claimed or self._mode == "append":
-            return
-        self._path = resolve_output_collision_path(self._requested_path, self._collision_policy)
-        self._write_target_claimed = True
+    def prepare_effect(
+        self,
+        request: SinkEffectPrepareRequest,
+        ctx: RestrictedSinkEffectContext,
+    ) -> SinkEffectPlan:
+        del ctx
+        effect_input = request.effect_input
+        if type(effect_input) is SinkEffectAuditExportSnapshotInput:
+            if effect_input.export_format is not AuditExportFormat.JSON:
+                raise TypeError("JSONSink audit effects require a JSON audit snapshot")
 
-    def _ensure_output_parent_exists(self) -> None:
-        """Create the selected local output directory before opening files."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+            def audit_export_chunks() -> Iterator[bytes]:
+                yield from effect_input.reader.iter_verified_chunks()
+                manifest = effect_input.reader.read_verified_signed_manifest()
+                if manifest.endswith(b"\n"):
+                    raise ValueError("audit export final manifest must not carry a trailing newline")
+                yield manifest
 
-    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
-        """Write a batch of rows to the JSON file.
-
-        Args:
-            rows: List of row dicts to write
-            ctx: Plugin context
-
-        Returns:
-            ArtifactDescriptor with content_hash (SHA-256) and size_bytes
-
-        Raises:
-            PluginContractViolation: Raised by executor if row fails input schema
-                validation. This indicates a bug in an upstream transform.
-        """
-        if not rows:
-            # Empty batch - return descriptor for empty content
-            return SinkWriteResult(
-                artifact=ArtifactDescriptor.for_file(
-                    path=str(self._path),
-                    content_hash=hashlib.sha256(b"").hexdigest(),
-                    size_bytes=0,
-                )
+            return prepare_local_effect(
+                effect_id=request.effect_id,
+                input_kind=request.input_kind,
+                inspection=request.inspection,
+                chunks=audit_export_chunks(),
+                row_count=0,
+                accepted_ordinals=(),
+                diverted_ordinals=(),
+                encoding="utf-8",
+                format_name="audit_export_jsonl",
+                stream_sequence=0,
             )
+        if type(effect_input) is not SinkEffectPipelineMembersInput:
+            raise TypeError("JSONSink effects require a closed supported effect input")
 
-        # Lazy resolution of contract from context for headers: original mode
-        # ctx.contract is set by orchestrator after first valid source row
-        # MUST happen BEFORE display header resolution (contract takes precedence over Landscape)
-        resolve_contract_from_context_if_needed(self, ctx)
-
-        # Lazy resolution of display headers from Landscape (fallback when no contract)
-        # Must happen AFTER source iteration begins (when field resolution is recorded)
-        resolve_display_headers_if_needed(self, ctx)
-
-        # Apply display header mapping to row keys if configured
-        output_rows = apply_display_headers(self, rows)
-
-        if self._format == "jsonl":
-            # Ensure file is open BEFORE capturing position — on first call
-            # in append mode the file doesn't exist yet, so we must open it
-            # first to get the correct position (end of existing content).
-            self._ensure_jsonl_file_open()
-            pre_write_pos = self._file.tell()  # type: ignore[union-attr]
-
-            try:
-                self._write_jsonl_content(output_rows, rows)
-
-                # Flush persistent file handle to ensure content is on disk for hashing.
-                if self._file is not None:
-                    self._file.flush()
-
-                content_hash = self._compute_file_hash()
-                size_bytes = self._path.stat().st_size
-            except Exception:
-                if self._file is not None and self._file.writable():
-                    try:
-                        self._file.seek(pre_write_pos)
-                        self._file.truncate(pre_write_pos)
-                        self._file.flush()
-                        os.fsync(self._file.fileno())
-                    except OSError as rollback_err:
-                        raise RuntimeError(
-                            f"JSONL write failed and rollback also failed — file may be corrupted at byte {pre_write_pos}"
-                        ) from rollback_err
-                raise
-        else:
-            # JSON array dumps the whole buffer atomically, so a non-serializable
-            # value would abort the entire (cumulative) file. Pre-encode each row of
-            # THIS batch individually: divert the rows whose values can't be encoded
-            # (per-row Tier-2 fault) and buffer only the good ones, so one bad value
-            # doesn't drop the whole batch. row_index is relative to the current batch.
-            # Record the committed buffer length so this batch's rows can be
-            # rolled back if the write fails. The atomic temp-file rename
-            # protects the on-disk file, but self._rows is extended in memory
-            # BEFORE the write — without rollback, a failed write (serialization,
-            # fsync, or os.replace) leaves this batch buffered, and the next
-            # successful write would emit it: a row from a failed write appearing
-            # in a later artifact with no matching success outcome
-            # (elspeth-813611aad6).
-            committed_row_count = len(self._rows)
-            for i, output_row in enumerate(output_rows):
-                try:
-                    json.dumps(output_row, allow_nan=False)
-                except (ValueError, TypeError) as exc:
-                    self._divert_row(rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
-                    continue
-                self._rows.append(output_row)
-            # Write immediately (file is rewritten on each write for JSON format).
-            # The file write is atomic (temp + os.replace); on failure we restore
-            # the in-memory buffer to its pre-batch state so the failed rows are
-            # not replayed into a later write.
-            try:
-                self._write_json_array()
-            except Exception:
-                del self._rows[committed_row_count:]
-                raise
-
-            content_hash = self._compute_file_hash()
-            size_bytes = self._path.stat().st_size
-
-        return SinkWriteResult(
-            artifact=ArtifactDescriptor.for_file(
-                path=str(self._path),
-                content_hash=content_hash,
-                size_bytes=size_bytes,
-            ),
-            diversions=self._get_diversions(),
+        members = effect_input.members
+        target_snapshot_members = effect_input.target_snapshot_members
+        current_by_effect_id = {member.member_effect_id: member for member in members}
+        target = Path(str(request.inspection.evidence["target_path"]))
+        predecessor_declared = bool(request.inspection.evidence["predecessor_declared"])
+        include_baseline, emitted_members = continuation_emission(
+            append_mode=self._mode == "append",
+            predecessor_declared=predecessor_declared,
+            current_member_effect_ids=current_by_effect_id.keys(),
+            target_snapshot_members=target_snapshot_members,
         )
+        accepted: list[int] = []
+        diverted: list[int] = []
+        diversion_attribution: list[DiversionAttribution] = []
 
-    def _ensure_jsonl_file_open(self) -> None:
-        """Open the JSONL output file if not already open.
+        def serialized_rows() -> Iterator[tuple[int, str]]:
+            source_rows = [deep_thaw(member.row) for member in emitted_members]
+            output_rows = apply_display_headers(self, source_rows)
+            for snapshot_member, original, output in zip(emitted_members, source_rows, output_rows, strict=True):
+                current_member = current_by_effect_id.get(snapshot_member.member_effect_id)
+                try:
+                    serialized = json.dumps(output, indent=self._indent if self._format == "json" else None, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    reason = f"JSON serialization failed: {exc}"
+                    if current_member is None:
+                        raise ValueError(f"Predecessor JSON snapshot is incompatible: {reason}") from exc
+                    self._divert_row(original, row_index=current_member.ordinal, reason=reason)
+                    diverted.append(current_member.ordinal)
+                    diversion_attribution.append(build_diversion_attribution(ordinal=current_member.ordinal, reason=reason))
+                    continue
+                if current_member is not None:
+                    accepted.append(current_member.ordinal)
+                serialized.encode(self._encoding)
+                yield snapshot_member.ordinal, serialized
 
-        Separated from content writing so the caller can capture file
-        position between open and write — critical for correct rollback
-        in append mode where pre-existing content must be preserved.
-        """
-        if self._file is None:
-            if self._mode != "append":
-                self._claim_write_target()
-            file_mode = "a" if self._mode == "append" else "w"
-            if self._mode != "append" and should_create_exclusively(self._collision_policy):
-                file_mode = "x"
-
-            # Validate schema compatibility before first append to existing file.
-            # Without this, append mode can write rows with incompatible schemas
-            # into the same JSONL file, violating sink schema contracts.
-            if self._mode == "append" and self._path.exists() and not self._schema_config.is_observed:
+        def jsonl_chunks() -> Iterator[bytes]:
+            encoder = codecs.getincrementalencoder(self._encoding)()
+            if include_baseline and target.exists():
                 validation = self.validate_output_target()
                 if not validation.valid:
-                    msg_parts = [f"JSONL schema mismatch: {validation.error_message}"]
-                    if validation.missing_fields:
-                        msg_parts.append(f"Missing fields: {list(validation.missing_fields)}")
-                    if validation.extra_fields:
-                        msg_parts.append(f"Extra fields: {list(validation.extra_fields)}")
-                    raise ValueError(". ".join(msg_parts))
+                    raise ValueError(f"Existing JSONL output is incompatible: {validation.error_message}")
+                yield from iter_path_chunks(target)
+                encoder.setstate(0)
+            for _ordinal, serialized in serialized_rows():
+                yield encoder.encode(serialized + "\n")
+            final = encoder.encode("", final=True)
+            if final:
+                yield final
 
-            self._ensure_output_parent_exists()
-            self._file = open(self._path, file_mode, encoding=self._encoding)  # noqa: SIM115
-
-    def _write_jsonl_content(self, rows: list[dict[str, Any]], original_rows: list[dict[str, Any]]) -> None:
-        """Stage and write JSONL rows; divert rows whose VALUES can't be encoded.
-
-        A value that cannot be encoded as standard JSON (NaN/Infinity, or a
-        non-serializable object) is a per-row Tier-2 data fault — one row's value,
-        not a batch failure. Such a row is diverted (recorded + routed per
-        on_write_failure) and the remaining rows are written, rather than aborting
-        the whole batch. ``original_rows`` is the unmapped input batch (1:1 with
-        ``rows``); it is the canonical payload handed to the failsink.
-
-        Serialization is done to a string FIRST so a mid-encode failure never writes
-        partial bytes to the staging buffer.
-        """
-        if self._file is None:
-            raise RuntimeError("JSONL file not open — call _ensure_jsonl_file_open() first")
-        with io.StringIO() as staging:
-            for i, row in enumerate(rows):
-                try:
-                    serialized = json.dumps(row, allow_nan=False)
-                except (ValueError, TypeError) as exc:
-                    self._divert_row(original_rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
-                    continue
-                staging.write(serialized)
-                staging.write("\n")
-            self._file.write(staging.getvalue())
-
-    def _write_json_array(self) -> None:
-        """Write buffered rows as JSON array (atomic write via temp file).
-
-        Uses write-to-temp + fsync + os.replace() + dir fsync to prevent
-        data loss on crash. The temp file is in the same directory to
-        guarantee same-filesystem atomic rename on POSIX.
-
-        On any failure, the temp file is cleaned up to prevent stale
-        artifacts. The original file remains untouched until os.replace()
-        succeeds.
-        """
-        if self._mode == "append":
-            raise ValueError("JSONSink format='json' does not support mode='append'. Use format='jsonl' for append/resume output.")
-
-        self._claim_write_target()
-        self._ensure_output_parent_exists()
-        temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        try:
-            with open(temp_path, "w", encoding=self._encoding) as f:
-                json.dump(self._rows, f, indent=self._indent, allow_nan=False)
-                f.flush()
-                os.fsync(f.fileno())
-            # Atomic replace — file transitions directly from old content to new
-            os.replace(temp_path, self._path)
-            # Fsync parent directory to ensure the rename is durable on power loss
-            dir_fd = os.open(str(self._path.parent), os.O_RDONLY)
+        def json_array_chunks() -> Iterator[bytes]:
+            encoder = codecs.getincrementalencoder(self._encoding)()
+            iterator = iter(serialized_rows())
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except BaseException:
-            # Clean up temp file on any failure (serialization, fsync, replace)
-            # so stale .tmp files don't accumulate
-            if temp_path.exists():
-                temp_path.unlink()
-            raise
+                _first_ordinal, first = next(iterator)
+            except StopIteration:
+                if include_baseline and target.exists():
+                    yield from iter_path_chunks(target)
+                else:
+                    yield encoder.encode("[]", final=True)
+                return
 
-    def _compute_file_hash(self) -> str:
-        """Compute SHA-256 hash of the file contents."""
-        sha256 = hashlib.sha256()
-        with open(self._path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
+            baseline_nonempty = False
+            if include_baseline and target.exists():
+                size = target.stat().st_size
+                if size > 64:
+                    baseline_nonempty = True
+                else:
+                    with target.open(encoding=self._encoding) as stream:
+                        baseline_nonempty = stream.read().strip() != "[]"
+            if baseline_nonempty:
+                suffix_encoder = codecs.getincrementalencoder(self._encoding)()
+                suffix_encoder.setstate(0)
+                suffix = suffix_encoder.encode("]" if self._indent is None else "\n]", final=True)
+                yield from _iter_file_without_suffix(target, suffix)
+                encoder.setstate(0)
+                yield encoder.encode(", " if self._indent is None else ",\n")
+            else:
+                yield encoder.encode("[" if self._indent is None else "[\n")
+
+            if self._indent is None:
+                yield encoder.encode(first)
+            else:
+                yield encoder.encode(_indent_json_value(first, self._indent))
+            for _ordinal, serialized in iterator:
+                yield encoder.encode(", " if self._indent is None else ",\n")
+                if self._indent is None:
+                    yield encoder.encode(serialized)
+                else:
+                    yield encoder.encode(_indent_json_value(serialized, self._indent))
+            yield encoder.encode("]" if self._indent is None else "\n]", final=True)
+
+        return prepare_local_effect(
+            effect_id=request.effect_id,
+            input_kind=request.input_kind,
+            inspection=request.inspection,
+            chunks=jsonl_chunks() if self._format == "jsonl" else json_array_chunks(),
+            row_count=len(members),
+            accepted_ordinals=lambda: accepted,
+            diverted_ordinals=lambda: diverted,
+            encoding=self._encoding,
+            format_name=self._format,
+            stream_sequence=1 if predecessor_declared else 0,
+            diversion_attribution=lambda: diversion_attribution,
+        )
+
+    def commit_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectCommitResult:
+        del ctx
+        return commit_local_effect(plan)
+
+    def reconcile_effect(self, plan: SinkEffectPlan, ctx: RestrictedSinkEffectContext) -> SinkEffectReconcileResult:
+        del ctx
+        return reconcile_local_effect(plan)
+
+    def write(self, rows: list[dict[str, Any]], ctx: SinkContext) -> SinkWriteResult:
+        del rows, ctx
+        raise RuntimeError("JSONSink publication requires the recoverable sink effect coordinator") from None
 
     def flush(self) -> None:
-        """Flush buffered data to disk with fsync for durability.
+        """No-op: ``commit_effect`` performs synchronous publication.
 
-        CRITICAL: Ensures data survives process crash and power loss.
-        Called by orchestrator BEFORE creating checkpoints.
-
-        JSONL format: flushes the persistent file handle and fsyncs.
-        JSON array format: no-op — _write_json_array already fsyncs
-        via the atomic write pattern (temp file + fsync + os.replace).
+        Direct ``write`` publication is forbidden. The recoverable sink-effect
+        coordinator owns inspection, intent recording, synchronous commit, and
+        reconciliation, so there is no independent buffered state to flush.
         """
-        if self._file is not None:
-            self._file.flush()
-            os.fsync(self._file.fileno())
+        pass
 
     def close(self) -> None:
-        """Close the file handle and release buffered rows."""
-        if self._file is not None:
-            self._file.close()
-            self._file = None
-        self._rows = []
+        """No-op: file handles are opened and closed inside the effect commit path."""
 
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
         set_resume_field_resolution(self, resolution_mapping)
@@ -534,7 +548,7 @@ class JSONSink(BaseSink):
                 summary="Write rows as JSON-array or JSONL (newline-delimited). Configurable collision_policy, encoding, and on_write_failure routing.",
                 composer_hints=(
                     "Choose format: 'jsonl' for resumable output. JSON-array rewrites the entire file on every checkpoint — not resumable.",
-                    "collision_policy: 'fail_if_exists', 'auto_increment', or 'append_or_create' (only with mode: append). Unset is the default and OVERWRITES an existing file — set it deliberately to protect prior runs.",
+                    "collision_policy: 'fail_if_exists', 'auto_increment', or 'append_or_create' (mode: append only). REQUIRED explicitly with mode: write — the composer rejects an implicit collision policy; 'auto_increment' is the safe default.",
                     "JSON sink writes the row it receives; schema, format, sink name, and output name do not drop fields. Use field_mapper before the sink when the user wants to remove or whitelist fields.",
                     "For web_scrape results saved without raw page bodies, route the final path through field_mapper(select_only=true) before this sink; a sink named cleanup is not a cleanup transform.",
                     "on_write_failure is REQUIRED (no default): set 'discard' (drop with an audit record) or a quarantine sink name so single-row write errors don't crash the run; omitting it fails validation.",

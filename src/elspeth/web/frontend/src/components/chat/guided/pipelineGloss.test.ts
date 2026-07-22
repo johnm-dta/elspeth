@@ -94,3 +94,50 @@ describe("buildPlainPhraseMap", () => {
     expect(UNKNOWN_COMPONENT_PHRASE).toMatch(/\S/);
   });
 });
+
+// A declared queue is uncorrelated structural fan-in: many producers publish
+// one connection name and the queue interleaves those rows. The gloss must say
+// so in plain language and must NOT reach for merge/join/union/buffer/priority
+// wording (elspeth-a5b86149d4 / elspeth-6421ffa028).
+describe("pipelineGloss — queue fan-in", () => {
+  function queueComposition() {
+    return makeComposition(1, {
+      sources: {
+        orders: { plugin: "csv", options: {} },
+        refunds: { plugin: "csv", options: {} },
+      },
+      nodes: [
+        {
+          id: "inbound",
+          node_type: "queue",
+          plugin: null,
+          input: "inbound",
+          on_success: null,
+          on_error: null,
+          options: {},
+        },
+        {
+          id: "normalize",
+          node_type: "transform",
+          plugin: "passthrough",
+          input: "inbound",
+          on_success: null,
+          on_error: null,
+          options: {},
+        },
+      ],
+      outputs: [{ name: "combined", plugin: "json", options: {} }],
+    });
+  }
+
+  it("describes the queue as fan-in that interleaves the incoming rows", () => {
+    const gloss = pipelineGloss(queueComposition());
+    expect(gloss).toContain("interleave the incoming rows");
+    expect(gloss).not.toMatch(/merge|join|union|buffer|priority/i);
+  });
+
+  it("keys the queue phrase by node id in the plain-phrase map", () => {
+    const map = buildPlainPhraseMap(queueComposition());
+    expect(map.get("inbound")).toBe("interleave the incoming rows");
+  });
+});

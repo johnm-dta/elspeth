@@ -1,7 +1,7 @@
 # ELSPETH Composer Guide
 
-**Document date:** 8 July 2026
-**Release covered:** 0.7.0
+**Document date:** 23 July 2026
+**Release covered:** 0.7.1
 **Audience:** Evaluators, programme teams, operators, and technical reviewers
 **Register:** Public-facing / lightly technical
 **Status:** Current capability guide
@@ -26,7 +26,7 @@ from a blank YAML file.
 | Need | Composer capability |
 |---|---|
 | Start from plain-language intent | Describe the workflow in chat or use guided mode to let the model build each stage from an operator instruction. |
-| Build with structure | Add or revise a source, sink, transforms, final wiring, routing, batch steps, and plugin options through controlled UI turns. |
+| Build with structure | Add or revise plural sources, sinks, transforms, queues, gates, forks, coalesces, final wiring, and plugin options through controlled UI turns. |
 | Keep the operator in control | Accept, reject, or edit proposed changes before they become part of the composition. |
 | Check readiness | Use the audit-readiness and live verification panels to see validation, plugin trust, provenance, retention, LLM interpretation, and secret status. |
 | Review the shape | Inspect the graph view and rendered YAML before running or sharing. |
@@ -48,11 +48,13 @@ Guided mode is the default for new sessions unless the user changes their
 Composer preference. Users can switch modes during a session without changing
 their account default.
 
-In 0.7.0, guided mode is LLM-primary. The operator stays in control, but the
-model proposes the concrete stage change through `/guided/chat`; ELSPETH applies
-that proposal to the in-progress pipeline only after validation, presents the
-plain-language gloss and graph impact, and gates final wiring on advisor
-sign-off.
+In 0.7.1, guided mode remains LLM-primary but uses the same canonical pipeline
+proposal contract as freeform mode. The model can propose a complete DAG or a
+stage-scoped revision; ELSPETH keeps that candidate separate from committed
+state, validates it, presents the plain-language and graph impact, and applies
+it only after review and wire confirmation. Closed rejection codes return
+contract facts to a bounded repair round instead of letting the model silently
+replace the operator's intent.
 
 ## How Composer Keeps Work Auditable
 
@@ -70,6 +72,9 @@ Composer treats authoring as part of the evidence chain.
   surface that interpretation for review instead of silently deciding it.
 - Guided sessions surface pending interpretation cards before persistence can
   advance, and the wire stage can request an advisor rather than auto-complete.
+- Guided planning, start admission, failed-operation evidence, and proposal
+  confirmation are durable and fenced. A concurrent mutation receives a fast
+  conflict instead of entering a second long-running planner queue.
 
 This does not make the language model an authority. The language model proposes
 changes. ELSPETH records, validates, and gates the resulting pipeline.
@@ -113,6 +118,11 @@ If a Composer session is interrupted, the recovery panel can show:
 - redacted tool-call rows;
 - the before-and-after composition diff;
 - the visible failure reason where one is available.
+
+Cancellation waits for the active turn to settle before reloading durable
+state. A stale response cannot overwrite a newer session version, and a
+replayed fork or confirmation returns the stored result. Retry is reserved for
+the latest retryable failure rather than acting as a second mutation path.
 
 The goal is not simply to "try again." The goal is to show what happened and let
 the user decide what to keep.

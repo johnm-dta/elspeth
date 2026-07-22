@@ -7,6 +7,7 @@ from elspeth.contracts import ArtifactDescriptor, Determinism
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.contracts.sink_effects import SinkEffectInputKind
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.testing import make_field
 
@@ -91,3 +92,12 @@ class TestBaseSinkContract:
     def test_class_attribute_default_is_none(self) -> None:
         """Class attribute _output_contract defaults to None."""
         assert BaseSink._output_contract is None
+
+    def test_effect_protocol_capabilities_default_to_explicitly_unsupported(self) -> None:
+        assert BaseSink.effect_protocol_version is None
+        assert BaseSink.supported_effect_modes == frozenset()
+        assert BaseSink.supported_effect_input_kinds == frozenset()
+        assert isinstance(BaseSink.supported_effect_input_kinds, frozenset)
+        assert "_resolved_effect_mode" not in BaseSink.__annotations__
+        assert "effect_mode" not in BaseSink.__annotations__
+        assert SinkEffectInputKind.PIPELINE_MEMBERS not in BaseSink.supported_effect_input_kinds

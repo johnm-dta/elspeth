@@ -41,6 +41,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: "2026-07-12T05:00:00Z",
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -54,9 +55,40 @@ describe("preferencesStore", () => {
     const state = usePreferencesStore.getState();
     expect(state.defaultMode).toBe("freeform");
     expect(state.bannerDismissedAt).toBeNull();
+    expect(state.freeformIntroDismissedAt).toBe("2026-07-12T05:00:00Z");
     expect(state.tutorialCompletedAt).toBeNull();
     expect(selectTutorialCompleted(state)).toBe(false);
     expect(state.loaded).toBe(true);
+  });
+
+  it("dismisses the freeform introduction only after the server confirms", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      freeformIntroDismissedAt: null,
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: "2026-07-12T05:00:00Z",
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-12T05:00:00Z",
+    });
+
+    const pending = usePreferencesStore.getState().dismissFreeformIntro();
+    expect(usePreferencesStore.getState().writing).toBe(true);
+    expect(usePreferencesStore.getState().freeformIntroDismissedAt).toBeNull();
+    await pending;
+
+    expect(mockUpdate).toHaveBeenCalledWith({
+      freeform_intro_dismissed_at: expect.any(String),
+    });
+    expect(usePreferencesStore.getState().freeformIntroDismissedAt).toBe(
+      "2026-07-12T05:00:00Z",
+    );
   });
 
   it("selectTutorialCompleted derives true when tutorialCompletedAt is set", () => {
@@ -73,6 +105,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -117,6 +150,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -144,6 +178,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -175,6 +210,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-05-19T12:30:00Z",
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -216,17 +252,136 @@ describe("preferencesStore", () => {
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
   });
 
-  it("markTutorialGraduated respects the writing guard", async () => {
+  it("markTutorialGraduated waits out an in-flight write instead of dropping the opt-out", async () => {
+    // The old `if (writing) return` no-op silently dropped the graduation
+    // PATCH — an exit/skip click landing while another preferences write was
+    // in flight simply never persisted (elspeth-61591e64bb). The store now
+    // waits for the in-flight write to settle, then sends the PATCH.
     usePreferencesStore.setState({
       loaded: true,
       defaultMode: "guided",
       writing: true,
     });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+    // Simulate the in-flight write settling shortly after the click.
+    setTimeout(() => {
+      usePreferencesStore.setState({ writing: false });
+    }, 120);
 
     await usePreferencesStore.getState().markTutorialGraduated();
 
+    expect(mockUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ tutorial_completed_at: expect.any(String) }),
+    );
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
+  });
+
+  it("markTutorialGraduated does not re-PATCH a completion that landed while it waited", async () => {
+    // Double-clicked Exit (or the chrome exit racing the wizard's onExited
+    // hand-off): the write this call waits out IS the same graduation. The
+    // backend counts every via=exit PATCH (no prior-state check), so an
+    // unconditional second PATCH double-counts completion_path telemetry.
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      writing: true,
+    });
+    // Simulate the first exit click's PATCH landing while this one waits.
+    setTimeout(() => {
+      usePreferencesStore.setState({
+        writing: false,
+        tutorialCompletedAt: "2026-07-09T00:00:00Z",
+        tutorialCompleted: true,
+      });
+    }, 120);
+
+    const completedAt = await usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+
+    expect(completedAt).toBe("2026-07-09T00:00:00Z");
     expect(mockUpdate).not.toHaveBeenCalled();
-    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+  });
+
+  it("two rapid exit clicks send exactly one completion PATCH", async () => {
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    let resolveFirst!: (payload: {
+      default_mode: "guided";
+      banner_dismissed_at: null;
+      freeform_intro_dismissed_at: null;
+      tutorial_completed_at: string;
+      tutorial_stage: null;
+      tutorial_session_id: null;
+      tutorial_run_id: null;
+      tutorial_source_data_hash: null;
+      updated_at: string;
+    }) => void;
+    mockUpdate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+
+    const first = usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+    const second = usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ via: "exit" });
+    resolveFirst({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(a).toBe("2026-07-09T00:00:00Z");
+    expect(b).toBe("2026-07-09T00:00:00Z");
+  });
+
+  it("markTutorialGraduated sends the exit discriminator when asked", async () => {
+    // The backend infers first_time/skip from payload shape; an explicit
+    // exit must carry tutorial_completed_via so it is not bucketed as
+    // "skip" (elspeth-61591e64bb telemetry correction).
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "guided",
+      banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
+      tutorial_completed_at: "2026-07-09T00:00:00Z",
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+      updated_at: "2026-07-09T00:00:00Z",
+    });
+
+    await usePreferencesStore.getState().markTutorialGraduated({ via: "exit" });
+
+    expect(mockUpdate).toHaveBeenCalledWith({
+      tutorial_completed_at: expect.any(String),
+      tutorial_completed_via: "exit",
+    });
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
   it("resetTutorial clears tutorial_completed_at through the PATCH contract", async () => {
@@ -239,6 +394,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -270,6 +426,7 @@ describe("preferencesStore", () => {
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -329,6 +486,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValue({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -357,6 +515,7 @@ describe("preferencesStore", () => {
     mockFetch.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -524,6 +683,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -546,6 +706,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -591,6 +752,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -610,6 +772,7 @@ describe("preferencesStore — banner cluster + error surface (Phase 1B Panel)",
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: stamp,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: null,
       tutorial_session_id: null,
@@ -694,6 +857,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockFetch.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "run",
       tutorial_session_id: "sess-1",
@@ -716,6 +880,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "guided",
       tutorial_session_id: "sess-2",
@@ -750,6 +915,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: null,
       tutorial_stage: "run",
       tutorial_session_id: "sess-3",
@@ -780,6 +946,7 @@ describe("preferencesStore — tutorial resume state (elspeth-918f4434b3)", () =
     mockUpdate.mockResolvedValueOnce({
       default_mode: "guided",
       banner_dismissed_at: null,
+      freeform_intro_dismissed_at: null,
       tutorial_completed_at: "2026-07-02T00:00:00Z",
       // Completion-clears-progress: the backend terminated the resume state.
       tutorial_stage: null,

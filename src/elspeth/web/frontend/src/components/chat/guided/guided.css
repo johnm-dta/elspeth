@@ -1,8 +1,7 @@
 /* guided.css — Guided-mode widget family used by the chat panel.
    Owners: .guided-* across InspectAndConfirm, MultiSelectWithCustom,
-   SchemaForm, ProposeChain, Recipe, ExitToFreeform, GuidedHistory,
-   CompletionSummary + the trailing @media (prefers-reduced-motion: reduce)
-   that silences guided-* transitions. */
+   SchemaForm, WireStage, GuidedHistory, and CompletionSummary, plus the
+   trailing reduced-motion rule that silences guided-* transitions. */
 
 /* ---------------------------------------------------------------------------
    Guided Mode Turn Widgets
@@ -13,7 +12,7 @@
        @media (prefers-reduced-motion: reduce) rule (see block at end of section).
      - Shared chip styles (.guided-chip-btn, .guided-chip-group, .guided-chip-item,
        .guided-chip-hint, .guided-chip-fieldset, .guided-chip-legend) are
-       designed for reuse by multi_select_with_custom and recipe_offer — do not
+       designed for reuse by multi_select_with_custom — do not
        redefine equivalent styles in those widgets' code.
      - `.guided-chip-btn[aria-pressed="true"]` lights the pressed visual.
        Only set `aria-pressed` on chips that have toggle semantics
@@ -114,6 +113,13 @@
   max-width: none;
   margin-inline: 0;
   padding: var(--space-xs) var(--space-lg) 0;
+}
+
+/* Keep the completed evidence stack on one shared horizontal grid. Run Results
+   already uses --space-lg as its inline gutter; the stepper's content and the
+   Pipeline Ready card align to that same edge below. */
+.chat-panel--completed > .guided-workflow {
+  padding-inline: var(--space-lg);
 }
 
 /* ── THE WORKSPACE (the one guided layout; grew up inside the tutorial) ───────
@@ -396,6 +402,237 @@
   color: var(--color-text-secondary);
 }
 
+/* ── Wire-stage inventory (operator pass 2026-07-22) ──────────────────────────
+   The proposal card's structure applied to the wiring review: grid rhythm,
+   grouped regions with quiet headings, component entries as bounded card rows
+   (not a raw bullet dump), and a readable measure — the 64rem sheet width the
+   guided column already uses — so metadata lines stop sprawling across
+   ultrawide viewports. */
+.wire-stage {
+  display: grid;
+  gap: var(--space-lg);
+  max-width: 64rem;
+}
+
+.wire-stage h3,
+.wire-stage__components h4,
+.wire-stage__routes h4 {
+  margin: 0;
+}
+
+.wire-stage__warnings {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-xl);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.wire-stage__components {
+  display: grid;
+  gap: var(--space-md);
+}
+
+/* Component entries as card rows: name + plugin on the lead line, the
+   cardinality/fields/policy metadata as quiet stacked lines beneath. The
+   direct-child combinators keep the nested field lists (structured outputs,
+   business schema) as ordinary indented sub-lists inside a card. */
+.wire-stage__components > div > ul {
+  list-style: none;
+  margin: var(--space-xs) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.wire-stage__components > div > ul > li {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  overflow-wrap: anywhere;
+}
+
+.wire-stage__components li > span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__components li p {
+  margin: var(--space-2xs) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__components li ul {
+  margin: var(--space-2xs) 0 0;
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+/* Stable ID expander: same quiet operator-expander idiom as
+   .wire-stage__raw, tucked at the end of a component card. */
+.wire-stage__components li details {
+  margin-top: var(--space-2xs);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__components li details summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.wire-stage__components li details code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Routes region: one count roll-up line, then per-route rows with a status
+   chip pinned right — never a per-line trailing "— not yet checked" clause. */
+.wire-stage__routes {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.wire-stage__routes-summary {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__edges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2xs);
+}
+
+.wire-stage__edges li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-xs);
+  row-gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  overflow-wrap: anywhere;
+}
+
+.wire-stage__edges .wire-review-flow {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__edges .wire-review-status {
+  margin-left: auto;
+}
+
+.wire-stage__edges .wire-review-detail {
+  flex-basis: 100%;
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* Route contract-status chip. Status is also folded into the row's
+   accessible name (WireReviewList contract) — the chip is the sighted
+   signal and never colour-alone (each variant carries its status word). */
+.wire-review-status {
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.wire-review-status--connected {
+  border-color: var(--color-success-border);
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.wire-review-status--warning {
+  border-color: var(--color-error-border);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+/* Correction request as a proper form group (the .guided-proposal__revise
+   bordered-region idiom): quiet legend-style heading, labelled select +
+   full-width feedback field from the schema-form family, action right. */
+.wire-stage__correction {
+  margin: 0;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.wire-stage__correction h4 {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+/* The grid gap owns the rhythm inside the group. */
+.wire-stage__correction .guided-schema-field-row {
+  margin-bottom: 0;
+}
+
+.wire-stage__correction .guided-schema-select {
+  max-width: 100%;
+  align-self: start;
+}
+
+/* Prose feedback field: the schema-form input chrome at full width (the app
+   font, not the JSON textarea's monospace). */
+.wire-stage__correction-input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  line-height: 1.45;
+  min-height: var(--size-control);
+  resize: vertical;
+  transition: border-color 0.1s ease;
+}
+
+.wire-stage__correction-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.wire-stage__correction-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Confirm / Exit action row. */
+.wire-stage__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
 /* ── Guided respond rejection (elspeth-3b35abf148 variant 3) ──────────────────
    The backend's structured 409 rendered NEXT TO the turn widget it rejected. */
 .guided-respond-rejection {
@@ -552,34 +789,61 @@
   overflow-x: auto;
 }
 
-/* Decision-card footer: the one-click Explain affordance sits under the turn
-   widget's own action row (Continue / Confirm wiring / Apply recipe), reading
-   as the card's secondary action for every widget type. */
+/* Decision-card footer: one anchored seam under the turn widget's own action
+   row for the card's ambient furniture — the pending "Saving decision" status
+   (left, with pulse + elapsed readout) and the one-click Explain affordance
+   (right). The border-top reads as the card's footer bar, so neither piece
+   floats in dead space (operator-reported orphan placement). */
 .guided-current-decision-footer {
   display: flex;
-  justify-content: flex-end;
-  margin-top: var(--space-sm);
-}
-
-/* Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
-   composer's child content is a lean single-row strip — pulse dots +
-   adaptive headline + elapsed + Stop. It replaces the whole .chat-input
-   strip, so it carries that strip's docked-band chrome itself (border-top
-   seam + padding, same trade as .guided-step-chat-sent above). min-height
-   approximates the idle strip (2-row textarea box + hint line) so the
-   conversation column above barely reflows on the swap. */
-.guided-pending-strip {
-  display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-md);
-  min-height: 76px;
-  padding: var(--space-sm) var(--space-lg);
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
   border-top: 1px solid var(--color-border);
 }
 
-/* Programmatic focus landing (tabIndex=-1), not a user tab stop — no ring. */
-.guided-pending-strip:focus {
-  outline: none;
+/* The pending status hugs the footer's left edge (auto margin pushes the
+   Explain button right); its bare-paragraph top margin dies inside the
+   footer — the footer's own seam owns the spacing. */
+.guided-current-decision-footer .guided-current-decision-pending {
+  margin: 0 auto 0 0;
+}
+
+/* Pending guided decision submit (chat Send pending idiom): pulse dots +
+   adaptive headline + elapsed readout on one baseline. Shared between the
+   decision-card footer and the proposal card's submitting status. */
+.guided-decision-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.guided-decision-pending .guided-decision-pending-headline {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Chat-pending working strip (elspeth-6a9673ecd3; placement pass
+   2026-07-23): pulse dots + adaptive headline + elapsed + Stop, riding IN
+   the conversation flow as the last child of .guided-workspace-scroll — the
+   provisional reply slot, matching the decision-submit indicator — instead
+   of swapping over the composer's typing area. The docked-band chrome
+   (border-top seam, input-strip min-height) died with the swap; margins
+   align it to the scroll region's card gutter alongside .ack-stack and
+   .guided-current-decision. */
+.guided-pending-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-xs) 0;
+}
+
+.guided-workspace-scroll > .guided-pending-strip {
+  margin-inline: var(--space-lg);
 }
 
 .guided-pending-strip-status {
@@ -588,6 +852,33 @@
   gap: var(--space-md);
   flex: 1;
   min-width: 0;
+}
+
+.guided-pending-substeps {
+  order: 2;
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin: calc(-1 * var(--space-xs)) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guided-pending-substep {
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+}
+
+.guided-pending-substep--current {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background-color: var(--color-accent-muted);
+  font-weight: 700;
 }
 
 .guided-pending-strip-headline {
@@ -624,11 +915,9 @@
   padding: var(--space-md) 0;
 }
 
-/* Shared turn action buttons (SchemaFormTurn / recipe_decision emit
-   .guided-turn-primary / .guided-turn-secondary). These were undefined, so the
-   "Continue" / "Apply recipe" / "Build manually" / "Clear …" buttons rendered
-   as unstyled UA buttons (and fell below the WCAG 2.5.8 44px target). Styled to
-   match the rest of the guided button family. */
+/* Shared turn action buttons (SchemaFormTurn emits
+   .guided-turn-primary / .guided-turn-secondary). They match the rest of the
+   guided button family and retain the WCAG 2.5.8 44px target. */
 .guided-turn-primary,
 .guided-turn-secondary {
   padding: var(--space-sm) var(--space-lg);
@@ -1285,6 +1574,27 @@
   color: var(--color-text-secondary);
 }
 
+/* A blob-backed source is an immutable binding, not an editable Path value.
+   Keep it visually static while showing both the friendly meaning and the
+   exact blob:<ref> target an operator is reviewing. */
+.guided-schema-bound-value {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  color: var(--color-text);
+}
+
+.guided-schema-bound-reference {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.guided-schema-bound-reference code {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+}
+
 /* Required-field asterisk (WCAG 3.3.2). aria-hidden in the markup — the
    accessible cue rides the visually-hidden "(required)" + aria-required; this
    is the sighted-only signal, tinted with the error colour to stand out. */
@@ -1465,367 +1775,96 @@
 }
 
 /* ---------------------------------------------------------------------------
-   ProposeChainTurn (Task 7.6)
-   Classes prefixed guided-propose-*. Card-list layout -- no chip styles.
-
-   CARD-STYLE REUSE (Task 7.7): .guided-propose-step-card also carries the
-   recipe-decision card chrome. It provides pure card chrome (surface-elevated,
-   border-strong, radius-lg, padding space-md) with no step-list-specific styling.
-   ProposeChainTurn applies it to each <li> in the step list.
+   ComponentReviewTurn — stable-id source/output collection controller.
    --------------------------------------------------------------------------- */
 
-/* Overall rationale paragraph shown above the step cards */
-.guided-propose-why {
-  font-size: var(--font-size-base);
-  color: var(--color-text-secondary);
-  margin-bottom: var(--space-md);
-  line-height: 1.5;
-  /* Readable measure — same constraint as the chat narration; the LLM
-     rationale must not run the full guided column. */
-  max-width: 70ch;
-}
-
-/* Blockers section — only rendered when payload.blockers is non-empty */
-.guided-propose-blockers {
-  background-color: var(--color-surface-elevated);
-  border: 1px solid var(--color-warning);
-  border-radius: var(--radius-md);
-  padding: var(--space-md);
-  margin-bottom: var(--space-md);
-}
-
-.guided-propose-blockers-heading {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--color-warning);
-  margin-bottom: var(--space-xs);
-}
-
-.guided-propose-blockers-list {
-  margin: 0;
-  padding-left: var(--space-lg);
-}
-
-.guided-propose-blocker-item {
-  font-size: var(--font-size-sm);
+.guided-component-review-heading {
+  margin: 0 0 var(--space-md);
   color: var(--color-text);
-  margin-bottom: var(--space-xs);
+  font-size: var(--font-size-lg);
 }
 
-/* Ordered list of step cards — reset list styles; numbers shown by .guided-propose-step-number */
-.guided-propose-steps {
+.guided-component-review-list {
+  display: grid;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
   list-style: none;
-  margin: 0;
-  padding: 0;
+}
+
+.guided-component-review-item {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-md);
-  margin-bottom: var(--space-lg);
-}
-
-/* Individual step card */
-.guided-propose-step-card {
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background-color: var(--color-surface-elevated);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-lg);
-  padding: var(--space-md);
 }
 
-/* Card header: step number badge + plugin name */
-.guided-propose-step-header {
+.guided-component-review-summary,
+.guided-component-review-item-actions,
+.guided-component-review-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  margin-bottom: var(--space-sm);
-}
-
-/* Circular step number badge */
-.guided-propose-step-number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background-color: var(--color-badge-transform-bg);
-  border: 1px solid var(--color-badge-transform-border);
-  color: var(--color-badge-transform);
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-/* Plugin name -- rendered as <h3> for SR landmark navigation.
-   Reset default <h*> margin so the visual layout matches the prior <span>;
-   font-size is pinned to --font-size-base so the browser's default <h3>
-   sizing does not leak in. */
-.guided-propose-step-plugin {
-  margin: 0;
-  font-size: var(--font-size-base);
-  font-weight: 600;
-  color: var(--color-text);
-  font-family: var(--font-mono, monospace);
-}
-
-/* Options key-value definition list */
-.guided-propose-options {
-  margin: 0 0 var(--space-sm) 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-/* Tutorial passive mode: the option dump is collapsed behind a summary so the
-   learner sees a friendly label, not a monospace config wall. */
-.guided-propose-options-details {
-  margin: 0 0 var(--space-sm) 0;
-}
-
-.guided-propose-options-summary {
-  cursor: pointer;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  font-family: var(--font-mono, monospace);
-  padding: var(--space-2xs) 0;
-}
-
-/* Each option row: key and value side-by-side */
-.guided-propose-option-row {
-  display: flex;
-  gap: var(--space-sm);
-  font-size: var(--font-size-sm);
-}
-
-.guided-propose-option-key {
-  color: var(--color-text-muted);
-  min-width: 120px;
-  flex-shrink: 0;
-  font-family: var(--font-mono, monospace);
-}
-
-.guided-propose-option-val {
-  color: var(--color-text);
-  font-family: var(--font-mono, monospace);
-  word-break: break-all;
-  margin: 0; /* dd default margin reset */
-}
-
-/* LLM's rationale for this step */
-.guided-propose-step-rationale {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
-  margin: 0;
-  line-height: 1.5;
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--color-border);
-  /* Readable measure — matches .guided-propose-why and the chat narration so
-     the per-step rationale doesn't run the full guided column. */
-  max-width: 70ch;
-}
-
-/* Action row: Reject / Ask advisor / Accept. The sibling
-   .guided-propose-step-actions (below) already carries gap; this row had neither
-   gap nor justification, so the buttons rendered flush. Right-align with the
-   primary (Accept) rightmost; wrap on narrow panels so the row never overflows. */
-.guided-propose-actions {
-  display: flex;
   flex-wrap: wrap;
   gap: var(--space-sm);
-  justify-content: flex-end;
+}
+
+.guided-component-review-summary span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.guided-component-review-actions {
   margin-top: var(--space-md);
 }
 
-/* Accept proposal button */
-.guided-propose-accept-btn {
-  padding: var(--space-sm) var(--space-lg);
-  background-color: var(--color-accent);
-  color: var(--color-text-inverse);
-  border: none;
-  border-radius: var(--radius-md);
+.guided-component-review-btn {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text);
   cursor: pointer;
-  font-size: var(--font-size-base);
-  font-family: inherit;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease;
+  font: inherit;
 }
 
-.guided-propose-accept-btn:hover {
-  background-color: var(--color-btn-primary-bg-hover);
+.guided-component-review-btn:hover:not(:disabled) {
+  border-color: var(--color-chip-border);
+  background-color: var(--color-highlight);
 }
 
-.guided-propose-accept-btn:focus-visible {
+.guided-component-review-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
 
-/* ---------------------------------------------------------------------------
-   Recipe decision header
-   Classes prefixed guided-recipe-*.
-
-   Card chrome reuse: .guided-propose-step-card (Task 7.6, defined earlier in
-   this file in the Propose Chain decision header section) is applied as the
-   outer card shell.  guided-recipe-* rules cover the
-   recipe-specific interior: name heading, slots definition list, alternatives
-   list, and action row with two buttons.
-   --------------------------------------------------------------------------- */
-
-/* Recipe name as <h3> -- reset default <h3> margin and pin font-size to base
-   so the browser's default <h3> sizing does not leak in.  Same pattern as
-   .guided-propose-step-plugin (Task 7.6). */
-.guided-recipe-name {
-  margin: 0 0 var(--space-md) 0;
-  font-size: var(--font-size-base);
-  font-weight: 700;
-  color: var(--color-text);
-  font-family: var(--font-mono, monospace);
-}
-
-/* Slot definition list */
-.guided-recipe-slots {
-  margin: 0 0 var(--space-sm) 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-}
-
-/* Each slot row: key and value side-by-side */
-.guided-recipe-slot-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  font-size: var(--font-size-sm);
-}
-
-.guided-recipe-slot-key {
+.guided-component-review-btn:disabled {
   color: var(--color-text-muted);
-  min-width: 120px;
-  flex-shrink: 0;
-  font-family: var(--font-mono, monospace);
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
-.guided-recipe-slot-val {
-  color: var(--color-text);
-  font-family: var(--font-mono, monospace);
-  word-break: break-all;
-  margin: 0; /* dd default margin reset */
+.guided-component-review-btn--remove {
+  border-color: var(--color-error-border);
 }
 
-/* Alternatives section -- only rendered when payload.alternatives is non-empty */
-.guided-recipe-alternatives {
-  margin-top: var(--space-sm);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--color-border);
-}
-
-.guided-recipe-alternatives-heading {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin: 0 0 var(--space-xs) 0;
-}
-
-.guided-recipe-alternatives-list {
-  margin: 0;
-  padding-left: var(--space-lg);
-}
-
-.guided-recipe-alternative-item {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-  font-family: var(--font-mono, monospace);
-  margin-bottom: var(--space-xs);
-}
-
-.guided-recipe-input-warning {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-xs);
-  margin: var(--space-xs) 0 0 0;
-  color: var(--color-warning);
-  font-size: var(--font-size-sm);
-  line-height: 1.45;
-}
-
-.guided-recipe-input-warning-icon {
-  display: inline-flex;
-  width: 1rem;
-  height: 1rem;
-  flex-shrink: 0;
-  margin-top: 0.1rem;
-}
-
-.guided-recipe-input-warning-icon svg {
-  display: block;
-  width: 1rem;
-  height: 1rem;
-  fill: currentColor;
-}
-
-.guided-recipe-slot-row .guided-recipe-input-warning {
-  flex-basis: 100%;
-  margin-left: calc(120px + var(--space-sm));
-}
-
-/* Action row: Apply recipe + Build manually buttons */
-.guided-recipe-actions {
-  display: flex;
-  gap: var(--space-sm);
-  margin-top: var(--space-md);
-}
-
-/* Apply recipe -- primary action */
-.guided-recipe-apply-btn {
-  padding: var(--space-sm) var(--space-lg);
-  background-color: var(--color-accent);
-  color: var(--color-text-inverse);
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: var(--font-size-base);
-  font-family: inherit;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease;
-}
-
-.guided-recipe-apply-btn:hover {
-  background-color: var(--color-btn-primary-bg-hover);
-}
-
-.guided-recipe-apply-btn:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-/* Build manually -- secondary action */
-.guided-recipe-build-btn {
-  padding: var(--space-sm) var(--space-lg);
-  background-color: transparent;
-  color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: var(--font-size-base);
-  font-family: inherit;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease, border-color 0.1s ease;
-}
-
-.guided-recipe-build-btn:hover {
-  background-color: var(--color-surface-elevated);
+.guided-component-review-btn--finish {
   border-color: var(--color-accent);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
 }
 
-.guided-recipe-build-btn:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
+@media (max-width: 640px) {
+  .guided-component-review-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 
-/* The guided<->freeform mode toggle moved to the shared ModeSwitchButton
-   (chat.css → .mode-switch-*), used in both body headers. The old
-   ExitToFreeformButton (.guided-exit-*) styles were retired with that
-   component. */
 
 /* ---------------------------------------------------------------------------
    GuidedHistory (Task 7.9)
@@ -1926,7 +1965,7 @@
    syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with
    task-oriented actions:
      "Open freeform editor" -- continue editing in the freeform composer.
-     "Review YAML"          -- switch to the YAML review tab.
+     "Export YAML"          -- open the YAML export dialog.
      "Validate pipeline"    -- run validation for the active session.
 
    Visual hierarchy:
@@ -1949,6 +1988,35 @@
   background-color: var(--color-success-bg);
   border: 1px solid var(--color-success-border);
   border-radius: var(--radius-lg);
+}
+
+/* On a completed wide/short workspace, Run Results must remain visible at the
+   bottom instead of being squeezed below the 400px YAML preview. Let this card
+   yield vertical space while preserving enough room for its heading, actions,
+   and a useful scrollable YAML viewport. */
+.chat-panel--completed > .guided-completion {
+  min-height: 18rem;
+  margin-top: var(--space-xs);
+  margin-inline: var(--space-lg);
+  overflow: hidden;
+}
+
+/* Match chat.css's compact Run Results gutter at the same breakpoint. */
+@media (max-width: 760px) {
+  .chat-panel--completed > .guided-workflow {
+    padding-inline: var(--space-sm);
+  }
+
+  .chat-panel--completed > .guided-completion {
+    margin-inline: var(--space-sm);
+  }
+}
+
+.chat-panel--completed
+  > .guided-completion
+  .guided-completion-yaml-container {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Section heading -- "Pipeline ready" */
@@ -2042,46 +2110,175 @@
   outline-offset: 2px;
 }
 
-/* ---------------------------------------------------------------------------
-   ProposeChainTurn secondary actions (transforms stage). The primary
-   .guided-propose-accept-btn is defined above; the edit / secondary buttons and
-   their row were not, so they rendered as unstyled UA buttons.
-   --------------------------------------------------------------------------- */
-.guided-propose-step-actions {
-  display: flex;
-  gap: var(--space-sm);
-  margin-top: var(--space-sm);
-}
-
-.guided-propose-edit-btn,
-.guided-propose-secondary-btn {
-  padding: var(--space-sm) var(--space-md);
-  background-color: transparent;
-  color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  font-family: inherit;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease, border-color 0.1s ease;
-}
-
-.guided-propose-edit-btn:hover:not(:disabled),
-.guided-propose-secondary-btn:hover:not(:disabled) {
-  background-color: var(--color-surface-elevated);
-  border-color: var(--color-accent);
-}
-
-.guided-propose-edit-btn:focus-visible,
-.guided-propose-secondary-btn:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
 
 /* The guided interpretation-review card styling was retired with the
    InterpretationReviewTurn widget; pending LLM decisions now render through the
    shared AcknowledgementStack/AcknowledgementCard (see chat.css → .ack-*). */
+
+/* ---------------------------------------------------------------------------
+   Durable full-pipeline proposal review
+   --------------------------------------------------------------------------- */
+
+.guided-proposal {
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.guided-proposal__header h3,
+.guided-proposal__header p,
+.guided-proposal__components h4,
+.guided-proposal__routes h4,
+.guided-proposal__blockers h4 {
+  margin: 0;
+}
+
+.guided-proposal__header {
+  display: grid;
+  gap: var(--space-xs);
+}
+
+.guided-proposal__header > p:not(.guided-proposal__counts) {
+  color: var(--color-text-secondary);
+}
+
+.guided-proposal__counts {
+  margin-top: var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.guided-proposal__status,
+.guided-proposal__tutorial-note {
+  margin: 0;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-proposal__status--error {
+  border-color: var(--color-error-border);
+  background-color: var(--color-error-bg);
+}
+
+.guided-proposal__blockers {
+  padding: var(--space-md);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-proposal__blockers ul,
+.guided-proposal__components ul,
+.guided-wire-review {
+  margin: var(--space-sm) 0 0;
+  padding-left: var(--space-xl);
+}
+
+.guided-proposal__components,
+.guided-proposal__routes {
+  min-width: 0;
+}
+
+.guided-proposal__components li,
+.guided-wire-review li {
+  margin-bottom: var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.guided-readonly-graph {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+}
+
+.guided-readonly-graph__canvas {
+  display: block;
+  width: 100%;
+  min-width: 44rem;
+  height: auto;
+}
+
+.guided-readonly-graph__edge {
+  fill: none;
+  stroke: var(--color-border-strong);
+  stroke-width: 2;
+}
+
+.guided-readonly-graph__edge--error {
+  stroke: var(--color-error);
+  stroke-dasharray: 5 4;
+}
+
+.guided-readonly-graph__node {
+  fill: var(--color-surface-elevated);
+  stroke: var(--color-border-strong);
+  stroke-width: 1.5;
+}
+
+.guided-readonly-graph__node--source,
+.guided-readonly-graph__node--output {
+  stroke: var(--color-accent);
+}
+
+.guided-readonly-graph__node--discard {
+  stroke: var(--color-error);
+  stroke-dasharray: 4 3;
+}
+
+.guided-readonly-graph__node-label {
+  fill: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.guided-readonly-graph__node-subtitle {
+  fill: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.guided-proposal__controls {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.guided-proposal__primary-actions,
+.guided-proposal__revise {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.guided-proposal__revise {
+  margin: 0;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.guided-proposal__revise legend {
+  padding: 0 var(--space-xs);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .guided-proposal__primary-actions,
+  .guided-proposal__revise {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .guided-proposal__primary-actions button,
+  .guided-proposal__revise button {
+    width: 100%;
+  }
+}
 
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
@@ -2101,13 +2298,9 @@
   .guided-schema-input,
   .guided-schema-select,
   .guided-schema-textarea,
+  .wire-stage__correction-input,
   .guided-schema-advanced-toggle,
   .guided-schema-continue-btn,
-  .guided-propose-accept-btn,
-  .guided-propose-edit-btn,
-  .guided-propose-secondary-btn,
-  .guided-recipe-apply-btn,
-  .guided-recipe-build-btn,
   .guided-completion-save-btn,
   .guided-completion-edit-btn {
     transition: none;

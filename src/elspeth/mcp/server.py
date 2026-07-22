@@ -238,6 +238,30 @@ _TOOLS: dict[str, _ToolDef] = {
             "limit": {"type": "integer", "description": "Max operations (default 100)", "default": 100},
         },
     ),
+    "list_artifacts": _ToolDef(
+        description="List sink artifacts with explicit producer and publication evidence",
+        args=_ArgSpec(
+            required_str=("run_id",),
+            optional_int=(("limit", 100),),
+            optional_int_min=(("limit", 1),),
+        ),
+        handler=lambda a, args: a.list_artifacts(run_id=args["run_id"], limit=args["limit"]),
+        schema_properties={
+            "run_id": {"type": "string", "description": "Run ID to query"},
+            "limit": {"type": "integer", "description": "Maximum artifacts (default 100)", "default": 100},
+        },
+    ),
+    "get_sink_effect_history": _ToolDef(
+        description=(
+            "Inspect one recoverable sink effect: lifecycle, predecessor, lease, member progress, "
+            "response-lost calls, exact evidence hashes, and safe recovery guidance"
+        ),
+        args=_ArgSpec(required_str=("effect_id",)),
+        handler=lambda a, args: a.get_sink_effect_history(args["effect_id"]),
+        schema_properties={
+            "effect_id": {"type": "string", "description": "Durable sink effect ID"},
+        },
+    ),
     "get_operation_calls": _ToolDef(
         description="Get external calls (HTTP, SQL, etc.) made during a source/sink operation",
         args=_ArgSpec(required_str=("operation_id",)),

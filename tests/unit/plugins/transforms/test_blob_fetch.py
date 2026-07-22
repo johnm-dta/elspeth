@@ -122,6 +122,83 @@ def test_blob_fetch_stores_body_and_emits_blob_reference(monkeypatch: pytest.Mon
     assert output["fetch_url_final_ip"] == "203.0.113.10"
 
 
+def test_blob_fetch_redacts_persisted_final_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.plugins.transforms.blob_fetch as blob_fetch_module
+    from elspeth.plugins.transforms.blob_fetch import BlobFetch
+
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "blob-fetch-test-key")
+    monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+    original_url = "https://example.test/data.csv?token=ORIGINAL_SECRET"
+    final_url = "https://alice:password@redirect.test/data.csv?sig=FINAL_SECRET&view=full#fragment-secret"
+    monkeypatch.setattr(
+        blob_fetch_module,
+        "validate_url_for_ssrf",
+        lambda url, allowed_ranges=(): _safe_request_for(url),
+    )
+
+    response = httpx.Response(
+        200,
+        content=b"id,name\n1,alice\n",
+        headers={"content-type": "text/csv"},
+        request=httpx.Request("GET", "https://203.0.113.10:443/data.csv"),
+    )
+    transform = BlobFetch(_config())
+    transform._payload_store = _PayloadStoreFake()
+    transform._fetch_url = lambda _safe, _ctx: (response, final_url, _call())  # type: ignore[method-assign]
+
+    result = transform.process(make_pipeline_row({"url": original_url}), make_context())
+
+    assert result.status == "success"
+    assert result.row is not None
+    persisted_url = result.row.to_dict()["fetch_url_final"]
+    parsed = urllib.parse.urlsplit(persisted_url)
+    assert parsed.username is None
+    assert parsed.password is None
+    assert parsed.netloc == "redirect.test"
+    assert parsed.fragment == ""
+    assert urllib.parse.parse_qs(parsed.query)["view"] == ["full"]
+    assert urllib.parse.parse_qs(parsed.query)["sig"][0].startswith("<fingerprint:")
+    assert "password" not in persisted_url
+    assert "FINAL_SECRET" not in persisted_url
+    assert "fragment-secret" not in persisted_url
+
+
+def test_blob_fetch_redacts_url_in_error_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    import elspeth.plugins.transforms.blob_fetch as blob_fetch_module
+    from elspeth.plugins.transforms.blob_fetch import BlobFetch
+
+    monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "blob-fetch-test-key")
+    monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+    original_url = "https://alice:password@example.test/file.pdf?token=ERROR_SECRET#fragment-secret"
+    monkeypatch.setattr(
+        blob_fetch_module,
+        "validate_url_for_ssrf",
+        lambda url, allowed_ranges=(): _safe_request_for(url),
+    )
+
+    response = httpx.Response(
+        200,
+        content=b"%PDF-1.7",
+        headers={"content-type": "application/pdf"},
+        request=httpx.Request("GET", "https://203.0.113.10:443/file.pdf"),
+    )
+    transform = BlobFetch(_config())
+    transform._payload_store = _PayloadStoreFake()
+    transform._fetch_url = lambda _safe, _ctx: (response, original_url, _call())  # type: ignore[method-assign]
+
+    result = transform.process(make_pipeline_row({"url": original_url}), make_context())
+
+    assert result.status == "error"
+    assert result.reason is not None
+    persisted_reason = repr(result.reason)
+    assert "password" not in persisted_reason
+    assert "ERROR_SECRET" not in persisted_reason
+    assert "fragment-secret" not in persisted_reason
+    persisted_url = result.reason["url"]
+    assert isinstance(persisted_url, str)
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(persisted_url).query)["token"][0].startswith("<fingerprint:")
+
+
 def test_blob_fetch_blocks_ssrf_rejected_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     import elspeth.plugins.transforms.blob_fetch as blob_fetch_module
     from elspeth.plugins.transforms.blob_fetch import BlobFetch

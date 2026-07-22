@@ -8,10 +8,11 @@ resume and explain.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
 from sqlalchemy.exc import SQLAlchemyError
@@ -30,17 +31,26 @@ from elspeth.core.landscape._helpers import now
 from elspeth.core.landscape.data_flow.ownership import RowTokenOwnership
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import TokenOutcomeLoader
+from elspeth.core.landscape.ports import LandscapeConnectionProvider
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batches_table,
     node_states_table,
     nodes_table,
+    sink_effect_members_table,
+    sink_effects_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
 )
 
-__all__ = ["TokenOutcomeRepository"]
+__all__ = ["TokenOutcomeRepository", "record_buffered_outcome_guarded"]
+
+# IN-clause chunk size for token-id lock queries — stays under SQLite's
+# default 999 bound-parameter ceiling (the node_states.py convention) and
+# keeps each PostgreSQL extended-protocol statement far below its 32767
+# bind cap on large sink flushes.
+_TOKEN_ID_CHUNK_SIZE = 500
 
 
 class TokenOutcomeRepository:
@@ -48,11 +58,13 @@ class TokenOutcomeRepository:
 
     def __init__(
         self,
+        db: LandscapeConnectionProvider,
         ops: DatabaseOps,
         *,
         token_outcome_loader: TokenOutcomeLoader,
         ownership: RowTokenOwnership,
     ) -> None:
+        self._db = db
         self._ops = ops
         self._token_outcome_loader = token_outcome_loader
         self._ownership = ownership
@@ -70,8 +82,126 @@ class TokenOutcomeRepository:
             return None
         return rows[0]
 
-    def _validate_outcome_fields(
+    @staticmethod
+    def _execute_lock_query(conn: Connection, query: Any, *, operation: str) -> list[Any]:
+        """Execute one PostgreSQL row-lock query with recorder-safe errors."""
+        try:
+            return list(conn.execute(query).fetchall())
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(f"{operation} failed — database rejected audit lock query: {type(exc).__name__}") from exc
+
+    def lock_token_outcome_dependencies(self, refs: Sequence[TokenRef], *, conn: Connection) -> None:
+        """Take token locks first, in stable order, for composed outcome writes.
+
+        PostgreSQL's global order is ``tokens.token_id`` then
+        ``node_states.state_id`` then ``artifacts.artifact_id``. Callers that
+        compose state/artifact mutations with outcomes must invoke this before
+        touching either downstream table. Sorting and de-duplicating here also
+        gives overlapping multi-token sink batches one common acquisition
+        order; ascending chunks keep every statement under the dialect
+        bound-parameter ceilings without changing that order, because chunk
+        N's ids all sort before chunk N+1's. Non-PostgreSQL dialects skip the
+        query entirely: SQLite ignores ``FOR UPDATE`` because
+        ``BEGIN IMMEDIATE`` already owns the file's write slot for the
+        complete boundary, so the statement would lock nothing while a large
+        flush could exceed the default 999-parameter ceiling.
+        """
+        if conn.dialect.name != "postgresql":
+            return
+        token_ids = sorted({ref.token_id for ref in refs})
+        for offset in range(0, len(token_ids), _TOKEN_ID_CHUNK_SIZE):
+            chunk = token_ids[offset : offset + _TOKEN_ID_CHUNK_SIZE]
+            query = (
+                select(tokens_table.c.token_id)
+                .where(tokens_table.c.token_id.in_(chunk))
+                .order_by(tokens_table.c.token_id)
+                .with_for_update(of=tokens_table)
+            )
+            self._execute_lock_query(conn, query, operation="record_token_outcome token lock")
+
+    def _lock_cross_table_witnesses(
         self,
+        ref: TokenRef,
+        outcome: TerminalOutcome | None,
+        path: TerminalPath,
+        *,
+        artifact_id: str | None,
+        conn: Connection,
+    ) -> None:
+        """Lock PostgreSQL witnesses in table/primary-key order.
+
+        The canonical order is ``tokens`` (already locked by the caller), then
+        ``node_states.state_id``, then ``artifacts.artifact_id``.  Lock every
+        existing state for the token so an I3-negative witness cannot change
+        from FAILED/OPEN to COMPLETED.  The token lock prevents a missing state
+        from appearing through a concurrent FK-mediated insert.
+        """
+        if conn.dialect.name != "postgresql":
+            return
+
+        pair = (outcome, path)
+        if pair not in {
+            (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK),
+            (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED),
+        }:
+            return
+
+        artifact_state_id: str | None = None
+        if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK) and artifact_id is not None:
+            artifact_state_query = (
+                select(artifacts_table.c.produced_by_state_id)
+                .where(artifacts_table.c.artifact_id == artifact_id)
+                .where(artifacts_table.c.run_id == ref.run_id)
+            )
+            artifact_state_row = self._execute_fetchone(artifact_state_query, conn=conn)
+            if artifact_state_row is None:
+                raise AuditIntegrityError(
+                    f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                    "did not exist when outcome validation acquired its witness locks."
+                )
+            artifact_state_id = artifact_state_row.produced_by_state_id
+
+        state_predicate = and_(
+            node_states_table.c.token_id == ref.token_id,
+            node_states_table.c.run_id == ref.run_id,
+        )
+        if artifact_state_id is not None:
+            state_predicate = or_(state_predicate, node_states_table.c.state_id == artifact_state_id)
+        state_lock_query = (
+            select(node_states_table.c.state_id)
+            .where(state_predicate)
+            .order_by(node_states_table.c.state_id)
+            .with_for_update(of=node_states_table)
+        )
+        self._execute_lock_query(conn, state_lock_query, operation="record_token_outcome node-state witness lock")
+
+        if artifact_id is None:
+            return
+        artifact_lock_query = (
+            select(artifacts_table.c.artifact_id, artifacts_table.c.produced_by_state_id)
+            .where(artifacts_table.c.artifact_id == artifact_id)
+            .where(artifacts_table.c.run_id == ref.run_id)
+            .order_by(artifacts_table.c.artifact_id)
+            .with_for_update(of=artifacts_table)
+        )
+        locked_artifacts = self._execute_lock_query(
+            conn,
+            artifact_lock_query,
+            operation="record_token_outcome artifact witness lock",
+        )
+        if not locked_artifacts:
+            raise AuditIntegrityError(
+                f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                "disappeared while outcome validation acquired its witness locks."
+            )
+        if locked_artifacts and artifact_state_id is not None and locked_artifacts[0].produced_by_state_id != artifact_state_id:
+            raise AuditIntegrityError(
+                f"ADR-019 I1c violation for token {ref.token_id}: artifact_id={artifact_id!r} "
+                "changed its producing node_state during outcome validation."
+            )
+
+    @staticmethod
+    def _validate_outcome_fields(
         outcome: TerminalOutcome | None,
         path: TerminalPath,
         *,
@@ -133,6 +263,7 @@ class TokenOutcomeRepository:
         sink_node_id: str | None,
         artifact_id: str | None,
         conn: Connection | None = None,
+        lock_witnesses: bool = True,
     ) -> None:
         """Validate ADR-019 real-time cross-table invariants.
 
@@ -141,6 +272,9 @@ class TokenOutcomeRepository:
         with a completed sink node-state for the same token.
         """
         pair = (outcome, path)
+
+        if conn is not None and lock_witnesses:
+            self._lock_cross_table_witnesses(ref, outcome, path, artifact_id=artifact_id, conn=conn)
 
         if pair == (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
             if sink_node_id is None:
@@ -181,7 +315,7 @@ class TokenOutcomeRepository:
                     f"node_state at sink_node_id={sink_node_id!r}."
                 )
 
-            artifact_query = (
+            legacy_artifact_query = (
                 select(artifacts_table.c.artifact_id)
                 .select_from(
                     artifacts_table.join(
@@ -205,7 +339,30 @@ class TokenOutcomeRepository:
                 .where(node_states_table.c.status == NodeStateStatus.COMPLETED.value)
                 .where(nodes_table.c.node_type == NodeType.SINK.value)
             )
-            artifact_row = self._execute_fetchone(artifact_query, conn=conn)
+            artifact_row = self._execute_fetchone(legacy_artifact_query, conn=conn)
+            if artifact_row is None:
+                effect_artifact_query = (
+                    select(artifacts_table.c.artifact_id)
+                    .select_from(
+                        artifacts_table.join(
+                            sink_effects_table,
+                            and_(
+                                artifacts_table.c.sink_effect_id == sink_effects_table.c.effect_id,
+                                artifacts_table.c.run_id == sink_effects_table.c.run_id,
+                                artifacts_table.c.sink_node_id == sink_effects_table.c.sink_node_id,
+                            ),
+                        ).join(
+                            sink_effect_members_table,
+                            sink_effect_members_table.c.effect_id == sink_effects_table.c.effect_id,
+                        )
+                    )
+                    .where(artifacts_table.c.artifact_id == artifact_id)
+                    .where(artifacts_table.c.run_id == ref.run_id)
+                    .where(artifacts_table.c.sink_node_id == sink_node_id)
+                    .where(sink_effect_members_table.c.token_id == ref.token_id)
+                    .where(sink_effect_members_table.c.run_id == ref.run_id)
+                )
+                artifact_row = self._execute_fetchone(effect_artifact_query, conn=conn)
             if artifact_row is None:
                 raise AuditIntegrityError(
                     f"ADR-019 I1c violation for token {ref.token_id}: "
@@ -262,6 +419,7 @@ class TokenOutcomeRepository:
         error_hash: str | None = None,
         context: Mapping[str, object] | None = None,
         conn: Connection | None = None,
+        dependencies_prelocked: bool = False,
     ) -> str:
         """Record a token's (outcome, path) audit terminal in the audit trail.
 
@@ -306,52 +464,74 @@ class TokenOutcomeRepository:
             expand_group_id=expand_group_id,
             error_hash=error_hash,
         )
-
-        # Validate token belongs to the specified run (Tier 1 invariant)
-        self._ownership.validate_token_run_ownership(ref, conn=conn)
-        self._validate_cross_table_invariants(
-            ref,
-            outcome,
-            path,
-            sink_name=sink_name,
-            sink_node_id=sink_node_id,
-            artifact_id=artifact_id,
-            conn=conn,
-        )
-
-        outcome_id = f"out_{generate_id()[:12]}"
-        completed = outcome is not None
+        # Canonicalization recursively normalizes caller-controlled data and
+        # can fail. Do it before taking SQLite's single writer slot (or before
+        # touching a caller-supplied transaction); only Tier-1 reads, witness
+        # locks, and the dependent INSERT belong inside the atomic boundary.
         context_json = canonical_json(context) if context is not None else None
 
-        stmt = token_outcomes_table.insert().values(
-            outcome_id=outcome_id,
-            run_id=ref.run_id,
-            token_id=ref.token_id,
-            outcome=outcome.value if outcome is not None else None,
-            path=path.value,
-            completed=1 if completed else 0,
-            recorded_at=now(),
-            sink_name=sink_name,
-            batch_id=batch_id,
-            fork_group_id=fork_group_id,
-            join_group_id=join_group_id,
-            expand_group_id=expand_group_id,
-            error_hash=error_hash,
-            context_json=context_json,
-        )
-        if conn is None:
-            self._ops.execute_insert(stmt)
-        else:
+        def _record_on(active_conn: Connection) -> str:
+            # Every Tier-1 read and the dependent insert use this exact
+            # transaction. Repository-owned calls enter through
+            # write_connection(), which is BEGIN IMMEDIATE on SQLite.
+            # Outcome inserts acquire a token FK lock even for pairs without a
+            # cross-table invariant. Make that dependency explicit and first
+            # for every repository-owned outcome transaction. Composed callers
+            # prelock their whole batch before any state/artifact mutations.
+            if not dependencies_prelocked:
+                self.lock_token_outcome_dependencies((ref,), conn=active_conn)
+            self._ownership.validate_token_run_ownership(ref, conn=active_conn)
+            self._validate_cross_table_invariants(
+                ref,
+                outcome,
+                path,
+                sink_name=sink_name,
+                sink_node_id=sink_node_id,
+                artifact_id=artifact_id,
+                conn=active_conn,
+                lock_witnesses=not dependencies_prelocked,
+            )
+
+            outcome_id = f"out_{generate_id()[:12]}"
+            completed = outcome is not None
+            stmt = token_outcomes_table.insert().values(
+                outcome_id=outcome_id,
+                run_id=ref.run_id,
+                token_id=ref.token_id,
+                outcome=outcome.value if outcome is not None else None,
+                path=path.value,
+                completed=1 if completed else 0,
+                recorded_at=now(),
+                sink_name=sink_name,
+                batch_id=batch_id,
+                fork_group_id=fork_group_id,
+                join_group_id=join_group_id,
+                expand_group_id=expand_group_id,
+                error_hash=error_hash,
+                context_json=context_json,
+            )
             try:
-                result = conn.execute(stmt)
+                result = active_conn.execute(stmt)
             except SQLAlchemyError as exc:
                 raise LandscapeRecordError(
                     f"record_token_outcome failed for token_id={ref.token_id!r} — database rejected audit write: {type(exc).__name__}"
                 ) from exc
             if result.rowcount == 0:
                 raise LandscapeRecordError(f"record_token_outcome: zero rows affected for token_id={ref.token_id!r} — audit write failed")
+            return outcome_id
 
-        return outcome_id
+        if conn is not None:
+            return _record_on(conn)
+        try:
+            with self._db.write_connection() as active_conn:
+                return _record_on(active_conn)
+        except LandscapeRecordError:
+            raise
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_token_outcome failed for token_id={ref.token_id!r} "
+                f"— database rejected audit transaction boundary: {type(exc).__name__}"
+            ) from exc
 
     def find_orphaned_transient_parents(self, run_id: str) -> list[SQLAlchemyRow[Any]]:
         """Find I1a parent tokens with no child token outcome witnesses."""
@@ -372,6 +552,7 @@ class TokenOutcomeRepository:
                 )
             )
             .where(token_parents_table.c.parent_token_id == token_outcomes_table.c.token_id)
+            .where(token_parents_table.c.run_id == run_id)
         )
         query = (
             select(token_outcomes_table.c.token_id, token_outcomes_table.c.path)
@@ -490,3 +671,57 @@ class TokenOutcomeRepository:
         )
         rows = self._ops.execute_fetchall(query)
         return [self._token_outcome_loader.load(r) for r in rows]
+
+
+def record_buffered_outcome_guarded(
+    conn: Connection,
+    *,
+    run_id: str,
+    token_id: str,
+    batch_id: str,
+    recorded_at: datetime,
+    context: Mapping[str, object] | None = None,
+) -> str:
+    """Record one backdated BUFFERED outcome inside a caller-owned transaction.
+
+    The scheduler barrier's fenced adoption transaction (ADR-030 §E.2) owns
+    ``conn`` and supplies the hold's durable ``barrier_blocked_at`` arrival
+    stamp as ``recorded_at`` — the audit's accept instant is invariant under
+    leader takeover, so backdating stays confined to this writer instead of
+    widening :meth:`TokenOutcomeRepository.record_token_outcome`. The ADR-019
+    (NULL, BUFFERED) discriminator rule runs through the SAME
+    ``_validate_outcome_fields`` validator as every repository-recorded
+    outcome, so a constraint change enforces on both paths.
+    """
+    TokenOutcomeRepository._validate_outcome_fields(
+        None,
+        TerminalPath.BUFFERED,
+        sink_name=None,
+        batch_id=batch_id,
+        fork_group_id=None,
+        join_group_id=None,
+        expand_group_id=None,
+        error_hash=None,
+    )
+    context_json = canonical_json(context) if context is not None else None
+    outcome_id = f"out_{generate_id()[:12]}"
+    stmt = token_outcomes_table.insert().values(
+        outcome_id=outcome_id,
+        run_id=run_id,
+        token_id=token_id,
+        outcome=None,
+        path=TerminalPath.BUFFERED.value,
+        completed=0,
+        recorded_at=recorded_at,
+        batch_id=batch_id,
+        context_json=context_json,
+    )
+    try:
+        result = conn.execute(stmt)
+    except SQLAlchemyError as exc:
+        raise LandscapeRecordError(
+            f"record_buffered_outcome_guarded failed for token_id={token_id!r} — database rejected audit write: {type(exc).__name__}"
+        ) from exc
+    if result.rowcount == 0:
+        raise LandscapeRecordError(f"record_buffered_outcome_guarded: zero rows affected for token_id={token_id!r} — audit write failed")
+    return outcome_id

@@ -160,8 +160,8 @@ def test_follower_drain_cadence_never_runs_lease_recovery() -> None:
 
     Drive enough idle follower drains to trip the SCHEDULER_MAINTENANCE_INTERVAL
     cadence: run_maintenance fires, but FOLLOWER mode returns 0 up front —
-    recover_expired_leases (whose None-token call would take the unfenced
-    legacy arm and reap peers' in-flight leases) is never issued.
+    strict recover_expired_leases (which requires a leader token) is never
+    issued, and follower mode cannot select the named legacy adapter.
     """
     follower, spy, setup, _clock = _build(lease_owner=FOLLOWER_OWNER, mode=ProcessorMode.FOLLOWER)
     _register_worker(setup, FOLLOWER_OWNER)

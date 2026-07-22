@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.guarantee_propagation import compose_propagation
 from elspeth.contracts.schema import get_raw_node_required_fields
@@ -171,21 +172,42 @@ def walk_effective_guarantee_vote(
         node_info.output_schema_config.get_effective_guaranteed_fields() if node_info.output_schema_config is not None else frozenset()
     )
 
-    if node_info.passes_through_input:
+    # Gates are pure routing: rows pass through unchanged (Rule 0 in
+    # validate_edge_schemas enforces input==output schema), so a gate's
+    # effective guarantee is composed from its predecessors exactly like a
+    # pass-through transform. The builder assigns each gate its upstream
+    # producer's RAW output_schema_config; when that producer is itself a
+    # pass-through (e.g. an llm forwarding source columns), the raw set
+    # under-computes and stopping here falsely rejected runnable
+    # source → pass-through → gate → branch pipelines. The composer preview
+    # (_connection_propagation_vote, web/composer/state.py) already recurses
+    # through gates; this pins the engine walker to the same result —
+    # sibling of the coalesce fix 6b431fd03 (elspeth-0b14977817). Monotonic:
+    # compose_propagation unions the gate's own (raw-inherited) fields with
+    # its predecessors' effective vote, so the set can only grow.
+    is_transparent_gate = node_info.node_type is NodeType.GATE
+    if node_info.passes_through_input or is_transparent_gate:
         predecessors = list(graph._graph.predecessors(node_id))
-        if not predecessors:
+        if not predecessors and is_transparent_gate:
+            # Hand-built test graphs may install a gate without wiring its
+            # upstream edge; fall back to the gate's own (inherited)
+            # declaration rather than crashing — the builder always wires
+            # gates, so real graphs never take this branch.
+            result = EffectiveGuaranteeVote(fields=own_fields, participated=own_participates)
+        elif not predecessors:
             raise FrameworkBugError(
                 f"Pass-through transform {node_id!r} has no predecessors. Builder must wire transforms with at least one upstream edge."
             )
-        predecessor_votes = [walk_effective_guarantee_vote(graph, pred_id, cache, field_cache) for pred_id in predecessors]
-        result_fields = compose_propagation(
-            own_fields,
-            [vote.fields if vote.participated else None for vote in predecessor_votes],
-        )
-        result = EffectiveGuaranteeVote(
-            fields=result_fields,
-            participated=own_participates or any(vote.participated for vote in predecessor_votes),
-        )
+        else:
+            predecessor_votes = [walk_effective_guarantee_vote(graph, pred_id, cache, field_cache) for pred_id in predecessors]
+            result_fields = compose_propagation(
+                own_fields,
+                [vote.fields if vote.participated else None for vote in predecessor_votes],
+            )
+            result = EffectiveGuaranteeVote(
+                fields=result_fields,
+                participated=own_participates or any(vote.participated for vote in predecessor_votes),
+            )
     else:
         result = EffectiveGuaranteeVote(
             fields=own_fields,

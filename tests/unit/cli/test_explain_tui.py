@@ -78,6 +78,9 @@ class FakeQuery:
         self.get_all_node_states_calls += 1
         return self.node_states
 
+    def get_effect_artifact_members(self, run_id: str) -> dict[str, tuple[str, ...]]:
+        return {}
+
 
 @dataclass(slots=True)
 class FakeExecution:
@@ -277,6 +280,7 @@ class TestExplainScreenLoading:
             content_hash="sha256:abc",
             size_bytes=1536,
             created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            publication_evidence_kind="legacy_returned",
         )
         factory = FakeRecorderFactory(
             data_flow=FakeDataFlow(nodes=nodes, edges=edges),
@@ -300,6 +304,8 @@ class TestExplainScreenLoading:
         assert "ID:   artifact-1" in content
         assert "Path: /tmp/out.csv" in content
         assert "Hash: sha256:abc" in content
+        assert "Producer: node_state" in content
+        assert "Publication: performed (legacy_returned)" in content
 
     def test_load_pipeline_structure_tree_preserves_multi_source_graph(self) -> None:
         """Loaded TUI tree uses graph edges instead of first-source linearization."""

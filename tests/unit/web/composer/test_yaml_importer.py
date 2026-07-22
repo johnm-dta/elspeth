@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
-from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec, queue_node_contract_error
 from elspeth.web.composer.yaml_generator import generate_public_yaml, generate_yaml
 from elspeth.web.composer.yaml_importer import (
     MAX_RUNTIME_YAML_IMPORT_CHARS,
     RuntimeYamlImportError,
     _nodes_from_runtime_list,
     _outputs_from_runtime_sinks,
+    _queues_from_runtime_mapping,
     _require_str,
     _source_from_runtime_entry,
     composition_state_from_runtime_yaml,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def test_require_str_rejects_non_string_value() -> None:
@@ -417,3 +422,199 @@ def test_composition_state_from_runtime_yaml_reimports_generate_public_yaml_outp
     assert set(reimported.sources) == {"source"}
     assert [n.id for n in reimported.nodes] == ["normalize", "split", "batch"]
     assert {o.name for o in reimported.outputs} == {"audit", "rejected"}
+
+
+def test_composition_state_from_runtime_yaml_stages_llm_review_requirements() -> None:
+    """Imported LLM nodes carry the same default pending review requirements
+    every composer mutation path stages (elspeth-ae5160c3cb). Without them the
+    run gate blocks fail-closed (requirement-None enumerator branch) while the
+    interpretation-event writer boundary refuses to surface a resolvable card,
+    leaving the imported pipeline permanently blocked."""
+    state = composition_state_from_runtime_yaml(
+        """
+sources:
+  source:
+    plugin: csv
+    on_success: score
+    options:
+      schema:
+        mode: observed
+transforms:
+- name: score
+  plugin: llm
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    model: anthropic/claude-haiku-4.5
+    prompt_template: 'Score this: {{ row.value }}'
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+    )
+    node = next(n for n in state.nodes if n.plugin == "llm")
+    requirements = {r["kind"]: r for r in node.options["interpretation_requirements"]}
+    assert set(requirements) == {"llm_prompt_template", "llm_model_choice"}
+    pt = requirements["llm_prompt_template"]
+    assert pt["status"] == "pending"
+    assert pt["draft"] == "Score this: {{ row.value }}"
+    assert pt["user_term"] == "llm_prompt_template:score"
+    mc = requirements["llm_model_choice"]
+    assert mc["status"] == "pending"
+    assert mc["draft"] == "anthropic/claude-haiku-4.5"
+    assert mc["user_term"] == "llm_model_choice:score"
+
+
+def test_composition_state_from_runtime_yaml_does_not_stage_reviews_on_non_llm_nodes() -> None:
+    """The auto-stagers are LLM-scoped no-ops: a non-llm transform imports
+    with its options untouched."""
+    state = composition_state_from_runtime_yaml(
+        """
+transforms:
+- name: normalize
+  plugin: field_normalizer
+  input: source
+  on_success: main
+  on_error: discard
+  options:
+    field: category
+"""
+    )
+    node = next(n for n in state.nodes if n.id == "normalize")
+    assert node.options == {"field": "category"}
+
+
+# --- Structural queue fan-in import (elspeth-a5b86149d4 / elspeth-6421ffa028) ---
+
+
+def _sole_queue(state: CompositionState) -> NodeSpec:
+    queues = [node for node in state.nodes if node.node_type == "queue"]
+    assert len(queues) == 1, [node.node_type for node in state.nodes]
+    return queues[0]
+
+
+def test_queues_from_runtime_mapping_rejects_non_mapping_section() -> None:
+    """Trust-boundary test_ref: a non-mapping ``queues`` value is rejected."""
+    with pytest.raises(RuntimeYamlImportError, match="queues must be a mapping"):
+        _queues_from_runtime_mapping(["not", "a", "mapping"])
+
+
+def test_queues_from_runtime_mapping_returns_empty_for_missing_section() -> None:
+    assert _queues_from_runtime_mapping(None) == []
+
+
+def test_composition_state_from_runtime_yaml_recognizes_queues_only_section() -> None:
+    """``queues`` is a first-class pipeline section: a document defining only a
+    queue is a pipeline export, not an empty (destructive-replace) import."""
+    state = composition_state_from_runtime_yaml("queues:\n  inbound: {}\n")
+    queue = _sole_queue(state)
+    assert queue.id == "inbound"
+    assert queue.input == "inbound"
+
+
+def test_composition_state_from_runtime_yaml_imports_empty_queue() -> None:
+    state = composition_state_from_runtime_yaml(
+        """
+sources:
+  orders:
+    plugin: csv
+    on_success: inbound
+    options:
+      schema:
+        mode: observed
+queues:
+  inbound: {}
+transforms:
+- name: normalize
+  plugin: passthrough
+  input: inbound
+  on_success: main
+  on_error: discard
+  options:
+    schema:
+      mode: observed
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+    )
+    queue = _sole_queue(state)
+    assert queue.id == "inbound"
+    assert queue.node_type == "queue"
+    assert queue.plugin is None
+    assert queue.input == "inbound"
+    assert queue.on_success is None
+    assert queue.options == {}
+    assert queue_node_contract_error(queue) is None
+
+
+def test_composition_state_from_runtime_yaml_imports_queue_with_description() -> None:
+    state = composition_state_from_runtime_yaml(
+        """
+queues:
+  inbound:
+    description: Orders and refunds interleave here
+"""
+    )
+    queue = _sole_queue(state)
+    assert queue.options == {"description": "Orders and refunds interleave here"}
+    assert queue_node_contract_error(queue) is None
+
+
+def test_composition_state_from_runtime_yaml_rejects_non_mapping_queues_value() -> None:
+    with pytest.raises(RuntimeYamlImportError, match="queues must be a mapping"):
+        composition_state_from_runtime_yaml("queues:\n  - inbound\n")
+
+
+def test_composition_state_from_runtime_yaml_rejects_non_mapping_queue_entry() -> None:
+    with pytest.raises(RuntimeYamlImportError, match=r"queues\.inbound must be a mapping"):
+        composition_state_from_runtime_yaml("queues:\n  inbound:\n    - not\n    - a\n    - mapping\n")
+
+
+def test_composition_state_from_runtime_yaml_rejects_empty_queue_name() -> None:
+    with pytest.raises(RuntimeYamlImportError, match="queues keys must be non-empty strings"):
+        composition_state_from_runtime_yaml("queues:\n  '': {}\n")
+
+
+def test_composition_state_from_runtime_yaml_rejects_unknown_queue_field() -> None:
+    with pytest.raises(RuntimeYamlImportError, match=r"queues\.inbound contains unknown field\(s\): \['priority'\]"):
+        composition_state_from_runtime_yaml("queues:\n  inbound:\n    priority: 5\n")
+
+
+def test_composition_state_from_runtime_yaml_rejects_non_string_queue_description() -> None:
+    with pytest.raises(RuntimeYamlImportError, match=r"queues\.inbound\.description must be a string"):
+        composition_state_from_runtime_yaml("queues:\n  inbound:\n    description: 7\n")
+
+
+def test_composition_state_from_runtime_yaml_imports_multi_source_queue_example() -> None:
+    """The shipped fan-in example imports with its queue preserved and validates."""
+    example = _REPO_ROOT / "examples" / "multi_source_queue" / "settings.yaml"
+    state = composition_state_from_runtime_yaml(example.read_text(encoding="utf-8"))
+
+    queue = _sole_queue(state)
+    assert queue.id == "inbound"
+    assert set(state.sources) == {"orders", "refunds"}
+    assert [source.on_success for source in state.sources.values()] == ["inbound", "inbound"]
+
+    result = state.validate()
+    assert result.is_valid, [entry.message for entry in result.errors]
+
+
+def test_composition_state_from_runtime_yaml_queue_options_unchanged_by_review_stamp() -> None:
+    """Drift guard: the imported-node review-stamp map is a pure no-op for a
+    queue (plugin=None), so its options survive byte-for-byte and it stays a
+    canonical queue (elspeth-ae5160c3cb interplay with elspeth-a5b86149d4)."""
+    bare = _sole_queue(composition_state_from_runtime_yaml("queues:\n  inbound: {}\n"))
+    assert dict(bare.options) == {}
+    assert queue_node_contract_error(bare) is None
+
+    described = _sole_queue(composition_state_from_runtime_yaml("queues:\n  inbound:\n    description: interleave point\n"))
+    assert dict(described.options) == {"description": "interleave point"}
+    assert queue_node_contract_error(described) is None

@@ -42,7 +42,9 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSummary
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -51,9 +53,10 @@ from elspeth.web.composer.redaction import (
 )
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
-from elspeth.web.composer.tools import _execute_create_blob, _execute_set_pipeline
-from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools import _execute_create_blob, _execute_set_pipeline, build_set_pipeline_candidate
+from elspeth.web.composer.tools._common import ToolContext as _ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -75,8 +78,28 @@ def _mock_catalog() -> MagicMock:
     functional smoke test below.  A bare ``MagicMock`` is sufficient — the
     paths exercised here do not consult the catalog's schema registry."""
     catalog = MagicMock(spec=CatalogService)
+    catalog.list_sources.return_value = [
+        PluginSummary(name=name, description=name, plugin_type="source", config_fields=[]) for name in ("csv", "json", "text")
+    ]
+    catalog.list_transforms.return_value = [
+        PluginSummary(name=name, description=name, plugin_type="transform", config_fields=[])
+        for name in ("field_mapper", "llm", "passthrough", "web_scrape")
+    ]
+    catalog.list_sinks.return_value = [
+        PluginSummary(name=name, description=name, plugin_type="sink", config_fields=[]) for name in ("csv", "json")
+    ]
     catalog.get_schema.return_value = {"properties": {}}
     return catalog
+
+
+def ToolContext(*, catalog: CatalogService, **kwargs: Any) -> _ToolContext:
+    """Build the explicit policy context required by promoted handlers."""
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    return _ToolContext(
+        catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
+        plugin_snapshot=snapshot,
+        **kwargs,
+    )
 
 
 def _session_engine_with_session() -> tuple[Any, str]:
@@ -162,6 +185,15 @@ def test_set_pipeline_manifest_entry_is_type_driven() -> None:
 
 
 class TestPromoteSetPipelineArgErrorRouting:
+    def test_candidate_builder_empty_arguments_raise_tool_argument_error(self) -> None:
+        """The decorated candidate boundary directly rejects malformed arguments."""
+        arguments: dict[str, Any] = {}
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            build_set_pipeline_candidate(arguments, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
     def test_empty_arguments_raise_tool_argument_error(self) -> None:
         """A bare ``{}`` is missing all four top-level required fields."""
         with pytest.raises(ToolArgumentError) as exc_info:
@@ -258,6 +290,22 @@ class TestPromoteSetPipelineArgErrorRouting:
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         assert any(err["loc"] == ("edges", 0, "to_node") for err in cause.errors())
+
+    def test_edge_unknown_edge_type_raises(self) -> None:
+        """edges[*].edge_type is the closed EdgeType vocabulary, not free text.
+
+        A planner-invented type ("flow") must be rejected at argument
+        validation: ``Edge.from_dict`` does not re-validate, so an open
+        string here commits vocabulary-invalid state that the strict web
+        client refuses to decode (elspeth-859e2702dd).
+        """
+        args = _minimal_valid_args()
+        args["edges"] = [{"id": "e1", "from_node": "a", "to_node": "b", "edge_type": "flow"}]
+        with pytest.raises(ToolArgumentError) as exc_info:
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+        cause = exc_info.value.__cause__
+        assert isinstance(cause, PydanticValidationError)
+        assert any(err["loc"] == ("edges", 0, "edge_type") for err in cause.errors())
 
     def test_output_missing_required_plugin_raises(self) -> None:
         """outputs[*] inner ``required: [sink_name, plugin]``."""
@@ -548,8 +596,8 @@ class TestPromoteSetPipelineArgErrorRouting:
                 composer_model_identifier="openai/gpt-5-mini",
                 composer_model_version="gpt-5-mini-2026-05-01",
                 composer_provider="openai",
-                composer_skill_hash="sha256:composer-skill",
-                tool_arguments_hash="sha256:tool-arguments",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
             ),
         )
 
@@ -616,8 +664,8 @@ class TestPromoteSetPipelineArgErrorRouting:
                 composer_model_identifier="openai/gpt-5-mini",
                 composer_model_version="gpt-5-mini-2026-05-01",
                 composer_provider="openai",
-                composer_skill_hash="sha256:composer-skill",
-                tool_arguments_hash="sha256:tool-arguments",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
             ),
         )
 
@@ -888,8 +936,8 @@ class TestPromoteSetPipelineArgErrorRouting:
             composer_model_identifier="openai/gpt-5-mini",
             composer_model_version="gpt-5-mini-2026-05-01",
             composer_provider="openai",
-            composer_skill_hash="sha256:composer-skill",
-            tool_arguments_hash="sha256:tool-arguments",
+            composer_skill_hash="a" * 64,
+            tool_arguments_hash="b" * 64,
         )
         create_result = _execute_create_blob(
             {
@@ -979,8 +1027,8 @@ class TestPromoteSetPipelineArgErrorRouting:
                 composer_model_identifier="openai/gpt-5-mini",
                 composer_model_version="gpt-5-mini-2026-05-01",
                 composer_provider="openai",
-                composer_skill_hash="sha256:composer-skill",
-                tool_arguments_hash="sha256:tool-arguments",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
             ),
         )
 
@@ -1405,3 +1453,85 @@ class TestSetPipelineInlineBlobTsvDelimiter:
         assert result.success is True, result.to_dict()
         source = result.updated_state.sources["source"]
         assert source.options.get("delimiter") is None
+
+
+# ---------------------------------------------------------------------------
+# Queue fan-in through set_pipeline (elspeth-a5b86149d4 / elspeth-6421ffa028).
+# set_pipeline validates every queue's intrinsic shape (queue_node_contract_error)
+# before assigning the newly built state; pipeline completeness stays validation
+# telemetry. The generic persisted transport model _PipelineNodeModel.node_type
+# is intentionally a plain ``str`` and must NOT be narrowed to accept queue.
+# ---------------------------------------------------------------------------
+
+_QUEUE_NODE_ENTRY: dict[str, Any] = {
+    "id": "inbound",
+    "node_type": "queue",
+    "input": "inbound",
+    "options": {"description": "Orders and refunds interleave here"},
+}
+
+
+def _valid_args_with_queue(queue_override: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A set_pipeline payload whose ONLY variable is the queue node.
+
+    The source passes real ``_prevalidate_source`` (csv + path + schema) so a
+    dispatch failure is attributable to the queue, not the source.
+    """
+    queue = dict(_QUEUE_NODE_ENTRY)
+    if queue_override is not None:
+        queue = {**queue, **queue_override}
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "inbound",
+            "options": {"path": "in.csv", "schema": {"mode": "observed"}},
+        },
+        "nodes": [queue],
+        "edges": [],
+        "outputs": [],
+    }
+
+
+class TestSetPipelineQueue:
+    def test_pipeline_node_transport_accepts_queue_without_narrowing(self) -> None:
+        """The reduced transport model accepts a queue entry; node_type stays ``str``."""
+        from elspeth.web.composer.redaction import _PipelineNodeModel
+
+        assert _PipelineNodeModel.model_fields["node_type"].annotation is str
+        model = _PipelineNodeModel.model_validate(_QUEUE_NODE_ENTRY)
+        assert model.node_type == "queue"
+
+    def test_set_pipeline_arguments_model_accepts_queue_entry(self) -> None:
+        args = _minimal_valid_args()
+        args["nodes"] = [dict(_QUEUE_NODE_ENTRY)]
+        validated = SetPipelineArgumentsModel.model_validate(args)
+        assert validated.nodes[0].node_type == "queue"
+
+    def test_set_pipeline_accepts_canonical_queue(self) -> None:
+        result = _execute_set_pipeline(_valid_args_with_queue(), _empty_state(), ToolContext(catalog=_mock_catalog()))
+        assert result.success is True, result.to_dict()
+        queue = next(n for n in result.updated_state.nodes if n.id == "inbound")
+        assert queue.node_type == "queue"
+        assert queue.input == "inbound"
+        assert queue.plugin is None
+        assert queue.on_success is None
+        assert queue.on_error is None
+        assert dict(queue.options) == {"description": "Orders and refunds interleave here"}
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"input": "elsewhere"},
+            {"plugin": "passthrough"},
+            {"on_success": "downstream"},
+            {"options": {"description": "ok", "priority": "high"}},
+            {"options": {"description": 123}},
+        ],
+    )
+    def test_set_pipeline_rejects_malformed_queue_atomically(self, override: dict[str, Any]) -> None:
+        state = _empty_state()
+        result = _execute_set_pipeline(_valid_args_with_queue(override), state, ToolContext(catalog=_mock_catalog()))
+        assert result.success is False
+        # Atomic: the exact prior state/version is untouched.
+        assert result.updated_state.version == state.version
+        assert result.updated_state.nodes == state.nodes

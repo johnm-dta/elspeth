@@ -1,8 +1,63 @@
 # Session DB Reset Runbook
 
-Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
+Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: 0.7.0 (two-DB reset)
+## Current Cutover: Composer parity (session epoch 35 and Landscape epoch 29)
+
+0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
+`user_preferences.freeform_intro_dismissed_at` can persist the account-wide
+freeform-primer preference, then to 28 so SQLite and PostgreSQL session stores
+carry the same application/store/epoch identity proof. Composer parity then
+advances the session store to epoch 29 for guided schema 8 and durable fenced
+guided operations, and to epoch 30 because the closed
+`guided_operations.failure_code` CHECK gains `quota_exceeded`. That final
+boundary makes a fork quota failure settle and replay as a stable HTTP 413.
+Later hard cuts add guided pipeline-proposal replay (31), exact failed-operation
+audit cohorts (32), guided-start negative admission (33), guided schema 10 (34),
+and exclusive guided-confirmation proposal admission (35). An epoch-34 database
+cannot enforce the current dispatch boundary and must be recreated. The universal web
+plugin-policy work also advances
+`SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
+table is optional per run but required in the schema: web runs receive one
+policy-evidence row atomically with the run, attribution, and leader records;
+CLI runs receive none. Database hardening then advances Landscape from epoch 23
+to 24 and adds `tokens(row_id, run_id) -> rows(row_id, run_id)`, then advances
+to 25 with a partial unique index over non-null
+`artifacts(run_id, idempotency_key)` pairs. Durable sink effects advance the
+Landscape to epoch 26, durable coalesce effects advance it to epoch 27, and
+per-member failsink-to-primary provenance advances it to epoch 28. Epoch 29
+adds canonical node output-contract hashes, run-scoped token ancestry and
+validation-error links, durable batch-expansion claims, and the
+transaction-owned sidecar-journal outbox.
+
+Archive and recreate the session database, its sidecars, and every stale
+Landscape database under the service-stop procedure below. Every predecessor
+session epoch is a recreate boundary, including epoch 34. Landscape epoch 29
+is the current release boundary; recreate a Landscape database only when
+its own sentinel is stale. Any stale PostgreSQL session shape is recreated by
+the schema owner; the runtime role remains DML-only.
+
+Validate-only startup and doctor must leave stale databases unchanged. Do not
+use `create_all`, `--init-schema`, an old migrator, or code rollback as an improvised repair
+mechanism. `auth.db` is a separate file and is not reset.
+
+The release/schema compatibility record for every candidate using this shape
+must state: candidate git SHA and immutable image/task-definition identity;
+session and Landscape epochs; presence of `run_web_plugin_policy`; structural
+and semantics-only changes; archive/export decision and approver; destructive
+reset requirement and database-operator approval; previous release identity
+and epochs; forward and backward compatibility decisions; and an explicit
+`rollback_permitted` decision with evidence. Older code is not compatible with
+the freshly recreated current databases. Rollback across this boundary is
+unsupported: keep the service drained, repair the epoch-35 release forward,
+recreate fresh state, and retry. Plans 10 and 12 must cite the
+session-epoch-35/Landscape-epoch-29 record when binding candidate and rollback
+decisions.
+
+Deployments crossing the 0.7.0 boundary from an older release must also account
+for the historical epoch-21 to epoch-22 Landscape reset described below.
+
+## Historical Cutover: 0.7.0 (two-DB reset)
 
 0.7.0 advances **both** schema epochs: `SESSION_SCHEMA_EPOCH` is now 26 and
 the Landscape audit DB `SQLITE_SCHEMA_EPOCH` is now 22. This is a
@@ -168,7 +223,21 @@ Never print secret values from `deploy/elspeth-web.env`. It is acceptable to pri
 
 ## Phase 5b: Two-DB Reset
 
-This procedure applies to any staging deploy that changes both the web session DB schema and the Landscape audit DB schema in the same cutover. Phase 4 hello-world tutorial work is in scope because it changes `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` together for tutorial completion and run/audit-story replay. Phase 5b is also in scope: skipping the Landscape delete after a Phase 5b deploy leaves stale `calls_table` rows whose `resolved_prompt_template_hash` is absent or stale; the first composer run after deploy will diverge from the session DB's `interpretation_events.resolved_prompt_template_hash` and the cross-DB byte-equality invariant (asserted by `tests/integration/web/composer/test_interpretation_runtime_handoff.py`) will fire.
+This destructive procedure applies whenever the configured Landscape store is
+older than the running pre-1.0 release. There is no supported in-place path for
+SQLite or PostgreSQL predecessor schemas. Archive or export required evidence,
+delete/recreate the store, and reinstall/initialize the current release.
+Read-only and `create_tables=False` inspection opens report incompatibility
+without mutation. PostgreSQL recreation is performed by the schema owner; the
+runtime role remains DML-only.
+
+Historical rationale remains unchanged: Phase 4 changed both epochs for
+tutorial completion and run/audit-story replay. Phase 5b also required deleting
+the stale Landscape database because old `calls_table` rows lacked the current
+`resolved_prompt_template_hash`; keeping them would violate the cross-DB
+byte-equality invariant asserted by
+`tests/integration/web/composer/test_interpretation_runtime_handoff.py` on the
+first composer run.
 
 Authority: current source epoch constants and schema tests:
 `src/elspeth/web/sessions/models.py:SESSION_SCHEMA_EPOCH`,
@@ -178,15 +247,25 @@ Authority: current source epoch constants and schema tests:
 ### Two-DB preconditions
 
 1. The Stop/Go Gates above have been run for the session DB.
-2. The deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`; this includes the Phase 4 hello-world tutorial dual-schema cutover, commit `2e390fc0b` or later (Phase 5b session/Landscape schema changes), and the 0.7.0 epoch-26 / epoch-22 release cutover.
+2. The approved cutover record explicitly requires destructive Landscape
+   recreation. Historical examples include the Phase 4 tutorial dual-schema
+   cutover, Phase 5b schema changes, and the 0.7.0 epoch-26 / epoch-22 release
+   cutover.
 3. The operator has resolved the active Landscape DB path per "Resolve Database Paths" above:
    - If `ELSPETH_WEB__LANDSCAPE_URL` is set, that is the Landscape URL.
    - Otherwise the default is `${ELSPETH_WEB__DATA_DIR}/runs/audit.db`, or `data/runs/audit.db` if `ELSPETH_WEB__DATA_DIR` is unset.
-4. The operator has explicitly signed off on losing the Landscape audit history in staging. The two-DB reset destroys staging audit data alongside session data; this is acceptable for staging only.
+4. The operator has explicitly signed off on losing the Landscape audit history
+   in staging. The two-DB reset destroys staging audit data alongside session
+   data; this is acceptable for staging only.
 
 ### Two-DB procedure (in addition to the staging session-DB reset below)
 
-Run after `sudo systemctl stop "$SERVICE"` and before `sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset under the same service-stop window.
+When the destructive preconditions apply, run after
+`sudo systemctl stop "$SERVICE"` and before
+`sudo systemctl start "$SERVICE"` in the staging procedure. Both DBs are reset
+under the same service-stop window. Archive the matched Landscape artifact set
+when evidence retention requires it, then delete every predecessor artifact.
+The archive is evidence only, not an input to the current release.
 
 ```bash
 # Continuing from the staging procedure: $PROJECT_ROOT, $ENV_FILE, $SERVICE,
@@ -199,7 +278,7 @@ if [ -n "$LANDSCAPE_URL" ]; then
     case "$LANDSCAPE_URL" in
         sqlite:///*) LANDSCAPE_PATH="${LANDSCAPE_URL#sqlite:///}" ;;
         sqlite:////*) LANDSCAPE_PATH="/${LANDSCAPE_URL#sqlite:////}" ;;
-        *) echo "REFUSING: non-sqlite Landscape URL requires a migration plan." >&2; exit 1 ;;
+        *) echo "REFUSING: this SQLite reset procedure cannot recreate a non-sqlite Landscape store." >&2; exit 1 ;;
     esac
 elif [ -n "$DATA_DIR" ]; then
     LANDSCAPE_PATH="$DATA_DIR/runs/audit.db"
@@ -288,9 +367,9 @@ After restart, verify by composing a new session and confirming the new guidance
 
 The staging site is a source-checkout systemd/Caddy deployment from `/home/john/elspeth`, not the generic VM/Docker flow. When a pre-release plan changes the session DB schema (e.g. composer-progress-persistence Phase 1A and later schema-changing phases), the schema validator at startup will refuse a stale DB; the only accepted cutover path is archive + delete + recreate. Row-level `DELETE FROM chat_messages` / `DELETE FROM composition_states` is incorrect: it leaves the old table shape behind and startup rejects the stale DB.
 
-This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch the Landscape audit DB. If the deploy changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH`, run the additional [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure inside the same service-stop window. Phase 4 hello-world tutorial is a dual-schema cutover; Phase 5b and later dual-schema cutovers also require it, and the cross-DB hash invariant will fire on the first run otherwise.** **Do not run any of this outside staging.**
+This procedure destroys staging session rows, chat history, composition states, audit access log rows, runs, run events, blob/blob-link database records, and encrypted `user_secrets` stored in the web session DB. It does not delete blob payload files under the data directory, payload storage, Filigree state, or source files. **If the deploy changes only the session DB schema, do not touch a current Landscape audit DB. If the Landscape schema is stale, archive/export required evidence and recreate it with the current release; no predecessor schema is transformed in place.** **Do not run any of this outside staging.**
 
-For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and rollback.
+For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.db-journal` are handled as one matched artifact set for archive, deletion, and recreation.
 
 ### Preconditions
 
@@ -299,9 +378,16 @@ For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.d
 3. The source checkout at `/home/john/elspeth` is on the commit being deployed.
 4. `deploy/elspeth-web.env` has been inspected directly for session DB settings without printing secret values.
 5. The Stop/Go Gates above have been run: Landscape code/schema must not reference web-session identifiers.
-6. The pre-cutover source ref compatible with the archived DB has been recorded. If rollback is needed, restore that ref and the archived DB together; never run the old DB under the new schema code.
+6. The candidate source ref has been recorded. Archived predecessor databases
+   are evidence only and are never opened by the current release.
 7. The live SQLite deployment is single-worker: `deploy/elspeth-web.service` has no `--workers` flag, `WEB_CONCURRENCY` is unset or `1`, and the startup multi-worker guard in `src/elspeth/web/app.py` remains enabled.
-8. The operator has explicitly signed off on the `user_secrets` blast radius. Either the archived DB is the accepted recovery point, or staging secrets have a documented re-entry/reseed procedure before users resume composer work. **The archive is a long-lived copy of live encrypted secret material.** The `user_secrets` rows are encrypted with `settings.secret_key` (the same key the running app uses — `UserSecretStore` is constructed on the session engine with `settings.secret_key`). The archive is only inert if `settings.secret_key` is **rotated** as part of the deploy; if the key is reused, the archive remains decryptable with the running app's key. Decide the secret_key-rotation outcome up front and record it in the deploy plan.
+8. The operator has explicitly signed off on the `user_secrets` blast radius and
+   has a documented re-entry/reseed procedure before users resume Composer work.
+   **Any archive is a long-lived copy of live encrypted secret material and is
+   retained as evidence, not as a recovery database.** The `user_secrets` rows
+   are encrypted with `settings.secret_key`; if the key is reused, the archive
+   remains decryptable. Decide the key-rotation and archive-retention outcomes
+   up front and record them in the deploy plan.
 9. No other host-side process is writing the SQLite DB. The procedure stops `elspeth-web.service` and checks open handles before copying; if another process still has the main DB or a sidecar open, stop and identify it before continuing.
 
 ### Procedure
@@ -338,7 +424,7 @@ if [ -n "$SESSION_DB_URL" ]; then
     case "$SESSION_DB_URL" in
         sqlite:///*) DB_PATH="${SESSION_DB_URL#sqlite:///}" ;;
         sqlite:////*) DB_PATH="/${SESSION_DB_URL#sqlite:////}" ;;
-        *) echo "REFUSING: non-sqlite session DB URL requires a migration plan." >&2; exit 1 ;;
+        *) echo "REFUSING: this SQLite reset procedure cannot recreate a non-sqlite session store." >&2; exit 1 ;;
     esac
 elif [ -n "$DATA_DIR" ]; then
     DB_PATH="$DATA_DIR/sessions.db"
@@ -427,7 +513,17 @@ sudo systemctl status "$SERVICE" --no-pager --lines=20
 
 `initialize_session_schema()` recreates the file on service startup. If either health check fails, inspect `journalctl -u elspeth-web.service --no-pager -n 80` before retrying.
 
-After health checks pass, create a new session through the API or UI and confirm no `SessionSchemaError` appears in the service journal.
+After health checks pass, prove the recreated session store carries the current
+hard-cut sentinel before creating any session:
+
+```bash
+sqlite3 "$DB_PATH" 'PRAGMA user_version;'  # expect 35 (== SESSION_SCHEMA_EPOCH)
+```
+
+An epoch-34 result is not repairable in place: keep the service drained,
+recreate the session database with the current release, and rerun the probe.
+Then create a new session through the API or UI and confirm no
+`SessionSchemaError` appears in the service journal.
 
 #### 0.7.0 epoch + smoke verification
 
@@ -463,85 +559,20 @@ B1 interpretation-surfacing fix is in the deployed build). Any of these in
 the journal means the deploy is not clean — stop and inspect before
 handing staging back to users.
 
-Before handing staging back to users, verify the `user_secrets` outcome the operator chose in the preconditions. If secrets were intentionally cleared, confirm the affected composer/provider flow reports the expected missing-secret state and that the operator has re-entered or reseeded any required staging secrets. If rollback depends on the archive, confirm the archived DB is retained because it contains the pre-reset encrypted secret rows as well as chat/session data.
+Before handing staging back to users, verify the `user_secrets` outcome the operator chose in the preconditions. Confirm the affected composer/provider flow reports the expected missing-secret state and that the operator has re-entered or reseeded any required staging secrets. Never reopen the predecessor archive in the current release.
 
-At the **end of the deploy window**, destroy or secure the archive directories created above (`$SNAPSHOT_DIR` and any `*.failed-phase1.*` from a rollback). Each is a long-lived copy of live encrypted secret material. It is only inert if `settings.secret_key` was **rotated** during this deploy; if the key was reused, the archive is decryptable with the running app's key, so an unattended snapshot directory is equivalent to leaving a readable copy of every staging secret on disk. If you must retain an archive past the deploy window as a recovery point, rotate `settings.secret_key` (which invalidates the archived ciphertext under the new key) or move the archive to access-controlled storage.
+At the **end of the deploy window**, destroy or secure the archive directories created above. Each is a long-lived copy of live encrypted secret material. It is only inert if `settings.secret_key` was **rotated** during this deploy; if the key was reused, the archive is decryptable with the running app's key, so an unattended snapshot directory is equivalent to leaving a readable copy of every staging secret on disk. If evidence retention requires keeping an archive, rotate `settings.secret_key` or move the archive to access-controlled storage.
 
-### Rollback
+### Failed Cutover
 
-Rollback is allowed only before users resume work on the recreated DB, or after explicitly preserving both the failed new DB and the archived old DB for operator review. If the new service has accepted user traffic, do not overwrite the new DB with the archive without a data-preservation decision.
-
-Rollback must restore source and data as a compatible pair. Because the session DB also stores encrypted `user_secrets`, restoring the archive also restores the pre-cutover staging secrets; never mix a new-source checkout with the old secret/schema archive.
-
-```bash
-set -euo pipefail
-
-PROJECT_ROOT="/home/john/elspeth"
-SERVICE="elspeth-web.service"
-DB_PATH="/absolute/path/resolved/by/the/procedure"
-SNAPSHOT_DIR="/absolute/path/to/sessions.db.pre-phase1.YYYYMMDDTHHMMSSZ"
-PRE_CUTOVER_REF="<recorded commit/ref compatible with SNAPSHOT_DIR>"
-DB_ARTIFACTS=(
-    "$DB_PATH"
-    "$DB_PATH-wal"
-    "$DB_PATH-shm"
-    "$DB_PATH-journal"
-)
-
-sudo systemctl stop "$SERVICE"
-
-FOUND_NEW_ARTIFACT=0
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    if [ -e "$artifact" ]; then
-        FOUND_NEW_ARTIFACT=1
-    fi
-done
-
-if [ "$FOUND_NEW_ARTIFACT" -eq 1 ]; then
-    FAILED_NEW_DB_DIR="$DB_PATH.failed-phase1.$(date -u +%Y%m%dT%H%M%SZ)"
-    sudo mkdir -p "$FAILED_NEW_DB_DIR"
-    for artifact in "${DB_ARTIFACTS[@]}"; do
-        if [ -e "$artifact" ]; then
-            sudo cp -a "$artifact" "$FAILED_NEW_DB_DIR/$(basename "$artifact")"
-        fi
-    done
-    echo "Preserved failed new DB artifact set at $FAILED_NEW_DB_DIR"
-fi
-
-if [ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]; then
-    echo "REFUSING: $PROJECT_ROOT has uncommitted changes; preserve or commit them before rollback." >&2
-    git -C "$PROJECT_ROOT" status --short >&2
-    exit 1
-fi
-
-# Use the approved source-checkout rollback mechanism for staging. The
-# important invariant is compatibility: the restored process must run the
-# pre-cutover code that understands SNAPSHOT_DIR's schema. Do not use
-# `git reset --hard` from automation; the dirty-tree guard above makes
-# this fail closed before switching refs.
-git -C "$PROJECT_ROOT" switch --detach "$PRE_CUTOVER_REF"
-
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    sudo rm -f "$artifact"
-done
-for artifact in "${DB_ARTIFACTS[@]}"; do
-    archived="$SNAPSHOT_DIR/$(basename "$artifact")"
-    if [ -e "$archived" ]; then
-        sudo cp -a "$archived" "$artifact"
-    fi
-done
-sudo systemctl start "$SERVICE"
-
-curl --unix-socket /run/elspeth/uvicorn.sock -fsS http://localhost/api/health
-curl -fsS https://elspeth.foundryside.dev/api/health
-sudo journalctl -u "$SERVICE" --no-pager -n 80
-```
-
-If rollback still fails, keep the service stopped, preserve both DB files, and inspect the journal before trying another reset. Retrying the new schema is appropriate when the failure was operational (wrong path, permission, stale process). Rolling back is appropriate when the new code or metadata is defective and the old DB snapshot must be served again.
+If the fresh current release fails, keep the service stopped, preserve the
+failed fresh stores and logs for diagnosis, fix the current release, then repeat
+the uninstall/recreate/reinstall procedure. Do not restore predecessor source
+or databases as the repair path.
 
 ### Why DELETE Is Forbidden For Schema-Changing Phases
 
-Row deletion does not add columns, CHECK constraints, FKs, or indexes. For schema-changing Phase plans (Phase 1A introduces NOT NULL `chat_messages.sequence_no`, NOT NULL `chat_messages.writer_principal`, NOT NULL `composition_states.provenance`, and the new `audit_access_log` table), row deletion leaves a stale DB shape that the startup schema validator correctly rejects. The validator is primarily a name/shape guard for expected tables, columns, CHECK names, and index names; it is not a compatibility migration engine and must not be treated as proof that stale CHECK expressions, partial-index predicates, or old table layouts are safe. Archive/delete/recreate is the only accepted cutover path for schema-changing phases. Archive, delete, and rollback must handle the SQLite main DB plus `-wal`, `-shm`, and `-journal` sidecars as a single artifact set; mixing a new main file with stale sidecars, or restoring a main file without its sidecars, is not a valid reset.
+Row deletion does not add columns, CHECK constraints, FKs, or indexes. For schema-changing Phase plans (Phase 1A introduces NOT NULL `chat_messages.sequence_no`, NOT NULL `chat_messages.writer_principal`, NOT NULL `composition_states.provenance`, and the new `audit_access_log` table), row deletion leaves a stale DB shape that the startup schema validator correctly rejects. The validator is primarily a name/shape guard for expected tables, columns, CHECK names, and index names; it is not a compatibility migration engine and must not be treated as proof that stale CHECK expressions, partial-index predicates, or old table layouts are safe. Archive/delete/recreate is the only accepted cutover path for schema-changing phases. Archive and deletion must handle the SQLite main DB plus `-wal`, `-shm`, and `-journal` sidecars as a single artifact set; mixing a new main file with stale sidecars is not a valid reset.
 
 ## Failure Handling
 

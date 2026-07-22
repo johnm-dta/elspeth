@@ -129,11 +129,42 @@ class _Producer:
     source: SourceSpec | None = None
 
 
+def _producer_key(producer: _Producer) -> str:
+    """Stable identity for cycle guards and deterministic predecessor order.
+
+    Keyed on producer identity (``source:<name>`` / ``node:<id>``), never on a
+    connection name — two producers may publish the same declared queue name.
+    """
+    if producer.kind == "source":
+        return f"source:{producer.source_name}"
+    if producer.node is None:
+        raise RuntimeError("Node producer missing node reference")
+    return f"node:{producer.node.id}"
+
+
+@dataclass(frozen=True)
+class _ProducerIndex:
+    """Queue-aware producer resolution.
+
+    ``by_connection`` is the ordinary single-producer map (with each declared
+    queue installed as the canonical producer of its own id).
+    ``queue_predecessors`` holds, per queue id, the distinct upstream producers
+    that publish into that queue — in deterministic producer-id order.
+    """
+
+    by_connection: Mapping[str, _Producer]
+    queue_predecessors: Mapping[str, tuple[_Producer, ...]]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "by_connection", "queue_predecessors")
+
+
 @dataclass(frozen=True, slots=True)
 class _FanoutTrace:
     markers: tuple[str, ...]
     source_markers: tuple[str, ...]
     source_estimated_rows: int | None
+    has_unknown_cardinality: bool
 
 
 def evaluate_execution_fanout_guard(
@@ -169,8 +200,10 @@ def evaluate_execution_fanout_guard(
             trace.source_estimated_rows * provider_calls_per_row if trace.source_estimated_rows is not None and not trace.markers else None
         )
 
-        requires_guard = bool(trace.markers) or (
-            estimated_provider_calls is not None and estimated_provider_calls > LLM_FANOUT_HIGH_CALL_THRESHOLD
+        requires_guard = (
+            trace.has_unknown_cardinality
+            or bool(trace.markers)
+            or (estimated_provider_calls is not None and estimated_provider_calls > LLM_FANOUT_HIGH_CALL_THRESHOLD)
         )
         if not requires_guard:
             continue
@@ -238,31 +271,52 @@ def annotate_pipeline_yaml_with_fanout_guard(
     return f"# {FANOUT_GUARD_AUDIT_COMMENT}: {canonical_json(payload)}\n{pipeline_yaml}"
 
 
-def _build_producer_index(state: CompositionState) -> dict[str, _Producer]:
-    producers: dict[str, _Producer] = {}
+def _build_producer_index(state: CompositionState) -> _ProducerIndex:
+    queue_ids = {node.id for node in state.nodes if node.node_type == "queue"}
+    by_connection: dict[str, _Producer] = {}
+    queue_predecessors: dict[str, dict[str, _Producer]] = {queue_id: {} for queue_id in queue_ids}
+
+    def register(label: str, producer: _Producer) -> None:
+        # A declared queue accepts many producers under its id: route them into
+        # its predecessor set instead of the single-producer map, keyed on
+        # stable producer identity so duplicates dedupe deterministically.
+        if label in queue_ids and _producer_key(producer) != f"node:{label}":
+            queue_predecessors[label].setdefault(_producer_key(producer), producer)
+            return
+        by_connection[label] = producer
+
     for source_name, source in state.sources.items():
         if source.on_success != "discard":
-            producers[source.on_success] = _Producer(kind="source", source_name=source_name, source=source)
+            register(source.on_success, _Producer(kind="source", source_name=source_name, source=source))
 
     for node in state.nodes:
         for label in (node.on_success, node.on_error):
             if label is not None and label != "discard":
-                producers[label] = _Producer(kind="node", node=node)
+                register(label, _Producer(kind="node", node=node))
         if node.routes is not None:
             for label in node.routes.values():
                 if label != "discard":
-                    producers[label] = _Producer(kind="node", node=node)
+                    register(label, _Producer(kind="node", node=node))
         if node.fork_to is not None:
             for label in node.fork_to:
                 if label != "discard":
-                    producers[label] = _Producer(kind="node", node=node)
-    return producers
+                    register(label, _Producer(kind="node", node=node))
+
+    # Install each declared queue as the canonical producer of its own id.
+    for node in state.nodes:
+        if node.node_type == "queue":
+            by_connection[node.id] = _Producer(kind="node", node=node)
+
+    frozen_predecessors = {
+        queue_id: tuple(predecessors[key] for key in sorted(predecessors)) for queue_id, predecessors in queue_predecessors.items()
+    }
+    return _ProducerIndex(by_connection=by_connection, queue_predecessors=frozen_predecessors)
 
 
 def _trace_upstream_fanout(
     *,
     input_label: str,
-    producers: Mapping[str, _Producer],
+    producers: _ProducerIndex,
     nodes_by_id: Mapping[str, NodeSpec],
     data_dir: Path,
 ) -> _FanoutTrace:
@@ -270,42 +324,58 @@ def _trace_upstream_fanout(
     source_markers: list[str] = []
     source_estimated_rows: int | None = None
     unknown_source_seen = False
-    visited_labels: set[str] = set()
-    visited_nodes: set[str] = set()
+    has_unknown_cardinality = False
+    # Cycle guard keyed on stable producer identity, NOT connection name — a
+    # queue's predecessors are distinct producers that share the queue's name.
+    visited: set[str] = set()
 
-    def walk(label: str) -> None:
-        nonlocal source_estimated_rows, unknown_source_seen
-        if label in visited_labels:
+    def record_source(producer: _Producer) -> None:
+        nonlocal source_estimated_rows, unknown_source_seen, has_unknown_cardinality
+        if producer.source is None or producer.source_name is None:
+            raise RuntimeError("Source producer missing source reference")
+        estimated_rows = _estimate_source_rows(producer.source, data_dir=data_dir)
+        marker_prefix = f"source:{producer.source_name}:{producer.source.plugin}:estimated_rows="
+        if estimated_rows is None:
+            # An unknown-cardinality source keeps the sum unknowable and pins
+            # the risk high; it is never allowed to silently vanish.
+            unknown_source_seen = True
+            has_unknown_cardinality = True
+            source_estimated_rows = None
+            source_markers.append(f"{marker_prefix}unknown")
             return
-        visited_labels.add(label)
+        if unknown_source_seen:
+            source_estimated_rows = None
+        elif source_estimated_rows is not None:
+            source_estimated_rows += estimated_rows
+        else:
+            source_estimated_rows = estimated_rows
+        source_markers.append(f"{marker_prefix}{estimated_rows}")
 
-        producer = producers[label] if label in producers else None
-        if producer is None:
+    def walk_label(label: str) -> None:
+        producer = producers.by_connection.get(label)
+        if producer is not None:
+            walk_producer(producer)
+
+    def walk_producer(producer: _Producer) -> None:
+        key = _producer_key(producer)
+        if key in visited:
             return
+        visited.add(key)
 
         if producer.kind == "source":
-            if producer.source is None or producer.source_name is None:
-                raise RuntimeError("Source producer missing source reference")
-            estimated_rows = _estimate_source_rows(producer.source, data_dir=data_dir)
-            if estimated_rows is None:
-                unknown_source_seen = True
-                source_estimated_rows = None
-            elif unknown_source_seen:
-                source_estimated_rows = None
-            elif source_estimated_rows is not None:
-                source_estimated_rows += estimated_rows
-            else:
-                source_estimated_rows = estimated_rows
-            if estimated_rows is not None:
-                source_markers.append(f"source:{producer.source_name}:{producer.source.plugin}:estimated_rows={estimated_rows}")
+            record_source(producer)
             return
 
         node = producer.node
         if node is None:
             raise RuntimeError("Node producer missing node reference")
-        if node.id in visited_nodes:
+
+        if node.node_type == "queue":
+            # A queue fans in every predecessor; traverse them all so no
+            # upstream cardinality or token-creating path is lost behind it.
+            for predecessor in producers.queue_predecessors.get(node.id, ()):
+                walk_producer(predecessor)
             return
-        visited_nodes.add(node.id)
 
         marker = _fanout_marker_for_node(node)
         if marker is not None:
@@ -313,18 +383,19 @@ def _trace_upstream_fanout(
 
         if node.node_type == "coalesce":
             if node.input:
-                walk(node.input)
+                walk_label(node.input)
             for branch in node.branches or ():
-                walk(branch)
+                walk_label(branch)
             return
 
-        walk(node.input)
+        walk_label(node.input)
 
-    walk(input_label)
+    walk_label(input_label)
     return _FanoutTrace(
         markers=tuple(dict.fromkeys(markers)),
         source_markers=tuple(dict.fromkeys(source_markers)),
         source_estimated_rows=source_estimated_rows,
+        has_unknown_cardinality=has_unknown_cardinality,
     )
 
 

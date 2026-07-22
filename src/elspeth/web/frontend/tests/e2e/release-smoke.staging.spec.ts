@@ -17,8 +17,8 @@
 //     dist (playwright.staging.config.ts has no webServer; the deployment is
 //     up), so a stale or shape-skewed bundle fails it.
 //
-// It makes NO LLM calls: it stops at the deterministic source SchemaForm,
-// before the recipe-offer / apply (LLM) step.
+// It makes NO LLM calls: it stops at the deterministic source review card,
+// before the transform proposal (LLM) step.
 //
 // Wiring: `*.staging.spec.ts` is ignored by the local/CI config and run only by
 // playwright.staging.config.ts via `npm run test:e2e:staging:smoke`.
@@ -39,7 +39,7 @@ const BLOB_FILENAME = "release-smoke-orders.csv";
 const SAMPLE_CSV = "id,name,value\n1,widget,42\n";
 
 test.describe("release smoke — built bundle renders against real backend", () => {
-  test("guided source-select renders the source SchemaForm (no chat-panel crash)", async ({
+  test("guided source-select renders the bound-source review card (no chat-panel crash)", async ({
     page,
   }) => {
     // Out-of-band setup via REST (not counted as user interaction): create a
@@ -60,18 +60,26 @@ test.describe("release smoke — built bundle renders against real backend", () 
 
       // Enter guided mode and select the csv source. On a pre-migration bundle
       // this re-renders ChatPanel against plural-`sources` backend state, reads
-      // the dropped singular `state.source`, and throws — so the SchemaForm
-      // below never appears and the ErrorBoundary fallback shows instead.
+      // the dropped singular `state.source`, and throws — so the source review
+      // card below never appears and the ErrorBoundary fallback shows instead.
       await page.getByRole("button", { name: "Switch to guided" }).click();
       await expect(page.getByLabel(/guided composer/i)).toBeVisible();
 
-      await page.getByRole("button", { name: "csv", exact: true }).click();
+      await page.getByRole("button", { name: "CSV", exact: true }).click();
 
-      // POSITIVE: the source SchemaForm renders. CSV source has three required
-      // fields (config_base.py): schema, path, on_validation_failure.
-      await expect(page.getByLabel(/^schema$/i)).toBeVisible();
-      await expect(page.getByLabel(/^path$/i)).toBeVisible();
-      await expect(page.getByLabel(/on\s+validation\s+failure/i)).toBeVisible();
+      // POSITIVE: the guided source step renders. Because a blob was uploaded
+      // above, selecting CSV binds it via the upload fast-path, so the source
+      // `path` knob renders as the static "Uploaded sample data" bound value
+      // (SchemaFormTurn summary view / KnobFieldRenderer maskBlobRef): a
+      // `blob:<ref>` path never shows an editable Path input. Pre-9f425de3d this
+      // step was an editable SchemaForm with a labeled Path, which is why the
+      // old getByLabel(/^path$/i) assertion drifted (elspeth-5f9cfd5ab6). The
+      // Continue affordance proves the interactive review card mounted, not the
+      // crash fallback.
+      await expect(page.getByText(/Uploaded sample data/i)).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Continue", exact: true }),
+      ).toBeVisible();
 
       // NEGATIVE: the chat-panel ErrorBoundary fallback (ErrorBoundary.tsx:
       // `{label} encountered an error`) is NOT showing.

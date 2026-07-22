@@ -20,11 +20,20 @@ from typing import Any, Literal, Protocol
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields, require_int
 
-ComposerLLMProviderCostSource = Literal["not_available", "response_usage.cost"]
+ComposerLLMProviderCostSource = Literal[
+    "not_available",
+    "response_usage.cost",
+    "_hidden_params.response_cost",
+]
 
 PROVIDER_COST_SOURCE_NOT_AVAILABLE: ComposerLLMProviderCostSource = "not_available"
 PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST: ComposerLLMProviderCostSource = "response_usage.cost"
-_VALID_PROVIDER_COST_SOURCES = {PROVIDER_COST_SOURCE_NOT_AVAILABLE, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST}
+PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST: ComposerLLMProviderCostSource = "_hidden_params.response_cost"
+_VALID_PROVIDER_COST_SOURCES = {
+    PROVIDER_COST_SOURCE_NOT_AVAILABLE,
+    PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST,
+    PROVIDER_COST_SOURCE_HIDDEN_PARAMS_RESPONSE_COST,
+}
 
 
 class ComposerLLMCallStatus(StrEnum):
@@ -76,6 +85,10 @@ class ComposerLLMCall:
     specification sent to LiteLLM, or ``None`` when the call did not carry
     tools (for example diagnostics text generation).
 
+    ``declared_tool_names`` is the ordered, public-safe projection of the
+    exact transmitted tool list. It proves declaration, not selection;
+    ``tools_spec_hash`` remains the integrity proof over the complete specs.
+
     Cache-token fields (``cached_prompt_tokens``,
     ``cache_creation_input_tokens``, ``cache_read_input_tokens``) capture
     provider-reported prompt-cache statistics. They default to ``None``
@@ -112,6 +125,7 @@ class ComposerLLMCall:
     provider_request_id: str | None
     messages_hash: str
     tools_spec_hash: str | None
+    declared_tool_names: tuple[str, ...]
     started_at: datetime
     finished_at: datetime
     error_class: str | None
@@ -127,6 +141,9 @@ class ComposerLLMCall:
     thinking_blocks: Any | None = None
     provider_cost: float | None = None
     provider_cost_source: ComposerLLMProviderCostSource = PROVIDER_COST_SOURCE_NOT_AVAILABLE
+    max_completion_tokens_requested: int | None = None
+    planner_policy_hash: str | None = None
+    planner_call_ordinal: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.status) is not ComposerLLMCallStatus:
@@ -136,6 +153,19 @@ class ComposerLLMCall:
         _require_non_empty_str(self.provider_request_id, "provider_request_id", optional=True)
         _require_non_empty_str(self.messages_hash, "messages_hash")
         _require_non_empty_str(self.tools_spec_hash, "tools_spec_hash", optional=True)
+        if type(self.declared_tool_names) is not tuple:
+            raise TypeError(f"declared_tool_names must be tuple, got {type(self.declared_tool_names).__name__}")
+        for name in self.declared_tool_names:
+            if type(name) is not str or not name:
+                raise ValueError("declared_tool_names entries must be non-empty strings")
+            if not ("a" <= name[0] <= "z") or any(
+                not (("a" <= character <= "z") or ("0" <= character <= "9") or character == "_") for character in name
+            ):
+                raise ValueError("declared_tool_names entries must be tool names containing lowercase letters, digits, and underscores")
+        if len(set(self.declared_tool_names)) != len(self.declared_tool_names):
+            raise ValueError("declared_tool_names entries must be unique")
+        if self.declared_tool_names and self.tools_spec_hash is None:
+            raise ValueError("declared_tool_names require tools_spec_hash")
         _require_datetime(self.started_at, "started_at")
         _require_datetime(self.finished_at, "finished_at")
         if self.finished_at < self.started_at:
@@ -149,6 +179,25 @@ class ComposerLLMCall:
         require_int(self.cache_creation_input_tokens, "cache_creation_input_tokens", optional=True, min_value=0)
         require_int(self.cache_read_input_tokens, "cache_read_input_tokens", optional=True, min_value=0)
         require_int(self.reasoning_tokens, "reasoning_tokens", optional=True, min_value=0)
+        require_int(
+            self.max_completion_tokens_requested,
+            "max_completion_tokens_requested",
+            optional=True,
+            min_value=1,
+        )
+        require_int(self.planner_call_ordinal, "planner_call_ordinal", optional=True, min_value=1)
+        _require_non_empty_str(self.planner_policy_hash, "planner_policy_hash", optional=True)
+        if self.planner_policy_hash is not None and (
+            len(self.planner_policy_hash) != 64 or any(character not in "0123456789abcdef" for character in self.planner_policy_hash)
+        ):
+            raise ValueError("planner_policy_hash must be exactly 64 lowercase hexadecimal characters")
+        planner_evidence = (
+            self.max_completion_tokens_requested,
+            self.planner_policy_hash,
+            self.planner_call_ordinal,
+        )
+        if any(value is not None for value in planner_evidence) and not all(value is not None for value in planner_evidence):
+            raise ValueError("planner request evidence fields must be supplied together")
         _require_optional_finite_number(self.temperature, "temperature")
         if self.temperature is not None:
             object.__setattr__(self, "temperature", float(self.temperature))
@@ -160,7 +209,7 @@ class ComposerLLMCall:
             raise ValueError("non-success calls must include error_class and error_message")
         if self.reasoning_content is not None and type(self.reasoning_content) is not str:
             raise TypeError(f"reasoning_content must be str or None, got {type(self.reasoning_content).__name__}")
-        freeze_fields(self, "reasoning_details", "thinking_blocks")
+        freeze_fields(self, "declared_tool_names", "reasoning_details", "thinking_blocks")
         if self.provider_cost_source not in _VALID_PROVIDER_COST_SOURCES:
             raise ValueError(
                 f"provider_cost_source must be one of {sorted(_VALID_PROVIDER_COST_SOURCES)}, got {self.provider_cost_source!r}"

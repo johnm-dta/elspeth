@@ -25,16 +25,50 @@ DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 runner = CliRunner()
 
 
+def _audit_export_config(*, signed: bool) -> dict[str, object]:
+    """Return the complete explicit audit-export policy required by production."""
+    return {
+        "enabled": True,
+        "sink": "audit_export",
+        "format": "json",
+        "signing_mode": "hmac_sha256" if signed else "unsigned",
+        "signer_key_id": "integration-test-key-v1" if signed else "UNSIGNED",
+        "signing_secret_ref": "ELSPETH_SIGNING_KEY" if signed else None,
+        "signer_rotation_policy": "multi_version",
+        "total_record_limit": 10_000,
+        "total_byte_limit": 10_000_000,
+        "chunk_limit": 100,
+        "per_chunk_record_limit": 1_000,
+        "per_chunk_byte_limit": 1_000_000,
+        "spool_root": ".elspeth/audit-export-spool",
+        "content_store": {
+            "content_store_id": "integration-test-store-v1",
+            "namespace": "audit-export",
+            "root": ".elspeth/audit-export-content-store/integration-tests",
+            "policy_version": "audit-store-policy-v1",
+            "retention_days": 365,
+            "durability": "fsync",
+        },
+    }
+
+
+def _read_audit_records(path: Path) -> list[dict[str, object]]:
+    """Read the canonical newline-framed v2 records and final manifest."""
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
 class TestLandscapeExport:
     """End-to-end tests for landscape export to sink."""
 
     @pytest.fixture
-    def export_settings_yaml(self, tmp_path: Path) -> Path:
+    def export_settings_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         """Create settings file with export enabled using JSON sink.
 
         Uses JSON sink because audit records have heterogeneous schemas
         (run, node, row, token records have different fields).
         """
+        monkeypatch.chdir(tmp_path)
+
         # Create input CSV
         input_csv = tmp_path / "input.csv"
         input_csv.write_text("id,name,value\n1,Alice,100\n2,Bob,200\n")
@@ -76,12 +110,7 @@ class TestLandscapeExport:
             },
             "landscape": {
                 "url": f"sqlite:///{db_path}",
-                "export": {
-                    "enabled": True,
-                    "sink": "audit_export",
-                    "format": "json",  # Must use JSON for heterogeneous records
-                    "sign": False,
-                },
+                "export": _audit_export_config(signed=False),
             },
         }
 
@@ -102,10 +131,8 @@ class TestLandscapeExport:
         audit_json = tmp_path / "audit_export.json"
         assert audit_json.exists(), "Audit export file was not created"
 
-        # Read and verify content is valid JSON
-        content = audit_json.read_text()
-        records = json.loads(content)
-        assert isinstance(records, list), "Export should be a JSON array"
+        # Read and verify the canonical newline-framed JSON records.
+        records = _read_audit_records(audit_json)
         assert len(records) > 0, "Export should contain records"
 
         # Check for expected structure
@@ -122,7 +149,7 @@ class TestLandscapeExport:
 
         # Read audit JSON
         audit_json = tmp_path / "audit_export.json"
-        records = json.loads(audit_json.read_text())
+        records = _read_audit_records(audit_json)
 
         # Extract record types
         record_types = {r["record_type"] for r in records}
@@ -142,7 +169,7 @@ class TestLandscapeExport:
 
         # Find run record
         audit_json = tmp_path / "audit_export.json"
-        records = json.loads(audit_json.read_text())
+        records = _read_audit_records(audit_json)
         run_records = [r for r in records if r["record_type"] == "run"]
 
         assert len(run_records) == 1, "Should have exactly one run record"
@@ -300,7 +327,7 @@ class TestSignedExportDeterminism:
 
         # Export the SAME run twice with signing
         signing_key = b"test-determinism-key-12345"
-        exporter = LandscapeExporter(db, signing_key=signing_key)
+        exporter = LandscapeExporter(db, signing_key=signing_key, signer_key_id="integration-test-key-v1")
 
         final_hashes = []
         for _ in range(2):
@@ -311,9 +338,11 @@ class TestSignedExportDeterminism:
         # Both exports must produce the same final hash
         assert final_hashes[0] == final_hashes[1], f"Non-deterministic export! Hash 1: {final_hashes[0]}, Hash 2: {final_hashes[1]}"
 
-    def test_signed_export_all_records_have_signatures(self, tmp_path: Path) -> None:
+    def test_signed_export_all_records_have_signatures(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """All exported records should have HMAC signatures when signing enabled."""
         from elspeth.cli import app
+
+        monkeypatch.chdir(tmp_path)
 
         input_csv = tmp_path / "input.csv"
         input_csv.write_text("id,value\n1,100\n")
@@ -355,12 +384,7 @@ class TestSignedExportDeterminism:
             },
             "landscape": {
                 "url": f"sqlite:///{db_path}",
-                "export": {
-                    "enabled": True,
-                    "sink": "audit_export",
-                    "format": "json",
-                    "sign": True,
-                },
+                "export": _audit_export_config(signed=True),
             },
         }
 
@@ -374,19 +398,21 @@ class TestSignedExportDeterminism:
         )
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
 
-        records = json.loads(audit_json.read_text())
+        records = _read_audit_records(audit_json)
 
         # Every record must have a signature
         for record in records:
             assert "signature" in record, f"Missing signature: {record.get('record_type')}"
             assert len(record["signature"]) == 64, "Signature should be 64-char hex (SHA256)"
 
-    def test_different_signing_keys_produce_different_hashes(self, tmp_path: Path) -> None:
+    def test_different_signing_keys_produce_different_hashes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Different signing keys should produce different final hashes.
 
         This verifies the signature actually depends on the key, not just the data.
         """
         from elspeth.cli import app
+
+        monkeypatch.chdir(tmp_path)
 
         input_csv = tmp_path / "input.csv"
         input_csv.write_text("id,value\n1,42\n")
@@ -432,12 +458,7 @@ class TestSignedExportDeterminism:
                 },
                 "landscape": {
                     "url": f"sqlite:///{db_path}",
-                    "export": {
-                        "enabled": True,
-                        "sink": "audit_export",
-                        "format": "json",
-                        "sign": True,
-                    },
+                    "export": _audit_export_config(signed=True),
                 },
             }
 
@@ -451,7 +472,7 @@ class TestSignedExportDeterminism:
             )
             assert result.exit_code == 0, f"Run with key {i} failed: {result.stdout}"
 
-            records = json.loads(audit_json.read_text())
+            records = _read_audit_records(audit_json)
             manifest = next(r for r in records if r["record_type"] == "manifest")
             final_hashes.append(manifest["final_hash"])
 

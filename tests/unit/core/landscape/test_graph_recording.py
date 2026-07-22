@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import threading
+from pathlib import Path
 from typing import Literal
 
 import pytest
+from sqlalchemy import event, select
 
-from elspeth.contracts import Determinism, NodeType, RoutingMode
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts import Determinism, NodeType, RoutingMode, RunStatus
+from elspeth.contracts.errors import AuditIntegrityError, ContractMergeError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import nodes_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -137,6 +141,7 @@ class TestRegisterNodeDsnSanitization:
 
         self._register_database_node(factory, {"url": self._DSN})
 
+        factory.run_lifecycle.complete_run("run-1", RunStatus.COMPLETED)
         records = list(LandscapeExporter(db).export_run("run-1"))
         node_records = [r for r in records if r["record_type"] == "node"]
         assert node_records, "expected the registered node in the export"
@@ -1604,8 +1609,236 @@ class TestUpdateNodeOutputContract:
         _, out = factory.data_flow.get_node_contracts("run-1", "src")
         assert out is not None
 
-    def test_overwrites_existing_output_contract(self) -> None:
-        _db, factory = _setup()
+    def test_registration_stores_output_contract_hash(self) -> None:
+        db, factory = _setup()
+        contract = _make_contract(
+            mode="OBSERVED",
+            fields=(_make_field("id", int),),
+            locked=True,
+        )
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            output_contract=contract,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        with db.read_only_connection() as conn:
+            stored_hash = conn.execute(
+                select(nodes_table.c.output_contract_hash).where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+            ).scalar_one()
+
+        assert stored_hash == contract.version_hash()
+
+    def test_identical_output_contract_is_noop(self) -> None:
+        db, factory = _setup()
+        contract = _make_contract(
+            mode="OBSERVED",
+            fields=(_make_field("id", int),),
+            locked=True,
+        )
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            output_contract=contract,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        updates: list[str] = []
+
+        def capture_update(_conn: object, _cursor: object, statement: str, _parameters: object, _context: object, _many: bool) -> None:
+            if statement.lstrip().upper().startswith("UPDATE NODES"):
+                updates.append(statement)
+
+        event.listen(db.engine, "before_cursor_execute", capture_update)
+        try:
+            factory.data_flow.update_node_output_contract("run-1", "xfm", contract)
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture_update)
+
+        assert updates == []
+
+    def test_rejects_stored_output_contract_hash_mismatch(self) -> None:
+        db, factory = _setup()
+        contract = _make_contract(
+            mode="OBSERVED",
+            fields=(_make_field("id", int),),
+            locked=True,
+        )
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            output_contract=contract,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        with db.write_connection() as conn:
+            conn.execute(
+                nodes_table.update()
+                .where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+                .values(output_contract_hash="0" * 32)
+            )
+
+        with pytest.raises(AuditIntegrityError, match="output contract hash mismatch"):
+            factory.data_flow.update_node_output_contract("run-1", "xfm", contract)
+
+    def test_rejects_hash_without_output_contract_json(self) -> None:
+        db, factory = _setup()
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        with db.write_connection() as conn:
+            conn.execute(
+                nodes_table.update()
+                .where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+                .values(output_contract_hash="0" * 32)
+            )
+
+        with pytest.raises(AuditIntegrityError, match="hash exists without JSON"):
+            factory.data_flow.update_node_output_contract(
+                "run-1",
+                "xfm",
+                _make_contract(fields=(_make_field("id", int),), locked=True),
+            )
+
+    def test_update_compare_and_swaps_on_stored_hash(self) -> None:
+        db, factory = _setup()
+        original = _make_contract(fields=(_make_field("id", int),), locked=True)
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            output_contract=original,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        updates: list[str] = []
+
+        def capture_update(_conn: object, _cursor: object, statement: str, _parameters: object, _context: object, _many: bool) -> None:
+            if statement.lstrip().upper().startswith("UPDATE NODES"):
+                updates.append(" ".join(statement.upper().split()))
+
+        event.listen(db.engine, "before_cursor_execute", capture_update)
+        try:
+            factory.data_flow.update_node_output_contract(
+                "run-1",
+                "xfm",
+                _make_contract(fields=(_make_field("extra", str),), locked=True),
+            )
+        finally:
+            event.remove(db.engine, "before_cursor_execute", capture_update)
+
+        assert len(updates) == 1
+        assert "OUTPUT_CONTRACT_HASH" in updates[0].split(" WHERE ", maxsplit=1)[1]
+
+    def test_independent_sqlite_writers_retain_disjoint_contract_fields(self, tmp_path: Path) -> None:
+        url = f"sqlite:///{tmp_path / 'output-contracts.db'}"
+        first_db = LandscapeDB.from_url(url)
+        second_db = LandscapeDB.from_url(url, create_tables=False)
+        try:
+            first = make_factory(first_db)
+            second = make_factory(second_db)
+            first.run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id="run-1",
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+            base = _make_contract(fields=(_make_field("base", int),), locked=True)
+            first.data_flow.register_node(
+                run_id="run-1",
+                plugin_name="mapper",
+                node_type=NodeType.TRANSFORM,
+                plugin_version="1.0.0",
+                config={},
+                node_id="xfm",
+                output_contract=base,
+                schema_config=_DYNAMIC_SCHEMA,
+            )
+            barrier = threading.Barrier(2)
+            failures: list[BaseException] = []
+
+            def update(factory: RecorderFactory, contract: SchemaContract) -> None:
+                try:
+                    barrier.wait(timeout=5)
+                    factory.data_flow.update_node_output_contract("run-1", "xfm", contract)
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            threads = (
+                threading.Thread(target=update, args=(first, _make_contract(fields=(_make_field("left", str),), locked=True))),
+                threading.Thread(target=update, args=(second, _make_contract(fields=(_make_field("right", float),), locked=True))),
+            )
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+            assert not any(thread.is_alive() for thread in threads)
+            assert failures == []
+            _, stored = first.data_flow.get_node_contracts("run-1", "xfm")
+            assert stored is not None
+            assert {field.normalized_name for field in stored.fields} == {"base", "left", "right"}
+            with first_db.read_only_connection() as conn:
+                stored_hash = conn.execute(
+                    select(nodes_table.c.output_contract_hash).where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+                ).scalar_one()
+            assert stored_hash == stored.version_hash()
+        finally:
+            second_db.close()
+            first_db.close()
+
+    def test_incompatible_output_contract_preserves_existing_audit_state(self) -> None:
+        db, factory = _setup()
+        original = _make_contract(fields=(_make_field("id", int),), locked=True)
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="mapper",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0.0",
+            config={},
+            node_id="xfm",
+            output_contract=original,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        with pytest.raises(ContractMergeError, match="id"):
+            factory.data_flow.update_node_output_contract(
+                "run-1",
+                "xfm",
+                _make_contract(fields=(_make_field("id", str),), locked=True),
+            )
+
+        _, stored = factory.data_flow.get_node_contracts("run-1", "xfm")
+        assert stored == original
+        with db.read_only_connection() as conn:
+            stored_hash = conn.execute(
+                select(nodes_table.c.output_contract_hash).where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+            ).scalar_one()
+        assert stored_hash == original.version_hash()
+
+    def test_merges_compatible_output_contract(self) -> None:
+        db, factory = _setup()
         original_contract = _make_contract(
             mode="OBSERVED",
             fields=(_make_field("old_field", str),),
@@ -1637,7 +1870,17 @@ class TestUpdateNodeOutputContract:
 
         _, out_after = factory.data_flow.get_node_contracts("run-1", "xfm")
         assert out_after is not None
-        assert len(out_after.fields) == 2
+        fields = {field.normalized_name: field for field in out_after.fields}
+        assert set(fields) == {"old_field", "new_field", "other"}
+        assert fields["old_field"].required is False
+        assert fields["old_field"].nullable is True
+        assert fields["new_field"].required is False
+        assert fields["new_field"].nullable is True
+        with db.read_only_connection() as conn:
+            stored_hash = conn.execute(
+                select(nodes_table.c.output_contract_hash).where((nodes_table.c.run_id == "run-1") & (nodes_table.c.node_id == "xfm"))
+            ).scalar_one()
+        assert stored_hash == out_after.version_hash()
 
     def test_does_not_affect_input_contract(self) -> None:
         _db, factory = _setup()

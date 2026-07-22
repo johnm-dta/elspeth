@@ -12,6 +12,7 @@ from elspeth.core.landscape._database_ops import DatabaseOps, ReadOnlyDatabaseOp
 from elspeth.core.landscape.auth_audit_repository import AuthAuditRepository
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.execution.audit_export_snapshots import AuditExportSnapshotRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
@@ -26,6 +27,9 @@ from elspeth.core.landscape.model_loaders import (
     RowLoader,
     RunLoader,
     SchedulerEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -234,6 +238,7 @@ class LandscapeWriteRepositories:
     """Typed writable repository surface for audit-recording callers."""
 
     __slots__ = (
+        "audit_export_snapshots",
         "auth_audit",
         "barrier_restore",
         "data_flow",
@@ -257,6 +262,7 @@ class LandscapeWriteRepositories:
         data_flow: DataFlowRepository,
         scheduler: TokenSchedulerRepository,
         run_coordination: RunCoordinationRepository,
+        audit_export_snapshots: AuditExportSnapshotRepository,
     ) -> None:
         self.read = read
         self.run_lifecycle = run_lifecycle
@@ -269,6 +275,7 @@ class LandscapeWriteRepositories:
         self.payload_store = read.payload_store
         self.scheduler = scheduler
         self.run_coordination = run_coordination
+        self.audit_export_snapshots = audit_export_snapshots
 
     def plugin_audit_writer(self) -> PluginAuditWriter:
         """Create a PluginAuditWriter adapter composing the writable repositories."""
@@ -321,6 +328,9 @@ class RecorderFactory:
         scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
+        sink_effect_loader = SinkEffectLoader()
+        sink_effect_member_loader = SinkEffectMemberLoader()
+        sink_effect_stream_loader = SinkEffectStreamLoader()
 
         run_lifecycle = RunLifecycleRepository(db, read_ops_as_common, run_loader)
         data_flow = DataFlowRepository(
@@ -343,6 +353,9 @@ class RecorderFactory:
             batch_loader=batch_loader,
             batch_member_loader=batch_member_loader,
             artifact_loader=artifact_loader,
+            sink_effect_loader=sink_effect_loader,
+            sink_effect_member_loader=sink_effect_member_loader,
+            sink_effect_stream_loader=sink_effect_stream_loader,
             payload_store=payload_store,
         )
         barrier_restore = BarrierRestoreReadModel(
@@ -399,6 +412,9 @@ class RecorderFactory:
         scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
+        sink_effect_loader = SinkEffectLoader()
+        sink_effect_member_loader = SinkEffectMemberLoader()
+        sink_effect_stream_loader = SinkEffectStreamLoader()
 
         # Composed repository for run lifecycle
         self._run_lifecycle = RunLifecycleRepository(db, ops, run_loader)
@@ -415,6 +431,9 @@ class RecorderFactory:
             batch_loader=batch_loader,
             batch_member_loader=batch_member_loader,
             artifact_loader=artifact_loader,
+            sink_effect_loader=sink_effect_loader,
+            sink_effect_member_loader=sink_effect_member_loader,
+            sink_effect_stream_loader=sink_effect_stream_loader,
             payload_store=payload_store,
         )
 
@@ -428,6 +447,7 @@ class RecorderFactory:
             validation_error_loader=validation_error_loader,
             transform_error_loader=transform_error_loader,
             payload_store=payload_store,
+            node_state_repository=self._execution.node_states,
         )
         self._barrier_restore = BarrierRestoreReadModel(
             ops,
@@ -460,6 +480,7 @@ class RecorderFactory:
         # SQLite Tier-1 PRAGMA probe when applicable — nothing it could do on
         # a read-only handle.
         self._run_coordination: RunCoordinationRepository | None = None if db.is_read_only else RunCoordinationRepository(db.engine)
+        self._audit_export_snapshots = AuditExportSnapshotRepository()
 
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
@@ -502,6 +523,13 @@ class RecorderFactory:
         return self._run_coordination
 
     @property
+    def audit_export_snapshots(self) -> AuditExportSnapshotRepository:
+        """Return the transaction-bound immutable snapshot registry capability."""
+        if self._db.is_read_only:
+            raise RuntimeError("audit export snapshot registry is not available on a read-only LandscapeDB handle")
+        return self._audit_export_snapshots
+
+    @property
     def payload_store(self) -> PayloadStore | None:
         return self._payload_store
 
@@ -533,4 +561,5 @@ class RecorderFactory:
             data_flow=self._data_flow,
             scheduler=self.scheduler,
             run_coordination=self.run_coordination,
+            audit_export_snapshots=self.audit_export_snapshots,
         )

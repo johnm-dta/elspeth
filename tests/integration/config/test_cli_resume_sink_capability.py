@@ -15,6 +15,7 @@ import pytest
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.database_sink import DatabaseSink
 from elspeth.plugins.sinks.json_sink import JSONSink
+from elspeth.plugins.sinks.text_sink import TextSink
 from tests.fixtures.base_classes import inject_write_failure
 
 
@@ -76,6 +77,23 @@ class TestCLIResumeCallsConfigureForResume:
         sink.configure_for_resume()
 
         assert sink._mode == "append"
+
+    def test_text_sink_is_resumable_and_switches_to_append(self, tmp_path):
+        sink = inject_write_failure(
+            TextSink(
+                {
+                    "path": str(tmp_path / "output.txt"),
+                    "field": "line_text",
+                    "schema": {"mode": "observed"},
+                }
+            )
+        )
+
+        assert sink.supports_resume is True
+        assert sink._mode == "write"
+        sink.configure_for_resume()
+        assert sink._mode == "append"
+        assert sink._collision_policy == "append_or_create"
 
 
 class TestDatabaseSinkResumeCapability:

@@ -1,8 +1,8 @@
 # AWS ECS Runtime Readiness Design
 
 Date: 2026-07-08
-Status: approved design, pending implementation plan
-Branch context: `release/0.7.0`
+Status: approved design; implementation governed by plans 01–14 and 15A–15C
+Branch context: `release/0.7.1`
 
 ## Purpose
 
@@ -31,6 +31,17 @@ runtime integration only:
 - Bedrock readiness for LLM usage: verification of the existing LiteLLM
   surfaces for the web composer, plus a new LiteLLM-backed `bedrock`
   provider for pipeline LLM transforms.
+- AWS operator telemetry: mandatory deployment-owned OTLP routing for pipeline
+  lifecycle/row signals and web metrics through a task-local CloudWatch Agent,
+  with CloudWatch/X-Ray dashboards, alarms, and live Landscape correlation.
+- AWS prompt and content shielding: explicit Bedrock Guardrails transforms for
+  prompt attacks and harmful content, independent of model invocation.
+- Universal web plugin governance: a core-only default with complete
+  CSV/JSON/text source/sink pairs, tutorial-required field mapper/web scrape/
+  LLM transforms, kind-qualified optional allowlisting, opaque operator
+  profiles, typed control preferences, request-scoped availability, and
+  enforcement from catalog through runtime/audit while CLI remains
+  unrestricted.
 - Documentation and tests for the above.
 
 ## Non-Goals
@@ -303,6 +314,21 @@ For the first ECS milestone, EFS is the local-state substrate:
 - Local auth is allowed as an explicit single-task option, with its SQLite
   auth DB on EFS.
 - Cognito/OIDC remains the recommended production auth path.
+- Cognito hosted authorization domains are cross-origin from user-pool issuer
+  URLs. Operators may declare the one exact HTTPS authorization origin; the
+  paired authorization and token endpoints must share it, the default remains
+  same-origin-only, and wildcards/suffix matching are forbidden.
+- Browser login uses a public Cognito app client with no client secret and an
+  authorization-code grant with S256 PKCE. A short-lived, tab-scoped,
+  single-use state/verifier transaction is consumed before callback decisions;
+  bearer tokens are never accepted from a callback URL. The implicit token
+  grant is not an approved production path.
+- Generic OIDC token validation continues to bind the configured audience to
+  `aud`. Cognito deployments explicitly select `client_id` audience mode for
+  access tokens; that mode requires an exact app-client ID match and
+  `token_use=access`, with signature, issuer, expiry, algorithm, and key-ID
+  validation enabled, an explicit expiry requirement, and Cognito's RS256
+  profile. Neither audience claim is a fallback for the other.
 
 The doctor and readiness checks cannot reliably prove from inside the
 container that a path is EFS. They must prove the runtime contract Elspeth
@@ -426,11 +452,87 @@ region, model identifier, and no embedded AWS keys.
 
 Composer acceptance must be falsifiable rather than a confirmation
 narrative: unit tests assert that Bedrock-shaped LiteLLM responses parse
-token, cost, and prompt-cache metadata correctly, and an opt-in live smoke
-test completes one `bedrock/anthropic...` request when explicit AWS
-credentials, region, and model settings are present. Unit tests for the
+token, cost, and prompt-cache metadata correctly, and an explicitly selected
+live smoke completes one `bedrock/anthropic...` request with region and model
+settings while credentials resolve through the ordinary AWS default chain.
+Acceptance must not require embedded access-key fields or infer credential
+availability from a partial list of environment variables. Unit tests for the
 pipeline `bedrock` provider cover model/config validation and safe error
 handling without requiring AWS access.
+
+## AWS Operational Telemetry
+
+Landscape remains the complete, durable audit and lineage source of truth.
+Operational telemetry is ephemeral, best effort, and must never authorize a
+run, repair missing audit evidence, or become replay evidence. At every shared
+path the Landscape write occurs before telemetry; if audit persistence fails,
+no telemetry is emitted for that event.
+
+ELSPETH already provides a generic OTLP exporter and OpenTelemetry web metrics.
+The AWS deployment uses those vendor-neutral surfaces rather than adding a
+direct CloudWatch SDK exporter. In `aws-ecs` web mode an operator-owned overlay
+replaces uploaded pipeline telemetry routing with one enabled OTLP exporter at
+the fixed task-local receiver, empty headers, explicit bounded resource
+identity, and `lifecycle` or `rows` granularity. `full` is forbidden in this
+profile because it can include LLM/HTTP request or response content. CLI/batch
+behavior remains configurable and vendor-neutral.
+
+The task definition runs a digest-pinned CloudWatch Agent sidecar with no
+published port. It receives OTLP metrics and traces, authenticates to AWS only
+through the task role, and exports to approved CloudWatch/X-Ray destinations
+with bounded memory/queue/retry behavior. Web metrics use an OTLP metric reader
+in addition to the existing authenticated Prometheus reader; the collector does
+not scrape `/metrics` with a bearer secret.
+
+Resource attributes and metric dimensions are closed and bounded. Service,
+version, environment, release, and task-definition identity are permitted.
+User/session/run/row/token IDs, prompts, content, URLs, exception strings, raw
+AWS identifiers, credentials, account numbers, and request IDs are forbidden
+as metric dimensions. Run correlation may remain a trace attribute for the
+alert-to-Landscape workflow. Delivery accounting distinguishes buffered,
+delivered, failed, and dropped events; sidecar/exporter failure and stale signal
+age are alarmable.
+
+## Bedrock Guardrail Shields
+
+Bedrock provider support does not imply shielding. Provider refusal/error
+mapping is not evidence that a Guardrail ran. Add two explicit transforms over
+the model-independent Bedrock Runtime `ApplyGuardrail` operation:
+
+- `aws_bedrock_prompt_shield` requires the `PROMPT_ATTACK` assessment family
+  and supports explicit user-prompt/document field analysis.
+- `aws_bedrock_content_safety` requires `HATE`, `INSULTS`, `SEXUAL`,
+  `VIOLENCE`, and `MISCONDUCT` assessments for INPUT or OUTPUT content.
+
+Both use the default AWS credential chain/task role, bounded region and
+identifier settings, immutable numeric Guardrail versions, `outputScope=FULL`,
+strict response validation, bounded retries, and audit-first/payload-free
+telemetry. Config must not accept access keys, session tokens, profiles, role or
+endpoint overrides. Missing, duplicate, unknown, malformed, or contradictory
+assessment data fails closed. A positive installed-model `detected` fact blocks
+even when top-level action is `NONE`; intervention output objects are bounded,
+validated, and discarded. Detection/intervention becomes a sanitized transform
+error for normal gate/quarantine routing and is never silently treated as allow.
+
+Prompt shielding and content safety remain separate capabilities in composer
+assistance. Untrusted content flowing to an LLM may trigger a strong shield
+recommendation, but topology is never mutated without explicit user or policy
+authority. A shield must dominate the relevant untrusted-to-LLM graph path.
+The target LLM receives the universal Plan-15B request-scoped typed capability
+inventory derived from registered plugin code identities, the kind-qualified
+operator allowlist, per-alias credential-scope readiness, and the frozen
+request snapshot. There are no per-shield enable flags or second AWS-specific
+inventory. Only usable controls and safe opaque aliases are included.
+When one compatible shield is available the model names it; when several are
+available it uses the operator's closed preference order; when none are
+available it emits the high-risk reconsider advisory and invents no plugin.
+The inventory may expose canonical aliases needed to author the selected
+config, but never resolved secrets/config values, disabled rows,
+Guardrail identifiers/versions or region values, AWS identity/permission data,
+or failure details. Availability errors fail closed to absent.
+Bedrock's listed harmful-content categories do not provide Azure's `self_harm`
+category, so equivalent coverage requires an explicit operator decision or an
+additional approved control.
 
 ## Packaging
 
@@ -439,10 +541,10 @@ Add production extras so the runtime image can avoid `--extra all`:
 - `postgres` for the chosen PostgreSQL DBAPI driver;
 - `aws` for boto3/botocore and any Bedrock/LiteLLM AWS support dependencies
   not already covered by `llm`;
-- existing web and LLM extras as needed.
+- existing `webui` and `llm` extras as needed.
 
 The Docker build should support a production install with only production
-extras, for example web, llm, aws, and postgres. Dev and test dependencies,
+extras, for example `webui`, `llm`, `aws`, and `postgres`. Dev and test dependencies,
 including testcontainers, should not be required in the final runtime image.
 
 The existing non-root runtime user remains required. AWS credentials should be
@@ -491,6 +593,18 @@ Integration tests:
 - web startup in ECS validate-only mode after doctor initialization;
 - optional LocalStack-backed S3 source/sink tests if LocalStack is available;
 - optional live Bedrock smoke test only when explicitly configured.
+- live acceptance harness: authenticated session/blob upload, fixed YAML import,
+  execution, blob/artifact hash capture, task replacement, API re-verification,
+  and explicit-UID one-shot payload-store integrity retrieval on real EFS;
+- candidate-task-role S3 source/sink write/read/hash/cleanup proof through the
+  ordinary AWS default chain, with no static credential/profile/role/endpoint
+  override;
+- local-auth SQLite verification only after traffic drain and service
+  desired-zero, from one explicit-UID verifier process sharing the EFS mount;
+- both disposable deployment state machines: first deploy → drain/scale-zero →
+  constrained recovery, and qualified Plan-13-capable rollback baseline →
+  candidate → rollback → candidate, each with zero task overlap and a fresh
+  20-sample observation.
 
 Security and boundary checks:
 
@@ -498,6 +612,23 @@ Security and boundary checks:
 - ensure provider errors, DB URLs, and secret-backed settings are redacted in
   doctor, readiness, and plugin error surfaces;
 - preserve fail-closed behavior for unknown provider modes and stale schemas.
+
+Whole-program closeout is a required testing stage, not an optional follow-up.
+After implementation plans 01–11, 13–14, and 15A–15C have landed in one integrated tree, execute
+`docs/superpowers/plans/aws/2026-07-08-aws-ecs-12-integration-closeout.md` in full.
+Plan 12 owns the exact 0.7.1 version boundary, tracker-completion verification,
+the unscoped pytest run, CI-aligned Ruff and strict-mypy checks, repository
+contract guards, Wardline scan, lean ECS Docker build/runtime verification,
+the hosted `CI Success` umbrella plus CodeQL and signed-allowlist gates on an
+exact-SHA temporary `RC*` push (not a PR synthetic merge SHA), and live
+Aurora/EFS/ECS/ALB deployment, reproducible API/payload persistence,
+observation, both first/upgrade rollback-mode evidence, durable sanitized
+evidence export, reviewed saved-plan Terraform apply/destroy bound to distinct
+remote state identities, an interruption-safe cleanup manifest, and verified
+teardown of both disposable environments and their temporary identities/tags.
+Scoped tests from plans 01–11, 13–14, and 15A–15C do not substitute for this gate. Any non-zero
+command or unmet prerequisite in Plan 12 blocks acceptance; fix the owning
+surface and restart the closeout sequence from its first step.
 
 ## Acceptance Criteria
 
@@ -507,8 +638,12 @@ Security and boundary checks:
   are missing, malformed, or SQLite-backed.
 - In `ELSPETH_WEB__DEPLOYMENT_TARGET=aws-ecs`, the web app refuses to start
   unless explicit PostgreSQL session and landscape URLs are provided.
-- In ECS mode, web startup validates existing schema and does not create or
-  mutate schema objects.
+- In ECS mode, web startup and every post-start web request path validate/use
+  existing schema without creating, completing, indexing, or otherwise
+  mutating schema objects. The deployment-target-to-`create_tables` mapping
+  fails closed on unknown vocabulary; a direct web-layer constructor/import
+  regression guard and a DDL-denied PostgreSQL request-writer test are required
+  acceptance evidence.
 - Stale Aurora schema fails with operator instructions to drop/recreate data;
   no Elspeth command auto-drops Aurora data.
 - `/api/health` remains shallow liveness and returns 200 even when Aurora,
@@ -520,6 +655,15 @@ Security and boundary checks:
 - Local auth works as an explicit single-task option on EFS; `elspeth doctor
   aws-ecs` never opens `auth.db`.
 - Cognito/OIDC is documented as the recommended production auth path.
+- A real Cognito hosted-UI authorization-code + S256 PKCE flow succeeds before
+  and after the upgrade rollback/redeploy scenario, with issuer, audience/
+  client ID, subject, and authenticated API use verified without persisting
+  credentials, authorization codes, PKCE verifiers, or token material in
+  acceptance evidence; the accepted access token follows ELSPETH's existing
+  auth-store session policy.
+- The upgrade rollback target is a mechanically complete pre-Plan-10 baseline
+  containing Plan 13, bound to an immutable image digest and exact task
+  definition; an older release without that Cognito contract is not eligible.
 - `aws_s3` source and sink read/write CSV, JSON, and JSONL using AWS default
   credentials.
 - `aws_s3` pipeline config contains no AWS access-key or secret-key fields.
@@ -532,9 +676,41 @@ Security and boundary checks:
   test completes one `bedrock/anthropic...` request.
 - Pipeline LLM transforms gain a LiteLLM-backed `bedrock` provider registered
   in `_PROVIDERS`, satisfying the existing `LLMProvider` protocol.
+- AWS ECS web execution cannot disable or redirect the operator telemetry
+  overlay; one web metric and one pipeline lifecycle trace arrive through the
+  task-local CloudWatch Agent and correlate to the exact terminal Landscape
+  run without forbidden content or high-cardinality dimensions.
+- A disposable collector-outage lane proves the already committed Landscape
+  record remains authoritative while exporter health degrades and alerts.
+- `aws_bedrock_prompt_shield` and `aws_bedrock_content_safety` are registered,
+  separately discoverable, explicitly placeable, and use immutable Guardrail
+  versions through the task role with no credential/endpoint fields.
+- Composer exposes exactly the enabled and configured shield/content controls
+  to the target LLM, selects only an advertised implementation using operator
+  preference, supplies only approved reference placeholders, and neither leaks
+  availability/configuration data nor invents a disabled provider.
+- Live candidate-task acceptance proves safe and intervened prompt-attack and
+  harmful-content decisions, strict malformed/missing-policy failure, audit
+  before telemetry, payload-free evidence, and zero skips. A Bedrock model
+  refusal does not satisfy this criterion.
 - Two concurrent `elspeth doctor aws-ecs --init-schema` runs against the same
   database serialize through the advisory lock without corrupting schema.
 - Production image installation no longer depends on `--extra all`.
+- Plan 12 completes on one integrated `release/0.7.1` commit with every
+  implementation tracker slice closed and every required local test,
+  static/contract guard, Wardline scan, lean-image check, and hosted
+  `CI Success` lane passing on that exact SHA, followed by live Aurora/EFS
+  doctor, one-task ECS/ALB, persistence-across-replacement, observation, and
+  both first-recovery and qualified-baseline rollback/redeploy evidence for the
+  same immutable candidate image, followed by durable evidence export and
+  verified teardown of both disposable stacks, test identities/secrets, and
+  run-scoped temporary ECR tags before runtime GO. That GO accepts the tested
+  source/runtime contract on the one target platform and digest only; it does
+  not authorize a rebuilt or other-platform release artifact. A later durable
+  artifact must match the recorded accepted digest or repeat artifact/live
+  acceptance, and must independently pass scan, SBOM/provenance, and signature
+  gates before publication. A
+  partial, skipped, local-only, or warning-only Plan 12 run is not acceptance.
 
 ## Follow-Up Work
 

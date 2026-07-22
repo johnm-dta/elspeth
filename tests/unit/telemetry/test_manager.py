@@ -7,10 +7,13 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from types import MappingProxyType
-from unittest.mock import patch
+from unittest.mock import create_autospec, patch
 
 import pytest
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter as SDKOTLPSpanExporter
+from opentelemetry.sdk.trace.export import SpanExportResult
 
+from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS
 from elspeth.contracts.enums import (
     BackpressureMode,
@@ -29,6 +32,7 @@ from elspeth.contracts.events import (
     RunStarted,
 )
 from elspeth.telemetry.errors import TelemetryExporterError
+from elspeth.telemetry.exporters.otlp import OTLPExporter
 from elspeth.telemetry.manager import TelemetryManager
 from tests.fixtures.telemetry import (
     FailingExporter,
@@ -85,6 +89,8 @@ def _external_call_event() -> ExternalCallCompleted:
         status=CallStatus.SUCCESS,
         latency_ms=50.0,
         state_id="s1",
+        request_payload=RawCallPayload({"operation": "apply_guardrail", "target_fingerprint": "abc123"}),
+        response_payload=RawCallPayload({"status": "safe", "request_id_present": True}),
     )
 
 
@@ -160,8 +166,12 @@ class TestInitialization:
         manager = TelemetryManager(config, exporters=[])
         try:
             metrics = manager.health_metrics
+            assert metrics["events_attempted"] == 0
+            assert metrics["events_delivered"] == 0
+            assert metrics["events_failed"] == 0
             assert metrics["events_emitted"] == 0
             assert metrics["events_dropped"] == 0
+            assert metrics["queue_drops"] == 0
             assert metrics["consecutive_total_failures"] == 0
         finally:
             manager.close()
@@ -182,6 +192,20 @@ class TestHandleEventBasic:
             _wait_for_processing(manager)
             assert len(exporter.events) == 1
             assert isinstance(exporter.events[0], RunStarted)
+        finally:
+            manager.close()
+
+    def test_bounded_external_call_payload_reaches_exporter_unchanged(self) -> None:
+        config = MockTelemetryConfig(granularity=TelemetryGranularity.FULL)
+        exporter = TelemetryTestExporter()
+        manager = TelemetryManager(config, exporters=[exporter])
+        try:
+            event = _external_call_event()
+            manager.handle_event(event)
+            _wait_for_processing(manager)
+            assert exporter.events == [event]
+            assert event.request_payload is not None
+            assert event.request_payload.to_dict() == {"operation": "apply_guardrail", "target_fingerprint": "abc123"}
         finally:
             manager.close()
 
@@ -428,7 +452,7 @@ class TestDropBackpressure:
                     object.__setattr__(manager, "_dispatch_to_exporters", original_dispatch)
                 manager.close()
 
-    def test_drop_mode_increments_events_dropped(self) -> None:
+    def test_drop_mode_increments_overall_and_queue_only_drops(self) -> None:
         with patch("elspeth.telemetry.manager.INTERNAL_DEFAULTS", _small_queue_defaults()):
             config = MockTelemetryConfig(backpressure_mode=BackpressureMode.DROP)
             exporter = TelemetryTestExporter()
@@ -451,8 +475,10 @@ class TestDropBackpressure:
                 manager.handle_event(_lifecycle_event())
 
                 initial_dropped = manager.health_metrics["events_dropped"]
+                initial_queue_drops = manager.health_metrics["queue_drops"]
                 manager.handle_event(_lifecycle_event())
                 assert manager.health_metrics["events_dropped"] > initial_dropped
+                assert manager.health_metrics["queue_drops"] > initial_queue_drops
             finally:
                 if "blocker" in locals() and not blocker.is_set():
                     blocker.set()
@@ -489,6 +515,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -565,6 +592,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -581,6 +609,7 @@ class TestDropBackpressure:
         assert queued is None
         q.task_done()
         assert dummy._events_dropped == 2
+        assert dummy._queue_drops == 2
 
     def test_drop_mode_degrades_gracefully_when_sentinel_requeue_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Sentinel requeue failure degrades to dropped event, never raises."""
@@ -594,6 +623,7 @@ class TestDropBackpressure:
                 self._queue = q
                 self._dropped_lock = threading.Lock()
                 self._events_dropped = 0
+                self._queue_drops = 0
                 self._last_logged_drop_count = 0
 
             def _log_drops_if_needed(self) -> None:
@@ -618,6 +648,7 @@ class TestDropBackpressure:
 
         # Event counted as dropped (not silently swallowed)
         assert dummy._events_dropped == 1
+        assert dummy._queue_drops == 1
 
 
 # =============================================================================
@@ -813,6 +844,7 @@ class TestTotalExporterFailure:
             manager.handle_event(_lifecycle_event())
             _wait_for_processing(manager)
             assert manager.health_metrics["events_dropped"] == 1
+            assert manager.health_metrics["queue_drops"] == 0
             assert manager.health_metrics["events_emitted"] == 0
         finally:
             manager.close()
@@ -938,13 +970,18 @@ class TestHealthMetrics:
         try:
             metrics = manager.health_metrics
             expected_keys = {
+                "events_attempted",
+                "events_delivered",
+                "events_failed",
                 "events_emitted",
                 "events_dropped",
+                "queue_drops",
                 "exporter_failures",
                 "consecutive_total_failures",
                 "queue_depth",
                 "queue_maxsize",
                 "circuit_breakers",
+                "exporter_delivery",
             }
             assert set(metrics.keys()) == expected_keys
         finally:
@@ -959,6 +996,9 @@ class TestHealthMetrics:
                 manager.handle_event(_lifecycle_event())
             _wait_for_processing(manager)
             assert manager.health_metrics["events_emitted"] == 5
+            assert manager.health_metrics["events_attempted"] == 5
+            assert manager.health_metrics["events_delivered"] == 5
+            assert manager.health_metrics["events_failed"] == 0
         finally:
             manager.close()
 
@@ -1121,6 +1161,63 @@ class TestFlush:
         finally:
             manager.close()
 
+    def test_flush_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
+        failed_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
+        failed_sdk.export.return_value = SpanExportResult.FAILURE
+        successful_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
+        successful_sdk.export.return_value = SpanExportResult.SUCCESS
+        failed_exporter = OTLPExporter()
+        successful_exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            side_effect=[failed_sdk, successful_sdk],
+        ):
+            failed_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+            successful_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[failed_exporter, successful_exporter])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            assert manager._pending_deferred_events == 1
+
+            manager.flush()
+
+            metrics = manager.health_metrics
+            assert metrics["events_delivered"] == 1
+            assert metrics["events_emitted"] == 1
+            assert metrics["events_failed"] == 0
+            assert metrics["events_dropped"] == 0
+            assert manager._pending_deferred_events == 0
+            failed_sdk.export.assert_called_once()
+            successful_sdk.export.assert_called_once()
+        finally:
+            manager.close()
+
+    def test_successful_deferred_flush_resets_failure_state(self) -> None:
+        sdk_exporter = create_autospec(SDKOTLPSpanExporter, instance=True)
+        sdk_exporter.export.return_value = SpanExportResult.SUCCESS
+        exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            return_value=sdk_exporter,
+        ):
+            exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[exporter])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            breaker = manager._circuit_breakers[id(exporter)]
+            breaker.record_failure()
+            manager._consecutive_total_failures = 1
+
+            manager.flush()
+
+            assert breaker.failure_count == 0
+            assert breaker.metrics["total_successes"] == 1
+            assert manager.health_metrics["consecutive_total_failures"] == 0
+        finally:
+            manager.close()
+
 
 # =============================================================================
 # Close
@@ -1179,6 +1276,75 @@ class TestClose:
         manager.close()
         # All events should have been processed before thread exited
         assert len(exporter.events) == 5
+
+    @pytest.mark.parametrize(
+        ("result", "expected_delivered", "expected_failed", "expected_dropped"),
+        [
+            (SpanExportResult.SUCCESS, 1, 0, 0),
+            (SpanExportResult.FAILURE, 0, 1, 1),
+        ],
+    )
+    def test_close_reconciles_otlp_partial_batch_once(
+        self,
+        result: SpanExportResult,
+        expected_delivered: int,
+        expected_failed: int,
+        expected_dropped: int,
+    ) -> None:
+        sdk_exporter = create_autospec(SDKOTLPSpanExporter, instance=True)
+        sdk_exporter.export.return_value = result
+        exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            return_value=sdk_exporter,
+        ):
+            exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[exporter])
+        manager.handle_event(_lifecycle_event())
+        _wait_for_processing(manager)
+        assert manager.health_metrics["events_delivered"] == 0
+        assert manager._pending_deferred_events == 1
+
+        manager.close()
+        manager.close()
+
+        metrics = manager.health_metrics
+        assert metrics["events_attempted"] == 1
+        assert metrics["events_delivered"] == expected_delivered
+        assert metrics["events_emitted"] == expected_delivered
+        assert metrics["events_failed"] == expected_failed
+        assert metrics["events_dropped"] == expected_dropped
+        assert manager._pending_deferred_events == 0
+        sdk_exporter.export.assert_called_once()
+
+    def test_close_counts_deferred_event_delivered_when_any_exporter_succeeds(self) -> None:
+        failed_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
+        failed_sdk.export.return_value = SpanExportResult.FAILURE
+        successful_sdk = create_autospec(SDKOTLPSpanExporter, instance=True)
+        successful_sdk.export.return_value = SpanExportResult.SUCCESS
+        failed_exporter = OTLPExporter()
+        successful_exporter = OTLPExporter()
+        with patch(
+            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            side_effect=[failed_sdk, successful_sdk],
+        ):
+            failed_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+            successful_exporter.configure({"endpoint": "http://127.0.0.1:4317", "batch_size": 100})
+        manager = TelemetryManager(MockTelemetryConfig(), exporters=[failed_exporter, successful_exporter])
+        manager.handle_event(_lifecycle_event())
+        _wait_for_processing(manager)
+        assert manager._pending_deferred_events == 1
+
+        manager.close()
+
+        metrics = manager.health_metrics
+        assert metrics["events_delivered"] == 1
+        assert metrics["events_emitted"] == 1
+        assert metrics["events_failed"] == 0
+        assert metrics["events_dropped"] == 0
+        assert manager._pending_deferred_events == 0
+        failed_sdk.export.assert_called_once()
+        successful_sdk.export.assert_called_once()
 
 
 # =============================================================================

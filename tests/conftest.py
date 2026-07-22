@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Iterator
 
 import pytest
 from hypothesis import Phase, Verbosity, settings
@@ -135,6 +136,22 @@ def _allow_raw_secrets_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _sink_effect_spool_outside_repo(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Keep the default sink-effect spool out of the repository tree.
+
+    The remote-object spool defaults to the project-local
+    ``.elspeth/sink-effect-spool`` (CWD-relative), so tests that prepare
+    remote effects without an explicit override would otherwise write into
+    the checkout. Tests asserting spool behaviour still win: function-scoped
+    monkeypatch.setenv/delenv overrides this session-level default.
+    """
+    patch = pytest.MonkeyPatch()
+    patch.setenv("ELSPETH_EFFECT_SPOOL_DIR", str(tmp_path_factory.mktemp("sink-effect-spool")))
+    yield
+    patch.undo()
+
+
 @pytest.fixture(autouse=True)
 def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mirror the runtime-VAL manifest precondition for direct repository tests.
@@ -194,13 +211,77 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
 
     original_orch_run = Orchestrator.run
 
+    def with_test_sink_effect_modes(config):  # type: ignore[no-untyped-def]
+        """Mirror RuntimePluginFactory mode resolution for test-only sinks."""
+        from dataclasses import replace
+        from unittest.mock import Mock
+
+        from elspeth.contracts import (
+            ResolvedSinkEffectMode,
+            SinkEffectExecutionPurpose,
+            SinkEffectInputKind,
+        )
+        from elspeth.engine.orchestrator import PipelineConfig
+        from elspeth.engine.orchestrator.preflight import validate_pipeline_sink_effect_capabilities
+
+        if isinstance(config, Mock):
+            # Resume unit tests use a spec-bound PipelineConfig mock for fields
+            # unrelated to sink execution. Give the new admission boundary an
+            # exact empty surface instead of letting auto-created Mock fields
+            # masquerade as a forged admission receipt.
+            config.sinks = {}
+            config.sink_effect_modes = {}
+            config.sink_effect_admission = None
+            return config
+        if type(config) is not PipelineConfig:
+            return config
+        modes: dict[str, str] = dict(config.sink_effect_modes)
+        if not modes:
+            for sink_name, sink in config.sinks.items():
+                resolver = getattr(type(sink), "_resolve_sink_effect_mode", None)
+                if resolver is None:
+                    continue
+                resolved = resolver(dict(sink.config), purpose=SinkEffectExecutionPurpose.FRESH)
+                if resolved is None:
+                    continue
+                if not isinstance(resolved, ResolvedSinkEffectMode):
+                    raise TypeError("test sink effect resolver must return ResolvedSinkEffectMode")
+                modes[sink_name] = resolved.value
+        admission = validate_pipeline_sink_effect_capabilities(
+            config.sinks,
+            configured_modes=modes,
+            required_input_kind=SinkEffectInputKind.PIPELINE_MEMBERS,
+        )
+        return replace(config, sink_effect_modes=modes, sink_effect_admission=admission)
+
     @functools.wraps(original_orch_run)
     def wrapped_orch_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Direct orchestrator tests bypass RuntimePluginFactory, which is the
+        # production authority that resolves and binds sink-effect modes. Keep
+        # test-only sink fixtures honest under the same effect-only runtime by
+        # resolving their declared mode before the call. Production sink types
+        # and tests that provide an explicit mode map are left untouched.
+        if "config" in kwargs:
+            kwargs["config"] = with_test_sink_effect_modes(kwargs["config"])
+        elif args:
+            args = (with_test_sink_effect_modes(args[0]), *args[1:])
         kwargs.setdefault("openrouter_catalog_sha256", "0" * 64)
         kwargs.setdefault("openrouter_catalog_source", "bundled")
         return original_orch_run(self, *args, **kwargs)
 
     monkeypatch.setattr(Orchestrator, "run", wrapped_orch_run)
+
+    original_orch_resume = Orchestrator.resume
+
+    @functools.wraps(original_orch_resume)
+    def wrapped_orch_resume(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if "config" in kwargs:
+            kwargs["config"] = with_test_sink_effect_modes(kwargs["config"])
+        elif len(args) >= 2:
+            args = (args[0], with_test_sink_effect_modes(args[1]), *args[2:])
+        return original_orch_resume(self, *args, **kwargs)
+
+    monkeypatch.setattr(Orchestrator, "resume", wrapped_orch_resume)
 
     # ExecutionServiceImpl: in production the lifespan calls
     # ``set_openrouter_catalog_snapshot()`` after construction. Tests

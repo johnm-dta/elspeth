@@ -4,6 +4,10 @@ import { useComposer } from "@/hooks/useComposer";
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import {
+  COMPOSE_CONNECTING_MESSAGE,
+  COMPOSE_UNAVAILABLE_MESSAGE,
+} from "@/config/composer";
 import type { CompositionState, ValidationEntryDTO } from "@/types/index";
 import {
   sortedSourceEntries,
@@ -16,9 +20,26 @@ interface SuggestionListProps {
 
 function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
   const { sendMessage, isComposing } = useComposer();
+  // Apply is a programmatic freeform sender (routes through useComposer →
+  // runComposeWithTimeout). Hold it closed until the backend compose wall
+  // clock has landed at boot, same as the main Send — a send started against
+  // the stale default ceiling could be aborted before the backend's 422
+  // (bootstrap race). The underlying runComposeWithTimeout also no-ops when
+  // not ready; disabling the button keeps it from reading as a dead click.
+  const composeTimeoutReady = useSessionStore((s) => s.composeTimeoutReady);
+  const composerTimeoutUnavailable = useSessionStore(
+    (s) => s.composerTimeoutUnavailable,
+  );
+  const applyDisabled = isComposing || !composeTimeoutReady;
+  // Reason shown while Apply is held closed by the compose gate (not while
+  // composing): the stuck "unavailable" state, else the transient boot window.
+  const composeGateReason = composerTimeoutUnavailable
+    ? COMPOSE_UNAVAILABLE_MESSAGE
+    : COMPOSE_CONNECTING_MESSAGE;
   const [expanded, setExpanded] = useState(suggestions.length <= 2);
 
   function handleApply(suggestion: ValidationEntryDTO): void {
+    if (applyDisabled) return;
     const prompt = `Please apply this suggestion to the pipeline:\n\n**${suggestion.component}:** ${suggestion.message}`;
     void sendMessage(prompt);
   }
@@ -45,6 +66,22 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
           {expanded ? "▴" : "▾"}
         </span>
       </div>
+      {expanded && !isComposing && !composeTimeoutReady && (
+        // Visible + announced reason the Apply buttons below are disabled. The
+        // per-button title alone is not reliably read by screen readers. Matches
+        // the main ChatInput affordance: polite role="status" for the transient
+        // boot window, assertive role="alert" for the stuck "unavailable" state.
+        <div
+          role={composerTimeoutUnavailable ? "alert" : "status"}
+          className={
+            composerTimeoutUnavailable
+              ? "side-rail-suggestion-unavailable"
+              : "side-rail-suggestion-connecting"
+          }
+        >
+          {composeGateReason}
+        </div>
+      )}
       {expanded && (
         <ul className="side-rail-suggestion-list">
           {suggestions.map((s, i) => (
@@ -54,7 +91,12 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
               </span>
               <button
                 className="side-rail-suggestion-apply-btn"
-                disabled={isComposing}
+                disabled={applyDisabled}
+                title={
+                  !isComposing && !composeTimeoutReady
+                    ? composeGateReason
+                    : undefined
+                }
                 onClick={() => handleApply(s)}
               >
                 {isComposing ? "Applying..." : "Apply"}

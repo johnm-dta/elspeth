@@ -2512,3 +2512,196 @@ class TestCoalesceSchemaBoundary:
             ("early", "any", False),
             ("late", "any", False),
         ]
+
+
+class _SourceWithGuarantees:
+    """Mock source that declares guaranteed_fields via its config schema.
+
+    Mirrors a real source (csv, observed mode) that guarantees the columns
+    downstream pass-through transforms carry through.
+    """
+
+    name = "mock_source_guaranteeing"
+    output_schema = None
+    _on_validation_failure = "discard"
+    on_success = "output"
+
+    def __init__(self, guaranteed: tuple[str, ...]) -> None:
+        self.config = {"schema": {"mode": "observed", "guaranteed_fields": list(guaranteed)}}
+
+
+class _PassThroughBranchTransform:
+    """Mock pass-through transform that ADDS one field on top of its input.
+
+    Models a real LLM node (passes_through_input=True) that forwards the
+    source columns and appends a response field. Its own declared guarantee
+    names ONLY the added field — the source columns reach the coalesce via
+    pass-through propagation, exactly the shape of session 30acb16e's
+    color_name/hex carried through llm_variant_a/b.
+    """
+
+    input_schema = None
+    output_schema = None
+    on_error: str | None = None
+    on_success: str | None = "output"
+    declared_output_fields: frozenset[str] = frozenset()
+    passes_through_input: bool = True
+
+    def __init__(self, name: str, added_field: str) -> None:
+        self.name = name
+        self.config = {"schema": {"mode": "observed", "guaranteed_fields": [added_field]}}
+        self._output_schema_config = SchemaConfig(
+            mode="observed",
+            fields=None,
+            guaranteed_fields=(added_field,),
+        )
+
+
+class TestBuilderCoalescePassThroughGuaranteePropagation:
+    """Coalesce union guarantee must include fields branches carry by pass-through.
+
+    Regression: builder.py assembled coalesce branch schemas from each branch
+    producer's RAW output_schema_config (its own declared guaranteed_fields),
+    NOT its propagation-walked EFFECTIVE guarantee. For a pass-through branch
+    (LLM) that forwards source columns, the raw guarantee omits those columns,
+    so ``merge_guaranteed_fields`` under-computed the coalesce union guarantee
+    and ``validate_edge_compatibility`` falsely rejected a runnable pipeline
+    (session 30acb16e: "coalesce guarantees ['tone','usage']; field_mapper
+    requires ['color_name','hex','tone','usage']; missing color_name,hex").
+
+    The reference-correct algorithm already lives in the composer preview
+    (web/composer/state.py::_connection_propagation_vote); these tests pin the
+    engine builder to the same result (elspeth-0b14977817).
+    """
+
+    def _build(
+        self,
+        *,
+        policy: str,
+        source_guarantees: tuple[str, ...] = ("color_name", "hex"),
+    ) -> ExecutionGraph:
+        source = _SourceWithGuarantees(source_guarantees)
+        t_a = _PassThroughBranchTransform("llm_variant_a", "tone")
+        t_b = _PassThroughBranchTransform("llm_variant_b", "usage")
+        wired_a = WiredTransform(
+            plugin=t_a,  # type: ignore[arg-type]
+            settings=TransformSettings(name="t_a", plugin=t_a.name, input="branch_a", on_success="t_a_out", on_error="discard", options={}),
+        )
+        wired_b = WiredTransform(
+            plugin=t_b,  # type: ignore[arg-type]
+            settings=TransformSettings(name="t_b", plugin=t_b.name, input="branch_b", on_success="t_b_out", on_error="discard", options={}),
+        )
+        fork_gate = GateSettings(
+            name="splitter",
+            input="source_out",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["branch_a", "branch_b"],
+        )
+        coalesce = CoalesceSettings(
+            name="reconcile",
+            branches={"branch_a": "t_a_out", "branch_b": "t_b_out"},
+            policy=policy,
+            merge="union",
+            on_success="output",
+            # best_effort/quorum require an arrival timeout; require_all does not.
+            timeout_seconds=None if policy == "require_all" else 30,
+        )
+        return ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
+            transforms=[wired_a, wired_b],
+            sinks={"output": _BuilderMockSink()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[fork_gate],
+            coalesce_settings=[coalesce],
+        )
+
+    def test_require_all_union_includes_passthrough_source_fields(self) -> None:
+        """require_all union guarantee = union of each branch's EFFECTIVE guarantee.
+
+        Each branch effectively guarantees {color_name, hex, <added>} because
+        the source columns propagate through the pass-through transform. Under
+        require_all all branches arrive, so the merged row always carries all
+        four fields.
+        """
+        graph = self._build(policy="require_all")
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        assert coal_schema.get_effective_guaranteed_fields() == frozenset({"color_name", "hex", "tone", "usage"})
+
+    def test_require_all_union_validates_downstream_consumer_requiring_all_fields(self) -> None:
+        """A downstream consumer requiring all four fields validates end-to-end.
+
+        This is the edge session 30acb16e's engine preflight rejected
+        ("coalesce guarantees ['tone','usage']; consumer requires
+        ['color_name','hex','tone','usage']; missing color_name,hex"). Uses a
+        strict sink (declared_required_fields flows reliably through the mock)
+        consuming the coalesce directly; before the fix this raised
+        GraphValidationError, after it validates cleanly.
+        """
+
+        class _SinkRequiringAllFour:
+            name = "strict_sink"
+            input_schema = None
+            config: ClassVar[dict[str, Any]] = {}
+            _on_write_failure: str = "discard"
+            declared_required_fields: ClassVar[frozenset[str]] = frozenset({"color_name", "hex", "tone", "usage"})
+
+            def _reset_diversion_log(self) -> None:
+                pass
+
+        source = _SourceWithGuarantees(("color_name", "hex"))
+        t_a = _PassThroughBranchTransform("llm_variant_a", "tone")
+        t_b = _PassThroughBranchTransform("llm_variant_b", "usage")
+        wired_a = WiredTransform(
+            plugin=t_a,  # type: ignore[arg-type]
+            settings=TransformSettings(name="t_a", plugin=t_a.name, input="branch_a", on_success="t_a_out", on_error="discard", options={}),
+        )
+        wired_b = WiredTransform(
+            plugin=t_b,  # type: ignore[arg-type]
+            settings=TransformSettings(name="t_b", plugin=t_b.name, input="branch_b", on_success="t_b_out", on_error="discard", options={}),
+        )
+        # Both routes fork (session 30acb16e's shape) so there is no gate→sink
+        # bypass edge — the sink's only upstream is the coalesce.
+        fork_gate = GateSettings(
+            name="splitter",
+            input="source_out",
+            condition="True",
+            routes={"true": "fork", "false": "fork"},
+            fork_to=["branch_a", "branch_b"],
+        )
+        coalesce = CoalesceSettings(
+            name="reconcile",
+            branches={"branch_a": "t_a_out", "branch_b": "t_b_out"},
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
+        # Should NOT raise — coalesce guarantees all four fields via propagation.
+        ExecutionGraph.from_plugin_instances(
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
+            transforms=[wired_a, wired_b],
+            sinks={"output": _SinkRequiringAllFour()},  # type: ignore[dict-item]
+            aggregations={},
+            gates=[fork_gate],
+            coalesce_settings=[coalesce],
+        )
+
+    def test_best_effort_union_intersects_passthrough_source_fields(self) -> None:
+        """best_effort union guarantee = INTERSECTION of branches' EFFECTIVE guarantees.
+
+        A branch may be lost, so only fields ALL branches guarantee survive.
+        Both branches carry color_name/hex (shared source columns) but each
+        adds a distinct field, so the intersection is exactly {color_name, hex}
+        — NOT the empty set the raw-guarantee under-computation produced.
+        """
+        graph = self._build(policy="best_effort")
+        coalesce_nodes = [n for n in graph.get_nodes() if n.node_type == NodeType.COALESCE]
+        assert len(coalesce_nodes) == 1
+        coal_schema = coalesce_nodes[0].output_schema_config
+        assert coal_schema is not None
+        assert coal_schema.get_effective_guaranteed_fields() == frozenset({"color_name", "hex"})

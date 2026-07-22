@@ -16,9 +16,10 @@ import httpx
 import pytest
 
 from elspeth.contracts import CallStatus, CallType
+from elspeth.contracts.call_data import HTTPCallResponse
 from elspeth.core.security.web import SSRFSafeRequest
 from elspeth.plugins.infrastructure.clients import http as http_client_module
-from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
 
 
 @dataclass(frozen=True)
@@ -535,6 +536,54 @@ class TestBug4_7_FailedHopRecordsAuditTrail:
         assert "Connection refused" in call_kwargs["error"].message
         assert isinstance(call_kwargs["latency_ms"], float)
         assert call_kwargs["latency_ms"] >= 0
+
+    def test_failed_hop_audit_sanitizes_connection_url_without_changing_raised_error(
+        self,
+        ssrf_validator: FakeSSRFValidator,
+        http_client: AuditedHTTPClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """IP-pinned redirect errors retain diagnostics without raw query credentials."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key-for-http-error-audit")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+        redirect_response = _make_redirect_response("https://redirect.example.com/huge?token=HOP_SECRET&view=summary#HOP_FRAGMENT")
+        redirect_request = _make_ssrf_request(
+            "https://redirect.example.com/huge?token=HOP_SECRET&view=summary#HOP_FRAGMENT",
+            ip="198.51.100.10",
+        )
+        ssrf_validator.queue(redirect_request)
+        response_payload = HTTPCallResponse(
+            status_code=200,
+            headers={},
+            body_size=6,
+            body={"_truncated": True, "_reason": "body_too_large"},
+        )
+        failure = HTTPResponseBodyTooLargeError(
+            url=redirect_request.connection_url,
+            body_size=6,
+            max_body_bytes=5,
+            response_payload=response_payload,
+        )
+        http_client._test_ephemeral_client.queue_get(failure)
+
+        with pytest.raises(HTTPResponseBodyTooLargeError) as exc_info:
+            http_client._follow_redirects_safe(
+                response=redirect_response,
+                max_redirects=5,
+                timeout=10.0,
+                original_headers={},
+                original_url="https://example.com/start",
+            )
+
+        assert exc_info.value is failure
+        assert len(http_client._execution.calls) == 1
+        recorded_message = http_client._execution.calls[0]["error"].message
+        assert "response body 6 bytes exceeds max_response_body_bytes 5" in recorded_message
+        assert "198.51.100.10:443/huge" in recorded_message
+        assert "view=summary" in recorded_message
+        assert "token=" in recorded_message
+        assert "HOP_SECRET" not in recorded_message
+        assert "HOP_FRAGMENT" not in recorded_message
 
 
 class TestRedirectValidationFailuresPreserveEvidence:

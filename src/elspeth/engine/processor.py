@@ -144,7 +144,7 @@ from elspeth.engine.executors import (
     TransformExecutor,
 )
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
-from elspeth.engine.executors.state_guard import stamped_node_state_id
+from elspeth.engine.executors.state_guard import NodeStateGuard, stamped_node_state_id
 from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -409,16 +409,16 @@ class RowProcessor:
             coordination_token: Leader fencing token (epoch 21, ADR-030).
                 Carried by value for the slice-2 step-4 fenced verbs this
                 processor drives (repair sweep, recover_expired_leases, the
-                fenced ingest verb). When provided, the orchestrator also
+                fenced ingest verb). Strict recovery derives both run scope
+                and caller identity from this token. The orchestrator also
                 passes ``scheduler_lease_owner=token.worker_id`` — the §A.1
-                registered worker identity IS the lease owner; the
-                ``row-processor:{run_id}:{uuid}`` mint below remains the
-                fallback for direct repository-level construction.
+                registered worker identity IS the lease owner. A distinct
+                leader lease owner is rejected at construction.
             run_coordination: Optional RunCoordinationRepository for leader
                 housekeeping (§C.2 path 1, slice 4): enumerating dead non-leader
                 workers and calling ``evict_worker`` for each. None = no
-                housekeeping sweep (N=1 without the coordination substrate, or
-                direct repository-level construction in tests).
+                dead-member enumeration; it never selects unfenced recovery,
+                and leader maintenance still requires ``coordination_token``.
             follower_barrier_node_ids: ADR-030 §B (slice 5, follower aggregation
                 barrier hand-off): frozenset of aggregation node IDs that this
                 follower must NOT execute locally.  When a batch-aware transform
@@ -428,9 +428,10 @@ class RowProcessor:
                 (§B.2: trigger evaluation is leader-only).  Non-follower
                 processors leave this None (no-op path).
             mode: Explicit processor role (elspeth-577179bba1). LEADER (the
-                default) covers the fenced leader, the N=1 arm, and direct
-                repository-level construction — within it, behavior still
-                keys on genuine coordination_token/run_coordination presence.
+                default) is the production role: maintenance requires
+                ``coordination_token`` and always uses strict recovery. Direct
+                tokenless harnesses recover through the repository's named
+                legacy adapter rather than this processor mode.
                 FOLLOWER is validated fail-closed below: it requires
                 ``coordination_token=None``, ``run_coordination=None``, and
                 an explicit ``scheduler_lease_owner``; it gates the public
@@ -543,6 +544,16 @@ class RowProcessor:
         # the lease owner is a run_workers identity. Production paths pass the
         # owner explicitly; direct tests often pass only the coordination token,
         # whose worker_id is the same registered leader identity.
+        if (
+            mode is ProcessorMode.LEADER
+            and coordination_token is not None
+            and scheduler_lease_owner is not None
+            and scheduler_lease_owner != coordination_token.worker_id
+        ):
+            raise OrchestrationInvariantError(
+                "ProcessorMode.LEADER requires scheduler_lease_owner to equal coordination_token.worker_id; "
+                "leader-fenced recovery derives caller identity from the token and must not hold leases under a second identity."
+            )
         resolved_scheduler_lease_owner = scheduler_lease_owner
         if resolved_scheduler_lease_owner is None and coordination_token is not None:
             resolved_scheduler_lease_owner = coordination_token.worker_id
@@ -691,7 +702,7 @@ class RowProcessor:
                 clock=self._clock,
                 aggregation_settings=self._aggregation_settings,
                 coalesce_node_ids=self._coalesce_node_ids,
-                coordination_token=coordination_token,
+                coordination_token=self._require_coordination_token(),
                 scheduler_lease_owner=self._scheduler_lease_owner,
             ).restore_from_journal(barrier_restore)
 
@@ -705,8 +716,10 @@ class RowProcessor:
         """The leader fencing token bound at construction (ADR-030).
 
         Exposed so source-iteration helpers (quarantine ingest) can thread it
-        into their own fenced rows writes. None only for direct
-        repository-level construction (the unfenced legacy arm).
+        into their own fenced row writes. None for follower processors and
+        tokenless direct harness construction. Neither case selects unfenced
+        recovery: followers skip maintenance, while recovery-specific direct
+        harnesses call the named repository legacy adapter outside RowProcessor.
         """
         return self._coordination_token
 
@@ -1484,7 +1497,8 @@ class RowProcessor:
                 output_contract=output_contract,
                 node_id=fctx.node_id,
                 run_id=self._run_id,
-                record_parent_outcome=False,
+                parent_path=TerminalPath.BATCH_CONSUMED,
+                parent_batch_id=fctx.batch_id,
             )
 
             # Record terminal outcomes for ALL buffered tokens AFTER expand_token
@@ -1502,14 +1516,16 @@ class RowProcessor:
                     batch_id = fctx.batch_id
                     outcome = TerminalOutcome.TRANSIENT
                     path = TerminalPath.BATCH_CONSUMED
+                parent_outcome_was_recorded_atomically = token.token_id == expand_parent_token.token_id and i not in quarantined_index_set
                 try:
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=outcome,
-                        path=path,
-                        error_hash=error_hash,
-                        batch_id=batch_id,
-                    )
+                    if not parent_outcome_was_recorded_atomically:
+                        self._data_flow.record_token_outcome(
+                            ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                            outcome=outcome,
+                            path=path,
+                            error_hash=error_hash,
+                            batch_id=batch_id,
+                        )
                 except LandscapeRecordError as record_failure:
                     raise AuditIntegrityError(
                         f"Failed to record batch parent terminal outcome for token {token.token_id!r} "
@@ -1660,11 +1676,21 @@ class RowProcessor:
         # the emitted rows.
         if settings.output_mode == OutputMode.PASSTHROUGH:
             flush_results, child_items = self._route_passthrough_results(fctx, result)
-            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(
+                node_id,
+                flush_results,
+                buffered_tokens,
+                child_items,
+            )
             return flush_results, child_items
         if settings.output_mode == OutputMode.TRANSFORM:
             flush_results, child_items = self._route_transform_results(fctx, result)
-            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(node_id, flush_results, buffered_tokens)
+            flush_results, _pending_sink_token_ids = self._complete_aggregation_flush(
+                node_id,
+                flush_results,
+                buffered_tokens,
+                child_items,
+            )
             return flush_results, child_items
         raise OrchestrationInvariantError(f"Unknown output_mode: {settings.output_mode}")
 
@@ -1805,6 +1831,39 @@ class RowProcessor:
             on_error,
         )
 
+    def _record_pre_attempt_shutdown_state(
+        self,
+        *,
+        exc: InterruptedError,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        attempt: int,
+    ) -> str:
+        """Record the failed node visit for shutdown before plugin invocation."""
+        node_id = transform.node_id
+        if node_id is None:
+            raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
+        with NodeStateGuard(
+            self._execution,
+            token_id=token.token_id,
+            node_id=node_id,
+            run_id=self._run_id,
+            step_index=self.resolve_node_step(NodeID(node_id)),
+            input_data=token.row_data.to_dict(),
+            attempt=token.resume_attempt_offset + attempt,
+            resume_checkpoint_id=token.resume_checkpoint_id,
+        ) as guard:
+            guard.complete(
+                NodeStateStatus.FAILED,
+                duration_ms=0.0,
+                error=ExecutionError(
+                    exception=scrub_text_for_audit(str(exc)),
+                    exception_type=type(exc).__name__,
+                    phase="retry_pre_attempt_shutdown",
+                ),
+            )
+            return guard.state_id
+
     def _execute_transform_with_retry(
         self,
         transform: Any,
@@ -1915,6 +1974,14 @@ class RowProcessor:
                 shutdown_event=ctx.shutdown_event,
             )
         except InterruptedError as e:
+            state_id = stamped_node_state_id(e) or state_tracker["last_failed_state_id"]
+            if state_id is None:
+                state_id = self._record_pre_attempt_shutdown_state(
+                    exc=e,
+                    transform=transform,
+                    token=token,
+                    attempt=attempt_tracker["current"],
+                )
             return self._convert_retryable_to_error_result(
                 e,
                 transform,
@@ -1924,7 +1991,7 @@ class RowProcessor:
                 # Stamped when the shutdown fired inside execute_transform
                 # (batch waiter); otherwise the RetryManager raised it and the
                 # last failed attempt's state is the divert attribution point.
-                state_id=stamped_node_state_id(e) or state_tracker["last_failed_state_id"],
+                state_id=state_id,
                 retryable=False,
             )
 
@@ -2178,7 +2245,7 @@ class RowProcessor:
         fields = self._work_codec.ready_fields(item, ingest_sequence=ingest_sequence)
 
         def insert_row_and_token(conn: Connection) -> tuple[AuditRow, AuditToken]:
-            return self._data_flow.insert_row_with_token_on(
+            row_record, token_record = self._data_flow.insert_row_with_token_on(
                 conn,
                 run_id=self._run_id,
                 source_node_id=str(source_node_id),
@@ -2189,6 +2256,17 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
             )
+            self._execution.record_completed_node_state_on(
+                conn,
+                token_id=token.token_id,
+                node_id=str(source_node_id),
+                run_id=self._run_id,
+                step_index=0,
+                input_data=data,
+                output_data=data,
+                duration_ms=0,
+            )
+            return row_record, token_record
 
         _row, _token_record, scheduled = self._scheduler.ingest_row_with_initial_claim(
             coordination_token=coordination_token,
@@ -2331,8 +2409,9 @@ class RowProcessor:
         preclaimed: TokenWorkItem | None = None
         if self._coordination_token is not None:
             # Fenced leader INGEST (§C.4 row 9): rows insert + tokens insert
-            # + initial enqueue-and-claim in ONE IMMEDIATE transaction; a
-            # stale epoch rolls the whole ingest back (no orphan rows row).
+            # + source COMPLETED evidence + initial enqueue-and-claim in ONE
+            # IMMEDIATE transaction; a stale epoch rolls the whole ingest
+            # back (no orphan rows row or unexplained scheduler admission).
             preclaimed = self._ingest_source_row_with_initial_claim(
                 item=initial_item,
                 source_node_id=effective_source_node_id,
@@ -2355,13 +2434,12 @@ class RowProcessor:
                 row_id=token.row_id,
                 token_id=token.token_id,
             )
-
-        self._record_source_node_state(
-            token=token,
-            input_data=source_input,
-            status=NodeStateStatus.COMPLETED,
-            source_node_id=effective_source_node_id,
-        )
+            self._record_source_node_state(
+                token=token,
+                input_data=source_input,
+                status=NodeStateStatus.COMPLETED,
+                source_node_id=effective_source_node_id,
+            )
         return self._drain_work_queue(initial_item, ctx, preclaimed=preclaimed)
 
     def process_existing_row(
@@ -2813,8 +2891,8 @@ class RowProcessor:
         """Drain scheduler-backed work, processing tokens until empty.
 
         Each work item is durably persisted and leased before it advances;
-        child continuations are persisted as READY work before the current
-        lease is marked terminal.
+        child continuations become READY in the same transaction that disposes
+        the current parent lease.
 
         ``preclaimed`` (ADR-030 §C.4 row 9): the fenced ingest verb already
         persisted AND claimed the initial item inside its composed
@@ -2845,6 +2923,18 @@ class RowProcessor:
         G3 — the original concern was duplicate RowResult emission; the fence CAS
         prevents non-members from claiming, closing that race structurally).
         """
+        repaired_source_states = self._execution.reconcile_source_completions_from_scheduler(
+            run_id=self._run_id,
+            coordination_token=self._require_coordination_token(),
+            at=self._clock.now_utc(),
+        )
+        if repaired_source_states:
+            logger.info(
+                "Reconciled %d source COMPLETED state(s) from fully witnessed scheduler ingress for run_id=%r",
+                repaired_source_states,
+                self._run_id,
+            )
+
         peer_owners = self._scheduler.peer_active_leases(
             run_id=self._run_id,
             caller_owner=self._scheduler_lease_owner,
@@ -2942,7 +3032,7 @@ class RowProcessor:
             barrier_key=barrier_key,
             token_ids=token_ids,
             now=self._clock.now_utc(),
-            coordination_token=self._coordination_token,
+            coordination_token=self._require_coordination_token(),
         )
         if expected_count and terminalized_count != expected_count:
             raise AuditIntegrityError(
@@ -3029,13 +3119,15 @@ class RowProcessor:
         node_id: NodeID,
         results: tuple[RowResult, ...],
         buffered_tokens: Sequence[TokenInfo],
+        child_items: Sequence[WorkItem],
     ) -> tuple[tuple[RowResult, ...], frozenset[str]]:
         """Complete a successful aggregation flush as ONE atomic journal transition.
 
         Consumes the buffered tokens' BLOCKED rows and emits every sink-bound
-        flush output as a durable PENDING_SINK row in the same transaction
-        (F1/D6): the moment the inputs are consumed, the outputs are journal-
-        durable, so a crash before the sink write can no longer strand a
+        flush output as a durable PENDING_SINK row, plus every non-sink
+        continuation as a durable READY row, in the same transaction (F1/D6):
+        the moment the inputs are consumed, every output is journal-durable,
+        so a crash before the next in-process step can no longer strand a
         flush output in memory while its inputs are TERMINAL.
 
         ORDERING vs batch status: ``execute_flush`` finalizes the batches row
@@ -3087,7 +3179,12 @@ class RowProcessor:
             barrier_key=str(node_id),
             consumed_token_ids=consumed_token_ids,
             emitted_pending_sink=tuple(emissions),
-            emitted_ready=(),
+            # The later in-process continuation loop invokes process_token for
+            # these same WorkItems. Its idempotent enqueue reconciles against
+            # the rows inserted here by deterministic work_item_id and strict
+            # field equality; a crash before that loop leaves durable READY
+            # work for resume instead of losing the continuation.
+            emitted_ready=tuple(self._work_codec.ready_emission(item) for item in child_items),
             now=self._clock.now_utc(),
             # §E.3 per-firing-group snapshot: this batch's adopted members.
             intake_snapshot_token_ids=frozenset(token.token_id for token in buffered_tokens),
@@ -3240,12 +3337,12 @@ class RowProcessor:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _require_coordination_token(self) -> CoordinationToken:
-        """The leader fencing token, REQUIRED for the slice-3 adoption verbs."""
+        """Return the authority required by every leader-fenced scheduler verb."""
         if self._coordination_token is None:
             raise OrchestrationInvariantError(
-                "Journal-first barrier intake requires the leader coordination token (ADR-030 §E.2): "
-                "adopt_blocked_barrier_item / adopt_coalesce_branch_losses are fenced verbs with no "
-                "unfenced arm. Construct RowProcessor with coordination_token — the orchestrator "
+                "Leader-fenced scheduler operations require the coordination token (ADR-030): "
+                "lease recovery and barrier adoption have no unfenced production arm. "
+                "Construct RowProcessor with coordination_token — the orchestrator "
                 "binds it at begin_run (epoch 1) or at the resume takeover CAS."
             )
         return self._coordination_token
@@ -3402,7 +3499,8 @@ class RowProcessor:
         active-claim state and the at-most-once-per-interval write.
         ``_process_single_token`` calls this on every node-iteration boundary
         (ADR-026 RC6, filigree elspeth-ddde8144b6); it raises
-        ``SchedulerLeaseLostError`` when the lease was reaped by a peer.
+        ``SchedulerLeaseLostError`` when the lease was reaped by a peer and
+        ``RunWorkerEvictedError`` when the active-membership CAS refuses.
         """
         self._scheduler_drain.heartbeat_active_claim()
 

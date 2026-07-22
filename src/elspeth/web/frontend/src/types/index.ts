@@ -24,6 +24,7 @@ export interface AuthConfig {
   oidc_issuer: string | null;
   oidc_client_id: string | null;
   authorization_endpoint: string | null;
+  token_endpoint?: string | null;
 }
 
 /**
@@ -98,12 +99,22 @@ export interface SourceSpec {
 }
 
 /**
+ * Closed vocabulary of composer processing-node types.
+ *
+ * Mirrors the backend `NodeType` / `COMPOSER_NODE_TYPES` in
+ * src/elspeth/web/composer/state.py. `queue` is the structural fan-in
+ * primitive: id == input, plugin null, description-only options — one or more
+ * upstream producers, exactly one ordinary downstream consumer.
+ */
+export type NodeType = "transform" | "gate" | "aggregation" | "coalesce" | "queue";
+
+/**
  * A node in the pipeline composition DAG.
  * Matches backend CompositionState.to_dict() node serialization.
  */
 export interface NodeSpec {
   id: string;
-  node_type: "transform" | "gate" | "aggregation" | "coalesce";
+  node_type: NodeType;
   plugin: string | null;
   input: string;
   on_success: string | null;
@@ -112,9 +123,12 @@ export interface NodeSpec {
   condition?: string | null;
   routes?: Record<string, string> | null;
   fork_to?: string[] | null;
-  branches?: string[] | null;
+  branches?: string[] | Record<string, string> | null;
   policy?: string | null;
   merge?: string | null;
+  trigger?: Record<string, unknown> | null;
+  output_mode?: "default" | "passthrough" | "transform" | null;
+  expected_output_count?: number | null;
 }
 
 /** An edge connecting two nodes in the DAG. */
@@ -131,6 +145,7 @@ export interface OutputSpec {
   name: string;
   plugin: string;
   options: Record<string, unknown>;
+  on_write_failure?: string;
 }
 
 /** Pipeline-level metadata attached to a composition. */
@@ -157,19 +172,26 @@ export interface ValidationEntryDTO {
   component: string;
   message: string;
   severity: string;
+  error_code?: string | null;
 }
 
 export interface CompositionState {
   id: string;
+  session_id: string;
   version: number;
   sources: Record<string, SourceSpec>;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
   outputs: OutputSpec[];
   metadata: PipelineMetadata;
-  validation_errors?: string[];
-  validation_warnings?: ValidationEntryDTO[];
-  validation_suggestions?: ValidationEntryDTO[];
+  is_valid: boolean;
+  validation_errors: string[] | null;
+  validation_warnings: ValidationEntryDTO[] | null;
+  validation_suggestions: ValidationEntryDTO[] | null;
+  derived_from_state_id: string | null;
+  created_at: string;
+  composer_meta: Record<string, unknown> | null;
+  plugin_policy_findings: PluginPolicyFinding[];
 }
 
 /** A version history entry for CompositionState. */
@@ -185,6 +207,17 @@ export interface CompositionStateVersion {
 export type ComposerTrustMode = "explicit_approve" | "auto_commit";
 export type ComposerDensityDefault = "high" | "medium" | "low";
 export type ProposalLifecycleStatus = "pending" | "committed" | "rejected";
+
+export interface PipelineProposalMetadata {
+  surface: "freeform" | "guided_full" | "guided_staged" | "tutorial_profile";
+  draft_hash: string;
+  base: Record<string, unknown>;
+  reviewed_anchor_hash: string;
+  repair_count: number;
+  skill_hash: string;
+  audit_payload_hash: string;
+  custody_result: "not_required" | "ready";
+}
 
 export interface ComposerPreferences {
   session_id: string;
@@ -207,6 +240,7 @@ export interface CompositionProposal {
   base_state_id: string | null;
   committed_state_id: string | null;
   audit_event_id: string | null;
+  pipeline_metadata?: PipelineProposalMetadata | null;
   created_at: string;
   updated_at: string;
 }
@@ -269,6 +303,15 @@ export interface ComposerProgressSnapshot {
   likely_next: string | null;
   reason: ComposerProgressReason | null;
   updated_at: string;
+  /**
+   * Live count of compose requests (send/recompose) currently inside the
+   * route for this session — including time queued on the server's
+   * per-session compose lock, before any progress is published. Zero is
+   * the post-abort resync's only settlement signal (the phase cannot
+   * distinguish an aborted-but-still-running request from quiescence).
+   * Optional only for fixture tolerance; the server always sends it.
+   */
+  inflight_requests?: number;
 }
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
@@ -309,6 +352,48 @@ export interface PluginSchemaInfo {
   plugin_type: "source" | "transform" | "sink";
   description: string;
   json_schema: Record<string, unknown>;
+}
+
+export type PluginPolicyCapability = "llm" | "prompt_shield" | "content_safety";
+export type PluginPolicyControlMode = "recommend" | "required";
+
+export interface PluginPolicyResponse {
+  principal_scope: string;
+  snapshot_fingerprint: string;
+  policy_hash: string;
+  available_plugin_ids: string[];
+  capability_groups: Array<{
+    capability: PluginPolicyCapability;
+    available_plugin_ids: string[];
+  }>;
+  selections: Array<{
+    capability: PluginPolicyCapability;
+    plugin_id: string | null;
+  }>;
+  control_modes: Array<{
+    capability: PluginPolicyCapability;
+    mode: PluginPolicyControlMode;
+  }>;
+}
+
+export interface PluginSnapshotResponse<T> {
+  data: T;
+  snapshotFingerprint: string;
+}
+
+export type PluginPolicyUnavailableReason =
+  | "plugin_not_enabled"
+  | "plugin_not_installed"
+  | "plugin_unavailable"
+  | "credential_unavailable"
+  | "profile_unavailable";
+
+/** Sanitized current-policy finding for a persisted component. */
+export interface PluginPolicyFinding {
+  component_id: string;
+  plugin_id: string;
+  reason_code: PluginPolicyUnavailableReason;
+  snapshot_fingerprint: string;
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -661,6 +746,7 @@ export interface RunDiagnosticOperation {
   operation_id: string;
   node_id: string;
   operation_type: string;
+  sink_effect_id: string | null;
   status: string;
   duration_ms: number | null;
   started_at: string;
@@ -671,9 +757,19 @@ export interface RunDiagnosticOperation {
 export interface RunDiagnosticArtifact {
   artifact_id: string;
   sink_node_id: string;
+  producer_kind: "node_state" | "sink_effect";
+  produced_by_state_id: string | null;
+  sink_effect_id: string | null;
   artifact_type: string;
   path_or_uri: string;
   size_bytes: number;
+  publication_performed: boolean;
+  publication_evidence_kind:
+    | "returned"
+    | "reconciled"
+    | "inherited"
+    | "virtual"
+    | "legacy_returned";
   created_at: string;
 }
 
@@ -730,16 +826,47 @@ export interface WebSocketTicketResponse {
 // from "is the file in the sink-allowlist AND on disk now?" — used by the
 // UI to suppress download buttons that would otherwise 4xx on click.
 
+// Structured discriminator classifying `path_or_uri` against elspeth's
+// real filesystem storage layouts (computed server-side by
+// `_classify_storage_kind` in web/execution/outputs.py — keep in sync):
+//   * "blob"      — the composer blob store, {data_dir}/blobs/...
+//   * "payload"   — the content-addressed payload store, {data_dir}/payloads/...
+//   * "sink_file" — the canonical sink output directory, {data_dir}/outputs/...
+//   * "unknown"   — anything else (a user-configured path, an object-store
+//                   URI, or a legacy response with no data_dir configured)
+// "blob" and "payload" are elspeth's own opaque internal storage — the UI
+// must never render their basename or full path as the row title/tooltip.
+export const RUN_OUTPUT_ARTIFACT_STORAGE_KIND_VALUES = [
+  "blob",
+  "payload",
+  "sink_file",
+  "unknown",
+] as const;
+
+export type RunOutputArtifactStorageKind =
+  (typeof RUN_OUTPUT_ARTIFACT_STORAGE_KIND_VALUES)[number];
+
 export interface RunOutputArtifact {
   artifact_id: string;
   sink_node_id: string;
+  producer_kind: "node_state" | "sink_effect";
+  produced_by_state_id: string | null;
+  sink_effect_id: string | null;
   artifact_type: string;
   path_or_uri: string;
   content_hash: string;
   size_bytes: number;
+  publication_performed: boolean;
+  publication_evidence_kind:
+    | "returned"
+    | "reconciled"
+    | "inherited"
+    | "virtual"
+    | "legacy_returned";
   created_at: string;
   exists_now: boolean;
   downloadable: boolean;
+  storage_kind: RunOutputArtifactStorageKind;
 }
 
 export interface RunOutputsResponse {
@@ -817,7 +944,8 @@ export interface ExecutionFanoutAck {
  * - `detail`: Human-readable error message (always present)
  * - `error_type`: Machine-readable discriminator (present on domain errors,
  *   absent on generic HTTP errors)
- * - `validation_errors`: Per-component errors (present on validation failures)
+ * - `validation_errors`: Per-component errors from established composer flows
+ * - `errors`: Structured entries from execution preflight failures
  *
  * The frontend checks error_type first (if present), falls back to HTTP
  * status code, then falls back to detail text.
@@ -826,6 +954,8 @@ export interface ApiError {
   status: number;
   detail: string;
   error_type?: string;
+  component_id?: string;
+  plugin_id?: string;
   partial_state?: CompositionState | null;
   failed_turn?: FailedTurn | null;
   partial_state_save_failed?: boolean;
@@ -834,14 +964,70 @@ export interface ApiError {
   provider_detail?: string;
   provider_status_code?: number;
   validation_errors?: ValidationError[];
+  errors?: ApiStructuredError[];
+  snapshot_fingerprint?: string;
+}
+
+/**
+ * Shared message-bearing shape for structured execution errors. Semantic
+ * contract entries use `component`; pipeline validation entries use the
+ * Stage-2 `component_id` / `component_type` fields.
+ */
+export interface ApiStructuredError {
+  message: string;
+  component?: string;
+  component_id?: string | null;
+  component_type?: string | null;
+  severity?: string;
+  suggestion?: string | null;
+  error_code?: string | null;
 }
 
 export interface SystemStatus {
+  /**
+   * The served SPA bundle's identity (hashed entry asset name, e.g.
+   * "index-Bk0OsIay.js") parsed server-side from the built index.html at
+   * startup — the deploy-cache coherence beacon. Null when the backend
+   * serves no built dist; optional for fixture tolerance.
+   */
+  frontend_build?: string | null;
   composer_available: boolean;
   composer_model: string;
   composer_provider: string | null;
   composer_reason: string | null;
   composer_missing_keys: string[];
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot;
+  tutorial_ready?: boolean;
+  tutorial_reason?: string | null;
+  /**
+   * The backend's configured compose wall clock
+   * (ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS). The SPA derives its compose
+   * abort ceiling from this (+ client grace) at boot — see
+   * applyServerComposerTimeout. Optional only for fixture tolerance; the
+   * server always sends it.
+   */
+  composer_timeout_seconds?: number;
+}
+
+export type PluginPolicyReadinessRowId =
+  | "policy_compilation"
+  | "required_core"
+  | "local_capability_configuration"
+  | "live_health"
+  | "tutorial_profile"
+  | "tutorial_required_control_coverage";
+
+export interface PluginPolicyReadinessRow {
+  id: PluginPolicyReadinessRowId;
+  label: string;
+  status: "ok" | "warning" | "error" | "not_applicable";
+  summary: string;
+  detail: string | null;
+}
+
+export interface PluginPolicyReadinessSnapshot {
+  rows: readonly PluginPolicyReadinessRow[];
+  tutorial_ready: boolean;
 }
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
@@ -957,6 +1143,7 @@ export interface AuditReadinessSnapshot {
   checked_at: string;
   rows: readonly ReadinessRow[];
   validation_result: ValidationResult;
+  plugin_policy_readiness?: PluginPolicyReadinessSnapshot | null;
 }
 
 export interface AuditReadinessExplain {

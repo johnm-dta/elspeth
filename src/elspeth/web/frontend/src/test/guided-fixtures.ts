@@ -1,6 +1,6 @@
 // ============================================================================
 // Guided-mode test fixtures — shared helpers for SingleSelectTurn,
-// MultiSelectWithCustomTurn, SchemaFormTurn, ProposeChainTurn,
+// MultiSelectWithCustomTurn, SchemaFormTurn,
 // InspectAndConfirmTurn (Tasks 7.2-7.7).
 //
 // Convention: anything that pins the GuidedRespondRequest wire shape lives
@@ -8,8 +8,6 @@
 // to detect drift in the wire contract — if a 7th GuidedRespondRequest field
 // lands one day, only THIS file should need updating, not 6 widget tests.
 // ============================================================================
-
-import type { GuidedRespondRequest } from "@/types/guided";
 
 /**
  * The four GuidedRespondRequest fields that none of the chip-group / form
@@ -40,14 +38,18 @@ import type { GuidedRespondRequest } from "@/types/guided";
  * that set fields beyond `chosen` / `custom_inputs` MUST observe the same
  * spread order.
  */
-export function nullResponse(): Pick<
-  GuidedRespondRequest,
-  "edited_values" | "accepted_step_index" | "edit_step_index" | "control_signal"
-> {
+export function nullResponse(): {
+  edited_values: null;
+  proposal_id: null;
+  draft_hash: null;
+  edit_target: null;
+  control_signal: null;
+} {
   return {
     edited_values: null,
-    accepted_step_index: null,
-    edit_step_index: null,
+    proposal_id: null,
+    draft_hash: null,
+    edit_target: null,
     control_signal: null,
   };
 }

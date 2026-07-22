@@ -32,13 +32,19 @@ function fileArtifact(overrides: Partial<RunOutputArtifact> = {}): RunOutputArti
   return {
     artifact_id: "art-1",
     sink_node_id: "results",
+    producer_kind: "sink_effect",
+    produced_by_state_id: null,
+    sink_effect_id: "effect-1",
     artifact_type: "file",
     path_or_uri: "file:///data/outputs/results.jsonl",
     content_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
     size_bytes: 1024,
+    publication_performed: true,
+    publication_evidence_kind: "returned",
     created_at: "2026-05-19T10:04:00Z",
     exists_now: true,
     downloadable: true,
+    storage_kind: "sink_file",
     ...overrides,
   };
 }

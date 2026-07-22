@@ -72,7 +72,7 @@ class AzureOpenAIConfig(LLMConfig):
     @field_validator("endpoint")
     @classmethod
     def _validate_endpoint_url(cls, value: str) -> str:
-        return validate_credential_safe_https_url(value, field_name="endpoint")
+        return validate_credential_safe_https_url(value, field_name="endpoint", allow_http_loopback=True)
 
     @model_validator(mode="before")
     @classmethod

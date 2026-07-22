@@ -13,6 +13,8 @@ from sqlalchemy.engine import Row as SARow
 
 from elspeth.contracts.audit import (
     Artifact,
+    AuditExportSnapshot,
+    AuditExportSnapshotChunk,
     Batch,
     BatchMember,
     Call,
@@ -27,6 +29,11 @@ from elspeth.contracts.audit import (
     RoutingEvent,
     Row,
     Run,
+    SinkEffect,
+    SinkEffectAttempt,
+    SinkEffectExportSnapshotAssociation,
+    SinkEffectMemberRecord,
+    SinkEffectStream,
     Token,
     TokenOutcome,
     TokenParent,
@@ -52,6 +59,18 @@ from elspeth.contracts.enums import (
 )
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
+from elspeth.contracts.sink_effects import (
+    AuditExportFormat,
+    AuditExportSigningMode,
+    SinkEffectAttemptAction,
+    SinkEffectAttemptState,
+    SinkEffectDescriptorMode,
+    SinkEffectInputKind,
+    SinkEffectInspectionMode,
+    SinkEffectReconcileKind,
+    SinkEffectRole,
+    SinkEffectState,
+)
 
 _COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
     {
@@ -593,6 +612,194 @@ class TokenOutcomeLoader:
         )
 
 
+class SinkEffectStreamLoader:
+    """Strict row decoder for a replacing-target stream."""
+
+    def load(self, row: SARow[Any]) -> SinkEffectStream:
+        return SinkEffectStream(
+            stream_id=row.stream_id,
+            run_id=row.run_id,
+            sink_node_id=row.sink_node_id,
+            role=SinkEffectRole(row.role),
+            requested_target_hash=row.requested_target_hash,
+            resolved_target=row.resolved_target,
+            next_sequence=row.next_sequence,
+            tail_effect_id=row.tail_effect_id,
+            head_effect_id=row.head_effect_id,
+            head_descriptor_hash=row.head_descriptor_hash,
+        )
+
+
+class SinkEffectLoader:
+    """Strict row decoder for the durable effect ledger."""
+
+    def load(self, row: SARow[Any]) -> SinkEffect:
+        return SinkEffect(
+            effect_id=row.effect_id,
+            run_id=row.run_id,
+            sink_node_id=row.sink_node_id,
+            role=SinkEffectRole(row.role),
+            state=SinkEffectState(row.state),
+            protocol_version=row.protocol_version,
+            input_kind=SinkEffectInputKind(row.input_kind),
+            required_member_ordinal=row.required_member_ordinal,
+            required_snapshot_slot=row.required_snapshot_slot,
+            config_hash=row.config_hash,
+            membership_or_manifest_hash=row.membership_or_manifest_hash,
+            group_payload_hash=row.group_payload_hash,
+            artifact_id=row.artifact_id,
+            artifact_idempotency_key=row.artifact_idempotency_key,
+            target_json=row.target_json,
+            inspection_mode=SinkEffectInspectionMode(row.inspection_mode) if row.inspection_mode is not None else None,
+            inspection_attempt_id=row.inspection_attempt_id,
+            plan_json=row.plan_json,
+            plan_hash=row.plan_hash,
+            descriptor_mode=SinkEffectDescriptorMode(row.descriptor_mode) if row.descriptor_mode is not None else None,
+            expected_descriptor_hash=row.expected_descriptor_hash,
+            precondition_hash=row.precondition_hash,
+            prepared_at=row.prepared_at,
+            lease_owner=row.lease_owner,
+            generation=row.generation,
+            lease_expires_at=row.lease_expires_at,
+            lease_heartbeat_at=row.lease_heartbeat_at,
+            reconcile_kind=SinkEffectReconcileKind(row.reconcile_kind) if row.reconcile_kind is not None else None,
+            reconcile_evidence_hash=row.reconcile_evidence_hash,
+            result_descriptor_hash=row.result_descriptor_hash,
+            publication_performed=row.publication_performed,
+            publication_evidence_kind=row.publication_evidence_kind,
+            primary_effect_id=row.primary_effect_id,
+            stream_id=row.stream_id,
+            stream_sequence=row.stream_sequence,
+            predecessor_effect_id=row.predecessor_effect_id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            finalized_at=row.finalized_at,
+        )
+
+
+class SinkEffectMemberLoader:
+    """Strict row decoder for canonical effect membership."""
+
+    def load(self, row: SARow[Any]) -> SinkEffectMemberRecord:
+        return SinkEffectMemberRecord(
+            effect_id=row.effect_id,
+            input_kind=SinkEffectInputKind(row.input_kind),
+            ordinal=row.ordinal,
+            run_id=row.run_id,
+            sink_node_id=row.sink_node_id,
+            role=SinkEffectRole(row.role),
+            token_id=row.token_id,
+            row_id=row.row_id,
+            ingest_sequence=row.ingest_sequence,
+            lineage_json=row.lineage_json,
+            lineage_hash=row.lineage_hash,
+            payload_hash=row.payload_hash,
+            primary_effect_id=row.primary_effect_id,
+            prepared_disposition=row.prepared_disposition,
+            reason_hash=row.reason_hash,
+            member_effect_id=row.member_effect_id,
+            member_state=SinkEffectState(row.member_state) if row.member_state is not None else None,
+            descriptor_hash=row.descriptor_hash,
+            evidence_hash=row.evidence_hash,
+        )
+
+
+class AuditExportSnapshotChunkLoader:
+    """Strict internal decoder for a sealed snapshot chunk descriptor."""
+
+    def load(self, row: SARow[Any]) -> AuditExportSnapshotChunk:
+        return AuditExportSnapshotChunk(
+            snapshot_id=row.snapshot_id,
+            ordinal=row.ordinal,
+            content_ref=row.content_ref,
+            content_hash=row.content_hash,
+            size_bytes=row.size_bytes,
+            record_count=row.record_count,
+            predecessor_seal_hash=row.predecessor_seal_hash,
+            cumulative_records=row.cumulative_records,
+            cumulative_bytes=row.cumulative_bytes,
+            chunk_seal_hash=row.chunk_seal_hash,
+        )
+
+
+class _AuditExportSnapshotRowLoader:
+    """Internal registry decoder; deliberately not a public content loader.
+
+    Returning verified bytes requires the winner's durable-store resolver and
+    belongs to the snapshot capability factory. Adapters must never use this
+    decoder as a substitute for that verification boundary.
+    """
+
+    def load(self, row: SARow[Any]) -> AuditExportSnapshot:
+        return AuditExportSnapshot(
+            snapshot_id=row.snapshot_id,
+            source_run_id=row.source_run_id,
+            source_status=RunStatus(row.source_status),
+            source_completed_at=row.source_completed_at,
+            exported_at=row.exported_at,
+            registry_key_hash=row.registry_key_hash,
+            exporter_version=row.exporter_version,
+            serialization_version=row.serialization_version,
+            export_format=AuditExportFormat(row.export_format),
+            signing_mode=AuditExportSigningMode(row.signing_mode),
+            signer_key_id=row.signer_key_id,
+            derivation_version=row.derivation_version,
+            public_export_config_hash=row.public_export_config_hash,
+            chunking_algorithm_version=row.chunking_algorithm_version,
+            per_chunk_record_limit=row.per_chunk_record_limit,
+            per_chunk_byte_limit=row.per_chunk_byte_limit,
+            record_count=row.record_count,
+            total_bytes=row.total_bytes,
+            chunk_count=row.chunk_count,
+            terminal_chunk_ordinal=row.terminal_chunk_ordinal,
+            content_store_id=row.content_store_id,
+            manifest_hash=row.manifest_hash,
+            last_chunk_seal_hash=row.last_chunk_seal_hash,
+            snapshot_hash=row.snapshot_hash,
+            snapshot_seal_hash=row.snapshot_seal_hash,
+            signature_hex=row.signature_hex,
+            record_chain_algorithm=row.record_chain_algorithm,
+            final_hash=row.final_hash,
+            signed_manifest_schema=row.signed_manifest_schema,
+            signed_manifest_hash=row.signed_manifest_hash,
+            signed_manifest_ref=row.signed_manifest_ref,
+            signed_manifest_size_bytes=row.signed_manifest_size_bytes,
+        )
+
+
+class SinkEffectExportSnapshotAssociationLoader:
+    """Strict row decoder for the export effect's single snapshot input."""
+
+    def load(self, row: SARow[Any]) -> SinkEffectExportSnapshotAssociation:
+        return SinkEffectExportSnapshotAssociation(
+            effect_id=row.effect_id,
+            input_kind=SinkEffectInputKind(row.input_kind),
+            slot=row.slot,
+            snapshot_id=row.snapshot_id,
+        )
+
+
+class SinkEffectAttemptLoader:
+    """Strict row decoder for external effect attempts."""
+
+    def load(self, row: SARow[Any]) -> SinkEffectAttempt:
+        return SinkEffectAttempt(
+            attempt_id=row.attempt_id,
+            effect_id=row.effect_id,
+            member_ordinal=row.member_ordinal,
+            generation=row.generation,
+            action=SinkEffectAttemptAction(row.action),
+            call_kind=row.call_kind,
+            request_hash=row.request_hash,
+            state=SinkEffectAttemptState(row.state),
+            evidence_json=row.evidence_json,
+            evidence_hash=row.evidence_hash,
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+            latency_ms=row.latency_ms,
+        )
+
+
 class ArtifactLoader:
     """Loader for Artifact records.
 
@@ -613,6 +820,7 @@ class ArtifactLoader:
             artifact_id=row.artifact_id,
             run_id=row.run_id,
             produced_by_state_id=row.produced_by_state_id,
+            sink_effect_id=row.sink_effect_id,
             sink_node_id=row.sink_node_id,
             artifact_type=row.artifact_type,
             path_or_uri=row.path_or_uri,
@@ -620,6 +828,8 @@ class ArtifactLoader:
             size_bytes=row.size_bytes,
             created_at=row.created_at,
             idempotency_key=row.idempotency_key,
+            publication_performed=row.publication_performed,
+            publication_evidence_kind=row.publication_evidence_kind,
         )
 
 
@@ -709,6 +919,7 @@ class OperationLoader:
             started_at=row.started_at,
             completed_at=row.completed_at,
             status=row.status,
+            sink_effect_id=row.sink_effect_id,
             input_data_ref=row.input_data_ref,
             input_data_hash=row.input_data_hash,
             output_data_ref=row.output_data_ref,

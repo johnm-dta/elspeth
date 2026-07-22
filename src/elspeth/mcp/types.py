@@ -21,6 +21,11 @@ from typing import Any, Literal, Required, TypedDict
 
 from elspeth.contracts import OPERATION_TYPE_VALUES as OPERATION_TYPE_VALUES
 from elspeth.contracts import OperationType
+from elspeth.contracts.export_records import (
+    SinkEffectAttemptExportRecord,
+    SinkEffectExportRecord,
+    SinkEffectMemberExportRecord,
+)
 
 RunStatusValue = Literal["running", "completed", "completed_with_failures", "failed", "empty", "interrupted"]
 ExportStatusValue = Literal["pending", "completed", "failed"]
@@ -105,11 +110,42 @@ class OperationRecord(TypedDict):
     node_id: str
     plugin_name: str
     operation_type: OperationTypeValue
+    sink_effect_id: str | None
     status: OperationStatusValue
     started_at: str | None
     completed_at: str | None
     duration_ms: float | None
     error_message: str | None
+
+
+class ArtifactRecord(TypedDict):
+    """A sink artifact record as returned by ``list_artifacts``."""
+
+    artifact_id: str
+    run_id: str
+    sink_node_id: str
+    producer_kind: Literal["node_state", "sink_effect"]
+    produced_by_state_id: str | None
+    sink_effect_id: str | None
+    artifact_type: str
+    path_or_uri: str
+    content_hash: str
+    size_bytes: int
+    idempotency_key: str | None
+    publication_performed: bool
+    publication_evidence_kind: Literal["returned", "reconciled", "inherited", "virtual", "legacy_returned"]
+    created_at: str
+
+
+class SinkEffectHistoryReport(TypedDict):
+    """Operator-safe lifecycle, member progress, and call history."""
+
+    effect: SinkEffectExportRecord
+    members: list[SinkEffectMemberExportRecord]
+    attempts: list[SinkEffectAttemptExportRecord]
+    member_progress: dict[str, int]
+    response_lost_attempts: int
+    operator_guidance: str
 
 
 class OperationCallRecord(TypedDict):

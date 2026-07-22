@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from unittest.mock import MagicMock
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
@@ -28,7 +30,14 @@ from elspeth.web.composer.state import (
     CompositionState,
     PipelineMetadata,
 )
-from elspeth.web.composer.tools import execute_tool
+from elspeth.web.composer.tools import execute_tool as _strict_execute_tool
+from elspeth.web.plugin_policy.models import (
+    PluginAvailability,
+    PluginAvailabilitySnapshot,
+    PluginId,
+    PluginUnavailableReason,
+)
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 
 def _empty_state() -> CompositionState:
@@ -39,6 +48,32 @@ def _empty_state() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def execute_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    **kwargs: Any,
+) -> Any:
+    supplied_snapshot = kwargs.pop("plugin_snapshot", None)
+    if isinstance(catalog, PolicyCatalogView):
+        if not isinstance(supplied_snapshot, PluginAvailabilitySnapshot):
+            raise AssertionError("policy catalog requires matching snapshot")
+        snapshot = supplied_snapshot
+        view = catalog
+    else:
+        snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        view = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+    return _strict_execute_tool(
+        tool_name,
+        arguments,
+        state,
+        view,
+        plugin_snapshot=snapshot,
+        **kwargs,
     )
 
 
@@ -121,14 +156,6 @@ class _CatalogWithSchemas:
         if plugin_type == "transform":
             return self._transform_schemas
         return self._sink_schemas
-
-
-class _UnavailableSecretService:
-    def list_refs(self, _user_id: str) -> list[Any]:
-        return []
-
-    def has_ref(self, _user_id: str, _name: str) -> bool:
-        return False
 
 
 def _make_catalog_with_schemas(
@@ -504,7 +531,19 @@ class TestFailureSchemaAugmentationPerToolCoverage:
         catalog = _make_catalog_with_schemas(
             transform_schemas={"azure_prompt_shield": _azure_prompt_shield_schema()},
         )
-        secret_service = _UnavailableSecretService()
+        unrestricted = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        shield_id = PluginId("transform", "azure_prompt_shield")
+        snapshot = PluginAvailabilitySnapshot.create(
+            policy_hash="restricted",
+            principal_scope="local:test-user",
+            available=unrestricted.available - {shield_id},
+            unavailable=(PluginAvailability(shield_id, PluginUnavailableReason.CREDENTIAL_MISSING),),
+            selected=unrestricted.selected,
+            usable_profile_aliases=(),
+            selected_profile_aliases=(),
+            binding_generation_fingerprint="restricted",
+        )
+        view = PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry))
 
         result = execute_tool(
             "upsert_node",
@@ -518,15 +557,14 @@ class TestFailureSchemaAugmentationPerToolCoverage:
                 "options": {},
             },
             _empty_state(),
-            catalog,
-            secret_service=secret_service,
-            user_id="test-user",
+            view,
+            plugin_snapshot=snapshot,
         )
         payload = result.to_dict()
 
         assert result.success is False, payload
         errors_text = " ".join(e["message"] for e in payload["validation"]["errors"])
-        assert "Invalid options for transform 'azure_prompt_shield'" in errors_text
+        assert "credential_unavailable" in errors_text
         assert "plugin_schemas" not in payload
 
     def test_patch_source_options_failure_carries_schema(self) -> None:

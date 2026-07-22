@@ -127,6 +127,7 @@ class PluginAuditWriterAdapter:
         ordinal: int = 0,
         reason_ref: str | None = None,
     ) -> RoutingEvent:
+        """Record a complete one-route decision; use the plural API for forks."""
         return self._execution.record_routing_event(
             state_id,
             edge_id,
@@ -144,6 +145,7 @@ class PluginAuditWriterAdapter:
         routes: list[RoutingSpec],
         reason: RoutingReason | None = None,
     ) -> list[RoutingEvent]:
+        """Atomically record every route in one complete fork decision."""
         return self._execution.record_routing_events(state_id, routes, reason)
 
     # ── DataFlowRepository delegation ────────────────────────────────────

@@ -99,7 +99,7 @@ _RUN_COUNTER = count()
 def _create_run(db: LandscapeDB) -> str:
     run_id = f"run-{next(_RUN_COUNTER):06d}"
     now = _REFERENCE_TIME
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             runs_table.insert().values(
                 run_id=run_id,
@@ -117,7 +117,7 @@ def _create_run(db: LandscapeDB) -> str:
 
 def _insert_nodes(db: LandscapeDB, run_id: str, determinisms: list[Determinism]) -> None:
     now = _REFERENCE_TIME
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         for idx, det in enumerate(determinisms):
             node_id = f"node_{idx}"
             config = {"node_id": node_id, "determinism": det.value}
@@ -137,7 +137,7 @@ def _insert_nodes(db: LandscapeDB, run_id: str, determinisms: list[Determinism])
 
 
 def _set_run_grade(db: LandscapeDB, run_id: str, grade: ReproducibilityGrade) -> None:
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(runs_table.update().where(runs_table.c.run_id == run_id).values(reproducibility_grade=grade.value))
 
 
@@ -173,7 +173,7 @@ def _insert_purged_call(
     state_id = f"st-{node_id}"
     call_id = f"call-{node_id}"
 
-    with db.connection() as conn:
+    with db.write_connection() as conn:
         conn.execute(
             nodes_table.insert().values(
                 node_id=node_id,

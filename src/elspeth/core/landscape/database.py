@@ -7,14 +7,16 @@ with appropriate settings for each.
 import os
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
-from typing import Any, NewType, Self, cast
+from types import MappingProxyType
+from typing import Any, Literal, NewType, Self, cast
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from sqlalchemy import Connection, create_engine, event, text
+from sqlalchemy import Connection, Table, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
@@ -24,7 +26,15 @@ from sqlalchemy.pool import StaticPool
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.url import SENSITIVE_PARAMS, _scrub_odbc_connect_value
 from elspeth.core.landscape.journal import LandscapeJournal
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, schema_identity_table
+from elspeth.core.schema_identity import (
+    SCHEMA_IDENTITY_TABLE_NAME,
+    SchemaIdentityMismatch,
+    insert_schema_identity,
+    read_schema_identities,
+    schema_identity_mismatch,
+)
+from elspeth.core.schema_shape import collect_metadata_shape_issues
 
 # Tier-1 branded Engine type.
 #
@@ -133,7 +143,14 @@ class SchemaCompatibilityError(Exception):
     pass
 
 
-ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+ADR019_CUTOVER_GUIDE = "docs/operator/migrations/adr-019.md"
+
+_EPOCH_24_TOKEN_ROW_RUN_FK: tuple[str, tuple[str, ...], str, tuple[str, ...]] = (
+    "tokens",
+    ("row_id", "run_id"),
+    "rows",
+    ("row_id", "run_id"),
+)
 
 
 def _query_base_param_name(key: str) -> str:
@@ -255,9 +272,24 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("run_attributions", "recorded_at"),
     ("run_attributions", "initiated_by_user_id"),
     ("run_attributions", "auth_provider_type"),
+    # Epoch 23: one optional, sanitized plugin-policy evidence row per web run.
+    ("run_web_plugin_policy", "run_id"),
+    ("run_web_plugin_policy", "schema_version"),
+    ("run_web_plugin_policy", "policy_hash"),
+    ("run_web_plugin_policy", "snapshot_hash"),
+    ("run_web_plugin_policy", "authorized_plugin_ids_json"),
+    ("run_web_plugin_policy", "available_plugin_ids_json"),
+    ("run_web_plugin_policy", "control_modes_json"),
+    ("run_web_plugin_policy", "selected_implementations_json"),
+    ("run_web_plugin_policy", "selected_profile_aliases_json"),
+    ("run_web_plugin_policy", "plugin_code_identities_json"),
+    ("run_web_plugin_policy", "binding_generation_fingerprint"),
+    ("run_web_plugin_policy", "decision_codes_json"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
+    # Token ancestry belongs to exactly one run; both endpoints are composite-FK scoped.
+    ("token_parents", "run_id"),
     # Added for composite FK to nodes (node_id, run_id) - enables run-isolated queries
     ("node_states", "run_id"),
     # Source schema persists typed resume metadata; runtime always writes this on new runs
@@ -273,6 +305,14 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Phase 5: Plugin contract audit trail - captures input/output contracts per node
     ("nodes", "input_contract_json"),
     ("nodes", "output_contract_json"),
+    ("nodes", "output_contract_hash"),
+    # Durable JSONL publication: committed batches remain recoverable until
+    # their fsynced sidecar append is acknowledged in a later transaction.
+    ("sidecar_journal_outbox", "sequence"),
+    ("sidecar_journal_outbox", "batch_id"),
+    ("sidecar_journal_outbox", "journal_owner"),
+    ("sidecar_journal_outbox", "created_at"),
+    ("sidecar_journal_outbox", "records_json"),
     # Operation I/O hashes - survive payload purge for integrity verification
     ("operations", "input_data_hash"),
     ("operations", "output_data_hash"),
@@ -296,6 +336,8 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("routing_events", "run_id"),
     # Retry lineage exactness - retry_batch() must deduplicate per failed batch.
     ("batches", "retry_of_batch_id"),
+    # Epoch 29: durable one-expansion-per-batch effect claim.
+    ("batches", "expansion_group_id"),
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
     ("token_outcomes", "completed"),
     ("token_outcomes", "path"),
@@ -419,11 +461,34 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("coalesce_branch_losses", "adopted_epoch"),
 )
 
+_EPOCH_26_REQUIRED_TABLES = (
+    "sink_effect_streams",
+    "sink_effects",
+    "sink_effect_members",
+    "sink_effect_attempts",
+    "audit_export_snapshots",
+    "audit_export_snapshot_chunks",
+    "sink_effect_export_snapshots",
+)
+_REQUIRED_COLUMNS += (
+    *((table_name, column.name) for table_name in _EPOCH_26_REQUIRED_TABLES for column in metadata.tables[table_name].columns),
+    ("operations", "sink_effect_id"),
+    ("artifacts", "sink_effect_id"),
+    ("artifacts", "publication_performed"),
+    ("artifacts", "publication_evidence_kind"),
+)
+
+_EPOCH_27_REQUIRED_TABLES = ("coalesce_effects", "coalesce_effect_members")
+_REQUIRED_COLUMNS += tuple(
+    (table_name, column.name) for table_name in _EPOCH_27_REQUIRED_TABLES for column in metadata.tables[table_name].columns
+)
+
 # Required foreign keys for audit integrity (Tier 1 trust).
 # Format: (table_name, column_name, referenced_table)
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
 # _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
 _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("run_web_plugin_policy", "run_id", "runs"),
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
     ("scheduler_events", "run_id", "runs"),
@@ -432,11 +497,20 @@ _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
     ("run_workers", "run_id", "runs"),
     ("run_coordination_events", "run_id", "runs"),
     ("coalesce_branch_losses", "run_id", "runs"),
+    ("operations", "sink_effect_id", "sink_effects"),
+    ("audit_export_snapshot_chunks", "snapshot_id", "audit_export_snapshots"),
+    ("sink_effect_export_snapshots", "snapshot_id", "audit_export_snapshots"),
+    ("sink_effect_attempts", "effect_id", "sink_effects"),
+    ("coalesce_effects", "run_id", "runs"),
 )
 
 # Required composite foreign keys for run-scoped audit integrity.
 # Format: (table_name, constrained_columns, referenced_table, referenced_columns)
 _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...] = (
+    # Epoch 24: a token's run is derived from, and must match, its row.
+    _EPOCH_24_TOKEN_ROW_RUN_FK,
+    ("token_parents", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_parents", ("parent_token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("token_outcomes", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("token_outcomes", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("node_states", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
@@ -460,6 +534,43 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("scheduler_events", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
     ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("artifacts", ("sink_effect_id", "run_id", "sink_node_id"), "sink_effects", ("effect_id", "run_id", "sink_node_id")),
+    ("sink_effects", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("sink_effect_members", ("token_id", "row_id", "run_id"), "tokens", ("token_id", "row_id", "run_id")),
+    ("sink_effect_members", ("effect_id", "input_kind"), "sink_effects", ("effect_id", "input_kind")),
+    ("sink_effect_members", ("primary_effect_id", "run_id"), "sink_effects", ("effect_id", "run_id")),
+    (
+        "audit_export_snapshots",
+        ("source_run_id", "source_status", "source_completed_at"),
+        "runs",
+        ("run_id", "status", "completed_at"),
+    ),
+    ("sink_effect_export_snapshots", ("effect_id", "input_kind"), "sink_effects", ("effect_id", "input_kind")),
+    ("coalesce_effects", ("row_id", "run_id"), "rows", ("row_id", "run_id")),
+    (
+        "coalesce_effects",
+        ("result_token_id", "run_id", "result_join_group_id"),
+        "tokens",
+        ("token_id", "run_id", "join_group_id"),
+    ),
+    (
+        "coalesce_effect_members",
+        ("effect_id", "run_id"),
+        "coalesce_effects",
+        ("effect_id", "run_id"),
+    ),
+    (
+        "coalesce_effect_members",
+        ("parent_token_id", "run_id"),
+        "tokens",
+        ("token_id", "run_id"),
+    ),
+    (
+        "coalesce_effect_members",
+        ("parent_state_id", "run_id", "parent_token_id"),
+        "node_states",
+        ("state_id", "run_id", "token_id"),
+    ),
 )
 
 # Foreign keys that belonged to older schema shapes but are incompatible with
@@ -481,6 +592,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
+    ("run_web_plugin_policy", "ck_run_web_plugin_policy_schema_version"),
     ("run_sources", "ck_run_sources_lifecycle_state"),
     ("token_work_items", "ck_token_work_items_lease_owner_required_when_leased"),
     ("scheduler_events", "ck_scheduler_events_event_type"),
@@ -497,6 +609,51 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("run_workers", "ck_run_workers_status"),
     ("run_workers", "ck_run_workers_evicted_at_paired"),
     ("run_coordination_events", "ck_run_coordination_events_event_type"),
+    ("sink_effect_streams", "ck_sink_effect_streams_role"),
+    ("sink_effect_streams", "ck_sink_effect_streams_next_sequence"),
+    ("sink_effects", "ck_sink_effects_role"),
+    ("sink_effects", "ck_sink_effects_state"),
+    ("sink_effects", "ck_sink_effects_input_kind_xor"),
+    ("sink_effects", "ck_sink_effects_lifecycle"),
+    ("sink_effects", "ck_sink_effects_generation"),
+    ("sink_effects", "ck_sink_effects_lease_window"),
+    ("sink_effects", "ck_sink_effects_stream_shape"),
+    ("sink_effects", "ck_sink_effects_descriptor_mode"),
+    ("sink_effects", "ck_sink_effects_inspection_mode"),
+    ("sink_effects", "ck_sink_effects_reconcile_kind"),
+    ("sink_effect_members", "ck_sink_effect_members_input_kind"),
+    ("sink_effect_members", "ck_sink_effect_members_order"),
+    ("sink_effect_members", "ck_sink_effect_members_primary_linkage"),
+    ("sink_effect_members", "ck_sink_effect_members_disposition"),
+    ("sink_effect_members", "ck_sink_effect_members_state"),
+    ("sink_effect_export_snapshots", "ck_sink_effect_export_snapshots_input_kind"),
+    ("sink_effect_export_snapshots", "ck_sink_effect_export_snapshots_slot"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_generation"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_action"),
+    ("sink_effect_attempts", "ck_sink_effect_attempts_state"),
+    ("operations", "ck_operations_sink_effect_type"),
+    ("artifacts", "ck_artifacts_producer_xor"),
+    ("artifacts", "ck_artifacts_publication_evidence_kind"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_terminal_witness"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_positive_totals"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_terminal_ordinal"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_manifest_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_snapshot_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_snapshot_seal_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_last_chunk_seal_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_final_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_hash_hex"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_ref"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signed_manifest_size"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_manifest_schema"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_derivation_version"),
+    ("audit_export_snapshots", "ck_audit_export_snapshots_signing_tuple"),
+    ("audit_export_snapshot_chunks", "ck_audit_export_snapshot_chunks_content_ref"),
+    ("coalesce_effects", "ck_coalesce_effects_lifecycle"),
+    ("coalesce_effects", "ck_coalesce_effects_parent_set_hash_hex"),
+    ("coalesce_effects", "ck_coalesce_effects_effect_hash_hex"),
+    ("coalesce_effects", "ck_coalesce_effects_payload_ref_hex"),
+    ("coalesce_effect_members", "ck_coalesce_effect_members_ordinal"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.
@@ -520,15 +677,143 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("scheduler_events", "ix_scheduler_events_run_token_time"),
     ("scheduler_events", "ix_scheduler_events_work_item"),
     ("validation_errors", "ix_validation_errors_run_row"),
+    ("artifacts", "uq_artifacts_run_idempotency_key"),
     # Epoch 21: multi-worker coordination substrate (ADR-030).
     ("run_workers", "ix_run_workers_liveness"),
     ("run_coordination_events", "uq_run_coordination_events_event_id"),
     ("run_coordination_events", "ix_run_coordination_events_run"),
     ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
+    ("runs", "uq_runs_export_witness"),
+    ("tokens", "uq_tokens_identity_row_run"),
+    ("tokens", "uq_tokens_coalesce_result_identity"),
+    ("node_states", "uq_node_states_coalesce_member_identity"),
+    ("operations", "uq_operations_sink_effect_id"),
+    ("sink_effect_streams", "uq_sink_effect_stream_identity"),
+    ("sink_effect_members", "uq_sink_effect_member_binding"),
+    ("audit_export_snapshots", "uq_audit_export_snapshots_registry_key"),
+    ("audit_export_snapshots", "ix_audit_export_snapshots_registry_key_hash"),
+    ("audit_export_snapshot_chunks", "uq_audit_export_snapshot_chunks_terminal"),
 )
 
-_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+_REQUIRED_TRIGGERS: tuple[str, ...] = (
+    "trg_audit_export_chunk_insert_validate",
+    "trg_audit_export_snapshot_insert_seal",
+    "trg_audit_export_snapshot_immutable",
+    "trg_audit_export_snapshot_immutable_delete",
+    "trg_audit_export_chunk_immutable",
+    "trg_audit_export_chunk_immutable_delete",
+)
+
+_ADDITIVE_INDEX_OWNERS: Mapping[str, str] = MappingProxyType({"ix_tokens_run_id": "tokens"})
+_ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset(_ADDITIVE_INDEX_OWNERS)
 _ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events", "run_attributions"})
+
+
+class LandscapeSchemaShape(Enum):
+    """The non-mutating structural state of a Landscape target."""
+
+    EMPTY = "empty"
+    FOREIGN = "foreign"
+    INCOMPLETE = "incomplete"
+    DIVERGENT = "divergent"
+    MATCHES = "matches"
+
+
+def _sqlite_epoch_is_incompatible(bind: Engine | Connection) -> bool:
+    """Return whether a SQLite target carries a non-current, non-zero epoch."""
+    if bind.dialect.name != "sqlite":
+        return False
+    if isinstance(bind, Connection):
+        epoch = int(bind.exec_driver_sql("PRAGMA user_version").scalar_one())
+    else:
+        with bind.connect() as conn:
+            epoch = int(conn.exec_driver_sql("PRAGMA user_version").scalar_one())
+    return epoch not in (0, SQLITE_SCHEMA_EPOCH)
+
+
+def _landscape_identity_issue(
+    bind: Engine | Connection,
+    inspector: Inspector,
+    existing_tables: set[str],
+    *,
+    schema_epoch: int = SQLITE_SCHEMA_EPOCH,
+    identity_required: bool = True,
+) -> SchemaIdentityMismatch | Literal["identity_table", "identity_shape"] | None:
+    """Return a static issue code for cross-dialect Landscape identity drift."""
+    if SCHEMA_IDENTITY_TABLE_NAME not in existing_tables:
+        other_landscape_tables = existing_tables.intersection(set(metadata.tables) - {SCHEMA_IDENTITY_TABLE_NAME})
+        return "identity_table" if identity_required and other_landscape_tables else None
+
+    columns = {str(column["name"]) for column in inspector.get_columns(SCHEMA_IDENTITY_TABLE_NAME)}
+    if columns != {"singleton_id", "application_id", "store_kind", "schema_epoch"}:
+        return "identity_shape"
+
+    if isinstance(bind, Connection):
+        rows = read_schema_identities(bind, schema_identity_table)
+    else:
+        with bind.connect() as connection:
+            rows = read_schema_identities(connection, schema_identity_table)
+    return schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=schema_epoch)
+
+
+def _missing_additive_indexes(inspector: Inspector, present_tables: set[str]) -> frozenset[str]:
+    missing: set[str] = set()
+    for index_name, table_name in _ADDITIVE_INDEX_OWNERS.items():
+        if table_name not in present_tables:
+            missing.add(index_name)
+            continue
+        found = {str(index["name"]) for index in inspector.get_indexes(table_name) if index.get("name") is not None}
+        if index_name not in found:
+            missing.add(index_name)
+    return frozenset(missing)
+
+
+def probe_schema_shape(bind: Engine | Connection) -> LandscapeSchemaShape:
+    """Classify a Landscape schema without creating or altering objects."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(bind)
+    existing = set(inspector.get_table_names())
+    expected = set(metadata.tables)
+
+    if _sqlite_epoch_is_incompatible(bind):
+        return LandscapeSchemaShape.DIVERGENT
+    if not existing:
+        return LandscapeSchemaShape.EMPTY
+    if _landscape_identity_issue(bind, inspector, existing) is not None:
+        return LandscapeSchemaShape.DIVERGENT
+    if existing - expected:
+        return LandscapeSchemaShape.FOREIGN
+
+    present = existing & expected
+    if not present:
+        return LandscapeSchemaShape.FOREIGN
+
+    issues = collect_metadata_shape_issues(
+        inspector,
+        metadata,
+        dialect=bind.dialect,
+        present_tables=present,
+        allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
+    )
+    if issues:
+        return LandscapeSchemaShape.DIVERGENT
+
+    missing_tables = expected - existing
+    if missing_tables - _ADDITIVE_TABLE_NAMES:
+        return LandscapeSchemaShape.DIVERGENT
+
+    if missing_tables or _missing_additive_indexes(inspector, present):
+        return LandscapeSchemaShape.INCOMPLETE
+    return LandscapeSchemaShape.MATCHES
+
+
+def create_additive_indexes(bind: Engine | Connection) -> None:
+    """Create explicitly additive Landscape indexes on existing tables."""
+    for table in metadata.tables.values():
+        for index in table.indexes:
+            if index.name in _ADDITIVE_INDEX_NAMES:
+                index.create(bind, checkfirst=True)
 
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
@@ -587,6 +872,7 @@ class LandscapeDB:
         dump_to_jsonl_fail_on_error: bool = False,
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
+        **engine_kwargs: Any,
     ) -> None:
         """Initialize database connection.
 
@@ -599,7 +885,7 @@ class LandscapeDB:
                 The passphrase is never stored in the URL or audit trail.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
             dump_to_jsonl_path: Optional override path for JSONL journal
-            dump_to_jsonl_fail_on_error: Fail if journal write fails
+            dump_to_jsonl_fail_on_error: Fail startup if committed journal backlog cannot be published
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
         """
@@ -620,21 +906,32 @@ class LandscapeDB:
                 include_payloads=dump_to_jsonl_include_payloads,
                 payload_base_path=dump_to_jsonl_payload_base_path,
             )
-        self._setup_engine()
+        self._setup_engine(**engine_kwargs)
         self._validate_schema()  # Check BEFORE create_tables
+        # Pre-1.0 schema changes are deliberate recreate boundaries. Never
+        # transform a populated older epoch in place: validation rejects it
+        # with delete/recreate guidance; only a fresh/unstamped schema reaches
+        # creation and current-epoch stamping below.
+        self._sync_sqlite_schema_epoch()
         self._create_tables()
         self._create_additive_indexes()
+        self._sync_schema_identity()
         self._sync_sqlite_schema_epoch()
+        if self._journal is not None:
+            self._journal.recover_pending(self.engine)
 
-    def _setup_engine(self) -> None:
+    def _setup_engine(self, **engine_kwargs: Any) -> None:
         """Create and configure the database engine."""
         if self._passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             self._engine = self._create_sqlcipher_engine(self.connection_string, self._passphrase)
             LandscapeDB._configure_sqlite(self._engine)
         else:
             self._engine = create_engine(
                 self.connection_string,
                 echo=False,  # Set True for SQL debugging
+                **engine_kwargs,
             )
             # SQLite-specific configuration
             if self.connection_string.startswith("sqlite"):
@@ -908,17 +1205,46 @@ class LandscapeDB:
 
     def _create_additive_indexes(self) -> None:
         """Create non-gating performance indexes for existing schemas."""
-        for table in metadata.tables.values():
-            for index in table.indexes:
-                if index.name in _ADDITIVE_INDEX_NAMES:
-                    index.create(self.engine, checkfirst=True)
+        create_additive_indexes(self.engine)
+
+    def _sync_schema_identity(self) -> None:
+        """Stamp a freshly created store or verify its existing identity row."""
+        with self.engine.connect() as connection:
+            rows = read_schema_identities(connection, schema_identity_table)
+        mismatch = schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+        if rows and mismatch is None:
+            return
+        if rows:
+            raise SchemaCompatibilityError(
+                f"Landscape database schema identity mismatch ({mismatch}); "
+                "uninstall this pre-1.0 deployment, delete/recreate the Landscape database, and reinstall."
+            )
+
+        # Re-read under write intent so concurrent fresh initializers cannot
+        # both conclude that the singleton row is absent.
+        with begin_write(self.engine) as conn:
+            rows = read_schema_identities(conn, schema_identity_table)
+            if not rows:
+                insert_schema_identity(
+                    conn,
+                    schema_identity_table,
+                    store_kind="landscape",
+                    schema_epoch=SQLITE_SCHEMA_EPOCH,
+                )
+                return
+            mismatch = schema_identity_mismatch(rows, store_kind="landscape", schema_epoch=SQLITE_SCHEMA_EPOCH)
+        if mismatch is not None:
+            raise SchemaCompatibilityError(
+                f"Landscape database schema identity mismatch ({mismatch}); "
+                "uninstall this pre-1.0 deployment, delete/recreate the Landscape database, and reinstall."
+            )
 
     def _get_sqlite_schema_epoch(self) -> int:
         """Return SQLite schema epoch from PRAGMA user_version.
 
         Uses SQLite's built-in schema version slot as a lightweight marker for
-        intentional pre-1.0 schema breaks. This is not a migration system; it
-        simply gives future migration code a stable entry point.
+        intentional pre-1.0 schema breaks. ELSPETH does not migrate between
+        these epochs in place before 1.0.
         """
         if not self.connection_string.startswith("sqlite"):
             return 0
@@ -942,14 +1268,14 @@ class LandscapeDB:
         """Stamp compatible SQLite databases with the current schema epoch.
 
         New databases get the epoch immediately after create_all(). Existing
-        compatible databases without an epoch are upgraded in place to the
-        current stamp, which preserves a future migration path without requiring
-        a full migration framework today. Call this only from schema-managing
-        paths; read-only/inspection opens must not mutate the database.
+        compatible databases without an epoch are stamped in place. Any
+        populated database carrying an older non-zero epoch is rejected at the
+        one-way schema boundary. Call this only from schema-managing paths;
+        read-only/inspection opens must not mutate the database.
 
         Raises:
-            SchemaCompatibilityError: If the database has a newer epoch than
-                this code version expects (prevents silent downgrades).
+            SchemaCompatibilityError: If the database has a non-zero epoch
+                different from this code version's epoch.
         """
         if not self.connection_string.startswith("sqlite"):
             return
@@ -965,6 +1291,31 @@ class LandscapeDB:
                 "Upgrade ELSPETH to open this database.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
+        if 0 < current_epoch < SQLITE_SCHEMA_EPOCH:
+            from sqlalchemy import inspect
+
+            present_landscape_tables = set(inspect(self.engine).get_table_names()) & set(metadata.tables)
+            if present_landscape_tables:
+                raise SchemaCompatibilityError(
+                    "Cannot sync schema epoch: this existing Landscape database predates "
+                    "the current one-way schema boundary. ELSPETH does not migrate it in place.\n\n"
+                    f"Database epoch: {current_epoch}\n"
+                    f"Current epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
+                    "Obtain archive/export approval where retention applies, then have the "
+                    "database operator drop/recreate the Landscape database and initialize "
+                    "a fresh schema. Rolling code back over the recreated database is unsafe.\n\n"
+                    f"Database: {_safe_database_descriptor(self.connection_string)}"
+                )
+
+        if current_epoch == 0:
+            from sqlalchemy import inspect
+
+            # A genuinely fresh file is stamped only after create_all has
+            # installed the complete current shape. Existing unstamped schemas
+            # reach this point only after _validate_schema proved compatibility.
+            if not (set(inspect(self.engine).get_table_names()) & set(metadata.tables)):
+                return
+
         if current_epoch < SQLITE_SCHEMA_EPOCH:
             self._set_sqlite_schema_epoch(SQLITE_SCHEMA_EPOCH)
 
@@ -980,6 +1331,9 @@ class LandscapeDB:
             SchemaCompatibilityError: If database is missing required schema
                 elements, or if an encrypted database is opened without the
                 correct passphrase.
+
+        Pre-1.0 callers validate only the current schema. Older schema epochs
+        are recreate boundaries, not inputs to an in-place migration.
         """
         from sqlalchemy import inspect
         from sqlalchemy.exc import OperationalError
@@ -999,9 +1353,37 @@ class LandscapeDB:
                     f"Database: {_safe_database_descriptor(self.connection_string)}"
                 ) from e
             raise
-        expected_tables = set(metadata.tables.keys())
+        validation_metadata = metadata
+        expected_tables = set(validation_metadata.tables.keys())
         present_landscape_tables = existing_tables & expected_tables
         schema_epoch = self._get_sqlite_schema_epoch() if self.connection_string.startswith("sqlite") else 0
+        identity_issue = (
+            _landscape_identity_issue(
+                self.engine,
+                inspector,
+                existing_tables,
+                schema_epoch=SQLITE_SCHEMA_EPOCH,
+                identity_required=SCHEMA_IDENTITY_TABLE_NAME in expected_tables,
+            )
+            if existing_tables
+            else None
+        )
+
+        epoch_incompatible = schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+        if epoch_incompatible and not present_landscape_tables:
+            raise SchemaCompatibilityError(
+                "Landscape database schema is outdated.\n\n"
+                f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}\n\n"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
+            )
+
+        foreign_tables = sorted(existing_tables - expected_tables)
+        if foreign_tables:
+            raise SchemaCompatibilityError(
+                "Landscape database contains foreign tables and cannot be opened as an ELSPETH audit database.\n\n"
+                f"Unexpected tables: {', '.join(foreign_tables)}\n\n"
+                f"Database: {_safe_database_descriptor(self.connection_string)}"
+            )
 
         # If this looks like an existing Landscape database, all known tables must exist.
         # For brand-new DB files (no Landscape tables yet), creation happens in create_all().
@@ -1016,8 +1398,27 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
-        missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
+        allowed_missing_tables = frozenset() if self._require_existing_schema else _ADDITIVE_TABLE_NAMES
+        missing_tables = sorted((expected_tables - existing_tables) - allowed_missing_tables) if present_landscape_tables else []
 
+        # Some focused guard tests replace metadata with a name-only sentinel
+        # so they can isolate the legacy high-signal diagnostics. Real
+        # application metadata always contains SQLAlchemy Table objects.
+        shape_issues = (
+            collect_metadata_shape_issues(
+                inspector,
+                validation_metadata,
+                dialect=self.engine.dialect,
+                present_tables=present_landscape_tables,
+                allowed_missing_index_names=_ADDITIVE_INDEX_NAMES,
+            )
+            if all(isinstance(table, Table) for table in validation_metadata.tables.values())
+            else ()
+        )
+
+        # Full shape validation already covers every predecessor column. The
+        # named current-column guard is retained for ordinary current-schema
+        # validation, where it provides higher-signal diagnostics.
         missing_columns = _collect_missing_required_columns(inspector)
         token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(
             inspector,
@@ -1103,7 +1504,29 @@ class LandscapeDB:
             if not has_index:
                 missing_indexes.append((table_name, index_name))
 
-        epoch_incompatible = present_landscape_tables and schema_epoch not in (0, SQLITE_SCHEMA_EPOCH)
+        # Triggers are physical integrity objects, not reflected as table
+        # indexes/checks by SQLAlchemy. Require their exact stable names on a
+        # current physical schema so an equivalent-looking table definition
+        # cannot silently omit the seal/immutability enforcement.
+        missing_triggers: list[str] = []
+        should_validate_triggers = (
+            bool(present_landscape_tables)
+            and "audit_export_snapshot_chunks" in expected_tables
+            and (self.engine.dialect.name != "sqlite" or schema_epoch == SQLITE_SCHEMA_EPOCH)
+        )
+        if should_validate_triggers:
+            with self.engine.connect() as connection:
+                if self.engine.dialect.name == "sqlite":
+                    trigger_names = set(connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type = 'trigger'").scalars())
+                else:
+                    trigger_names = set(
+                        connection.exec_driver_sql(
+                            "SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = current_schema()"
+                        ).scalars()
+                    )
+            missing_triggers = sorted(set(_REQUIRED_TRIGGERS) - trigger_names)
+
+        epoch_incompatible = bool(present_landscape_tables) and epoch_incompatible
 
         # Raise errors for missing columns, FKs, check constraints, indexes, or stale ADR-019 shapes.
         if (
@@ -1115,12 +1538,21 @@ class LandscapeDB:
             or forbidden_fks
             or missing_checks
             or missing_indexes
+            or missing_triggers
+            or shape_issues
             or epoch_incompatible
+            or identity_issue
         ):
             error_parts = []
 
             if epoch_incompatible:
                 error_parts.append(f"schema epoch is incompatible:\nDatabase epoch: {schema_epoch}\nCurrent epoch: {SQLITE_SCHEMA_EPOCH}")
+
+            if identity_issue:
+                error_parts.append(
+                    f"schema identity is incompatible ({identity_issue}); expected application elspeth, "
+                    f"store landscape, epoch {SQLITE_SCHEMA_EPOCH}"
+                )
 
             if missing_tables:
                 missing_tables_str = ", ".join(missing_tables)
@@ -1159,6 +1591,13 @@ class LandscapeDB:
                 missing_indexes_str = ", ".join(f"{t}.{name}" for t, name in missing_indexes)
                 error_parts.append(f"Missing indexes: {missing_indexes_str}")
 
+            if missing_triggers:
+                error_parts.append(f"Missing triggers: {', '.join(missing_triggers)}")
+
+            if shape_issues:
+                shape_str = "; ".join(f"{issue.subject}: expected {issue.expected!r}, observed {issue.actual!r}" for issue in shape_issues)
+                error_parts.append(f"Full metadata shape mismatches: {shape_str}")
+
             if (
                 ("token_outcomes", "completed") in missing_columns
                 or ("token_outcomes", "path") in missing_columns
@@ -1167,15 +1606,14 @@ class LandscapeDB:
                 error_parts.append(
                     "ADR-019 changed token_outcomes from the old single-axis outcome/is_terminal to "
                     "(TerminalOutcome, TerminalPath, completed). See "
-                    f"{ADR019_MIGRATION_GUIDE} and replace the stale audit.db "
+                    f"{ADR019_CUTOVER_GUIDE} and replace the stale audit.db "
                     "before starting this ELSPETH version."
                 )
 
             raise SchemaCompatibilityError(
                 "Landscape database schema is outdated.\n\n" + "\n".join(error_parts) + "\n\n"
-                f"To fix this, either:\n"
-                f"  1. Delete the database file and let ELSPETH recreate it, or\n"
-                f"  2. Run: elspeth landscape migrate (when available)\n\n"
+                f"Pre-1.0 schemas are not migrated in place. Uninstall the deployment,\n"
+                f"delete/recreate the database, and reinstall this ELSPETH version.\n\n"
                 f"Database: {_safe_database_descriptor(self.connection_string)}"
             )
 
@@ -1260,6 +1698,7 @@ class LandscapeDB:
         cls._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
         metadata.create_all(engine)
         instance = cls._from_parts("sqlite:///:memory:", engine)
+        instance._sync_schema_identity()
         instance._sync_sqlite_schema_epoch()
         return instance
 
@@ -1305,6 +1744,7 @@ class LandscapeDB:
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
         dump_to_jsonl_worker_suffix: str | None = None,
+        **engine_kwargs: Any,
     ) -> Self:
         """Create database from connection URL.
 
@@ -1324,7 +1764,7 @@ class LandscapeDB:
                 When set alongside ``dump_to_jsonl_worker_suffix``, it is the
                 operator's responsibility to ensure distinct paths for each
                 worker (explicit-path-at-N-over-1 is unsupported).
-            dump_to_jsonl_fail_on_error: Fail if journal write fails
+            dump_to_jsonl_fail_on_error: Fail startup if committed journal backlog cannot be published
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
             dump_to_jsonl_worker_suffix: Per-worker hex suffix (the uuid4 hex
@@ -1342,6 +1782,8 @@ class LandscapeDB:
             raise ValueError("read_only=True cannot enable dump_to_jsonl")
 
         if passphrase is not None:
+            if engine_kwargs:
+                raise ValueError("SQLCipher construction does not accept SQLAlchemy engine kwargs")
             engine = cls._create_sqlcipher_engine(url, passphrase, read_only=read_only)
             cls._configure_sqlite(engine, read_only=read_only)
             if not read_only:
@@ -1349,7 +1791,7 @@ class LandscapeDB:
                 cls._verify_sqlite_pragmas(engine, url)
         else:
             engine_url = cls._sqlite_read_only_url(url) if read_only and url.startswith("sqlite") else url
-            engine = create_engine(engine_url, echo=False)
+            engine = create_engine(engine_url, echo=False, **engine_kwargs)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
                 cls._configure_sqlite(engine, read_only=read_only)
@@ -1385,9 +1827,13 @@ class LandscapeDB:
         instance._validate_schema()
 
         if create_tables:
+            instance._sync_sqlite_schema_epoch()
             metadata.create_all(engine)
             instance._create_additive_indexes()
+            instance._sync_schema_identity()
             instance._sync_sqlite_schema_epoch()
+        if journal is not None:
+            journal.recover_pending(engine)
         return instance
 
     @staticmethod
@@ -1482,23 +1928,14 @@ class LandscapeDB:
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:
-        """Get a database connection with automatic transaction handling.
+        """Get a transaction-scoped connection for read queries.
 
-        Uses engine.begin() for proper transaction semantics:
-        - Auto-commits on successful block exit
-        - Auto-rolls back on exception
-
-        Usage:
-            with db.connection() as conn:
-                conn.execute(runs_table.insert().values(...))
-            # Committed automatically if no exception raised
+        This is a convenience alias for :meth:`read_only_connection` on both
+        writable and read-only database handles.  Use :meth:`write_connection`
+        for INSERT, UPDATE, or DELETE statements so SQLite transactions carry
+        write intent from ``BEGIN`` and PostgreSQL call sites remain explicit.
         """
-        if self._read_only:
-            with self.read_only_connection() as conn:
-                yield conn
-            return
-
-        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
+        with self.read_only_connection() as conn:
             yield conn
 
     @contextmanager

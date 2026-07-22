@@ -4,18 +4,42 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_mock_engine, insert, inspect, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import QueuePool
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, metadata, sessions_table
 from elspeth.web.sessions.schema import (
     SessionSchemaError,
+    _stamp_schema_sentinels,
+    _user_tables,
     _validate_current_schema,
     initialize_session_schema,
+    probe_current_schema,
 )
+
+
+@pytest.mark.parametrize(
+    ("dialect", "expected"),
+    [
+        ("sqlite", frozenset()),
+        ("postgresql", frozenset({"sqlite_sequence"})),
+    ],
+)
+def test_user_tables_only_excludes_sqlite_internal_names_on_sqlite(
+    dialect: str,
+    expected: frozenset[str],
+) -> None:
+    inspector = SimpleNamespace(
+        bind=SimpleNamespace(dialect=SimpleNamespace(name=dialect)),
+        get_table_names=lambda: ["sqlite_sequence"],
+    )
+
+    assert _user_tables(inspector) == expected  # type: ignore[arg-type]
 
 
 def _create_all_on_mock_engine(engine) -> None:
@@ -71,15 +95,32 @@ def test_initialize_session_schema_creates_current_schema_without_alembic_table(
     assert "ck_blobs_ready_hash" in {check["name"] for check in inspector.get_check_constraints("blobs")}
 
 
-def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
-    """SQLite trigger bodies must not leak into PostgreSQL schema bootstrap."""
+def test_postgres_schema_emits_native_audit_trigger_ddl() -> None:
+    """PostgreSQL bootstrap emits all native triggers, never SQLite syntax."""
     emitted: list[str] = []
     engine = create_mock_engine("postgresql://", lambda sql, *_, **__: emitted.append(str(sql)))
 
     _create_all_on_mock_engine(engine)
 
     assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
-    assert not any("CREATE TRIGGER" in statement for statement in emitted)
+    ddl = "\n".join(emitted)
+    for trigger_name in (
+        "trg_interpretation_events_immutable_resolved",
+        "trg_interpretation_events_no_delete_resolved",
+        "trg_composer_completion_events_no_update",
+        "trg_composer_completion_events_no_delete",
+        "trg_chat_messages_immutable_content",
+        "trg_chat_messages_no_delete",
+        "trg_guided_operations_terminal_immutable",
+        "trg_guided_operation_events_no_update",
+        "trg_guided_operation_events_no_delete",
+        "trg_guided_operation_admission_blocks_no_update",
+        "trg_guided_operation_admission_blocks_no_delete",
+        "trg_guided_operation_admission_blocks_reject_existing_operation",
+        "trg_guided_operations_reject_admission_block_insert",
+        "trg_guided_operations_reject_admission_block_update",
+    ):
+        assert f"CREATE TRIGGER {trigger_name}" in ddl
     assert not any("SELECT RAISE" in statement for statement in emitted)
 
 
@@ -110,6 +151,103 @@ def test_initialize_session_schema_is_idempotent_for_current_schema() -> None:
     initialize_session_schema(eng)
 
 
+def test_probe_current_schema_accepts_engine_and_connection_for_current_schema() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    assert probe_current_schema(eng) is True
+    with eng.connect() as connection:
+        assert probe_current_schema(connection) is True
+
+
+def test_probe_current_schema_connection_does_not_checkout_a_second_connection() -> None:
+    eng = create_session_engine(
+        "sqlite:///:memory:",
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=0.01,
+    )
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection:
+        assert probe_current_schema(connection) is True
+
+
+def test_probe_current_schema_true_preserves_transaction_free_connection() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection:
+        assert connection.in_transaction() is False
+        assert probe_current_schema(connection) is True
+        assert connection.in_transaction() is False
+
+
+def test_probe_current_schema_false_preserves_transaction_free_connection() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+
+    with eng.connect() as connection:
+        assert connection.in_transaction() is False
+        assert probe_current_schema(connection) is False
+        assert connection.in_transaction() is False
+
+
+def test_probe_current_schema_true_preserves_existing_transaction() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+
+    with eng.connect() as connection, connection.begin() as transaction:
+        assert probe_current_schema(connection) is True
+        assert connection.in_transaction() is True
+        assert transaction.is_active is True
+
+
+def test_probe_current_schema_false_preserves_existing_transaction() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as connection:
+        connection.execute(text("DROP INDEX uq_chat_messages_tool_call_id"))
+
+    with eng.connect() as connection, connection.begin() as transaction:
+        assert probe_current_schema(connection) is False
+        assert connection.in_transaction() is True
+        assert transaction.is_active is True
+
+
+def test_probe_current_schema_returns_false_for_shape_drift() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as connection:
+        connection.execute(text("DROP INDEX uq_chat_messages_tool_call_id"))
+
+    assert probe_current_schema(eng) is False
+
+
+def test_probe_current_schema_never_creates_or_stamps_objects() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+
+    assert probe_current_schema(eng) is False
+    assert inspect(eng).get_table_names() == []
+    with eng.connect() as connection:
+        assert connection.execute(text("PRAGMA application_id")).scalar_one() == 0
+        assert connection.execute(text("PRAGMA user_version")).scalar_one() == 0
+
+
+def test_probe_current_schema_only_converts_session_schema_error(monkeypatch) -> None:
+    from elspeth.web.sessions import schema as schema_module
+
+    eng = create_session_engine("sqlite:///:memory:")
+
+    def _unexpected_failure(_bind) -> None:
+        raise RuntimeError("inspector unavailable")
+
+    monkeypatch.setattr(schema_module, "_assert_schema_sentinels", _unexpected_failure)
+
+    with pytest.raises(RuntimeError, match="inspector unavailable"):
+        probe_current_schema(eng)
+
+
 def test_initialize_session_schema_rejects_legacy_alembic_database() -> None:
     eng = create_session_engine("sqlite:///:memory:")
     with eng.begin() as conn:
@@ -130,27 +268,92 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_epoch_23_database() -> None:
-    """A VALID full-schema DB stamped at the PRIOR epoch fail-closes at boot.
+def test_initialize_session_schema_rejects_epoch_34_database() -> None:
+    """An epoch-34 DB without exclusive proposal admission fails at boot.
 
-    Genuine TDD red->green guard for the 23->24 bump (D15), isolated from any
-    table-set mismatch. Seed a COMPLETE current-schema DB
-    (``initialize_session_schema`` runs ``metadata.create_all`` + stamps the
-    CURRENT epoch), then re-stamp ``user_version`` to the prior epoch. Because the
-    schema is otherwise valid, the ONLY thing that can fail-close is the epoch
-    sentinel (``_assert_schema_sentinels``):
-      - pre-bump  (epoch still 23): stamped 23 == current 23 -> accepted, NO raise -> RED
-      - post-bump (epoch 24):       stamped 23 != current 24 -> raises -> GREEN
-
-    Do NOT use a partial-table fixture: that would fail for table-set mismatch
-    at both epochs and would make the red phase hollow.
+    Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
+    Because the SQL shape and cross-dialect identity row remain current, the
+    PRAGMA guard is the only possible failure source.
     """
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text("PRAGMA user_version = 23"))  # re-stamp to the prior epoch
-    with pytest.raises(SessionSchemaError, match="SESSION_SCHEMA_EPOCH"):
+        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 34 WHERE store_kind = 'session'"))
+        conn.execute(text("PRAGMA user_version = 34"))
+    assert probe_current_schema(eng) is False
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 34 does not match SESSION_SCHEMA_EPOCH=35.*Delete the session DB file and restart",
+    ):
         initialize_session_schema(eng)
+
+
+def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with_recreate_guidance(tmp_path) -> None:
+    """The epoch-30 operation CHECKs cannot be opened by epoch-33 code."""
+    db_path = tmp_path / "epoch-30-without-guided-plan.db"
+    engine = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(engine)
+    with engine.begin() as connection:
+        guided_operations_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'guided_plan'" in guided_operations_sql
+        epoch_30_sql = guided_operations_sql.replace("'guided_plan'", "'guided_convert'")
+        assert epoch_30_sql != guided_operations_sql
+        assert "'guided_plan'" not in epoch_30_sql
+        connection.execute(text("PRAGMA writable_schema = ON"))
+        connection.execute(
+            text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = 'guided_operations'"),
+            {"sql": epoch_30_sql},
+        )
+        connection.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 30 WHERE store_kind = 'session'"))
+        connection.execute(text("PRAGMA user_version = 30"))
+        schema_version = connection.execute(text("PRAGMA schema_version")).scalar_one()
+        connection.execute(text(f"PRAGMA schema_version = {schema_version + 1}"))
+        connection.execute(text("PRAGMA writable_schema = OFF"))
+    engine.dispose()
+
+    stale_engine = create_session_engine(f"sqlite:///{db_path}")
+    with stale_engine.connect() as connection:
+        assert connection.execute(text("PRAGMA user_version")).scalar_one() == 30
+        stored_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'guided_operations'")
+        ).scalar_one()
+        assert "'guided_plan'" not in stored_sql
+
+    with pytest.raises(
+        SessionSchemaError,
+        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=35.*"
+        r"Delete the session DB file and restart",
+    ):
+        initialize_session_schema(stale_engine)
+
+
+@pytest.mark.parametrize("renamed_column", ["singleton_id", "application_id", "store_kind", "schema_epoch"])
+def test_initialize_session_schema_rejects_identity_table_with_renamed_column(renamed_column: str) -> None:
+    """A divergent identity-table shape fail-closes with the actionable error.
+
+    Regression for elspeth-5cf1ca2852: ``read_schema_identities()`` selected
+    the declared identity columns before any live-shape validation, so a
+    missing or renamed column leaked a raw ``sqlalchemy.exc.OperationalError``
+    instead of the delete-and-restart ``SessionSchemaError``.
+    """
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as conn:
+        conn.execute(text(f"ALTER TABLE elspeth_schema_identity RENAME COLUMN {renamed_column} TO drifted_away"))
+
+    with pytest.raises(SessionSchemaError, match=renamed_column):
+        initialize_session_schema(eng)
+
+
+def test_probe_current_schema_returns_false_for_identity_table_with_renamed_column() -> None:
+    eng = create_session_engine("sqlite:///:memory:")
+    initialize_session_schema(eng)
+    with eng.begin() as conn:
+        conn.execute(text("ALTER TABLE elspeth_schema_identity RENAME COLUMN schema_epoch TO drifted_away"))
+
+    assert probe_current_schema(eng) is False
 
 
 def test_current_schema_enforces_ready_blob_hash_check(engine) -> None:
@@ -322,6 +525,7 @@ def test_validator_accepts_index_unique_true_as_unique_constraint() -> None:
 
     eng = create_session_engine("sqlite:///:memory:")
     metadata.create_all(eng)
+    _stamp_schema_sentinels(eng)
     inspector = sa_inspect(eng)
 
     expected_unique_chat = {

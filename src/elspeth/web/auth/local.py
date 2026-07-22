@@ -224,6 +224,44 @@ class LocalAuthProvider:
             )
         return UserIdentity(user_id=user_id, username=user_id)
 
+    def restore_email_verification_token(self, token: str, user_id: str) -> bool:
+        """Compensate a just-completed verification when required audit fails.
+
+        The token and user activation are restored together, guarded by the
+        exact token/user relationship and the consumed marker observed in the
+        same transaction. A successful return makes the original request safe
+        to retry.
+        """
+        token_hash = _verification_token_hash(token)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT tokens.used_at, users.email_verified
+                FROM email_verification_tokens AS tokens
+                JOIN users ON users.user_id = tokens.user_id
+                WHERE tokens.token_hash = ? AND tokens.user_id = ?
+                """,
+                (token_hash, user_id),
+            ).fetchone()
+            if row is None or row[0] is None or not row[1]:
+                return False
+            used_at = row[0]
+            user_result = conn.execute(
+                "UPDATE users SET email_verified = 0 WHERE user_id = ? AND email_verified = 1",
+                (user_id,),
+            )
+            token_result = conn.execute(
+                """
+                UPDATE email_verification_tokens
+                SET used_at = NULL
+                WHERE token_hash = ? AND user_id = ? AND used_at = ?
+                """,
+                (token_hash, user_id, used_at),
+            )
+            if user_result.rowcount != 1 or token_result.rowcount != 1:
+                raise RuntimeError("Email verification compensation lost its state precondition")
+        return True
+
     def issue_token_for_user(self, user_id: str, username: str) -> str:
         """Issue a local JWT for an already-authorized user."""
         return self._issue_token(user_id, username)

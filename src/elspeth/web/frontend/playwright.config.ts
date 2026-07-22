@@ -52,6 +52,15 @@ const composerSettingsEnv: Record<string, string> = {
   ELSPETH_WEB__composer_rate_limit_per_minute: "60",
   ELSPETH_WEB__auth_rate_limit_per_minute: "120",
   ELSPETH_WEB__e2e_state_seed_enabled: "true",
+  // Keep the operator-profiled LLM catalog surface available without a
+  // credential or network call. The E2E schema test verifies the public
+  // alias-only contract; it never executes this Bedrock profile.
+  ELSPETH_WEB__llm_profiles: JSON.stringify({
+    "e2e-bedrock": {
+      provider: "bedrock",
+      model: "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+    },
+  }),
   // Placeholder JWT signing key for the local webServer instance. The
   // backend refuses startup if cors_origins contains a non-loopback host
   // and secret_key is left at its default; here we set it explicitly so

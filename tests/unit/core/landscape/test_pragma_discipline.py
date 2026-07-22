@@ -254,6 +254,7 @@ class _RivalInterposingLeases(SchedulerLeaseRepository):
         lease_seconds: int,
         now: datetime,
         membership_fenced: bool = False,
+        strict_membership_fenced: bool = False,
     ) -> RowMapping | None:
         try:
             self.rival_outcome = self._rival.claim_ready(
@@ -272,6 +273,7 @@ class _RivalInterposingLeases(SchedulerLeaseRepository):
             lease_seconds=lease_seconds,
             now=now,
             membership_fenced=membership_fenced,
+            strict_membership_fenced=strict_membership_fenced,
         )
 
 

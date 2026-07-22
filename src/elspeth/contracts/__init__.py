@@ -23,6 +23,8 @@ Import patterns:
 from elspeth.contracts.audit import (
     OPERATION_TYPE_VALUES,
     Artifact,
+    ArtifactProducerKind,
+    ArtifactPublicationEvidenceKind,
     Batch,
     BatchMember,
     BatchOutput,
@@ -51,6 +53,13 @@ from elspeth.contracts.audit import (
     TokenParent,
     TransformErrorRecord,
     ValidationErrorRecord,
+)
+from elspeth.contracts.audit_export import (
+    AuditExportSnapshotCandidate,
+    AuditExportSnapshotReadLimits,
+    AuditExportSnapshotRegistryKey,
+    AuditExportSnapshotWinner,
+    AuditExportTerminalWitness,
 )
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.barrier_scalars import (
@@ -132,7 +141,7 @@ from elspeth.contracts.data import (
     validate_row,
 )
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
-from elspeth.contracts.engine import BufferEntry, PendingOutcome, RetryPolicy
+from elspeth.contracts.engine import BufferEntry, CoalesceParentCompletion, PendingOutcome, RetryPolicy
 from elspeth.contracts.enums import (
     AuditCharacteristic,
     BackpressureMode,
@@ -237,6 +246,7 @@ from elspeth.contracts.plugin_context import (
 )
 from elspeth.contracts.plugin_protocols import (
     BatchTransformProtocol,
+    SinkEffectProtocol,
     SinkProtocol,
     SourceProtocol,
     TransformProtocol,
@@ -272,6 +282,42 @@ from elspeth.contracts.schema_contract_factory import (
     map_schema_mode,
 )
 from elspeth.contracts.sink import OutputValidationResult
+from elspeth.contracts.sink_effects import (
+    SINK_EFFECT_PROTOCOL_VERSION,
+    AuditExportFormat,
+    AuditExportSignedManifestInput,
+    AuditExportSigningMode,
+    AuditExportSnapshotChunkInput,
+    ResolvedSinkEffectMode,
+    RestrictedAuditExportSnapshotReader,
+    RestrictedSinkEffectContext,
+    SinkEffectAttemptAction,
+    SinkEffectAttemptRequest,
+    SinkEffectAttemptResult,
+    SinkEffectAttemptState,
+    SinkEffectAuditExportSnapshotInput,
+    SinkEffectCommitResult,
+    SinkEffectDescriptorMode,
+    SinkEffectExecutionPurpose,
+    SinkEffectFinalizationMember,
+    SinkEffectFinalizationResult,
+    SinkEffectFinalizeRequest,
+    SinkEffectInputKind,
+    SinkEffectInspection,
+    SinkEffectInspectionMode,
+    SinkEffectInspectionRequest,
+    SinkEffectLease,
+    SinkEffectMember,
+    SinkEffectPipelineMembersInput,
+    SinkEffectPlan,
+    SinkEffectPrepareRequest,
+    SinkEffectReconcileKind,
+    SinkEffectReconcileResult,
+    SinkEffectReservationRequest,
+    SinkEffectRole,
+    SinkEffectRuntimeBinding,
+    SinkEffectState,
+)
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.transform_contract import (
     create_output_contract_from_schema,
@@ -312,6 +358,13 @@ from elspeth.contracts.value_source import (
 __all__ = [  # Grouped by category for readability
     # audit
     "Artifact",
+    "ArtifactProducerKind",
+    "ArtifactPublicationEvidenceKind",
+    "AuditExportSnapshotCandidate",
+    "AuditExportSnapshotReadLimits",
+    "AuditExportSnapshotRegistryKey",
+    "AuditExportSnapshotWinner",
+    "AuditExportTerminalWitness",
     "Operation",
     "OperationType",
     "OPERATION_TYPE_VALUES",
@@ -484,6 +537,7 @@ __all__ = [  # Grouped by category for readability
     "validate_row",
     # engine
     "BufferEntry",
+    "CoalesceParentCompletion",
     "PendingOutcome",
     "RetryPolicy",
     # payload_store
@@ -502,6 +556,7 @@ __all__ = [  # Grouped by category for readability
     # plugin protocols
     "BatchTransformRuntimeProtocol",
     "BatchTransformProtocol",
+    "SinkEffectProtocol",
     "SinkProtocol",
     "SourceProtocol",
     "TransformProtocol",
@@ -532,6 +587,41 @@ __all__ = [  # Grouped by category for readability
     "SanitizedWebhookUrl",
     # sink
     "OutputValidationResult",
+    # sink effects
+    "SINK_EFFECT_PROTOCOL_VERSION",
+    "AuditExportFormat",
+    "AuditExportSignedManifestInput",
+    "AuditExportSigningMode",
+    "AuditExportSnapshotChunkInput",
+    "ResolvedSinkEffectMode",
+    "RestrictedAuditExportSnapshotReader",
+    "RestrictedSinkEffectContext",
+    "SinkEffectAttemptAction",
+    "SinkEffectAttemptRequest",
+    "SinkEffectAttemptResult",
+    "SinkEffectAttemptState",
+    "SinkEffectAuditExportSnapshotInput",
+    "SinkEffectCommitResult",
+    "SinkEffectDescriptorMode",
+    "SinkEffectExecutionPurpose",
+    "SinkEffectFinalizationMember",
+    "SinkEffectFinalizationResult",
+    "SinkEffectFinalizeRequest",
+    "SinkEffectInputKind",
+    "SinkEffectInspection",
+    "SinkEffectInspectionMode",
+    "SinkEffectInspectionRequest",
+    "SinkEffectLease",
+    "SinkEffectMember",
+    "SinkEffectPipelineMembersInput",
+    "SinkEffectPlan",
+    "SinkEffectPrepareRequest",
+    "SinkEffectReconcileKind",
+    "SinkEffectReconcileResult",
+    "SinkEffectReservationRequest",
+    "SinkEffectRole",
+    "SinkEffectRuntimeBinding",
+    "SinkEffectState",
     # token usage
     "TokenUsage",
     # call data (LLM + HTTP audit records)

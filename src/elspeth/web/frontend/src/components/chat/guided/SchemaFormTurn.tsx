@@ -1,12 +1,11 @@
 import { useId, useState, type ReactNode } from "react";
-import type { GuidedRespondRequest, KnobField, SchemaFormPayload } from "@/types/guided";
+import type { GuidedRespondAction, KnobField, SchemaFormPayload } from "@/types/guided";
 import { TUTORIAL_VALIDATION_FAILURE_CAVEAT } from "@/components/tutorial/copy";
 import { CodeBlock } from "../CodeBlock";
-import { RecipeContextHeader } from "./RecipeContextHeader";
 
 interface SchemaFormTurnProps {
   payload: SchemaFormPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /**
    * Tutorial mode: surfaces the worked-example teaching copy for prefilled
@@ -71,63 +70,49 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
 
   function handleContinue() {
     if (!canSubmit()) return;
-    const submitted: Record<string, unknown> =
-      payload.mode === "recipe_decision" ? { ...payload.prefilled } : {};
+    const submitted: Record<string, unknown> = {};
     for (const field of visibleFields()) {
-      submitted[field.name] = submittedValue(field, values[field.name]);
-    }
-
-    if (payload.mode === "plugin_options") {
-      onSubmit({
-        chosen: null,
-        edited_values: {
-          plugin: payload.plugin,
-          options: submitted,
-          observed_columns: [],
-          sample_rows: [],
-        },
-        custom_inputs: null,
-        accepted_step_index: null,
-        edit_step_index: null,
-        control_signal: null,
-      });
-      return;
+      const value = submittedValue(field, values[field.name]);
+      // Optional non-nullable knobs must be OMITTED when their RESOLVED value is
+      // null rather than sent as an explicit null: the backend schema-form
+      // contract rejects null for a non-nullable option (stage_transitions.py:
+      // "option 'X' is not nullable"), even though the field is optional and the
+      // plugin config supplies its own default (e.g. the JSON sink's `headers` /
+      // `collision_policy` / `indent`). A json-value field can hold the literal
+      // string "null" that submittedValue parses to null, so we test the resolved
+      // value, not the raw input. Required-field validation is unaffected;
+      // nullable optional fields still send null (null is meaningful there).
+      if (value === null && !field.required && !field.nullable) {
+        continue;
+      }
+      submitted[field.name] = value;
     }
 
     onSubmit({
-      chosen: ["accept"],
+      chosen: null,
+      // The schema_form guided/respond contract accepts EXACTLY {plugin, options}
+      // (backend guided.py — schema-8 cutover befb436f0). Extra keys trip the
+      // closed-shape set-check and 400 the turn ("Guided response does not satisfy
+      // the current turn contract."). The server re-derives observed columns / sample
+      // rows from the stored source intent, so they must NOT be sent here.
       edited_values: {
-        recipe_name: payload.recipe_context.recipe_name,
-        slots: submitted,
+        plugin: payload.plugin,
+        options: submitted,
       },
       custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
-      control_signal: null,
-    });
-  }
-
-  function handleBuildManually() {
-    onSubmit({
-      chosen: ["build_manually"],
-      edited_values: null,
-      custom_inputs: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
     });
   }
 
   const showValidationFailureTeaching =
     isTutorial &&
-    payload.mode === "plugin_options" &&
     payload.knobs.fields.some((field) => field.name === "on_validation_failure");
 
   return (
     <div className="guided-turn guided-schema-form">
-      {payload.mode === "recipe_decision" && (
-        <RecipeContextHeader context={payload.recipe_context} />
-      )}
       {view === "summary" ? (
         // Empty-row treatment (elspeth-eba8820005): an optional field with no
         // value carries no decision — elide the row rather than rendering a
@@ -226,18 +211,8 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           onClick={handleContinue}
           disabled={disabled || !canSubmit()}
         >
-          {payload.mode === "recipe_decision" ? "Apply recipe" : "Continue"}
+          Continue
         </button>
-        {payload.mode === "recipe_decision" && payload.recipe_context.alternatives.includes("build_manually") && (
-          <button
-            type="button"
-            className="guided-turn-secondary"
-            onClick={handleBuildManually}
-            disabled={disabled}
-          >
-            Build manually
-          </button>
-        )}
       </div>
     </div>
   );
@@ -334,6 +309,7 @@ function emptyForKind(kind: KnobField["kind"]): unknown {
 function submittedValue(field: KnobField, value: unknown): unknown {
   if (value === undefined) return field.default ?? null;
   if (field.kind === "string-list") {
+    if (value === null && field.nullable) return null;
     if (typeof value === "string") return value.split("\n").filter((line) => line !== "");
     if (Array.isArray(value)) return value;
     return [];
@@ -437,16 +413,30 @@ function KnobFieldRenderer({
       // blob:<ref> sentinel mask (all modes, not just tutorial): the guided
       // emitter already masks a blob-backed source's absolute storage_path as
       // `blob:<blob_ref>` on the wire, but a raw UUID means nothing to the
-      // user. Render the friendly label; the sentinel stays in form state and
-      // flows to submit unchanged (handleContinue reads `values`, never this
-      // DOM string). readOnly so the label can never overwrite the sentinel.
+      // user. Render it as a static bound-upload value, including the exact
+      // sentinel for review; the sentinel stays in form state and flows to
+      // submit unchanged (handleContinue reads `values`).
       const maskBlobRef =
         field.name === "path" && rawString.startsWith(BLOB_REF_PATH_PREFIX);
-      const displayString = maskBlobRef
-        ? BLOB_REF_FRIENDLY_LABEL
-        : maskPathLeak
-          ? friendlyBlobRef(rawString)
-          : rawString;
+      if (maskBlobRef) {
+        return (
+          <div className="guided-schema-field-row">
+            <span className="guided-schema-label">{field.label}</span>
+            <div className="guided-schema-bound-value">
+              <span>Uploaded sample data</span>
+              <span className="guided-schema-bound-reference">
+                Bound reference: <code>{rawString}</code>
+              </span>
+            </div>
+            {field.description && (
+              <p id={descriptionId} className="guided-schema-hint">
+                {field.description}
+              </p>
+            )}
+          </div>
+        );
+      }
+      const displayString = maskPathLeak ? friendlyBlobRef(rawString) : rawString;
       return (
         <div className="guided-schema-field-row">
           <FieldLabel field={field} htmlFor={id} />
@@ -461,7 +451,7 @@ function KnobFieldRenderer({
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
-            readOnly={maskPathLeak || maskBlobRef}
+            readOnly={maskPathLeak}
           />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">

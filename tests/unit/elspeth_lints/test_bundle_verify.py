@@ -199,6 +199,64 @@ def test_verify_passes_when_claims_match_tree(tmp_path: Path) -> None:
     assert report.rotation_plan is None  # no rotation action
 
 
+def test_verify_passes_with_cli_style_relative_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented sign-bundle defaults are relative to the repository root."""
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_source(root, "plugins/gadget.py", "gadget")
+    finding = _live_finding(root, "plugins/gadget.py")
+    bundle = _bundle(root, allowlist_dir, (_new_judgment_action(finding, "plugins/gadget.py"),))
+
+    monkeypatch.chdir(tmp_path)
+    report = verify_bundle_against_tree(
+        bundle,
+        root=root.relative_to(tmp_path),
+        allowlist_dir=allowlist_dir.relative_to(tmp_path),
+    )
+
+    assert report.ok is True
+    assert report.mismatches == ()
+
+
+def test_verify_scans_each_new_judgment_file_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Large bundles commonly carry hundreds of findings from one source file."""
+    from elspeth_lints.core import bundle_verify
+    from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
+
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    target = root / "plugins/gadget.py"
+    target.write_text(
+        "class Widget:\n"
+        "    def lookup(self, payload: dict) -> str:\n"
+        "        return payload.get('name', 'anonymous')\n\n"
+        "    def lookup_other(self, payload: dict) -> str:\n"
+        "        return payload.get('other', 'anonymous')\n",
+        encoding="utf-8",
+    )
+    findings = [finding for finding in scan_file(target.resolve(), root) if finding.rule_id == "R1"]
+    assert len(findings) == 2
+    bundle = _bundle(
+        root,
+        allowlist_dir,
+        tuple(_new_judgment_action(finding, "plugins/gadget.py") for finding in findings),
+    )
+
+    real_scan = bundle_verify.scan_single_file_findings
+    scan_calls = 0
+
+    def counted_scan(*, target_file: Path, root: Path) -> list[Any]:
+        nonlocal scan_calls
+        scan_calls += 1
+        return real_scan(target_file=target_file, root=root)
+
+    monkeypatch.setattr(bundle_verify, "scan_single_file_findings", counted_scan)
+    report = verify_bundle_against_tree(bundle, root=root, allowlist_dir=allowlist_dir)
+
+    assert report.ok is True
+    assert scan_calls == 1
+
+
 def test_verify_aborts_on_drift_mismatch(tmp_path: Path) -> None:
     root = _build_root(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)

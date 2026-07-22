@@ -21,7 +21,6 @@ Tests for explain_token that hit this path are marked xfail.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -39,6 +38,7 @@ from elspeth.contracts import (
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
+from elspeth.contracts.sink_effects import SinkEffectAttemptAction, SinkEffectAttemptRequest
 from elspeth.core.landscape.lineage import explain
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
@@ -46,6 +46,8 @@ from elspeth.mcp.analyzers.queries import (
     explain_token,
     get_calls,
     get_operation_calls,
+    get_sink_effect_history,
+    list_artifacts,
     list_operations,
     list_rows,
     list_runs,
@@ -53,9 +55,12 @@ from elspeth.mcp.analyzers.queries import (
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
 from elspeth.mcp.types import ErrorResult
 from tests.fixtures.landscape import (
+    make_factory,
+    make_landscape_db,
     make_recorder_with_run,
     register_test_node,
 )
+from tests.unit.core.landscape.test_sink_effect_finalization import _prepared
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -196,6 +201,76 @@ class TestListOperations:
 
         assert [row["operation_id"] for row in rows] == [operation.operation_id]
         assert rows[0]["operation_type"] == "runtime_preflight"
+        assert rows[0]["sink_effect_id"] is None
+
+
+def test_list_artifacts_maps_explicit_producer_and_publication_evidence() -> None:
+    p = _build_linear_pipeline()
+    artifact = p["factory"].execution.register_artifact(
+        run_id=p["run_id"],
+        state_id=p["node_state"].state_id,
+        sink_node_id=p["sink_node_id"],
+        artifact_type="file",
+        path="/output/result.csv",
+        content_hash="a" * 64,
+        size_bytes=1,
+    )
+
+    rows = list_artifacts(p["db"], p["factory"], p["run_id"])
+
+    assert rows == [
+        {
+            "artifact_id": artifact.artifact_id,
+            "run_id": p["run_id"],
+            "sink_node_id": p["sink_node_id"],
+            "producer_kind": "node_state",
+            "produced_by_state_id": p["node_state"].state_id,
+            "sink_effect_id": None,
+            "artifact_type": "file",
+            "path_or_uri": "/output/result.csv",
+            "content_hash": "a" * 64,
+            "size_bytes": 1,
+            "idempotency_key": None,
+            "publication_performed": True,
+            "publication_evidence_kind": "legacy_returned",
+            "created_at": artifact.created_at.isoformat(),
+        }
+    ]
+
+
+def test_get_sink_effect_history_exposes_recovery_state_without_provider_bodies() -> None:
+    db = make_landscape_db()
+    try:
+        factory = make_factory(db)
+        effect, _members, lease = _prepared(factory, count=1, replacing_target=True)
+        attempt = factory.execution.sink_effects.begin_attempt(
+            SinkEffectAttemptRequest(
+                effect_id=effect.effect_id,
+                member_ordinal=None,
+                generation=lease.generation,
+                action=SinkEffectAttemptAction.COMMIT,
+                call_kind=CallType.FILESYSTEM,
+                request_hash="f" * 64,
+            )
+        )
+        lost = factory.execution.sink_effects.mark_response_lost(attempt.attempt_id)
+
+        history = get_sink_effect_history(db, factory, effect.effect_id)
+
+        assert history is not None
+        assert history["effect"]["state"] == "in_flight"
+        assert history["effect"]["lease_owner"] == lease.owner
+        assert history["effect"]["predecessor_effect_id"] is None
+        assert history["member_progress"] == {"prepared": 1}
+        assert history["response_lost_attempts"] == 1
+        assert history["operator_guidance"].startswith("Do not retry publication speculatively")
+        assert history["attempts"][0]["state"] == "response_lost"
+        assert history["attempts"][0]["evidence_hash"] == lost.evidence_hash
+        assert "evidence_json" not in history["attempts"][0]
+        assert "target_json" not in history["effect"]
+        assert "plan_json" not in history["effect"]
+    finally:
+        db.close()
 
 
 # ===========================================================================
@@ -817,24 +892,28 @@ class TestGetRunSummary:
         distribution = {(entry["outcome"], entry["path"], entry["completed"]): entry["count"] for entry in result["outcome_distribution"]}
         assert distribution[(TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value, True)] == 1
 
-    def test_summary_token_count_uses_token_run_ownership(self) -> None:
-        """A wrong-run token that references a target row must not be counted."""
+    def test_summary_token_count_is_run_scoped(self) -> None:
+        """Tokens owned by another run must not be counted in the target run."""
         p = _build_linear_pipeline(run_id="summary-target-run")
         db = p["db"]
         factory = p["factory"]
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="summary-other-run")
-
-        from elspeth.core.landscape.schema import tokens_table
-
-        with db.connection() as conn:
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="wrong-run-token",
-                    row_id=p["row"].row_id,
-                    run_id="summary-other-run",
-                    created_at=datetime.now(UTC),
-                )
-            )
+        register_test_node(
+            factory.data_flow,
+            "summary-other-run",
+            "other-source",
+            node_type=NodeType.SOURCE,
+            plugin_name="other-source",
+        )
+        other_row = factory.data_flow.create_row(
+            "summary-other-run",
+            "other-source",
+            row_index=0,
+            data={"name": "Bob"},
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        factory.data_flow.create_token(other_row.row_id)
 
         result = get_run_summary(db, factory, "summary-target-run")
 
@@ -1470,7 +1549,7 @@ class TestListCollisions:
 
         # Use raw SQL to update context_after_json with collision data
         # (the complete_node_state API doesn't directly support arbitrary JSON)
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1486,7 +1565,6 @@ class TestListCollisions:
                     "context_after": '{"union_field_collision_values": {"status": [["branch1", "active"], ["branch2", "inactive"]]}}',
                 },
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "plain-coalesce")
 
@@ -1537,7 +1615,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1550,7 +1628,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "overlap-only")
 
@@ -1596,7 +1673,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1609,7 +1686,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "first-wins")
 
@@ -1677,7 +1753,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1694,7 +1770,6 @@ class TestListCollisions:
                     "context_after": context_json,
                 },
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "failed-merge")
 
@@ -1759,7 +1834,7 @@ class TestListCollisions:
         ns1 = factory.execution.begin_node_state(token1.token_id, "coalesce-node", "no-dedup-test", step_index=1, input_data={"x": 1})
         ns2 = factory.execution.begin_node_state(token2.token_id, "coalesce-node", "no-dedup-test", step_index=1, input_data={"x": 2})
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             for ns in [ns1, ns2]:
                 conn.execute(
                     text(
@@ -1773,7 +1848,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "context_after": context_json},
                 )
-            conn.commit()
 
         results = list_collisions(db, factory, "no-dedup-test")
 
@@ -1819,13 +1893,13 @@ class TestListCollisions:
         # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older).
         # begin_node_state opens its own write transaction — it must run BEFORE
         # the db.connection() block (nesting a repo write inside an open
-        # connection on the in-memory StaticPool nests transactions under the
+        # write connection on the in-memory StaticPool nests transactions under the
         # write-intent begin discipline).
         node_states = [
             factory.execution.begin_node_state(token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i})
             for i, (_row, token) in enumerate(rows_and_tokens)
         ]
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             for i, ns in enumerate(node_states):
                 if i < 2:
                     # Overlap-only: same value on both branches (NOT a real collision)
@@ -1864,7 +1938,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "context_after": context},
                 )
-            conn.commit()
 
         # With limit=2, if LIMIT was in SQL, we'd only get the 2 overlap-only rows
         # and filter them out, returning 0 results. With limit after filter, we
@@ -1922,7 +1995,7 @@ class TestListCollisions:
             }
         )
 
-        with db.connection() as conn:
+        with db.write_connection() as conn:
             conn.execute(
                 text(
                     """
@@ -1935,7 +2008,6 @@ class TestListCollisions:
                 ),
                 {"state_id": ns.state_id, "context_after": context_json},
             )
-            conn.commit()
 
         results = list_collisions(db, factory, "canonical-test")
 
@@ -1994,7 +2066,7 @@ class TestListCollisions:
                 }
             )
 
-            with db.connection() as conn:
+            with db.write_connection() as conn:
                 conn.execute(
                     text(
                         """
@@ -2007,7 +2079,6 @@ class TestListCollisions:
                     ),
                     {"state_id": ns.state_id, "timestamp": fixed_timestamp, "context_after": context_json},
                 )
-                conn.commit()
 
         # Fetch with limit=5 — with unstable ordering, rows can shift between
         # batches causing skips/duplicates when the internal batch_size kicks in

@@ -89,7 +89,7 @@ def _composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> ComposerS
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
     )
-    return ComposerServiceImpl(
+    return ComposerServiceImpl.for_trained_operator(
         catalog=catalog,
         settings=settings,
         sessions_service=sessions_service,
@@ -135,7 +135,7 @@ def _build_execution_service(
         shareable_link_signing_key=b"\x00" * 32,
         landscape_url=f"sqlite:///{tmp_path}/audit.db",
     )
-    svc = ExecutionServiceImpl(
+    svc = ExecutionServiceImpl.for_trained_operator(
         loop=mock_loop,
         broadcaster=broadcaster,
         settings=settings,

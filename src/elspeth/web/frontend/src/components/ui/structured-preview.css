@@ -1,0 +1,123 @@
+.ui-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 1em;
+  height: 1em;
+  color: currentColor;
+}
+
+.structured-preview {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.structured-preview-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.structured-preview-toggle {
+  min-height: var(--size-control-compact);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-xs);
+}
+
+.structured-preview-toggle[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-muted);
+  color: var(--color-text);
+}
+
+/* Shared CodeBlock for the JSON view (elspeth-865bc4fcfc). Mirrors the
+   ack-card CodeBlock chrome (chat.css), scoped to the same box the old
+   plain <pre> used: capped height + scroll, since blob/run-output previews
+   can be large. */
+.structured-preview .code-block-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.structured-preview .code-block {
+  max-height: 300px;
+  margin: 0;
+  overflow: auto;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
+.structured-preview .code-block--plain {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.structured-preview .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.structured-preview .code-block-wrapper:hover .code-block-copy,
+.structured-preview .code-block-copy:focus-visible {
+  opacity: 1;
+}
+
+.structured-preview-table-wrap {
+  max-width: 100%;
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.structured-preview-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.structured-preview-table th,
+.structured-preview-table td {
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+  white-space: pre;
+}
+
+.structured-preview-table th {
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.structured-preview-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}

@@ -8,10 +8,16 @@ Layer: L3 (application).
 
 from __future__ import annotations
 
+from elspeth.web.audit_readiness.models import PluginPolicyReadinessSnapshot
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec
 
 
-def build_narrative(state: CompositionState, *, retention_days: int) -> str:
+def build_narrative(
+    state: CompositionState,
+    *,
+    retention_days: int,
+    plugin_policy_readiness: PluginPolicyReadinessSnapshot | None = None,
+) -> str:
     lines: list[str] = [
         "When you run this pipeline, ELSPETH will record:",
         "",
@@ -31,6 +37,10 @@ def build_narrative(state: CompositionState, *, retention_days: int) -> str:
 
     for output in state.outputs:
         lines.append(_describe_output(output))
+
+    if plugin_policy_readiness is not None:
+        lines.extend(("", "Web plugin policy readiness:"))
+        lines.extend(f"- {row.label}: {row.status} — {row.summary}" for row in plugin_policy_readiness.rows)
 
     lines.extend(
         [

@@ -384,15 +384,15 @@ def test_session_fk_cascade_is_blocked_by_append_only_trigger(engine) -> None:
             conn.commit()
 
 
-# ---- triggers registered in _REQUIRED_SQLITE_TRIGGERS ----
+# ---- triggers registered in _REQUIRED_AUDIT_TRIGGERS ----
 
 
 def test_triggers_registered_in_required_set() -> None:
     """Startup validator must enforce trigger presence on existing DBs."""
-    from elspeth.web.sessions.schema import _REQUIRED_SQLITE_TRIGGERS
+    from elspeth.web.sessions.schema import _REQUIRED_AUDIT_TRIGGERS
 
-    assert "trg_composer_completion_events_no_update" in _REQUIRED_SQLITE_TRIGGERS
-    assert "trg_composer_completion_events_no_delete" in _REQUIRED_SQLITE_TRIGGERS
+    assert "trg_composer_completion_events_no_update" in _REQUIRED_AUDIT_TRIGGERS
+    assert "trg_composer_completion_events_no_delete" in _REQUIRED_AUDIT_TRIGGERS
 
 
 def test_triggers_present_in_live_database(engine) -> None:

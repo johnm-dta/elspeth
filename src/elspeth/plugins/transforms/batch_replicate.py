@@ -98,15 +98,15 @@ class BatchReplicate(BaseTransform):
     name = "batch_replicate"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3e9b08173c506ade"
+    source_file_hash: str | None = "sha256:afce27221f965067"
     config_model = BatchReplicateConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
-    # Mixed-validity batches can quarantine some input rows (e.g. copies < 1)
-    # while still succeeding for the rest of the batch. That makes the
-    # unconditional pass-through contract dishonest even though every emitted
-    # row deep-copies the originating input before adding copy_index.
-    passes_through_input = False
+    # Every emitted row deep-copies its originating input before adding
+    # copy_index. Mixed-validity batches may quarantine inputs, but the
+    # pass-through contract applies to emitted rows and batch verification uses
+    # the fields shared by every buffered input (ADR-009 Clause 2).
+    passes_through_input = True
 
     @classmethod
     def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
@@ -134,40 +134,6 @@ class BatchReplicate(BaseTransform):
             "max_copies": 10,
             "include_copy_index": True,
         }
-
-    def backward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
-        """Drive the backward invariant with a mixed-validity batch.
-
-        ``BatchReplicate`` is non-pass-through because one row can be
-        quarantined while another still emits successfully. A singleton probe
-        row only exercises the happy path. We therefore synthesize a two-row
-        batch:
-
-        - row 0: invalid copies + a unique field that exists nowhere else
-        - row 1: valid copies so the transform still returns success
-
-        The harness can then observe that the success rows do not preserve the
-        unique invalid-row field, proving the class-level
-        ``passes_through_input = False`` declaration is honest.
-        """
-        unique_invalid_field = "quarantined_only_marker"
-
-        invalid_payload = probe.to_dict()
-        invalid_payload[self._copies_field] = 0
-        invalid_payload[unique_invalid_field] = "invalid-branch"
-        invalid_contract = probe.contract.with_field(
-            normalized=unique_invalid_field,
-            original=unique_invalid_field,
-            value=invalid_payload[unique_invalid_field],
-        )
-
-        valid_payload = probe.to_dict()
-        valid_payload[self._copies_field] = 1
-
-        return [
-            PipelineRow(invalid_payload, invalid_contract),
-            PipelineRow(valid_payload, probe.contract),
-        ]
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

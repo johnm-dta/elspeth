@@ -2,7 +2,7 @@
 
 Index of the documentation shipped in this repository.
 
-**Framework status:** `0.7.0`
+**Framework status:** `0.7.1`
 **Archive note:** current release, architecture, contract, guide, reference, and
 runbook docs remain visible here. Implemented plans, superseded specs, generated
 review sidecars, and other internal work product are removed from active public
@@ -35,6 +35,8 @@ Current architecture and design references.
 - [Requirements Matrix](architecture/requirements.md) — compatibility pointer to current requirement and contract sources
 - [Subsystems](architecture/subsystems.md) — compatibility pointer to current subsystem diagrams and ADRs
 - [Token Lifecycle](architecture/token-lifecycle.md) — row identity through forks and joins
+- [State Engine](architecture/state_engine/README.md) — canonical durable scheduler, barrier, sink-effect, proof-catalog, and assessment authority
+- [DAG Information and Completeness](architecture/dag/README.md) — permanent criteria, assessment framework, current verdict, and dated evidence
 - [Landscape System](architecture/landscape.md) — audit trail architecture
 - [Landscape Entry Points](architecture/landscape-entry-points.md) — where audit records are created
 - [Telemetry](architecture/telemetry.md) — operational visibility architecture

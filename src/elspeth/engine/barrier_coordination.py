@@ -435,7 +435,7 @@ class BarrierIntakeCoordinator:
                 barrier_key=str(coalesce_name),
                 token_ids=(token.token_id,),
                 now=self._clock.now_utc(),
-                coordination_token=self._coordination_token,
+                coordination_token=coordination_token,
                 release_context={
                     "late_arrival": True,
                     "reason": outcome.failure_reason,
@@ -648,7 +648,7 @@ class BarrierRecoveryCoordinator:
         clock: Clock,
         aggregation_settings: Mapping[NodeID, AggregationSettings],
         coalesce_node_ids: Mapping[CoalesceName, NodeID],
-        coordination_token: CoordinationToken | None,
+        coordination_token: CoordinationToken,
         scheduler_lease_owner: str,
     ) -> None:
         self._run_id = run_id

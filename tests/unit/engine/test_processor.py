@@ -36,6 +36,7 @@ from elspeth.contracts.enums import (
     BatchStatus,
     NodeStateStatus,
     RoutingMode,
+    RunStatus,
     TerminalOutcome,
     TerminalPath,
     TriggerType,
@@ -178,7 +179,7 @@ def _persist_blocked_scheduler_work(
     """
     _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
     now = processor._clock.now_utc()
-    item = processor._scheduler.enqueue_ready_claimed(
+    item = processor._scheduler.enqueue_ready_claimed_legacy_unfenced(
         run_id=processor.run_id,
         token_id=token.token_id,
         row_id=token.row_id,
@@ -499,13 +500,12 @@ class TestConstructorErrorEdgeMap:
         assert first._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
         assert second._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
 
-    def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
-        """Tests and controlled workers can still provide a stable lease-owner identity."""
+    def test_explicit_scheduler_lease_owner_must_match_coordination_token(self) -> None:
+        """A leader cannot hold scheduler leases under a second identity."""
         _, factory = _make_factory()
 
-        processor = _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
-
-        assert processor._scheduler_lease_owner == "worker-a"
+        with pytest.raises(OrchestrationInvariantError, match=r"scheduler_lease_owner.*coordination_token\.worker_id"):
+            _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
 
     def test_navigator_is_constructed_from_traversal_context_factory(self) -> None:
         """RowProcessor should not re-derive DAGNavigator internals at the call site."""
@@ -740,7 +740,7 @@ class TestConstructorErrorEdgeMap:
         token = TokenInfo(row_id="row-ghost", token_id="tok-ghost", row_data=payload)
         _persist_token_for_scheduler(factory, token, ingest_sequence=0)
         ghost_now = datetime.now(UTC)
-        ghost_item = factory.scheduler.enqueue_ready_claimed(
+        ghost_item = factory.scheduler.enqueue_ready_claimed_legacy_unfenced(
             run_id="test-run",
             token_id="tok-ghost",
             row_id="row-ghost",
@@ -1288,6 +1288,47 @@ class TestProcessRowNoTransforms:
     """Tests for process_row with an empty transform list."""
 
     @staticmethod
+    def _seed_pre_fix_ts02_gap(
+        factory: RecorderFactory,
+        *,
+        token_id: str,
+        row_id: str,
+        observed_at: datetime,
+    ) -> tuple[Any, Any]:
+        """Persist the exact legacy row/token + initial scheduler-claim image."""
+        coordination_token = leader_coordination_token(factory, "test-run")
+        source_data = {"value": 42}
+        pipeline_row = _make_source_row(source_data).to_pipeline_row()
+
+        def insert_pre_fix_ingress(conn: Any) -> tuple[Any, Any]:
+            return factory.data_flow.insert_row_with_token_on(
+                conn,
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=0,
+                data=source_data,
+                source_row_index=0,
+                ingest_sequence=0,
+                row_id=row_id,
+                token_id=token_id,
+            )
+
+        _row, _token, work_item = factory.scheduler.ingest_row_with_initial_claim(
+            coordination_token=coordination_token,
+            now=observed_at,
+            insert_row_and_token=insert_pre_fix_ingress,
+            token_id=token_id,
+            row_id=row_id,
+            node_id=None,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(pipeline_row),
+            lease_owner=_TEST_LEADER_WORKER_ID,
+            lease_seconds=300,
+        )
+        return coordination_token, work_item
+
+    @staticmethod
     def _source_plugin(*, declared_guaranteed_fields: frozenset[str]) -> Any:
         plugin = type("ProcessorSourcePlugin", (), {})()
         plugin.name = "processor-source"
@@ -1350,7 +1391,12 @@ class TestProcessRowNoTransforms:
         with (
             patch.object(
                 factory.execution, "record_completed_node_state", wraps=factory.execution.record_completed_node_state
-            ) as completed,
+            ) as completed_standalone,
+            patch.object(
+                factory.execution,
+                "record_completed_node_state_on",
+                wraps=factory.execution.record_completed_node_state_on,
+            ) as completed_composed,
             patch.object(factory.execution, "begin_node_state", wraps=factory.execution.begin_node_state) as begin,
             patch.object(factory.execution, "complete_node_state", wraps=factory.execution.complete_node_state) as complete,
         ):
@@ -1363,7 +1409,8 @@ class TestProcessRowNoTransforms:
                 ingest_sequence=0,
             )
 
-        assert completed.call_count == 1
+        assert completed_composed.call_count == 1
+        assert completed_standalone.call_count == 0
         assert begin.call_count == 0
         assert complete.call_count == 0
 
@@ -1384,6 +1431,321 @@ class TestProcessRowNoTransforms:
         [source_state] = states
         assert source_state.node_id == "source-0"
         assert source_state.status == NodeStateStatus.COMPLETED
+
+    def test_fenced_ingest_commits_source_completion_before_return(self) -> None:
+        """A hard kill after TS-02 returns cannot strand source audit evidence."""
+        db, factory = _make_factory()
+        processor = _make_processor(factory)
+        source_row = _make_source_row()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        class _SimulatedProcessDeath(BaseException):
+            pass
+
+        committed_ingest = processor._ingest_source_row_with_initial_claim
+
+        def crash_after_ingest_commit(**kwargs: Any) -> None:
+            committed_ingest(**kwargs)
+            raise _SimulatedProcessDeath
+
+        with (
+            patch.object(processor, "_ingest_source_row_with_initial_claim", side_effect=crash_after_ingest_commit),
+            pytest.raises(_SimulatedProcessDeath),
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=source_row,
+                transforms=[],
+                ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import node_states_table, rows_table, token_work_items_table, tokens_table
+
+        with db.connection() as conn:
+            assert conn.execute(select(func.count()).select_from(rows_table)).scalar_one() == 1
+            assert conn.execute(select(func.count()).select_from(tokens_table)).scalar_one() == 1
+            assert conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one() == 1
+            source_states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
+
+        assert [(state.status, state.attempt) for state in source_states] == [(NodeStateStatus.COMPLETED.value, 0)], (
+            "the fenced ingest commit must include the source COMPLETED witness"
+        )
+
+    def test_fenced_ingest_rolls_source_completion_back_with_scheduler_failure(self) -> None:
+        """A failure after the source-state insert rolls the whole ingress back."""
+        db, factory = _make_factory()
+        processor = _make_processor(factory)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            patch.object(factory.scheduler.queue, "enqueue_ready_claimed_on", side_effect=RuntimeError("injected TS-02 failure")),
+            pytest.raises(RuntimeError, match="injected TS-02 failure"),
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=_make_source_row(),
+                transforms=[],
+                ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import node_states_table, rows_table, token_work_items_table, tokens_table
+
+        with db.connection() as conn:
+            assert conn.execute(select(func.count()).select_from(rows_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(tokens_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(node_states_table)).scalar_one() == 0
+            assert conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one() == 0
+
+    def test_source_completion_reconciliation_rejects_conflicting_state(self) -> None:
+        """A fully witnessed TS-02 image never overwrites conflicting evidence."""
+        _db, factory = _make_factory()
+        coordination_token = leader_coordination_token(factory, "test-run")
+        observed_at = datetime.now(UTC)
+        source_data = {"value": 42}
+        pipeline_row = _make_source_row(source_data).to_pipeline_row()
+
+        def insert_pre_fix_ingress(conn: Any) -> tuple[Any, Any]:
+            return factory.data_flow.insert_row_with_token_on(
+                conn,
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=0,
+                data=source_data,
+                source_row_index=0,
+                ingest_sequence=0,
+                row_id="row-conflicting-source-state",
+                token_id="token-conflicting-source-state",
+            )
+
+        factory.scheduler.ingest_row_with_initial_claim(
+            coordination_token=coordination_token,
+            now=observed_at,
+            insert_row_and_token=insert_pre_fix_ingress,
+            token_id="token-conflicting-source-state",
+            row_id="row-conflicting-source-state",
+            node_id=None,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(pipeline_row),
+            lease_owner=_TEST_LEADER_WORKER_ID,
+            lease_seconds=300,
+        )
+        factory.execution.record_completed_node_state(
+            token_id="token-conflicting-source-state",
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 999},
+            output_data={"value": 999},
+            duration_ms=0,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="conflicting audit evidence"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+
+    def test_source_completion_reconciliation_rejects_duplicate_claim_witness(self) -> None:
+        """Duplicate scheduler claims are ambiguous and must not synthesize evidence."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-duplicate-claim"
+        coordination_token, work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-duplicate-claim",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import node_states_table, scheduler_events_table
+
+        with db.write_connection() as conn:
+            claim = (
+                conn.execute(
+                    select(scheduler_events_table).where(
+                        scheduler_events_table.c.run_id == "test-run",
+                        scheduler_events_table.c.token_id == token_id,
+                        scheduler_events_table.c.event_type == "claim_ready",
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            values = dict(claim)
+            values["event_id"] = "duplicate-claim-event"
+            conn.execute(scheduler_events_table.insert().values(**values))
+
+        with pytest.raises(AuditIntegrityError, match="exactly two scheduler events"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+        assert work_item.attempt == 1
+
+    def test_source_completion_reconciliation_rejects_mismatched_work_item_witness(self) -> None:
+        """Token-level history cannot stand in for the current work-item witness."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-mismatched-work-item"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-mismatched-work-item",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table, scheduler_events_table
+
+        with db.write_connection() as conn:
+            conn.execute(
+                update(scheduler_events_table)
+                .where(
+                    scheduler_events_table.c.run_id == "test-run",
+                    scheduler_events_table.c.token_id == token_id,
+                    scheduler_events_table.c.event_type == "claim_ready",
+                )
+                .values(work_item_id="different-work-item")
+            )
+
+        with pytest.raises(AuditIntegrityError, match="exactly two scheduler events"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+
+    def test_source_completion_reconciliation_rejects_later_attempt(self) -> None:
+        """Historical attempt-1 events cannot authorize repair at attempt 2."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-later-attempt"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-later-attempt",
+            observed_at=observed_at,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table, token_work_items_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(attempt=2))
+
+        with pytest.raises(AuditIntegrityError, match="requires attempt=1"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() == []
+
+    def test_source_completion_reconciliation_rejects_malformed_existing_state(self) -> None:
+        """Unreadable COMPLETED evidence is a conflict, never an idempotent success."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = "token-malformed-source-state"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id="row-malformed-source-state",
+            observed_at=observed_at,
+        )
+        factory.execution.record_completed_node_state(
+            token_id=token_id,
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 42},
+            output_data={"value": 42},
+            duration_ms=0,
+        )
+
+        from sqlalchemy import select, update
+
+        from elspeth.core.landscape.schema import node_states_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(node_states_table).where(node_states_table.c.token_id == token_id).values(completed_at=None))
+
+        with pytest.raises(AuditIntegrityError, match="completed_at"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
+        with db.connection() as conn:
+            assert conn.execute(select(node_states_table).where(node_states_table.c.token_id == token_id)).all() != []
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("context_before_json", "{}"),
+            ("context_after_json", "{}"),
+            ("success_reason_json", '{"action":"pass"}'),
+            ("resume_checkpoint_id", "checkpoint-impossible-for-source"),
+        ],
+    )
+    def test_source_completion_reconciliation_rejects_source_impossible_metadata(self, field: str, value: str) -> None:
+        """A source witness cannot carry transform or resume provenance."""
+        db, factory = _make_factory()
+        observed_at = datetime.now(UTC)
+        token_id = f"token-source-metadata-{field}"
+        coordination_token, _work_item = self._seed_pre_fix_ts02_gap(
+            factory,
+            token_id=token_id,
+            row_id=f"row-source-metadata-{field}",
+            observed_at=observed_at,
+        )
+        factory.execution.record_completed_node_state(
+            token_id=token_id,
+            node_id="source-0",
+            run_id="test-run",
+            step_index=0,
+            input_data={"value": 42},
+            output_data={"value": 42},
+            duration_ms=0,
+        )
+
+        from sqlalchemy import update
+
+        from elspeth.core.landscape.schema import node_states_table
+
+        with db.write_connection() as conn:
+            conn.execute(update(node_states_table).where(node_states_table.c.token_id == token_id).values({field: value}))
+
+        with pytest.raises(AuditIntegrityError, match="conflicting audit evidence"):
+            factory.execution.reconcile_source_completions_from_scheduler(
+                run_id="test-run",
+                coordination_token=coordination_token,
+                at=observed_at,
+            )
 
     def test_source_boundary_violation_records_failed_outcome_and_failed_source_state(self) -> None:
         """Tier-1 source boundary failures must still leave terminal audit evidence."""
@@ -2507,10 +2869,14 @@ class TestAggregationFailureMatrix:
             )
 
     def test_timeout_flush_passthrough_with_downstream_returns_continuation_work(self) -> None:
-        """Timeout flush routes passthrough tokens into child work when downstream exists."""
+        """Timeout flush atomically journals downstream continuation work."""
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
         downstream_node = NodeID("downstream-2")
         agg_node = NodeID("agg-1")
-        _db, factory, processor, transform, agg_node = self._setup_batch_processor(
+        db, factory, processor, transform, agg_node = self._setup_batch_processor(
             output_mode="passthrough",
             node_to_next={NodeID("source-0"): agg_node, agg_node: downstream_node, downstream_node: None},
         )
@@ -2538,6 +2904,20 @@ class TestAggregationFailureMatrix:
         assert results == ()
         assert len(child_items) == 1
         assert child_items[0].current_node_id == downstream_node
+
+        with db.connection() as conn:
+            journal = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.node_id,
+                    token_work_items_table.c.status,
+                ).where(token_work_items_table.c.run_id == processor.run_id)
+            ).all()
+
+        assert {(row.token_id, row.node_id, row.status) for row in journal} == {
+            (buffered_token.token_id, str(agg_node), "terminal"),
+            (child_items[0].token.token_id, str(downstream_node), "ready"),
+        }
 
     def test_timeout_flush_passthrough_terminal_returns_completed(self) -> None:
         """Timeout flush returns terminal COMPLETED results when no downstream/coalesce exists."""
@@ -2668,7 +3048,7 @@ class TestAggregationFailureMatrix:
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
             patch.object(processor, "_emit_token_completed"),
-            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")),
+            patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
         ):
             results = processor.process_row(
                 row_index=0,
@@ -2686,10 +3066,15 @@ class TestAggregationFailureMatrix:
         # consumption lives in the audit trail.
         assert [(r.outcome, r.path) for r in results] == [(None, TerminalPath.BUFFERED)]
 
-        # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
+        # The expansion operation owns the selected parent's terminal outcome
+        # atomically, so the processor must not issue a second recorder call.
         recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
-        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
+        assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs
         assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) not in recorded_pairs
+        assert expand_token.call_args is not None
+        assert expand_token.call_args.kwargs["parent_token"] == captured["token"]
+        assert expand_token.call_args.kwargs["parent_path"] == TerminalPath.BATCH_CONSUMED
+        assert expand_token.call_args.kwargs["parent_batch_id"] == "batch-1"
 
     def test_transform_mode_count_flush_expands_from_non_quarantined_parent(self) -> None:
         """Count-triggered batch output children must not use a quarantined triggering token as parent."""
@@ -3008,7 +3393,7 @@ class TestTransformModeOutcomeOrdering:
             patch.object(
                 factory.data_flow,
                 "record_token_outcome",
-                side_effect=[None, LandscapeRecordError("audit DB down")],
+                side_effect=LandscapeRecordError("audit DB down"),
             ),
             patch.object(processor, "_emit_token_completed"),
             pytest.raises(AuditIntegrityError, match="Failed to record batch parent terminal outcome") as exc_info,
@@ -3667,7 +4052,7 @@ class TestDrainWorkQueueIterationGuard:
             return (None, [WorkItem(token=new_token, current_node_id=NodeID("source-0"))])
 
         with (
-            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", 3),
+            patch("elspeth.engine.scheduler_drain.MAX_WORK_QUEUE_ITERATIONS", 3),
             patch.object(processor, "_process_single_token", side_effect=infinite_loop_producer),
             pytest.raises(RuntimeError, match=r"exceeded.*iterations"),
         ):
@@ -3675,6 +4060,7 @@ class TestDrainWorkQueueIterationGuard:
                 WorkItem(token=token, current_node_id=NodeID("source-0")),
                 ctx=ctx,
             )
+        assert produced == 3
 
     def test_iteration_guard_allows_supported_batch_replicate_fanout(self) -> None:
         """The outer queue guard must not reject the largest supported legal fan-out."""
@@ -3699,7 +4085,7 @@ class TestDrainWorkQueueIterationGuard:
             return (None, [WorkItem(token=child, current_node_id=NodeID("source-0"))])
 
         with (
-            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
+            patch("elspeth.engine.scheduler_drain.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
             patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token,
         ):
             results = processor._drain_work_queue(
@@ -3792,10 +4178,10 @@ class TestDurableSchedulerResumeDrain:
     def _seed_parked_on_error_pending_sink(self, *, error_hash: str | None) -> tuple[Any, Any, Any]:
         """Seed a durable ON_ERROR_ROUTED PENDING_SINK row via production verbs.
 
-        Returns (db, factory, processor) where processor is a FRESH resume
-        processor ("resume-worker") that has not yet drained. Both identities
-        are registered run_workers (the factory's run already registers its
-        leader, so unregistered claimants would be membership-fenced).
+        Returns (db, factory, processor) where processor is a fresh leader
+        processor that has not yet drained. The crashed worker remains a
+        distinct registered member; strict recovery identity is the leader
+        identity carried by the coordination token.
         """
         db, factory = _make_factory()
         transform_node = NodeID("transform-1")
@@ -3831,25 +4217,37 @@ class TestDurableSchedulerResumeDrain:
         _register_test_worker(factory, "crashed-worker")
         claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="crashed-worker", lease_seconds=300, now=datetime.now(UTC))
         assert claimed is not None
+        persisted_error_hash = error_hash if error_hash is not None else "valid-before-corruption"
         factory.scheduler.mark_pending_sink(
             work_item_id=claimed.work_item_id,
             row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
             sink_name="error_sink",
             outcome=TerminalOutcome.FAILURE.value,
             path=TerminalPath.ON_ERROR_ROUTED.value,
-            error_hash=error_hash,
+            error_hash=persisted_error_hash,
             # EMPTY original message: the class where a recomputed replay
             # hash diverges from the originally-audited one.
             error_message="",
             now=datetime.now(UTC),
             expected_lease_owner="crashed-worker",
         )
+        if error_hash is None:
+            from sqlalchemy import update
+
+            from elspeth.core.landscape.schema import token_work_items_table
+
+            with db.engine.begin() as conn:
+                conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == claimed.work_item_id)
+                    .values(pending_error_hash=None)
+                )
         processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         return db, factory, processor
 
@@ -3935,7 +4333,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="worker-evictable",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         success_result = TransformResult.success(
@@ -3949,7 +4347,7 @@ class TestDurableSchedulerResumeDrain:
             with db.engine.begin() as conn:
                 conn.execute(
                     update(run_workers_table)
-                    .where(run_workers_table.c.worker_id == "worker-evictable")
+                    .where(run_workers_table.c.worker_id == _TEST_LEADER_WORKER_ID)
                     .values(status="evicted", evicted_at=datetime.now(UTC))
                 )
             return (success_result, token, None)
@@ -3967,7 +4365,7 @@ class TestDurableSchedulerResumeDrain:
                 )
             ).one()
         assert item_row.status == "leased", "evicted worker's disposition must not commit"
-        assert item_row.lease_owner == "worker-evictable"
+        assert item_row.lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_sink_bound_scheduler_work_terminalizes_only_after_sink_callback(self) -> None:
         """Sink-bound work remains durable until sink outcome recording completes."""
@@ -4111,7 +4509,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
             results = resumed_processor.drain_scheduled_work(ctx)
@@ -4132,7 +4530,7 @@ class TestDurableSchedulerResumeDrain:
                 )
             ).one()
         assert status == "leased"
-        assert lease_owner == "resume-worker"
+        assert lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink(self) -> None:
         """A terminal token outcome is the resume witness; do not emit the sink externally again."""
@@ -4174,7 +4572,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         final_token = TokenInfo(
@@ -4204,7 +4602,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
             results = resumed_processor.drain_scheduled_work(ctx)
@@ -4227,7 +4625,7 @@ class TestDurableSchedulerResumeDrain:
             ).scalar_one()
         assert status == "terminal"
         assert lease_owner is None
-        assert terminal_event_owner == "resume-worker"
+        assert terminal_event_owner == _TEST_LEADER_WORKER_ID
 
     def test_resume_drains_all_pending_sink_rows_in_single_call(self) -> None:
         """Multiple pre-existing PENDING_SINK rows must all drain in a single resume call.
@@ -4276,9 +4674,10 @@ class TestDurableSchedulerResumeDrain:
                 available_at=datetime.now(UTC),
             )
 
-        # Stage 1: simulate the crashed worker that drove the transform to
-        # success on every token. Each token ends in PENDING_SINK because
-        # sink durability never completed.
+        # Stage 1: fabricate the durable image left by a leader that drove the
+        # transform to success and then crashed before sink durability. This
+        # test isolates pending-sink replay, so both processors use the
+        # fixture's same token-bound leader identity.
         transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
         crashed_processor = _make_processor(
             factory,
@@ -4286,7 +4685,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
@@ -4312,19 +4711,19 @@ class TestDurableSchedulerResumeDrain:
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
         assert sorted(statuses) == ["pending_sink"] * 3, (
-            f"Expected three PENDING_SINK rows after the crashed worker drained transform work; got {sorted(statuses)}."
+            f"Expected three PENDING_SINK rows after the pre-crash drain; got {sorted(statuses)}."
         )
 
-        # Stage 2: fresh resume worker. The bug: only one PENDING_SINK row
-        # emits a RowResult; the other two stay PENDING_SINK because the gate
-        # blocks the recovery branch after the first claim.
+        # Stage 2: fresh recovery processor. The bug: only one PENDING_SINK
+        # row emits a RowResult; the other two stay PENDING_SINK because the
+        # gate blocks the recovery branch after the first claim.
         resume_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(
             resume_processor._transform_executor,
@@ -4342,7 +4741,7 @@ class TestDurableSchedulerResumeDrain:
             statuses_after = (
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
-        # Every row is now LEASED by the resume worker awaiting the sink
+        # Every row is now LEASED by the token-bound leader awaiting the sink
         # callback; none remain in PENDING_SINK status.
         assert sorted(statuses_after) == ["leased"] * 3
 
@@ -4370,7 +4769,7 @@ class TestDurableSchedulerResumeDrain:
             schema_config=_DYNAMIC_SCHEMA,
         )
 
-        # Two pre-existing pending-sink rows from a prior crashed worker.
+        # Two pre-existing pending-sink rows representing a prior crash image.
         pre_existing_token_ids: list[str] = []
         for idx in range(2):
             source_payload = make_row({"value": idx})
@@ -4399,14 +4798,15 @@ class TestDurableSchedulerResumeDrain:
         transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
-        # Stage 1: crashed worker pushes the pre-existing rows to PENDING_SINK.
+        # Stage 1: the first processor pushes the pre-existing rows to
+        # PENDING_SINK before the simulated crash window.
         crashed_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="crashed-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
 
         def crashed_executor(*, transform, token, ctx, attempt=0):
@@ -4422,7 +4822,7 @@ class TestDurableSchedulerResumeDrain:
         with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
             crashed_processor.drain_scheduled_work(ctx)
 
-        # Stage 2: enqueue a brand new READY token that the resume worker
+        # Stage 2: enqueue a brand new READY token that the recovery processor
         # will process to completion (ending in PENDING_SINK durably and
         # emitting one sink-bound RowResult).
         fresh_payload = make_row({"value": 99})
@@ -4447,22 +4847,22 @@ class TestDurableSchedulerResumeDrain:
             available_at=datetime.now(UTC),
         )
 
-        # Stage 3: resume worker drains everything in one call. Pre-existing
-        # rows recover via _row_result_from_pending_sink; the fresh row
-        # processes through the transform and emits the sink-bound RowResult
-        # directly. Neither path may emit the same token twice.
+        # Stage 3: a fresh recovery processor drains everything in one call.
+        # Pre-existing rows recover via _row_result_from_pending_sink; the
+        # fresh row processes through the transform and emits the sink-bound
+        # RowResult directly. Neither path may emit the same token twice.
         resume_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
 
         def resume_executor(*, transform, token, ctx, attempt=0):
             # Pre-existing tokens must NOT re-enter the transform (their
-            # transform work is durable from the crashed worker).
+            # transform work is durable from the pre-crash drain).
             assert token.token_id == fresh_token_id, f"transform replayed for {token.token_id!r} during recovery drain"
             return (
                 TransformResult.success(
@@ -5719,7 +6119,7 @@ class TestDurableSchedulerResumeDrain:
                 ),
             },
             scheduler=factory.scheduler,
-            scheduler_lease_owner="resume-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         with patch.object(
             resumed_processor._transform_executor,
@@ -5743,7 +6143,7 @@ class TestDurableSchedulerResumeDrain:
                 ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
             ).all()
         assert {(row.token_id, row.status, row.lease_owner) for row in resumed_rows} == {
-            (token_id, "leased", "resume-worker") for token_id in flushed_token_ids
+            (token_id, "leased", _TEST_LEADER_WORKER_ID) for token_id in flushed_token_ids
         }
 
     def test_drain_scheduled_work_no_longer_refuses_on_peer_lease(self) -> None:
@@ -5758,7 +6158,7 @@ class TestDurableSchedulerResumeDrain:
 
         This test was previously ``test_drain_refuses_when_peer_worker_holds_active_lease``
         and asserted an ``AuditIntegrityError`` raise. It now asserts the
-        OPPOSITE: ``drain_scheduled_work`` must NOT raise. Worker B's drain
+        OPPOSITE: ``drain_scheduled_work`` must NOT raise. The leader's drain
         enters the claim loop, finds the row still LEASED under peer-worker-A
         (``claim_ready`` returns None — no READY rows), and exits cleanly with
         an empty result list.
@@ -5808,23 +6208,23 @@ class TestDurableSchedulerResumeDrain:
         assert peer_claim is not None
         assert peer_claim.lease_owner == "peer-worker-A"
 
-        # Worker B's drain now logs the peer diagnostic but does NOT raise.
-        worker_b_processor = _make_processor(
+        # The token-bound leader logs the peer diagnostic but does NOT raise.
+        leader_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="peer-worker-B",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
         # No raise: peer lease is diagnostic, not a refusal.
-        results = worker_b_processor.drain_scheduled_work(ctx)
+        results = leader_processor.drain_scheduled_work(ctx)
         # claim_ready found no READY rows (row is LEASED under peer-worker-A).
         assert results == []
 
-        # Peer's row is still owned by peer-worker-A — B's drain was a no-op.
+        # Peer's row is still owned by peer-worker-A — the leader drain was a no-op.
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
@@ -5894,13 +6294,13 @@ class TestDurableSchedulerResumeDrain:
             make_row({"value": 1, "resumed": True}),
             success_reason={"action": "resume_drain"},
         )
-        worker_b_processor = _make_processor(
+        leader_processor = _make_processor(
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="recovery-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
             clock=clock,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
@@ -5908,10 +6308,10 @@ class TestDurableSchedulerResumeDrain:
         def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (success_result, token, None)
 
-        with patch.object(worker_b_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
-            results = worker_b_processor.drain_scheduled_work(ctx)
+        with patch.object(leader_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = leader_processor.drain_scheduled_work(ctx)
 
-        # Expired peer lease was recovered; row drained under recovery-worker.
+        # Expired peer lease was recovered; row drained under the token-bound leader.
         assert len(results) == 1
         assert results[0].token.token_id == "token-stale-peer"
 
@@ -5955,10 +6355,9 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # The caller's lease_owner pre-claims the row before the drain entry.
-        _register_test_worker(factory, "own-worker")
         factory.scheduler.claim_ready(
             run_id="test-run",
-            lease_owner="own-worker",
+            lease_owner=_TEST_LEADER_WORKER_ID,
             lease_seconds=600,
             now=datetime.now(UTC),
         )
@@ -5969,7 +6368,7 @@ class TestDurableSchedulerResumeDrain:
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
             node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
             scheduler=factory.scheduler,
-            scheduler_lease_owner="own-worker",
+            scheduler_lease_owner=_TEST_LEADER_WORKER_ID,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
@@ -6365,6 +6764,7 @@ class TestExecuteTransformNoRetry:
         routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
         assert routing_reason_payload["error"] == "<redacted-secret>"
 
+        factory.run_lifecycle.complete_run(setup.run_id, RunStatus.COMPLETED)
         export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
         transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
         exported_error_payload = json.loads(transform_error_export["error_details_json"])
@@ -6453,6 +6853,13 @@ class TestExecuteTransformNoRetry:
         routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
         assert routing_reason_payload == transform_error_payload
 
+        from sqlalchemy import update
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with setup.db.engine.begin() as conn:
+            conn.execute(update(token_work_items_table).where(token_work_items_table.c.run_id == setup.run_id).values(status="terminal"))
+        factory.run_lifecycle.complete_run(setup.run_id, RunStatus.COMPLETED)
         export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
         transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
         exported_error_payload = json.loads(transform_error_export["error_details_json"])
@@ -6580,6 +6987,7 @@ class TestExecuteTransformNoRetry:
         routing_reason_payload = json.loads(payload_store.retrieve(routing_events[0].reason_ref).decode("utf-8"))
         assert routing_reason_payload == result.reason
 
+        factory.run_lifecycle.complete_run(setup.run_id, RunStatus.COMPLETED)
         export_records = list(LandscapeExporter(setup.db).export_run(setup.run_id))
         transform_error_export = next(record for record in export_records if record["record_type"] == "transform_error")
         exported_error_payload = json.loads(transform_error_export["error_details_json"])
@@ -6774,6 +7182,68 @@ class TestExecuteTransformWithRetry:
         assert error_sink == "error-sink"
         record_event.assert_called_once()
         assert record_event.call_args.kwargs["state_id"] == "state-attempt-0"
+
+    def test_pre_attempt_shutdown_records_state_backed_divert_without_partial_audit(self) -> None:
+        """A pre-set shutdown must not write transform_error without its DIVERT."""
+        from elspeth.contracts.config import RuntimeRetryConfig
+
+        _, factory = _make_factory()
+        retry_manager = RetryManager(RuntimeRetryConfig(max_attempts=3, base_delay=0.01, max_delay=0.1, jitter=0.0, exponential_base=2.0))
+        transform = _make_mock_transform(node_id="t1", on_error="error-sink")
+        processor = _make_processor(
+            factory,
+            retry_manager=retry_manager,
+            node_step_map={NodeID("t1"): 1},
+            node_to_plugin={NodeID("t1"): transform},
+        )
+        processor._error_edge_ids = {NodeID("t1"): "error-edge-1"}
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="csv",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="error-sink",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.register_edge(
+            run_id="test-run",
+            from_node_id="t1",
+            to_node_id="error-sink",
+            label="__error_0__",
+            mode=RoutingMode.DIVERT,
+            edge_id="error-edge-1",
+        )
+        token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
+        shutdown_event = threading.Event()
+        shutdown_event.set()
+        ctx = make_context(run_id="test-run", token=token, landscape=factory.plugin_audit_writer())
+        ctx.shutdown_event = shutdown_event
+
+        with patch.object(processor._transform_executor, "execute_transform") as execute_transform:
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        execute_transform.assert_not_called()
+        assert result.status == "error"
+        assert result.reason == {"reason": "shutdown_requested", "error": "shutdown requested before retry attempt"}
+        assert result.retryable is False
+        assert error_sink == "error-sink"
+
+        transform_errors = factory.data_flow.get_transform_errors_for_run("test-run")
+        routing_events = factory.query.get_all_routing_events_for_run("test-run")
+        assert len(transform_errors) == 1
+        assert len(routing_events) == 1
+        assert routing_events[0].state_id is not None
+        state = factory.execution.get_node_state(routing_events[0].state_id)
+        assert state is not None
+        assert state.status is NodeStateStatus.FAILED
+        assert state.node_id == "t1"
+        assert state.attempt == 0
 
 
 # =============================================================================

@@ -8,6 +8,7 @@ import type {
   NodeSpec,
 } from "@/types/api";
 import type { SourceSpec } from "@/types/index";
+import { compositionStateAuthorityFields } from "@/test/composerFixtures";
 
 function makeSource(overrides: Partial<SourceSpec> = {}): SourceSpec {
   return {
@@ -50,6 +51,7 @@ function makeEdge(
 function makeState(overrides: Partial<CompositionState> = {}): CompositionState {
   return {
     id: "state-1",
+    ...compositionStateAuthorityFields,
     version: 1,
     sources: { source: makeSource() },
     nodes: [makeNode("clean")],

@@ -329,6 +329,20 @@ _TRANSFORM_REJECTION_CASES = [
 ]
 
 _SOURCE_REJECTION_CASES = [
+    # ── AWS S3 source ───────────────────────────────────────────────────
+    pytest.param(
+        "aws_s3",
+        {
+            "bucket": "agreement-input",
+            "key": "rows.json",
+            "format": "json",
+            "columns": ["id"],
+            "schema": _make_observed_schema(),
+            "on_validation_failure": "quarantine",
+        },
+        "columns is only supported for CSV format",
+        id="aws_s3-columns-on-json",
+    ),
     # ── json source ───────────────────────────────────────────────────────
     pytest.param(
         "json",
@@ -380,6 +394,32 @@ _SOURCE_REJECTION_CASES = [
 ]
 
 _SINK_REJECTION_CASES = [
+    # ── AWS S3 sink ─────────────────────────────────────────────────────
+    pytest.param(
+        "aws_s3",
+        {
+            "bucket": "agreement-output",
+            "key": "rows.json",
+            "format": "json",
+            "csv_options": {"delimiter": "|"},
+            "schema": _make_observed_schema(),
+        },
+        "csv_options is only supported for CSV format",
+        id="aws_s3-csv-options-on-json",
+    ),
+    # ── text sink ───────────────────────────────────────────────────────
+    pytest.param(
+        "text",
+        {
+            "path": "/tmp/output.txt",
+            "field": "message",
+            "mode": "append",
+            "collision_policy": "fail_if_exists",
+            "schema": _make_observed_schema(),
+        },
+        "mode='append' requires collision_policy='append_or_create'",
+        id="text-append-collision-policy",
+    ),
     # ── dataverse sink ────────────────────────────────────────────────────
     pytest.param(
         "dataverse",

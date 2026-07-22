@@ -17,6 +17,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.barrier_scalars import CoalescePendingScalars
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
+from elspeth.contracts.engine import CoalesceParentCompletion
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
@@ -1157,40 +1158,33 @@ class CoalesceExecutor:
             merged_data = plan.merged_data
             consumed_tokens = plan.consumed_tokens
 
-            # Create merged token via TokenManager
+            entries_by_token_id = {entry.token.token_id: entry for entry in pending.branches.values()}
+            parent_completions: list[CoalesceParentCompletion] = []
+            for token in consumed_tokens:
+                parent_entry = entries_by_token_id.get(token.token_id)
+                if parent_entry is None:
+                    raise OrchestrationInvariantError(f"coalesce consumed token {token.token_id!r} has no pending node-state witness")
+                parent_completions.append(
+                    CoalesceParentCompletion(
+                        parent_ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                        state_id=parent_entry.state_id,
+                        duration_ms=(now - parent_entry.arrival_time) * 1000,
+                        context_after=coalesce_metadata,
+                    )
+                )
+
+            # Materialize one durable merged identity, then atomically complete
+            # every consumed state/outcome and CAS the effect receipt. A crash
+            # between those phases leaves an explicit replayable MATERIALIZED
+            # effect rather than partial terminal evidence.
             merged_token = self._token_manager.coalesce_tokens(
                 parents=list(consumed_tokens),
                 merged_data=merged_data,
                 node_id=node_id,
                 run_id=self._run_id,
+                parent_completions=parent_completions,
             )
-
-            # Complete pending node states for consumed tokens
-            # (These states were created as "pending" when tokens were held in accept())
-            for _branch_name, entry in pending.branches.items():
-                # Complete it now that merge is happening
-                # Bug l4h fix: include coalesce metadata in context_after for audit trail
-                self._execution.complete_node_state(
-                    state_id=entry.state_id,
-                    status=NodeStateStatus.COMPLETED,
-                    output_data={"merged_into": merged_token.token_id},
-                    duration_ms=(now - entry.arrival_time) * 1000,
-                    context_after=coalesce_metadata,
-                )
-                completed_state_ids.add(entry.state_id)
-
-                # Record terminal token outcome (COALESCED)
-                if self._data_flow is None:
-                    raise OrchestrationInvariantError(
-                        "CoalesceExecutor.data_flow is None but token outcome recording requires DataFlowRepository"
-                    )
-                self._data_flow.record_token_outcome(
-                    ref=TokenRef(token_id=entry.token.token_id, run_id=self._run_id),
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.COALESCED,
-                    sink_name=None,
-                    join_group_id=merged_token.join_group_id,
-                )
+            completed_state_ids.update(item.state_id for item in parent_completions)
 
             # NOTE: The merged token does NOT get COALESCED recorded here.
             # - Consumed tokens: COALESCED (terminal) - they've been absorbed into the merge

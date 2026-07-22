@@ -333,10 +333,10 @@ elspeth health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.7.0"},
+    "version": {"status": "ok", "value": "0.7.1"},
     "python": {"status": "ok", "value": "3.13.1"},
     "database": {"status": "ok", "value": "connected"},
     "plugins": {"status": "ok", "value": "6 sources, 19 transforms, 6 sinks"}
@@ -494,19 +494,35 @@ elspeth web
 Then open the URL printed on the console (typically <http://localhost:8765>).
 
 When you create a new session, the composer starts in **Guided Mode** unless
-your Composer preference says otherwise. In 0.7.0 guided mode is LLM-primary:
-the browser sends the operator's stage instruction to `/guided/chat`, and the
-server applies the model's proposed source, sink, transform, or wiring change to
-the in-progress pipeline only after validation.
+your Composer preference says otherwise. Guided mode is LLM-primary: each stage
+sends the operator's instruction to the shared pipeline planner, which returns a
+validated proposal. Guided records the reviewed facts as it goes and
+materializes the pipeline when you confirm the wiring.
 
 Guided sessions are created through `POST /guided/start`. The response carries
 a closed-enum `WorkflowProfile` so ELSPETH can distinguish a normal guided
 session from the passive first-run tutorial. Tutorial profile state is stripped
 on fork so it cannot leak into an ordinary session.
 
+### Guided and freeform differ in interaction, not in capability
+
+Guided and freeform are two ways of talking to the **same** pipeline planner.
+Freeform takes an end-to-end request and lets you refine the result
+incrementally; guided decomposes that same request into source, output,
+transformation/topology, and wire-review conversations. Both call the one shared
+planner, produce the same canonical pipeline draft, and are checked by the same
+runtime validators, the same graph contracts, and the same audit trail.
+
+The choice of mode changes the conversation, not the pipeline language: the same
+canonical structures are available on both surfaces. Switching modes never
+discards pipeline state — only the authoring surface changes. (The staged guided
+conversation has two known, tracked exceptions, described under Known
+limitations below; those are specific defects being fixed, not a capability
+boundary.)
+
 ### What guided mode is for
 
-Guided mode builds a linear pipeline in ordered stages:
+Guided mode builds the pipeline through ordered stages:
 
 1. **Source** — describe where the data comes from. The source driver can revise
    a committed source in place and can route a URL-row source to the web-scrape
@@ -526,18 +542,55 @@ Each stage can be revised against its current state. Revision context is passed
 back to the model so it amends the committed stage rather than starting from a
 blank proposal.
 
-### When to use guided mode versus freeform
+### Supported pipeline structures
 
-- **Use guided mode** if you want a structured conversation that builds and
-  verifies the pipeline one stage at a time.
-- **Use freeform mode** if you already know which plugins you want to wire
-  together, or if your pipeline does not match any of the patterns guided mode
-  supports (multi-source pipelines, custom branching topologies, exotic
-  aggregations, etc.).
+Both guided and freeform author the full canonical set of pipeline structures:
 
-Both modes target the same runtime, the same validators, and the same audit
-trail. Switching modes never discards pipeline state — only the authoring
-surface changes.
+- **Linear transform chains** — a source through one or more transforms to a
+  sink.
+- **Conditional gates** — route rows down different paths by a condition.
+- **Multiple outputs** — fan a stream out to several sinks, including a
+  write-failure fallback to another output.
+- **Fork and coalesce** — split a stream into parallel branches and merge them
+  back, including require-all union merges.
+- **Multi-source queue fan-in** — several sources feeding one downstream queue.
+- **Batch aggregation** — compute statistics over batches or groups.
+- **Row expansion** — expand one row into many (deaggregation, JSON explode).
+- **Error routing** — send failed rows to a dedicated failure output.
+- **Structured LLM output consumed downstream** — a typed multi-field LLM result
+  that later stages read by field.
+
+These are the same nine canonical classes the parity corpus verifies across
+every authoring surface; none of them is freeform-only.
+
+### Choosing between guided and freeform
+
+Because capability is identical, pick the interaction that fits how you think:
+
+- **Guided** suits a structured, one-decision-at-a-time conversation that builds
+  and reviews the pipeline stage by stage.
+- **Freeform** suits describing the whole pipeline at once, or refining a draft
+  when you already know which plugins you want to wire together.
+
+Neither choice limits what you can build. Switch whenever the other interaction
+would be more convenient; the chat history and the pipeline draft carry over
+unchanged.
+
+### Wrong-stage mentions are retained, not rejected
+
+Guided asks about the source, then the output, then transforms, then wiring, but
+you do not have to hold a thought until its stage. If you mention a plugin that
+belongs to a later stage — an LLM transform while you are still choosing the
+source — guided does not discard the request or claim it cannot express it. It
+records the intent, replies with an explicit deferral (for example, "That LLM
+belongs in the transformation stage; finish the source choice first"), and
+carries the intent forward so the responsible stage consumes it. If the stage
+that owns the request has already been reviewed, guided opens the stable
+back/edit flow for that stage instead. Early-stage work is stored as interaction
+facts rather than a frozen partial pipeline, so a later requirement triggers a
+typed rewind to the affected stage and a replan — never an "unsupported
+topology" dead-end. (An unavailable plugin, by contrast, remains a distinct
+catalog/availability error.)
 
 ### Validation, interpretation, and sign-off
 
@@ -565,18 +618,32 @@ it directly from the composer. The composer's `/validate` and `/execute`
 endpoints use the same runtime assembly and graph validation contracts as
 `elspeth validate` and `elspeth run` — there is no separate UI-only validator.
 
-### What guided mode does not cover
+### The first-run tutorial is a guided profile
 
-Guided mode is intentionally narrow. It does not (yet) cover:
+The passive first-run tutorial is not a separate or reduced-capability mode. It
+is a **guided workflow profile**: it drives the same staged planner and the same
+proposal schema as ordinary guided mode, with fixed sample data and teaching
+copy. It may preselect or explain the next relevant decision, but it does not
+substitute a tutorial-only planner, remove capabilities from the planner schema,
+or rewrite the guided rules. Whatever you author in the tutorial transfers
+directly to a real guided session.
 
-- Pipelines with multiple sources.
-- Pipelines with branching topologies (forks, gates with multiple downstream
-  paths, fork+coalesce patterns).
-- Complex aggregation workflows that require custom topology.
-- Custom plugin authoring.
+### Known limitations of the staged conversation
 
-For any of these, exit to freeform when guided mode reaches a step it cannot
-represent. The chat history and the partial pipeline state both carry over.
+Two topologies are not yet authorable through the staged guided conversation:
+
+- a **require-all (union) coalesce** — a fork whose parallel branches merge with
+  a require-all union (elspeth-93dd908354); and
+- a **cross-sink `on_write_failure` fallback** — an output whose write-failure
+  route targets another sink (elspeth-b83b5b3204).
+
+These are specific, tracked defects in how the staged conversation projects
+connections and sink options — not capability boundaries. The staged
+conversation therefore authors seven of the nine canonical structures directly.
+The same shared planner represents both topologies without trouble, so full
+parity is available today: build these two shapes in **freeform** (the
+single-turn `/guided/plan` endpoint authors them too). Both defects are being
+fixed so the staged conversation reaches the other two as well.
 
 ### See also
 

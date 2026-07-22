@@ -52,6 +52,9 @@ from elspeth.core.landscape.model_loaders import (
     NodeStateLoader,
     OperationLoader,
     RoutingEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
 )
 from elspeth.core.landscape.schema import node_states_table, routing_events_table
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -87,6 +90,9 @@ def _make_repo(
         batch_loader=BatchLoader(),
         batch_member_loader=BatchMemberLoader(),
         artifact_loader=ArtifactLoader(),
+        sink_effect_loader=SinkEffectLoader(),
+        sink_effect_member_loader=SinkEffectMemberLoader(),
+        sink_effect_stream_loader=SinkEffectStreamLoader(),
         payload_store=payload_store,
     )
     factory = make_factory(db)
@@ -153,6 +159,14 @@ class _TrackingPayloadStore(MockPayloadStore):
         content_hash = super().store(content)
         self.store_calls.append(content_hash)
         return content_hash
+
+
+class _FailingPayloadStore(MockPayloadStore):
+    """Payload store whose durable write always fails."""
+
+    def store(self, content: bytes) -> str:
+        del content
+        raise OSError("injected reason-store failure")
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +361,84 @@ class TestCompleteNodeStateCrashPaths:
         repo.complete_node_states_completed_many(tuple((state.state_id, {"completed": index}, 1.0) for index, state in enumerate(states)))
 
         assert sorted(observed_select_sizes) == [1, 1, 500, 500]
+
+    @pytest.mark.parametrize("caller_owns_connection", [False, True], ids=["repository-owned", "caller-owned"])
+    def test_complete_node_states_completed_many_skips_prelock_on_sqlite(
+        self,
+        caller_owns_connection: bool,
+    ) -> None:
+        """SQLite bulk completion must not issue the no-op FOR UPDATE prelock.
+
+        ``BEGIN IMMEDIATE`` already owns the file's write slot, so the prelock
+        locks nothing there; batch atomicity (rowcount mismatch rolls the whole
+        completion back) must hold without it.
+        """
+        db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row(
+            "run-1",
+            "source-0",
+            1,
+            {"name": "second"},
+            row_id="row-2",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+        state_b = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"name": "test"}, state_id="state-b")
+        state_a = repo.begin_node_state("tok-2", "sink-0", "run-1", 2, {"name": "second"}, state_id="state-a")
+        completions = (
+            (state_b.state_id, {"completed": "b"}, 1.0),
+            (state_a.state_id, {"completed": "a"}, 1.0),
+            (state_b.state_id, {"completed": "b-duplicate"}, 2.0),
+        )
+        events: list[tuple[str, str | None]] = []
+
+        def observe_connection(conn: Any) -> None:
+            original_execute = conn.execute
+
+            def observed_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+                if getattr(stmt, "is_select", False) and "FROM node_states" in str(stmt):
+                    if getattr(stmt, "_for_update_arg", None) is not None:
+                        events.append(("lock", None))
+                    else:
+                        events.append(("read", None))
+                elif getattr(stmt, "is_update", False) and stmt.table is node_states_table:
+                    events.append(("update", None))
+                return original_execute(stmt, *args, **kwargs)
+
+            conn.execute = observed_execute
+
+        if caller_owns_connection:
+            with pytest.raises(LandscapeRecordError, match="affected 2 rows for 3 states"), db.write_connection() as conn:
+                observe_connection(conn)
+                repo.complete_node_states_completed_many(completions, conn=conn)
+        else:
+            original_connection = repo._db.write_connection
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def observed_write_connection():
+                with original_connection() as conn:
+                    observe_connection(conn)
+                    yield conn
+
+            repo._db.write_connection = observed_write_connection  # type: ignore[method-assign]
+            with pytest.raises(LandscapeRecordError, match="affected 2 rows for 3 states"):
+                repo.complete_node_states_completed_many(completions)
+
+        assert ("lock", None) not in events
+        assert events[0] == ("read", None)
+        with db.read_only_connection() as conn:
+            statuses = conn.execute(
+                select(node_states_table.c.state_id, node_states_table.c.status)
+                .where(node_states_table.c.state_id.in_((state_a.state_id, state_b.state_id)))
+                .order_by(node_states_table.c.state_id)
+            ).all()
+        assert statuses == [
+            ("state-a", NodeStateStatus.OPEN.value),
+            ("state-b", NodeStateStatus.OPEN.value),
+        ]
 
     def test_batch_begin_rowcount_mismatch_rolls_back_inserted_open_states(self) -> None:
         """Rowcount mismatches must abort inside the write transaction."""
@@ -1439,6 +1531,237 @@ class TestRecordRoutingEvent:
         payload_bytes = store.retrieve(event.reason_ref)
         assert b"row['x'] > 0" in payload_bytes
 
+    def test_supplied_reason_ref_must_resolve_to_exact_reason(self) -> None:
+        """A caller cannot attach a missing or mismatched blob to an event."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="does not match its canonical SHA-256 hash"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason={"condition": "x", "result": "true"},
+                reason_ref="0" * 64,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+        exact_ref = store.store(b'{"condition":"x","result":"true"}')
+        event = repo.record_routing_event(
+            state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            reason={"condition": "x", "result": "true"},
+            reason_ref=exact_ref,
+        )
+        assert event.reason_hash == exact_ref
+        assert event.reason_ref == exact_ref
+
+    def test_supplied_reason_ref_requires_verifying_payload_store(self) -> None:
+        """A ref cannot claim materialization when no backend can verify it."""
+        db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+
+        with pytest.raises(AuditIntegrityError, match="requires a configured payload store"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason=reason,
+                reason_ref=stable_hash(reason),
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_supplied_reason_ref_requires_reason_bytes(self) -> None:
+        """An unhashable opaque ref is not authoritative routing evidence."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="requires canonical reason bytes"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason_ref="0" * 64,
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_reason_store_failure_creates_no_routing_event(self) -> None:
+        """A reason must be durable before its authoritative event can exist."""
+        store = _FailingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+
+        with pytest.raises(LandscapeRecordError, match="reason materialization failed"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason={"condition": "x", "result": "true"},
+            )
+
+        with db.connection() as conn:
+            assert conn.execute(select(routing_events_table.c.event_id)).all() == []
+
+    def test_event_insert_failure_leaves_reusable_deduplicated_reason(self) -> None:
+        """Store-first may orphan a blob, but retry must reuse its exact ref."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        fac.data_flow.create_row(
+            "run-1",
+            "source-0",
+            1,
+            {"name": "occupied"},
+            row_id="row-occupied",
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+        fac.data_flow.create_token("row-occupied", token_id="tok-occupied")
+        occupied_state = repo.begin_node_state(
+            "tok-occupied",
+            "transform-1",
+            "run-1",
+            1,
+            {"name": "occupied"},
+        )
+        repo.record_routing_event(
+            occupied_state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            event_id="occupied-event-id",
+            routing_group_id="occupied-group",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+        expected_ref = stable_hash(reason)
+
+        with pytest.raises(LandscapeRecordError, match="database rejected audit write"):
+            repo.record_routing_event(
+                state.state_id,
+                "edge-1",
+                RoutingMode.MOVE,
+                reason=reason,
+                event_id="occupied-event-id",
+                routing_group_id="retry-group",
+            )
+
+        assert store.exists(expected_ref)
+        with db.write_connection() as conn:
+            conn.execute(routing_events_table.delete().where(routing_events_table.c.event_id == "occupied-event-id"))
+
+        retried = repo.record_routing_event(
+            state.state_id,
+            "edge-1",
+            RoutingMode.MOVE,
+            reason=reason,
+            event_id="occupied-event-id",
+            routing_group_id="retry-group",
+        )
+
+        assert retried.reason_ref == expected_ref
+        assert store.store_calls == [expected_ref, expected_ref]
+
+    def test_response_loss_retry_returns_one_identical_routing_event(self) -> None:
+        """Repeating one decision must read back the durable event, not append."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        reason: ConfigGateReason = {"condition": "x", "result": "true"}
+
+        first = repo.record_routing_event(state.state_id, "edge-1", RoutingMode.MOVE, reason=reason)
+        retried = repo.record_routing_event(state.state_id, "edge-1", RoutingMode.MOVE, reason=reason)
+
+        assert retried == first
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 1
+        assert store.store_calls == [first.reason_ref, first.reason_ref]
+
+    def test_divergent_retry_fails_closed_and_preserves_first_decision(self) -> None:
+        """The stable retry identity must never alias two routing decisions."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for edge_id in ("edge-a", "edge-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=edge_id,
+                mode=RoutingMode.MOVE,
+                edge_id=edge_id,
+            )
+        first_reason: ConfigGateReason = {"condition": "x", "result": "true"}
+        divergent_reason: ConfigGateReason = {"condition": "y", "result": "true"}
+        first = repo.record_routing_event(state.state_id, "edge-a", RoutingMode.MOVE, reason=first_reason)
+
+        with pytest.raises(AuditIntegrityError, match="durable event differs"):
+            repo.record_routing_event(state.state_id, "edge-b", RoutingMode.MOVE, reason=divergent_reason)
+
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 1
+        assert rows[0].event_id == first.event_id
+        assert rows[0].edge_id == "edge-a"
+        assert rows[0].reason_ref == stable_hash(first_reason)
+
     def test_record_routing_events_multiple(self) -> None:
         """record_routing_events records multiple routes with shared group ID."""
         _db, repo, fac, tok = _make_repo_with_token()
@@ -1470,6 +1793,35 @@ class TestRecordRoutingEvent:
         assert events[1].ordinal == 1
         # All events in a fork share the same routing_group_id
         assert events[0].routing_group_id == events[1].routing_group_id
+
+    def test_response_loss_retry_returns_one_identical_routing_group(self) -> None:
+        """A retried fork must converge on the original ordered event set."""
+        store = _TrackingPayloadStore()
+        db, repo, fac, tok = _make_repo_with_token(payload_store=store)  # type: ignore[arg-type]
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for edge_id in ("edge-a", "edge-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=edge_id,
+                mode=RoutingMode.COPY,
+                edge_id=edge_id,
+            )
+        routes = [
+            RoutingSpec(edge_id="edge-a", mode=RoutingMode.COPY),
+            RoutingSpec(edge_id="edge-b", mode=RoutingMode.COPY),
+        ]
+        reason: ConfigGateReason = {"condition": "fork", "result": "true"}
+
+        first = repo.record_routing_events(state.state_id, routes, reason=reason)
+        retried = repo.record_routing_events(state.state_id, routes, reason=reason)
+
+        assert retried == first
+        with db.connection() as conn:
+            rows = conn.execute(select(routing_events_table)).all()
+        assert len(rows) == 2
+        assert store.store_calls == [first[0].reason_ref, first[0].reason_ref]
 
     def test_record_routing_events_rejects_edge_from_different_run(self) -> None:
         """Batch routing writes must roll back when any route targets another run."""
@@ -1531,6 +1883,97 @@ class TestRecordRoutingEvent:
         state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
         events = repo.record_routing_events(state.state_id, [])
         assert events == []
+
+    def test_record_routing_event_without_reason_reads_run_id_only_in_transaction(self) -> None:
+        """A reason-free routing event has nothing to guard pre-transaction.
+
+        The write transaction resolves the state/edge run pairing
+        authoritatively under the state lock, so any pre-transaction read is a
+        redundant round trip.
+        """
+        _db, repo, fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        edge = fac.data_flow.register_edge(
+            run_id="run-1",
+            from_node_id="transform-1",
+            to_node_id="sink-0",
+            label="continue",
+            mode=RoutingMode.MOVE,
+            edge_id="edge-1",
+        )
+        pre_transaction_reads: list[str] = []
+        original_fetchone = repo._ops.execute_fetchone
+        original_fetchall = repo._ops.execute_fetchall
+
+        def spy_fetchone(query: Any) -> Any:
+            pre_transaction_reads.append("fetchone")
+            return original_fetchone(query)
+
+        def spy_fetchall(query: Any) -> Any:
+            pre_transaction_reads.append("fetchall")
+            return original_fetchall(query)
+
+        repo._ops.execute_fetchone = spy_fetchone  # type: ignore[method-assign]
+        repo._ops.execute_fetchall = spy_fetchall  # type: ignore[method-assign]
+        try:
+            event = repo.record_routing_event(state.state_id, edge.edge_id, RoutingMode.MOVE)
+        finally:
+            repo._ops.execute_fetchone = original_fetchone  # type: ignore[method-assign]
+            repo._ops.execute_fetchall = original_fetchall  # type: ignore[method-assign]
+
+        assert pre_transaction_reads == []
+        assert event.state_id == state.state_id
+        assert event.edge_id == edge.edge_id
+
+    def test_record_routing_events_with_reason_validates_targets_in_one_pre_read(self) -> None:
+        """A reason-bearing fork validates all its edges with one query.
+
+        The pre-transaction read exists only to keep a doomed decision's
+        reason bytes out of the payload store; one batched query covers every
+        route, replacing the old one-read-per-edge loop.
+        """
+        store = _TrackingPayloadStore()
+        _db, repo, fac, tok = _make_repo_with_token(payload_store=store)
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"a": 1})
+        for label in ("path-a", "path-b"):
+            fac.data_flow.register_edge(
+                run_id="run-1",
+                from_node_id="transform-1",
+                to_node_id="sink-0",
+                label=label,
+                mode=RoutingMode.COPY,
+                edge_id=f"edge-{label}",
+            )
+        pre_transaction_reads: list[str] = []
+        original_fetchone = repo._ops.execute_fetchone
+        original_fetchall = repo._ops.execute_fetchall
+
+        def spy_fetchone(query: Any) -> Any:
+            pre_transaction_reads.append("fetchone")
+            return original_fetchone(query)
+
+        def spy_fetchall(query: Any) -> Any:
+            pre_transaction_reads.append("fetchall")
+            return original_fetchall(query)
+
+        repo._ops.execute_fetchone = spy_fetchone  # type: ignore[method-assign]
+        repo._ops.execute_fetchall = spy_fetchall  # type: ignore[method-assign]
+        try:
+            events = repo.record_routing_events(
+                state.state_id,
+                [
+                    RoutingSpec(edge_id="edge-path-a", mode=RoutingMode.COPY),
+                    RoutingSpec(edge_id="edge-path-b", mode=RoutingMode.COPY),
+                ],
+                reason={"condition": "fork", "result": "true"},
+            )
+        finally:
+            repo._ops.execute_fetchone = original_fetchone  # type: ignore[method-assign]
+            repo._ops.execute_fetchall = original_fetchall  # type: ignore[method-assign]
+
+        assert pre_transaction_reads == ["fetchall"]
+        assert [event.edge_id for event in events] == ["edge-path-a", "edge-path-b"]
+        assert len(store.store_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1631,8 +2074,24 @@ class TestRegisterArtifact:
         state0 = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"x": 1})
         state1 = repo.begin_node_state(tok, "sink-1", "run-1", 3, {"x": 1}, state_id="state-s1", attempt=1)
 
-        repo.register_artifact("run-1", state0.state_id, "sink-0", "csv", "/out/a.csv", "h1", 100)
-        repo.register_artifact("run-1", state1.state_id, "sink-1", "json", "/out/b.json", "h2", 200)
+        repo.register_artifact(
+            run_id="run-1",
+            state_id=state0.state_id,
+            sink_node_id="sink-0",
+            artifact_type="csv",
+            path="/out/a.csv",
+            content_hash="h1",
+            size_bytes=100,
+        )
+        repo.register_artifact(
+            run_id="run-1",
+            state_id=state1.state_id,
+            sink_node_id="sink-1",
+            artifact_type="json",
+            path="/out/b.json",
+            content_hash="h2",
+            size_bytes=200,
+        )
 
         csv_only = repo.get_artifacts("run-1", sink_node_id="sink-0")
         assert len(csv_only) == 1

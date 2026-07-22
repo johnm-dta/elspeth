@@ -73,6 +73,7 @@ class TestWebCommandHappyPath:
 
         assert len(uvicorn.run.calls) == 1
         assert uvicorn.run.calls[0].kwargs["factory"] is True
+        assert uvicorn.run.calls[0].kwargs["access_log"] is False
 
     def test_passes_correct_host_and_port_to_uvicorn(self) -> None:
         """Use localhost with custom port — verifies host and port forwarding."""

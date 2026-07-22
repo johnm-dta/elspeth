@@ -1,0 +1,42 @@
+[
+  {
+    "column": 24,
+    "file_path": "src/elspeth/from_module.py",
+    "fingerprint": "d1a2d5660e9a39b0",
+    "line": 5,
+    "message": "SQLite-specific insert builder call has no complete PostgreSQL counterpart and explicit sqlite/postgresql dialect dispatch in this module.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  },
+  {
+    "column": 24,
+    "file_path": "src/elspeth/from_module_alias.py",
+    "fingerprint": "90622c214320a173",
+    "line": 5,
+    "message": "SQLite-specific insert builder call has no complete PostgreSQL counterpart and explicit sqlite/postgresql dialect dispatch in this module.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  },
+  {
+    "column": 24,
+    "file_path": "src/elspeth/import_module.py",
+    "fingerprint": "db21357a48e788fe",
+    "line": 5,
+    "message": "SQLite-specific insert builder call has no complete PostgreSQL counterpart and explicit sqlite/postgresql dialect dispatch in this module.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  },
+  {
+    "column": 24,
+    "file_path": "src/elspeth/import_module_alias.py",
+    "fingerprint": "8e24ddf26f7a03be",
+    "line": 5,
+    "message": "SQLite-specific insert builder call has no complete PostgreSQL counterpart and explicit sqlite/postgresql dialect dispatch in this module.",
+    "rule_id": "contract_invariants.portable_sqlite_insert",
+    "severity": "error",
+    "suggestion": "Pair sqlalchemy.dialects.sqlite.insert with sqlalchemy.dialects.postgresql.insert and dispatch explicitly on connection.dialect.name for both 'sqlite' and 'postgresql'."
+  }
+]

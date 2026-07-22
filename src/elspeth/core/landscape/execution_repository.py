@@ -17,12 +17,14 @@ delegators.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal, overload
 
 from sqlalchemy.engine import Connection
 
 from elspeth.contracts import (
     Artifact,
+    ArtifactPublicationEvidenceKind,
     Batch,
     BatchMember,
     BatchStatus,
@@ -45,6 +47,7 @@ from elspeth.contracts import (
     TriggerType,
 )
 from elspeth.contracts.call_data import CallPayload
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import ExecutionError, TransformErrorReason
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
@@ -54,6 +57,8 @@ from elspeth.core.landscape.execution import (
     CallAuditRepository,
     NodeStateRepository,
     OperationRepository,
+    SinkEffectRepository,
+    SourceCompletionReconciler,
 )
 from elspeth.core.landscape.model_loaders import (
     ArtifactLoader,
@@ -63,6 +68,9 @@ from elspeth.core.landscape.model_loaders import (
     NodeStateLoader,
     OperationLoader,
     RoutingEventLoader,
+    SinkEffectLoader,
+    SinkEffectMemberLoader,
+    SinkEffectStreamLoader,
 )
 from elspeth.core.landscape.row_data import CallDataResult
 
@@ -95,6 +103,9 @@ class ExecutionRepository:
         batch_loader: BatchLoader,
         batch_member_loader: BatchMemberLoader,
         artifact_loader: ArtifactLoader,
+        sink_effect_loader: SinkEffectLoader,
+        sink_effect_member_loader: SinkEffectMemberLoader,
+        sink_effect_stream_loader: SinkEffectStreamLoader,
         payload_store: PayloadStore | None = None,
     ) -> None:
         self._db = db
@@ -106,10 +117,18 @@ class ExecutionRepository:
             routing_event_loader=routing_event_loader,
             payload_store=payload_store,
         )
-        self.calls = CallAuditRepository(ops, call_loader=call_loader, payload_store=payload_store)
+        self.source_completion_recovery = SourceCompletionReconciler(db, node_states=self.node_states)
+        self.calls = CallAuditRepository(db, ops, call_loader=call_loader, payload_store=payload_store)
         self.operations = OperationRepository(db, ops, operation_loader=operation_loader, payload_store=payload_store)
         self.batches = BatchRepository(db, ops, batch_loader=batch_loader, batch_member_loader=batch_member_loader)
         self.artifacts = ArtifactRepository(ops, artifact_loader=artifact_loader)
+        self.sink_effects = SinkEffectRepository(
+            db,
+            ops,
+            effect_loader=sink_effect_loader,
+            member_loader=sink_effect_member_loader,
+            stream_loader=sink_effect_stream_loader,
+        )
 
     # ── Node state recording (NodeStateRepository) ─────────────────────
 
@@ -169,6 +188,54 @@ class ExecutionRepository:
             quarantined=quarantined,
             success_reason=success_reason,
             context_after=context_after,
+        )
+
+    def record_completed_node_state_on(
+        self,
+        conn: Connection,
+        token_id: str,
+        node_id: str,
+        run_id: str,
+        step_index: int,
+        input_data: Mapping[str, object],
+        output_data: Mapping[str, object] | list[Mapping[str, object]],
+        duration_ms: float,
+        *,
+        state_id: str | None = None,
+        attempt: int = 0,
+        quarantined: bool = False,
+        success_reason: TransformSuccessReason | None = None,
+        context_after: NodeStateContext | None = None,
+    ) -> NodeStateCompleted:
+        """Insert an immediately completed node state on a caller-owned transaction."""
+        return self.node_states.record_completed_node_state_on(
+            conn,
+            token_id,
+            node_id,
+            run_id,
+            step_index,
+            input_data,
+            output_data,
+            duration_ms,
+            state_id=state_id,
+            attempt=attempt,
+            quarantined=quarantined,
+            success_reason=success_reason,
+            context_after=context_after,
+        )
+
+    def reconcile_source_completions_from_scheduler(
+        self,
+        *,
+        run_id: str,
+        coordination_token: CoordinationToken,
+        at: datetime,
+    ) -> int:
+        """Repair fully witnessed pre-fix TS-02 source-completion gaps."""
+        return self.source_completion_recovery.reconcile(
+            run_id=run_id,
+            coordination_token=coordination_token,
+            at=at,
         )
 
     def begin_node_states_many(
@@ -288,7 +355,13 @@ class ExecutionRepository:
         ordinal: int = 0,
         reason_ref: str | None = None,
     ) -> RoutingEvent:
-        """Record a single routing event."""
+        """Record one complete one-route decision for a state.
+
+        Fork/multi-destination decisions must use ``record_routing_events``
+        with every route in one call. ``routing_group_id`` and ``ordinal``
+        are explicit/legacy retry identities, not permission to append routes
+        through sequential calls.
+        """
         return self.node_states.record_routing_event(
             state_id,
             edge_id,
@@ -306,7 +379,7 @@ class ExecutionRepository:
         routes: list[RoutingSpec],
         reason: RoutingReason | None = None,
     ) -> list[RoutingEvent]:
-        """Record multiple routing events (fork/multi-destination)."""
+        """Atomically record one complete fork/multi-destination decision."""
         return self.node_states.record_routing_events(state_id, routes, reason)
 
     # ── Call recording (CallAuditRepository) ───────────────────────────
@@ -354,9 +427,16 @@ class ExecutionRepository:
         operation_type: OperationType,
         *,
         input_data: Mapping[str, object] | None = None,
+        sink_effect_id: str | None = None,
     ) -> Operation:
         """Begin an operation for source/sink I/O."""
-        return self.operations.begin_operation(run_id, node_id, operation_type, input_data=input_data)
+        return self.operations.begin_operation(
+            run_id,
+            node_id,
+            operation_type,
+            input_data=input_data,
+            sink_effect_id=sink_effect_id,
+        )
 
     def complete_operation(
         self,
@@ -459,9 +539,11 @@ class ExecutionRepository:
         batch_id: str,
         token_id: str,
         ordinal: int,
+        *,
+        conn: Connection | None = None,
     ) -> BatchMember:
         """Add a token to a batch."""
-        return self.batches.add_batch_member(batch_id, token_id, ordinal)
+        return self.batches.add_batch_member(batch_id, token_id, ordinal, conn=conn)
 
     def update_batch_status(
         self,
@@ -534,28 +616,34 @@ class ExecutionRepository:
     def register_artifact(
         self,
         run_id: str,
-        state_id: str,
         sink_node_id: str,
         artifact_type: str,
         path: str,
         content_hash: str,
         size_bytes: int,
         *,
+        state_id: str | None = None,
+        sink_effect_id: str | None = None,
         artifact_id: str | None = None,
         idempotency_key: str | None = None,
+        publication_performed: bool = True,
+        publication_evidence_kind: ArtifactPublicationEvidenceKind | None = None,
         conn: Connection | None = None,
     ) -> Artifact:
         """Register an artifact produced by a sink."""
         return self.artifacts.register_artifact(
             run_id,
-            state_id,
             sink_node_id,
             artifact_type,
             path,
             content_hash,
             size_bytes,
+            state_id=state_id,
+            sink_effect_id=sink_effect_id,
             artifact_id=artifact_id,
             idempotency_key=idempotency_key,
+            publication_performed=publication_performed,
+            publication_evidence_kind=publication_evidence_kind,
             conn=conn,
         )
 

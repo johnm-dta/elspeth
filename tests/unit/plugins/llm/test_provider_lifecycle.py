@@ -1,10 +1,9 @@
 # tests/unit/plugins/llm/test_provider_lifecycle.py
 """Tests for LLMTransform._create_provider() lifecycle.
 
-Verifies that the unified LLMTransform correctly dispatches to the right
-provider class based on config type (AzureOpenAIConfig vs OpenRouterConfig),
-and that lifecycle ordering is enforced (recorder must be set before provider
-creation).
+Verifies that the unified LLMTransform correctly dispatches Azure, OpenRouter,
+and Bedrock config types to their provider classes, and that lifecycle ordering
+is enforced (recorder must be set before provider creation).
 """
 
 from __future__ import annotations
@@ -12,11 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from elspeth.plugins.transforms.llm.provider import LLMProvider
 from elspeth.plugins.transforms.llm.providers.azure import AzureLLMProvider, AzureOpenAIConfig
+from elspeth.plugins.transforms.llm.providers.bedrock import BedrockConfig, BedrockLLMProvider
 from elspeth.plugins.transforms.llm.providers.openrouter import (
     OpenRouterConfig,
     OpenRouterLLMProvider,
@@ -76,6 +77,18 @@ def _make_openrouter_config() -> dict[str, Any]:
     }
 
 
+def _make_bedrock_config() -> dict[str, Any]:
+    """Build minimal valid Bedrock LLMTransform config."""
+    return {
+        "provider": "bedrock",
+        "model": "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "region_name": "ap-southeast-2",
+        "prompt_template": "Test: {{ row.text }}",
+        "schema": DYNAMIC_SCHEMA,
+        "required_input_fields": ["text"],
+    }
+
+
 def _prepare_transform_for_provider_creation(transform: LLMTransform) -> None:
     """Set the minimal internal state required for _create_provider().
 
@@ -117,6 +130,15 @@ class TestCreateProviderDispatch:
         assert isinstance(provider, OpenRouterLLMProvider)
         assert isinstance(provider, LLMProvider)
 
+    def test_bedrock_config_produces_bedrock_provider(self) -> None:
+        transform = LLMTransform(_make_bedrock_config())
+        _prepare_transform_for_provider_creation(transform)
+
+        provider = transform._create_provider()
+
+        assert isinstance(provider, BedrockLLMProvider)
+        assert isinstance(provider, LLMProvider)
+
     def test_azure_config_type_is_azure_openai_config(self) -> None:
         """Verify the parsed config is actually AzureOpenAIConfig."""
         transform = LLMTransform(_make_azure_config())
@@ -128,6 +150,11 @@ class TestCreateProviderDispatch:
         transform = LLMTransform(_make_openrouter_config())
 
         assert isinstance(transform._config, OpenRouterConfig)
+
+    def test_bedrock_config_type_is_bedrock_config(self) -> None:
+        transform = LLMTransform(_make_bedrock_config())
+
+        assert isinstance(transform._config, BedrockConfig)
 
 
 class TestCreateProviderLifecycleEnforcement:
@@ -144,6 +171,12 @@ class TestCreateProviderLifecycleEnforcement:
     def test_create_provider_raises_for_openrouter_before_recorder(self) -> None:
         """Same lifecycle check applies to OpenRouter config path."""
         transform = LLMTransform(_make_openrouter_config())
+
+        with pytest.raises(RuntimeError, match="before on_start"):
+            transform._create_provider()
+
+    def test_create_provider_raises_for_bedrock_before_recorder(self) -> None:
+        transform = LLMTransform(_make_bedrock_config())
 
         with pytest.raises(RuntimeError, match="before on_start"):
             transform._create_provider()
@@ -184,6 +217,30 @@ class TestOnStartSetsProvider:
         # Same as above — verifying concrete provider type behind Protocol interface.
         assert isinstance(transform._provider, OpenRouterLLMProvider)  # type: ignore[unreachable]
         assert isinstance(transform._provider, LLMProvider)
+
+    def test_on_start_sets_provider_for_bedrock(self) -> None:
+        transform = LLMTransform(_make_bedrock_config())
+
+        ctx = FakeLifecycleContext(landscape=FakeAuditRecorder())
+        transform.on_start(ctx)
+
+        assert isinstance(transform._provider, BedrockLLMProvider)  # type: ignore[unreachable]
+        assert isinstance(transform._provider, LLMProvider)
+
+    def test_close_dispatches_to_bedrock_provider_once(self) -> None:
+        transform = LLMTransform(_make_bedrock_config())
+        ctx = FakeLifecycleContext(landscape=FakeAuditRecorder())
+        transform.on_start(ctx)
+        provider = transform._provider
+        assert isinstance(provider, BedrockLLMProvider)  # type: ignore[unreachable]
+        close = Mock(wraps=provider.close)
+        provider.close = close  # type: ignore[method-assign]
+
+        transform.close()
+        transform.close()
+
+        close.assert_called_once_with()
+        assert transform._provider is None
 
     def test_on_start_stores_recorder(self) -> None:
         """on_start() should capture the recorder from context."""

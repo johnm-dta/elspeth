@@ -3,9 +3,9 @@
 // Guided-mode widget for the multi_select_with_custom turn type (Task 7.4).
 // Conventions inherited from SingleSelectTurn (Task 7.2 template) and
 // InspectAndConfirmTurn (Task 7.3):
-//   - Props: { payload: MultiSelectWithCustomPayload; onSubmit: (body: GuidedRespondRequest) => void }
+//   - Props: { payload: MultiSelectWithCustomPayload; onSubmit: (body: GuidedRespondAction) => void }
 //   - onSubmit is SYNC — the widget constructs the body; the store awaits the round-trip
-//   - All 6 GuidedRespondRequest fields set explicitly; unused ones = null (no omission)
+//   - Every GuidedRespondAction field is explicit; unused ones are null
 //   - <fieldset>+<legend> for the chip group (per Task 7.2 SHAPE NOTE — chip-group
 //     family widgets share the structure)
 //   - <button type="button"> (never <div onClick>)
@@ -70,7 +70,8 @@
 //     { chosen: [required field names in option order],
 //       custom_inputs: [...custom field names],
 //       edited_values: null,
-//       accepted_step_index: null, edit_step_index: null, control_signal: null }
+//       proposal_id: null, draft_hash: null, edit_target: null,
+//       control_signal: null }
 //   The backend's _advance_step_2 reads chosen + custom_inputs and combines them
 //   with the sink plugin + options stored in GuidedSession.step_2_sink_intent
 //   (persisted by the preceding SCHEMA_FORM dispatcher) to construct
@@ -79,7 +80,7 @@
 //
 // ESCAPE PATH:
 //   payload.escape_label renders as a first-class "let source decide" action.
-//   It submits chosen=[] and custom_inputs=[] with control_signal="passthrough"
+//   It submits the standalone control_signal="passthrough" action
 //   (C-3a — the explicit, unambiguous signal; a bare empty chosen/custom_inputs
 //   pair is otherwise indistinguishable from a stale client submitting nothing,
 //   so the backend fail-closes it). The backend treats passthrough as observed
@@ -90,13 +91,13 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type {
-  GuidedRespondRequest,
+  GuidedRespondAction,
   MultiSelectWithCustomPayload,
 } from "@/types/guided";
 
 interface MultiSelectWithCustomTurnProps {
   payload: MultiSelectWithCustomPayload;
-  onSubmit: (body: GuidedRespondRequest) => void;
+  onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   /**
    * Tutorial passive mode: suppress the "Select all that apply, then press
@@ -248,13 +249,41 @@ export function MultiSelectWithCustomTurn({
     // data to coerce. Returning silently here matches the same predicate as
     // the disabled attribute, deduplicated.
     if (selection.chosen.size === 0 && selection.customs.length === 0) return;
-    onSubmit({
-      chosen: chosenInOptionOrder(selection.chosen),
-      custom_inputs: [...selection.customs],
+    const chosen = chosenInOptionOrder(selection.chosen);
+    const customs = [...selection.customs];
+    const common = {
       edited_values: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: null,
+    } as const;
+    if (chosen.length > 0) {
+      const selected: [string, ...string[]] = [chosen[0], ...chosen.slice(1)];
+      const [firstCustom, ...remainingCustoms] = customs;
+      if (firstCustom !== undefined) {
+        onSubmit({
+          ...common,
+          chosen: selected,
+          custom_inputs: [firstCustom, ...remainingCustoms],
+        });
+        return;
+      }
+      onSubmit({
+        ...common,
+        chosen: selected,
+        custom_inputs: null,
+      });
+      return;
+    }
+    const [firstCustom, ...remainingCustoms] = customs;
+    if (firstCustom === undefined) {
+      throw new Error("enabled multi-select continue requires a selected or custom value");
+    }
+    onSubmit({
+      ...common,
+      chosen: null,
+      custom_inputs: [firstCustom, ...remainingCustoms],
     });
   }
 
@@ -264,15 +293,16 @@ export function MultiSelectWithCustomTurn({
     // stale/buggy client submitting nothing, so the backend fail-closes it
     // (guided_step2_no_fields_selected) — even from this legitimate escape
     // hatch. control_signal: "passthrough" is the explicit, unambiguous
-    // signal the backend's STEP_2_SINK MULTI_SELECT_WITH_CUSTOM dispatcher
-    // requires before it will accept the empty required-fields set (see
+    // signal the backend's STEP_2_SINK field-review transition requires
+    // before it will accept the empty required-fields set (see
     // ControlSignal.PASSTHROUGH in protocol.py).
     onSubmit({
-      chosen: [],
-      custom_inputs: [],
+      chosen: null,
+      custom_inputs: null,
       edited_values: null,
-      accepted_step_index: null,
-      edit_step_index: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
       control_signal: "passthrough",
     });
   }

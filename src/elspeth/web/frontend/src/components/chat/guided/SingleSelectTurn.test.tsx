@@ -20,7 +20,7 @@ import userEvent from "@testing-library/user-event";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { nullResponse } from "@/test/guided-fixtures";
 import type { SingleSelectPayload } from "@/types/guided";
-import type { GuidedRespondRequest } from "@/types/guided";
+import type { GuidedRespondAction } from "@/types/guided";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -66,8 +66,8 @@ describe("SingleSelectTurn — option click", () => {
     await user.click(screen.getByRole("button", { name: "CSV File" }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       chosen: ["csv"],
       custom_inputs: null,
       ...nullResponse(),
@@ -81,7 +81,7 @@ describe("SingleSelectTurn — option click", () => {
 
     await user.click(screen.getByRole("button", { name: "LLM Classifier" }));
 
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
     expect(body.chosen).toEqual(["llm_classify"]);
     expect(body.custom_inputs).toBeNull();
   });
@@ -118,8 +118,8 @@ describe("SingleSelectTurn — allow_custom=true", () => {
     await user.click(screen.getByRole("button", { name: /submit custom/i }));
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
-    const body: GuidedRespondRequest = onSubmit.mock.calls[0][0];
-    expect(body).toEqual<GuidedRespondRequest>({
+    const body: GuidedRespondAction = onSubmit.mock.calls[0][0];
+    expect(body).toEqual<GuidedRespondAction>({
       chosen: null,
       custom_inputs: ["my custom transform"],
       ...nullResponse(),

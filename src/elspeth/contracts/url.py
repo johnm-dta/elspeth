@@ -109,6 +109,13 @@ SENSITIVE_PARAMS = frozenset(
         # Signed URL patterns
         "signature",
         "sig",
+        # AWS SigV4 presigned URLs — the signature is the authenticator; the
+        # credential/security-token params carry the access key id and session
+        # token. _base_param_name does not strip the x-amz- prefix, so these
+        # need their own entries.
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
         # Header-style params sometimes in query strings
         "authorization",
         "x-api-key",
@@ -173,7 +180,13 @@ def _iter_odbc_connect_parts(decoded_value: str) -> list[str]:
         elif seen_equals and not char.isspace():
             value_has_non_space = True
         i += 1
-    parts.append(decoded_value[start:])
+    if in_braces:
+        # The final value opened a brace that never closed. Treat that
+        # unmatched brace as literal so later attributes cannot be swallowed
+        # into a non-sensitive value and bypass password detection.
+        parts.extend(decoded_value[start:].split(";"))
+    else:
+        parts.append(decoded_value[start:])
     return parts
 
 

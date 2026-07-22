@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import SecretBytes
 from sqlalchemy.pool import StaticPool
 
@@ -143,6 +143,15 @@ def _install_fake_live_run(
         return _FakeLiveRun()
 
     monkeypatch.setattr(tutorial_service_module, "_run_live_tutorial", _fake_run_live_tutorial)
+
+    async def _fake_require_tutorial_launch_readiness(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        tutorial_service_module,
+        "_require_tutorial_launch_readiness",
+        _fake_require_tutorial_launch_readiness,
+    )
     return calls
 
 
@@ -158,6 +167,33 @@ def test_post_run_executes_live_and_returns_output(tmp_path: Path, monkeypatch: 
     body = response.json()
     assert body["output"]["rows"] == [{"url": "https://example.gov.au", "summary": "A page."}]
     assert calls["count"] == 1
+
+
+def test_post_run_returns_typed_409_when_tutorial_policy_is_not_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _app(tmp_path)
+    session_id = _seed_session_with_state(app)
+    calls = _install_fake_live_run(monkeypatch)
+
+    async def _blocked(**_kwargs: Any) -> None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "tutorial_not_ready",
+                "code": "tutorial_required_control_coverage",
+                "detail": "The tutorial is missing required control coverage.",
+            },
+        )
+
+    monkeypatch.setattr(tutorial_service_module, "_require_tutorial_launch_readiness", _blocked)
+
+    response = TestClient(app).post("/api/tutorial/run", json={"session_id": str(session_id)})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "tutorial_required_control_coverage"
+    assert calls["count"] == 0
 
 
 def test_post_run_rate_limiter_blocks_before_live_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

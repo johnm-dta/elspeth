@@ -28,8 +28,7 @@ import os
 import tempfile
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
 from uuid import UUID, uuid4
@@ -37,6 +36,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
 from elspeth.contracts.blobs_inline import (
     ALLOWED_CONTENT_ENCODINGS,
     BlobInlineRef,
@@ -46,13 +46,15 @@ from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_m
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.trust_boundary import trust_boundary
-from elspeth.web.blobs.protocol import BlobIntegrityError
+from elspeth.web.blobs.protocol import AllowedMimeType, BlobIntegrityError, BlobQuotaExceededError
 from elspeth.web.blobs.service import (
     _ACTIVE_RUN_COMPOSITION_COLUMNS,
     _active_run_pipeline_dict,
     _composition_references_blob,
     _guard_blob_row_literals,
     _lock_session_for_blob_quota,
+    _persist_blob_content,
+    _remove_blob_temp_artifacts,
     content_hash,
     sanitize_filename,
 )
@@ -77,7 +79,10 @@ from elspeth.web.composer.tools.declarations import (
     ToolKind,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
+from elspeth.web.sessions.locking import locked_session_transaction
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
+from elspeth.web.sessions.proposal_blob_refs import pending_proposal_reference_id
 
 
 class BlobToolRecord(TypedDict):
@@ -189,11 +194,10 @@ def _sync_get_blob_by_storage_path(
 ) -> BlobToolRecord | None:
     """Look up a blob by its canonical storage_path within a session.
 
-    Used by ``handle_step_1_source`` (steps.py) to detect whether a path
-    supplied via the guided SchemaForm resolves to an already-uploaded blob.
+    Used by guided proposal preparation to detect whether a reviewed path
+    resolves to an already-uploaded blob.
     When it does, the blob_id (= blob["id"]) can be injected as ``blob_ref``
-    into ``SourceResolved.options`` so that the recipe slot resolvers in
-    ``recipe_match.py`` have access to the UUID they need.
+    into the reviewed source facts used by proposal custody.
 
     Returns None if no blob row matches the path, which is the correct
     representation for path-based sources that are not blob-backed.
@@ -213,8 +217,8 @@ def _sync_get_blob_by_id(
 ) -> BlobToolRecord | None:
     """Look up a blob by its UUID within a session (authoritative DB query).
 
-    The inverse of :func:`_sync_get_blob_by_storage_path`: used by
-    ``handle_step_1_source`` (steps.py) to resolve a ``blob:<ref>`` path sentinel
+    The inverse of :func:`_sync_get_blob_by_storage_path`: used to resolve a
+    ``blob:<ref>`` path sentinel
     — emitted by ``build_step_1_schema_form_turn_from_resolved`` to keep the
     absolute storage_path off the wire — back to the blob's real ``storage_path``
     before the source is committed. Session-scoped so a blob ref cannot resolve
@@ -482,6 +486,28 @@ def _affected_component_for_inline_field_path(field_path: str) -> tuple[str, ...
     return ()
 
 
+def _inline_blob_endpoint_policy_error(state: CompositionState, field_path: str) -> str | None:
+    """Return the endpoint policy result for the component changed by a blob marker."""
+    prefix, _, _rest = field_path.partition(".options.")
+    if prefix == "source":
+        source_name = "source"
+    elif prefix.startswith("source:"):
+        source_name = prefix.removeprefix("source:")
+    else:
+        source_name = None
+
+    if source_name is not None:
+        source = state.sources[source_name]
+        return web_aws_s3_endpoint_url_policy_error(source.plugin, source.options)
+
+    if prefix.startswith("output:"):
+        output_name = prefix.removeprefix("output:")
+        output = next(output for output in state.outputs if output.name == output_name)
+        return web_aws_s3_endpoint_url_policy_error(output.plugin, output.options)
+
+    return None
+
+
 def _execute_wire_blob_inline_ref(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -552,6 +578,9 @@ def _execute_wire_blob_inline_ref(
         new_state = _apply_inline_blob_marker(state, ref.field_path, marker)
     except ValueError as exc:
         return _failure_result(state, str(exc))
+    endpoint_policy_error = _inline_blob_endpoint_policy_error(new_state, ref.field_path)
+    if endpoint_policy_error is not None:
+        return _failure_result(state, endpoint_policy_error)
     return _mutation_result(new_state, _affected_component_for_inline_field_path(ref.field_path), data={"field_path": ref.field_path})
 
 
@@ -587,16 +616,7 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
 )
 
 
-_ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
-    {
-        "text/plain",
-        "application/json",
-        "text/csv",
-        "application/x-jsonlines",
-        "application/jsonl",
-        "text/jsonl",
-    }
-)
+_ALLOWED_BLOB_MIME_TYPES = ALLOWED_MIME_TYPES
 
 _BLOB_QUOTA_BYTES: int = 500 * 1024 * 1024
 
@@ -625,7 +645,7 @@ class _PreparedBlobCreate:
     blob_id: str
     filename: str
     mime_type: str
-    content_bytes: bytes
+    content_bytes: bytes = field(repr=False)
     content_hash: str
     storage_path: Path
     description: Any | None
@@ -895,52 +915,39 @@ def _persist_prepared_blob_create(
     session_id: str,
     max_blob_storage_per_session_bytes: int | None = None,
 ) -> str | None:
-    """Persist a prepared blob create payload, returning a quota error if any."""
-    prepared.storage_path.parent.mkdir(parents=True, exist_ok=True)
-    prepared.storage_path.write_bytes(prepared.content_bytes)
-
-    now = datetime.now(UTC)
+    """Persist a prepared blob through the shared blob custody primitive."""
+    resolved_storage = prepared.storage_path.expanduser().resolve()
+    session_dir = resolved_storage.parent
+    blobs_dir = session_dir.parent
+    if session_dir.name != session_id or blobs_dir.name != "blobs":
+        raise AuditIntegrityError("Prepared blob storage path does not match its session custody root")
+    data_dir = blobs_dir.parent
     try:
-        with session_engine.begin() as conn:
-            quota_error = _check_blob_quota(
-                conn,
-                session_id,
-                len(prepared.content_bytes),
-                quota_bytes=max_blob_storage_per_session_bytes,
-            )
-            if quota_error is not None:
-                prepared.storage_path.unlink(missing_ok=True)
-                return quota_error
-
-            conn.execute(
-                blobs_table.insert().values(
-                    id=prepared.blob_id,
-                    session_id=session_id,
-                    filename=prepared.filename,
-                    mime_type=prepared.mime_type,
-                    size_bytes=len(prepared.content_bytes),
-                    content_hash=prepared.content_hash,
-                    storage_path=str(prepared.storage_path),
-                    created_at=now,
-                    created_by="assistant",
-                    source_description=prepared.description,
-                    status="ready",
-                    # Inline-blob provenance. The
-                    # DB-side CHECK ck_blobs_creating_llm_provenance_nullability
-                    # rejects any combination where the modality and the
-                    # five creating_* fields disagree on LLM authorship.
-                    creation_modality=prepared.creation_modality.value,
-                    created_from_message_id=prepared.created_from_message_id,
-                    creating_model_identifier=prepared.creating_model_identifier,
-                    creating_model_version=prepared.creating_model_version,
-                    creating_provider=prepared.creating_provider,
-                    creating_composer_skill_hash=prepared.creating_composer_skill_hash,
-                    creating_arguments_hash=prepared.creating_arguments_hash,
-                )
-            )
-    except Exception:
-        prepared.storage_path.unlink(missing_ok=True)
-        raise
+        _persist_blob_content(
+            engine=session_engine,
+            data_dir=data_dir,
+            max_storage_per_session=_resolve_blob_quota_bytes(max_blob_storage_per_session_bytes),
+            blob_id=UUID(prepared.blob_id),
+            session_id=session_id,
+            filename=prepared.filename,
+            content=prepared.content_bytes,
+            mime_type=cast(AllowedMimeType, prepared.mime_type),
+            created_by="assistant",
+            source_description=prepared.description,
+            creation_modality=prepared.creation_modality,
+            created_from_message_id=prepared.created_from_message_id,
+            creating_model_identifier=prepared.creating_model_identifier,
+            creating_model_version=prepared.creating_model_version,
+            creating_provider=prepared.creating_provider,
+            creating_composer_skill_hash=prepared.creating_composer_skill_hash,
+            creating_arguments_hash=prepared.creating_arguments_hash,
+            idempotent=False,
+        )
+    except BlobQuotaExceededError as exc:
+        return (
+            f"Session blob quota exceeded: {exc.current_bytes + len(prepared.content_bytes)} bytes "
+            f"would exceed {exc.limit_bytes} byte limit."
+        )
     return None
 
 
@@ -991,6 +998,22 @@ def _execute_create_blob(
     try:
         validated = CreateBlobArgumentsModel.model_validate(arguments)
     except PydanticValidationError as exc:
+        # The shared AllowedMimeType contract is intentionally expressed in
+        # the redaction model as well as the wire schema. Preserve the
+        # historical semantic-error channel for an unsupported string: callers
+        # receive the safe field-specific allowlist diagnostic rather than a
+        # generic model-shape failure. Non-string values remain structural
+        # model errors.
+        raw_mime_type = arguments.get("mime_type")
+        if type(raw_mime_type) is str and any(
+            tuple(error["loc"]) == ("mime_type",) and error["type"] == "literal_error" for error in exc.errors(include_input=False)
+        ):
+            allowed = ", ".join(sorted(_ALLOWED_BLOB_MIME_TYPES))
+            raise ToolArgumentError(
+                argument="mime_type",
+                expected=f"one of: {allowed}",
+                actual_type="str",
+            ) from exc
         raise ToolArgumentError(
             argument="create_blob arguments",
             expected="object conforming to CreateBlobArgumentsModel",
@@ -1046,14 +1069,7 @@ _CREATE_BLOB_DECLARATION = ToolDeclaration(
             },
             "mime_type": {
                 "type": "string",
-                "enum": [
-                    "text/plain",
-                    "application/json",
-                    "text/csv",
-                    "application/x-jsonlines",
-                    "application/jsonl",
-                    "text/jsonl",
-                ],
+                "enum": sorted(ALLOWED_MIME_TYPES),
                 "description": "MIME type of the content.",
             },
             "content": {
@@ -1577,7 +1593,28 @@ def _execute_delete_blob(
     tombstone_path: Path | None = None
 
     try:
-        with session_engine.begin() as conn:
+        with locked_session_transaction(session_engine, session_id) as conn:
+            locked_row = conn.execute(
+                select(blobs_table).where(
+                    blobs_table.c.id == blob_id,
+                    blobs_table.c.session_id == session_id,
+                )
+            ).first()
+            if locked_row is None:
+                return _failure_result(state, f"Blob '{blob_id}' not found.")
+            blob = _blob_row_to_tool_dict(locked_row)
+            storage_path = Path(blob["storage_path"])
+            retaining_proposal_id = pending_proposal_reference_id(
+                conn,
+                session_id=session_id,
+                blob_id=blob_id,
+            )
+            if retaining_proposal_id is not None:
+                return _failure_result(
+                    state,
+                    f"Blob '{blob_id}' is referenced by pending proposal '{retaining_proposal_id}' and cannot be deleted.",
+                )
+
             # Active-run guard (two checks):
             #
             # 1. Explicit link: blob_run_links already points at an active run.
@@ -1629,6 +1666,7 @@ def _execute_delete_blob(
             if storage_path.exists():
                 tombstone_path = storage_path.with_name(f".{storage_path.name}.delete-{uuid4().hex}")
                 os.replace(storage_path, tombstone_path)
+            _remove_blob_temp_artifacts(storage_path)
 
             # Delete record — include session_id filter for defence in depth
             conn.execute(

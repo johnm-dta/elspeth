@@ -48,8 +48,19 @@ export interface BlobStructuralSummary {
   caveat: string | null;
 }
 
+/**
+ * Normalise a MIME type for comparison: strips any `; parameter=...` suffix,
+ * trims whitespace, and lowercases. Defensive against null/undefined input
+ * (returns `""`) so this can be the single shared rule for every blob-preview
+ * call site — format detection here, plus BlobRow's preview-eligibility and
+ * JSON-branch checks — rather than each one hand-rolling its own copy.
+ */
+export function normalizeMimeType(mimeType: string | null | undefined): string {
+  return mimeType?.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
 function detectStructuralFormat(mimeType: string): BlobStructuralFormat {
-  const base = mimeType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const base = normalizeMimeType(mimeType);
   if (base === "text/csv") return "csv";
   if (base === "application/json") return "json-records";
   if (base === "application/x-jsonlines") return "jsonlines";

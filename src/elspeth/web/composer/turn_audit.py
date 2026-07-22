@@ -65,6 +65,10 @@ async def persist_turn_audit(
     from pydantic import ValidationError as PydanticValidationError
 
     from elspeth.contracts.freeze import deep_thaw
+    from elspeth.web.composer.pipeline_custody import (
+        inline_custody_audit_projection,
+        inline_custody_manifest_redaction_input,
+    )
     from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
 
     phase3_self = cast(Any, service)
@@ -90,11 +94,19 @@ async def persist_turn_audit(
             decoded_args = {"_raw_arguments": tc.function.arguments}
         if tc.function.name in MANIFEST:
             try:
+                redaction_input = (
+                    inline_custody_manifest_redaction_input(decoded_args) if tc.function.name == "set_pipeline" else decoded_args
+                )
                 persisted_arguments = redact_tool_call_arguments(
                     tc.function.name,
-                    decoded_args,
+                    redaction_input,
                     telemetry=redaction_telemetry,
                 )
+                if tc.function.name == "set_pipeline":
+                    persisted_arguments = cast(
+                        dict[str, Any],
+                        inline_custody_audit_projection(persisted_arguments),
+                    )
             except PydanticValidationError:
                 if tool_outcome.error_class is None:
                     raise

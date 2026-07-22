@@ -18,16 +18,19 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_2_sink_chat
+from elspeth.web.composer.guided.chat_solver import GuidedChatEmptyOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
+from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
 
 def _empty_state() -> CompositionState:
@@ -55,6 +58,26 @@ def _catalog() -> CatalogService:
     return _SinkCatalog()
 
 
+def _policy_context() -> tuple[PolicyCatalogView, PluginAvailabilitySnapshot]:
+    catalog = _catalog()
+    snapshot = PluginAvailabilitySnapshot.create(
+        policy_hash="guided-sink-policy",
+        principal_scope="local:alice",
+        available=frozenset({PluginId("sink", "json")}),
+        unavailable=(),
+        selected=(),
+        usable_profile_aliases=(),
+        selected_profile_aliases=(),
+        binding_generation_fingerprint="guided-sink-generation",
+    )
+    profiles = MagicMock(spec=OperatorProfileRegistry)
+    profiles.public_schema.side_effect = lambda _plugin_id, schema, **_kwargs: schema
+    return PolicyCatalogView(catalog, snapshot, profiles), snapshot
+
+
+_POLICY_CATALOG, _PLUGIN_SNAPSHOT = _policy_context()
+
+
 def _tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> SimpleNamespace:
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=json.dumps(arguments)))
 
@@ -65,14 +88,14 @@ def _response(*, content: str | None = None, tool_calls: list[SimpleNamespace] |
 
 _RESOLVE_SINK_ARGS = {
     "resolution": "sink",
-    "outputs": [
-        {
-            "plugin": "json",
-            "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
-            "required_fields": [],
-            "schema_mode": "observed",
-        }
-    ],
+    "output": {
+        "name": "results",
+        "plugin": "json",
+        "options": {"path": "out.jsonl", "schema": {"mode": "observed"}},
+        "required_fields": [],
+        "schema_mode": "observed",
+        "on_write_failure": "discard",
+    },
     "assistant_message": "Saved the results as a JSON Lines file.",
 }
 
@@ -98,9 +121,11 @@ async def test_sink_loop_lists_sinks_then_resolves() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -150,13 +175,14 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
-    assert result.sink is None
-    assert result.assistant_message is None
+    assert type(result) is GuidedChatEmptyOutcome
     execute_tool_spy.assert_not_called()
 
 
@@ -191,9 +217,11 @@ async def test_sink_loop_threads_parallel_tool_calls() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
@@ -226,15 +254,16 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
             max_discovery_iters=3,
         )
 
-    assert result.sink is None
-    assert result.assistant_message is None
+    assert type(result) is GuidedChatEmptyOutcome
     assert len(recorder.llm_calls) == 3
 
 
@@ -243,18 +272,18 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
     """A malformed discovery call classifies MALFORMED_RESPONSE, not API_ERROR.
 
     An *allowed* discovery tool whose ``arguments`` decode to a non-object makes
-    the production ``_execute_discovery_call`` raise ``ChainSolverResponseShapeError``.
+    the production ``_execute_discovery_call`` raise ``GuidedSolverResponseShapeError``.
     The loop must list that class in its typed shape-failure except (mirroring
-    ``solve_chain``'s ``chain_solver.py`` clause) so the audit row records
+    ``guided solver``'s ``chain_solver.py`` clause) so the audit row records
     MALFORMED_RESPONSE — not fall through to the API_ERROR catch-all. The class
     still re-raises; the wrapper turns it into the advisory fallback.
     """
     from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
-    from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+    from elspeth.web.composer.guided.errors import GuidedSolverResponseShapeError
 
     recorder = BufferingRecorder()
     # ``list_sinks`` is allowed (passes the dispatch gate), but its arguments
-    # decode to a non-object, so dispatch raises ChainSolverResponseShapeError.
+    # decode to a non-object, so dispatch raises GuidedSolverResponseShapeError.
     malformed = _response(tool_calls=[SimpleNamespace(id="c1", function=SimpleNamespace(name="list_sinks", arguments="[1, 2, 3]"))])
 
     async def _fake(**kwargs: Any) -> SimpleNamespace:
@@ -262,7 +291,7 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
 
     with (
         patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake),
-        pytest.raises(ChainSolverResponseShapeError),
+        pytest.raises(GuidedSolverResponseShapeError),
     ):
         await maybe_resolve_step_2_sink_chat(
             model="m",
@@ -270,13 +299,91 @@ async def test_sink_loop_malformed_discovery_args_classify_malformed_response() 
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
             recorder=recorder,
             state=_empty_state(),
-            catalog=_catalog(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
             user_id="u1",
         )
 
     assert recorder.llm_calls[-1].status == ComposerLLMCallStatus.MALFORMED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_sink_loop_progress_events_advance_through_discovery_and_resolve() -> None:
+    """Progress phases published to a real ``ComposerProgressSink`` across a
+    list_sinks -> resolve_sink round trip, exercising the actual production
+    seam (elspeth-a8eeebb3aa): calling_model precedes EVERY provider round
+    (including the round after the discovery tool result is threaded back),
+    and using_tools precedes the discovery dispatch. The frontend folds both
+    calling_model and using_tools into the same substep (ChatPanel.tsx
+    tutorialStep2ActiveSubstep) precisely because this loop re-emits
+    calling_model a second time — that mapping is exercised in the frontend
+    test suite; this test pins the backend event sequence it must handle.
+    """
+    responses = [
+        _response(tool_calls=[_tool_call("c1", "list_sinks", {})]),
+        _response(tool_calls=[_tool_call("c2", "resolve_sink", _RESOLVE_SINK_ARGS)]),
+    ]
+    phases: list[str] = []
+
+    async def _fake(**kwargs: Any) -> SimpleNamespace:
+        return responses.pop(0)
+
+    async def _capture_progress(event: Any) -> None:
+        phases.append(event.phase)
+
+    with patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake):
+        result = await maybe_resolve_step_2_sink_chat(
+            model="m",
+            user_message="save the results as a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+            state=_empty_state(),
+            catalog=_POLICY_CATALOG,
+            plugin_snapshot=_PLUGIN_SNAPSHOT,
+            user_id="u1",
+            progress=_capture_progress,
+        )
+
+    assert result.sink is not None
+    assert phases == ["calling_model", "using_tools", "calling_model"]
+
+
+@pytest.mark.asyncio
+async def test_sink_loop_progress_single_shot_resolve_emits_calling_model_only() -> None:
+    """A single-round resolve (no discovery tool call at all) still emits
+    calling_model — the common case for the tutorial's one-line "Save the
+    pipeline's results to a JSON file." prompt, where the composer model
+    resolves ``json`` directly without needing list_sinks/get_plugin_schema.
+    Without this event the substep indicator would never leave substep 0 for
+    the tutorial's actual traffic shape, even with the loop instrumented.
+    """
+    responses = [_response(tool_calls=[_tool_call("c1", "resolve_sink", _RESOLVE_SINK_ARGS)])]
+    phases: list[str] = []
+
+    async def _fake(**kwargs: Any) -> SimpleNamespace:
+        return responses.pop(0)
+
+    async def _capture_progress(event: Any) -> None:
+        phases.append(event.phase)
+
+    with patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake):
+        result = await maybe_resolve_step_2_sink_chat(
+            model="m",
+            user_message="save the results as a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+            progress=_capture_progress,
+        )
+
+    assert result.sink is not None
+    assert phases == ["calling_model"]
 
 
 @pytest.mark.asyncio
@@ -296,9 +403,10 @@ async def test_sink_loop_single_shot_when_no_catalog() -> None:
             current_sink=None,
             temperature=None,
             seed=None,
+            timeout_seconds=30.0,
         )
 
     assert result.sink is not None
-    # Only the resolve_sink tool is offered — no discovery tools.
+    # Terminal guided actions remain available, but no discovery tools are offered.
     offered_names = {t["function"]["name"] for t in captured[0]}
-    assert offered_names == {"resolve_sink"}
+    assert offered_names == {"resolve_sink", "retain_deferred_intent", "manage_deferred_intent"}

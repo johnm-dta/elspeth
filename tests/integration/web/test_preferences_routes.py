@@ -142,6 +142,7 @@ def test_get_returns_guided_default_for_brand_new_user(client_as_alice: TestClie
     body = response.json()
     assert body["default_mode"] == "guided"
     assert body["banner_dismissed_at"] is None
+    assert body["freeform_intro_dismissed_at"] is None
     assert body["tutorial_completed_at"] is None
 
 
@@ -167,6 +168,18 @@ def test_patch_persists_banner_dismissal(client_as_alice: TestClient) -> None:
     assert body["banner_dismissed_at"] is not None
     # SQLite strips tzinfo; the value is preserved either way.
     assert "2026-05-15T12:00:00" in body["banner_dismissed_at"]
+
+
+def test_patch_persists_freeform_intro_dismissal(client_as_alice: TestClient) -> None:
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"freeform_intro_dismissed_at": "2026-07-12T05:00:00Z"},
+    )
+
+    assert response.status_code == 200
+    assert "2026-07-12T05:00:00" in response.json()["freeform_intro_dismissed_at"]
+    follow_up = client_as_alice.get("/api/composer-preferences")
+    assert "2026-07-12T05:00:00" in follow_up.json()["freeform_intro_dismissed_at"]
 
 
 def test_patch_sets_tutorial_completed_at(client_as_alice: TestClient) -> None:

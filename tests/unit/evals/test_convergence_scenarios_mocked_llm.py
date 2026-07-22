@@ -57,6 +57,7 @@ from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -311,7 +312,12 @@ class TestCsvClassifierScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: blocking pipeline — fixed schema declaring only ticket_id,
         # omitting the other four observed columns. on_validation_failure=
@@ -417,19 +423,19 @@ class TestCsvClassifierScenario:
         # at is_valid=false (reviews surfaced, pending out-of-loop resolution).
         # The REAL preflight is what makes is_valid honest here.
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
-            # Six LLM calls / two forced repair turns (Branch B terminal state):
+            # Five LLM calls / two forced repair turns (Branch B terminal state):
             #   1. set_pipeline (fixed schema omitting four observed columns)
             #   2. claim completion → REPAIR 1 (preflight: schema omits columns)
             #   3. patch_source_options → schema=observed
             #   4. claim completion → REPAIR 2 (orphan gate: llm_model_choice on
             #      'classifier' has no pending review event)
             #   5. request_interpretation_review (llm_model_choice) → pending event
-            #   6. claim completion → CLEAN finalize. Both interpretation reviews
-            #      (llm_prompt_template auto-surfaced + llm_model_choice surfaced)
-            #      are now RESOLVABLE pending handoffs, zero orphans. The terminal
+            #      and immediate terminal user-action handoff. Both interpretation
+            #      reviews (llm_prompt_template auto-surfaced + llm_model_choice
+            #      surfaced) are now RESOLVABLE, with zero orphans. The terminal
             #      preflight is invalid-but-pending, so the finalize path SKIPS the
             #      "runtime preflight failed" suffix → clean message, is_valid=false.
-            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice, turn4]
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn_surface_model_choice]
             result = await service.compose(
                 "Classify these tickets",
                 [],
@@ -440,7 +446,7 @@ class TestCsvClassifierScenario:
 
         # Convergence behaviour: two forced repair turns (schema-mode repair +
         # the orphan-gate repair that surfaces the llm_model_choice review).
-        assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
+        assert mock_llm.call_count == 5, f"expected 5 LLM calls, got {mock_llm.call_count}"
         assert result.repair_turns_used == 2, f"expected 2 repair turns, got {result.repair_turns_used}"
 
         # The terminal state is the honest Branch-B converged shape: a model-
@@ -508,7 +514,12 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Single-turn build: type_coerce on price + gate + two outputs.
         turn1 = _llm_response(
@@ -627,7 +638,12 @@ class TestNumericGateScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: structurally valid but runtime-broken pipeline — observed
         # CSV values are raw strings, so the direct numeric gate would fail
@@ -823,7 +839,12 @@ class TestUrlTextSmokeScenario:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: blocking pipeline — text source whose blob content is a
         # URL, but no web_scrape transform downstream. The URL string
@@ -1066,7 +1087,12 @@ class TestPreflightRepairContinue:
 
         catalog = _real_catalog()
         settings = _make_settings(tmp_path)
-        service = ComposerServiceImpl(catalog=catalog, settings=settings, sessions_service=sessions_service, session_engine=engine)
+        service = ComposerServiceImpl.for_trained_operator(
+            catalog=catalog,
+            settings=settings,
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
 
         # Turn 1: build a structurally valid pipeline whose sink path is a
         # placeholder -> content-aware preflight is INVALID.
@@ -1092,8 +1118,9 @@ class TestPreflightRepairContinue:
             state: CompositionState,
             user_id: str | None = None,
             session_id: str | None = None,
+            plugin_snapshot: PluginAvailabilitySnapshot | None = None,
         ) -> ValidationResult:
-            del user_id, session_id
+            del user_id, session_id, plugin_snapshot
             sink_path = state.outputs[0].options.get("path") if state.outputs else None
             if sink_path == _BROKEN_SINK_PATH:
                 return _preflight_invalid_for_placeholder_sink()

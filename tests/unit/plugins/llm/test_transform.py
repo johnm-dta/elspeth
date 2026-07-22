@@ -125,6 +125,8 @@ def _make_config(*, provider: str = "azure", **overrides: Any) -> dict[str, Any]
             model="openai/gpt-4o",
             api_key="test-key",
         )
+    elif provider == "bedrock":
+        base.update(model="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0")
     base.update(overrides)
     return base
 
@@ -680,14 +682,22 @@ class TestTemplateTierPolicy:
 
     def test_per_query_template_syntax_error_raises_at_construction(self) -> None:
         """A syntactically invalid per-query template must fail at construction,
-        not be deferred to the first row (structural = Tier 2 init-time validation)."""
-        from elspeth.plugins.infrastructure.templates import TemplateError
+        not be deferred to the first row (structural = Tier 2 init-time validation).
+
+        Since the run-4 P4 compose-parity fix, the failure surfaces even
+        earlier — at CONFIG parse (QueryDefinition.validate_template), the
+        same gate that already covered options.prompt_template — rather than
+        at QueryExecutor init.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         config = _make_multi_query_config()
         config["queries"]["quality"]["template"] = "{% if unclosed"
 
-        with pytest.raises(TemplateError, match="Invalid template syntax"):
+        with pytest.raises((PluginConfigError, PydanticValidationError), match="Invalid Jinja2 template in queries entry"):
             LLMTransform(config)
 
     def test_valid_per_query_template_override_compiles_at_init(self) -> None:
@@ -1280,6 +1290,20 @@ class TestLimiterDispatch:
         transform.on_start(ctx)
 
         mock_registry.get_limiter.assert_called_once_with("openrouter")
+
+    def test_bedrock_provider_gets_bedrock_limiter(self) -> None:
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        transform = LLMTransform(_make_config(provider="bedrock"))
+        mock_registry = _RegistryDouble()
+        ctx = _make_ctx()
+        ctx.landscape = object()
+        ctx.rate_limit_registry = mock_registry
+        ctx.telemetry_emit = lambda event: None
+
+        transform.on_start(ctx)
+
+        mock_registry.get_limiter.assert_called_once_with("bedrock")
 
 
 # ---------------------------------------------------------------------------

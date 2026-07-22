@@ -24,9 +24,11 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from elspeth.contracts.audit_export import AuditExportDerivationConfig
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape import LandscapeDB
-from elspeth.core.landscape.exporter import LandscapeExporter
+from elspeth.core.landscape.exporter import LandscapeExporter, RecorderFactoryExportReadModel
+from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_landscape_db
 from tests.strategies.json import json_primitives
 
@@ -198,22 +200,24 @@ class TestExportSigningProperties:
 
 
 class TestExportUnsignedProperties:
-    """Unsigned exports must not have signatures."""
+    """Unsigned exports retain data-record shape and one null-signed manifest."""
 
     def test_unsigned_records_have_no_signature(self) -> None:
         """Property: When sign=False, records have no 'signature' field."""
-        exporter = _make_exporter_with_data(signing_key=b"key", num_records=2)
+        exporter = _make_exporter_with_data(signing_key=None, num_records=2)
         records = list(exporter.export_run("run-1", sign=False))
 
-        for record in records:
+        for record in records[:-1]:
             assert "signature" not in record
+        assert records[-1]["signature"] is None
 
-    def test_unsigned_has_no_manifest(self) -> None:
-        """Property: When sign=False, no manifest record is emitted."""
-        exporter = _make_exporter_with_data(signing_key=b"key", num_records=2)
+    def test_unsigned_has_one_manifest_last(self) -> None:
+        """Property: unsigned v2 still emits exactly one final manifest."""
+        exporter = _make_exporter_with_data(signing_key=None, num_records=2)
         records = list(exporter.export_run("run-1", sign=False))
 
-        assert not any(r.get("record_type") == "manifest" for r in records)
+        assert [r.get("record_type") for r in records].count("manifest") == 1
+        assert records[-1]["record_type"] == "manifest"
 
 
 # =============================================================================
@@ -235,7 +239,8 @@ class TestManifestMetadata:
         assert "record_count" in manifest
         assert "final_hash" in manifest
         assert manifest["hash_algorithm"] == "sha256"
-        assert manifest["signature_algorithm"] == "hmac-sha256"
+        assert manifest["signature_algorithm"] == "hmac_sha256"
+        assert manifest["schema"] == "elspeth.audit-export-manifest.v2"
         assert "exported_at" in manifest
         assert "signature" in manifest
 
@@ -264,7 +269,11 @@ def _shared_landscape_db() -> LandscapeDB:
 
 def _make_exporter(signing_key: bytes | None = None) -> LandscapeExporter:
     """Create an exporter over a real empty DB (for _sign_record tests only)."""
-    return LandscapeExporter(_shared_landscape_db(), signing_key=signing_key)
+    return LandscapeExporter(
+        _shared_landscape_db(),
+        signing_key=signing_key,
+        signer_key_id="property-signer-v1" if signing_key is not None else None,
+    )
 
 
 def _make_exporter_with_data(
@@ -278,7 +287,32 @@ def _make_exporter_with_data(
     """
     test_records = [{"record_type": f"test_{i}", "data": f"value_{i}", "index": i} for i in range(num_records)]
 
-    exporter = LandscapeExporter(_shared_landscape_db(), signing_key=signing_key)
+    signing_mode = "hmac_sha256" if signing_key is not None else "unsigned"
+    exporter = LandscapeExporter(
+        _shared_landscape_db(),
+        # The records and terminal witness are synthetic in this property
+        # test.  Supplying the read model explicitly keeps snapshot ownership
+        # with the test fixture instead of asking the default exporter to look
+        # up the non-existent ``run-1`` fixture row.
+        read_model=RecorderFactoryExportReadModel(RecorderFactory(_shared_landscape_db())),
+        signing_key=signing_key,
+        signer_key_id="property-signer-v1" if signing_key is not None else None,
+        derivation_config=AuditExportDerivationConfig(
+            source_run_id="run-1",
+            source_status="completed",
+            source_completed_at="2026-01-15T13:00:00.000000Z",
+            export_format="json",
+            exporter_version="landscape-exporter-v1",
+            serialization_version="audit-export-v2",
+            chunking_algorithm_version="record-framing-v1",
+            include_raw_error_rows=False,
+            per_chunk_byte_limit=1_048_576,
+            per_chunk_record_limit=1_000,
+            signing_mode=signing_mode,
+            signer_key_id="property-signer-v1" if signing_key is not None else "UNSIGNED",
+            signing_key=signing_key,
+        ),
+    )
 
     # Patch _iter_records to return our test data
     def _mock_iter(run_id: str):

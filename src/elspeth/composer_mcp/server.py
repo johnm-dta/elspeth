@@ -35,6 +35,7 @@ from elspeth.contracts.composer_audit import (
 )
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import build_canonicalization_sentinel
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -56,6 +57,7 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightKey,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 __all__ = ["create_server", "main"]
 
@@ -355,7 +357,18 @@ def _dispatch_tool(
                 "error": control_error,
                 "state": state.to_dict(),
             }
-        result = execute_tool(tool_name, arguments, state, catalog, data_dir=None, baseline=baseline, runtime_preflight=runtime_preflight)
+        plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+        policy_catalog = PolicyCatalogView.for_trained_operator(catalog, plugin_snapshot)
+        result = execute_tool(
+            tool_name,
+            arguments,
+            state,
+            policy_catalog,
+            plugin_snapshot=plugin_snapshot,
+            data_dir=None,
+            baseline=baseline,
+            runtime_preflight=runtime_preflight,
+        )
         response = result.to_dict()
         response["state"] = result.updated_state.to_dict()
         # Discovery tools return Pydantic models (PluginSummary, PluginSchemaInfo)

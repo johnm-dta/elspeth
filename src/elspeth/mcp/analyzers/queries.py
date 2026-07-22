@@ -19,10 +19,12 @@ from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import LandscapeReadRepositories, RecorderFactory
 from elspeth.core.landscape.serialization import dataclass_to_dict, serialize_datetime
+from elspeth.core.landscape.sink_effect_diagnostics import load_sink_effect_recovery_history
 from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,
     OPERATION_TYPE_VALUES,
+    ArtifactRecord,
     CallDetail,
     CollisionFieldRecord,
     CollisionRecord,
@@ -34,6 +36,7 @@ from elspeth.mcp.types import (
     RowRecord,
     RunDetail,
     RunRecord,
+    SinkEffectHistoryReport,
     TokenChildRecord,
     TokenRecord,
 )
@@ -275,6 +278,7 @@ def list_operations(
                 operations_table.c.run_id,
                 operations_table.c.node_id,
                 operations_table.c.operation_type,
+                operations_table.c.sink_effect_id,
                 operations_table.c.started_at,
                 operations_table.c.completed_at,
                 operations_table.c.status,
@@ -312,6 +316,7 @@ def list_operations(
             "node_id": row.node_id,
             "plugin_name": row.plugin_name,
             "operation_type": row.operation_type,
+            "sink_effect_id": row.sink_effect_id,
             "status": row.status,
             "started_at": row.started_at.isoformat() if row.started_at else None,
             "completed_at": row.completed_at.isoformat() if row.completed_at else None,
@@ -320,6 +325,56 @@ def list_operations(
         }
         for row in rows
     ]
+
+
+def list_artifacts(
+    db: LandscapeDB,
+    factory: AnalyzerRepositories,
+    run_id: str,
+    limit: int = 100,
+) -> list[ArtifactRecord]:
+    """List artifacts with explicit epoch-25/26 producer and publication evidence."""
+    del db
+    artifacts = factory.execution.get_artifacts(run_id)
+    return [
+        {
+            "artifact_id": artifact.artifact_id,
+            "run_id": artifact.run_id,
+            "sink_node_id": artifact.sink_node_id,
+            "producer_kind": artifact.producer_kind,
+            "produced_by_state_id": artifact.produced_by_state_id,
+            "sink_effect_id": artifact.sink_effect_id,
+            "artifact_type": artifact.artifact_type,
+            "path_or_uri": artifact.path_or_uri,
+            "content_hash": artifact.content_hash,
+            "size_bytes": artifact.size_bytes,
+            "idempotency_key": artifact.idempotency_key,
+            "publication_performed": artifact.publication_performed,
+            "publication_evidence_kind": artifact.publication_evidence_kind,
+            "created_at": artifact.created_at.isoformat(),
+        }
+        for artifact in artifacts[:limit]
+    ]
+
+
+def get_sink_effect_history(
+    db: LandscapeDB,
+    factory: AnalyzerRepositories,
+    effect_id: str,
+) -> SinkEffectHistoryReport | None:
+    """Return safe recovery diagnostics for one durable sink effect."""
+    del factory
+    history = load_sink_effect_recovery_history(db, effect_id)
+    if history is None:
+        return None
+    return {
+        "effect": history.effect,
+        "members": list(history.members),
+        "attempts": list(history.attempts),
+        "member_progress": dict(history.member_progress),
+        "response_lost_attempts": history.response_lost_attempts,
+        "operator_guidance": history.operator_guidance,
+    }
 
 
 def get_operation_calls(db: LandscapeDB, factory: AnalyzerRepositories, operation_id: str) -> list[OperationCallRecord]:

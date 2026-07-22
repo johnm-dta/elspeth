@@ -23,16 +23,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 interface ModeSwitchButtonProps {
   target: "guided" | "freeform";
   hasWork: boolean;
-  /**
-   * C-4b (composer first-principles review 2026-07-04): set when the
-   * session's guided state is permanently terminal (exited_to_freeform with
-   * reason solver_exhausted or protocol_violation — NOT user_pressed_exit,
-   * which the backend's POST /guided/reenter still honours). Renders the
-   * button disabled with this plain-language explanation instead of the
-   * normal switch/confirm flow — clicking must never silently no-op (the
-   * old behaviour: the client re-fetched guided state, saw the same
-   * terminal, and stayed in freeform with zero feedback).
-   */
+  /** Optional caller-owned explanation for a disabled mode transition. */
   disabledReason?: string;
 }
 
@@ -46,12 +37,19 @@ export function ModeSwitchButton({
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
   const reactId = useId();
   const disabledReasonId = `${reactId}-mode-switch-disabled-reason`;
+  const confirmDescriptionId = `${reactId}-mode-switch-confirm-description`;
 
   const label = target === "guided" ? "Switch to guided" : "Exit to freeform";
   const confirmLabel =
     target === "guided"
       ? "Confirm switch to guided"
       : "Confirm exit to freeform";
+  const confirmTitle =
+    target === "guided" ? "Switch to guided mode?" : "Exit to freeform mode?";
+  const confirmNote =
+    target === "guided"
+      ? "Guided mode starts a fresh pipeline. Your current pipeline is saved to version history and can be restored."
+      : "Your guided progress remains saved. You can continue in the freeform composer with the current pipeline context.";
 
   function doSwitch(): void {
     void (target === "guided" ? enterGuided() : exitToFreeform());
@@ -78,13 +76,19 @@ export function ModeSwitchButton({
   if (confirming) {
     return (
       <div
-        className="mode-switch-confirm"
+        className="mode-switch-confirm mode-switch-confirm-card"
         role="group"
         aria-label={confirmLabel}
+        aria-describedby={confirmDescriptionId}
       >
+        <span className="mode-switch-confirm-title">{confirmTitle}</span>
+        <span id={confirmDescriptionId} className="mode-switch-confirm-note">
+          {confirmNote}
+        </span>
         <button
           type="button"
           className="mode-switch-btn mode-switch-btn--confirm"
+          aria-describedby={confirmDescriptionId}
           onClick={() => {
             setConfirming(false);
             doSwitch();

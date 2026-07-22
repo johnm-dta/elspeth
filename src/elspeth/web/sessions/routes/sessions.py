@@ -3,17 +3,38 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
-from elspeth.web.blobs.protocol import BlobRecord
+from elspeth.web.blobs.protocol import (
+    BlobError,
+    BlobForkFenceLostError,
+    BlobForkWriteFence,
+    BlobQuotaExceededError,
+    BlobRecord,
+)
+from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX
+from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.sessions.protocol import (
+    GuidedForkSettlementCommand,
+    GuidedOperationFailureCode,
+    GuidedOperationFenceLostError,
+    GuidedSessionResult,
+    SessionGuidedOperationInProgressError,
+    SessionNotFoundError,
+)
+from elspeth.web.sessions.routes.guided_operations import (
+    GuidedOperationLease,
+    guided_response_hash,
+    raise_guided_operation_failure,
+    reserve_or_replay_guided_operation,
+)
 from elspeth.web.sessions.titles import mint_default_session_title
 
 from ._helpers import (
     UUID,
     APIRouter,
     AuditIntegrityError,
-    BlobQuotaExceededError,
     BlobServiceProtocol,
-    ChatMessageRecord,
     ComposerProgressSnapshot,
     CompositionStateData,
     CreateSessionRequest,
@@ -31,9 +52,7 @@ from ._helpers import (
     UserIdentity,
     _get_composer_progress_registry,
     _get_session_compose_lock_registry,
-    _message_response,
     _session_response,
-    _state_response,
     _verify_session_ownership,
     deep_thaw,
     get_current_user,
@@ -85,36 +104,6 @@ def _copied_blob_for_inline_marker(
             f"session {new_session_id}."
         )
     return copied_blob
-
-
-async def _archive_session_capturing_failure(
-    service: SessionServiceProtocol,
-    session_id: UUID,
-    *,
-    context: str,
-) -> str | None:
-    """Best-effort rollback archive of a partially-forked session.
-
-    Returns an explicit ``RecoveryFailed[...]`` note (a recorded boundary
-    outcome, not a swallow) when ``archive_session`` fails with a recoverable
-    IO/DB error; the caller attaches it to the propagating primary error so the
-    orphan session row is visible to operators. Returns ``None`` on success.
-
-    The catch is narrowed to ``(SQLAlchemyError, OSError)`` so programmer bugs
-    (AttributeError, TypeError) in ``archive_session`` still propagate. The
-    cleanup failure is converted to a return value *inside* this helper, so it
-    never enters the headline exception's ``__context__`` chain — the caller's
-    ``raise ... from None`` / bare ``raise`` traceback semantics are preserved.
-    """
-    try:
-        await service.archive_session(session_id)
-        return None
-    except (SQLAlchemyError, OSError) as cleanup_exc:
-        return (
-            f"RecoveryFailed[{type(cleanup_exc).__name__}]: "
-            f"could not archive forked session {session_id} {context} "
-            f"({cleanup_exc}). Manual cleanup of sessions.id={session_id} required."
-        )
 
 
 def _rewrite_inline_content_blob_refs(
@@ -169,6 +158,201 @@ def _rewrite_inline_content_blob_refs(
         return rewritten
 
     return False
+
+
+def _rewrite_source_blob_options(
+    options: object,
+    blob_map: dict[UUID, BlobRecord],
+    source_blob_path_map: dict[str, BlobRecord],
+    *,
+    field_path: str,
+) -> tuple[dict[str, Any], bool]:
+    """Strictly rebuild one source options object without touching samples."""
+    if type(options) is not dict:
+        raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path} must be an exact dict")
+    rebuilt = deep_thaw(options)
+    if type(rebuilt) is not dict:  # pragma: no cover - deep_thaw contract
+        raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path} thaw did not produce a dict")
+    targets: dict[UUID, BlobRecord] = {}
+    id_option_keys = tuple(
+        key
+        for key, value in rebuilt.items()
+        if value is not None and type(key) is str and (key in {"blob_ref", "blob_id"} or key.endswith("_blob_id"))
+    )
+    for key in id_option_keys:
+        old_ref = rebuilt[key]
+        if type(old_ref) is not str:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{key} must be a UUID string")
+        try:
+            old_blob_id = UUID(old_ref)
+        except ValueError as exc:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{key} is not a UUID string") from exc
+        copied = blob_map.get(old_blob_id)
+        if copied is None:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{key} was absent from the frozen fork plan")
+        targets[old_blob_id] = copied
+        rebuilt[key] = str(copied.id)
+    for carrier in ("path", "file"):
+        value = rebuilt.get(carrier)
+        if carrier in rebuilt and value is not None and type(value) is not str:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{carrier} must be a string")
+        if type(value) is not str:
+            continue
+        if value.startswith(BLOB_REF_PATH_PREFIX):
+            try:
+                old_blob_id = UUID(value.removeprefix(BLOB_REF_PATH_PREFIX))
+            except ValueError as exc:
+                raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{carrier} has malformed blob sentinel") from exc
+            copied = blob_map.get(old_blob_id)
+            if copied is None:
+                raise AuditIntegrityError(
+                    f"Tier 1 audit anomaly: {field_path}.{carrier} blob sentinel was absent from the frozen fork plan"
+                )
+            targets[old_blob_id] = copied
+            rebuilt[carrier] = f"{BLOB_REF_PATH_PREFIX}{copied.id}"
+        elif value in source_blob_path_map:
+            copied = source_blob_path_map[value]
+            targets[next(source_id for source_id, record in blob_map.items() if record.id == copied.id)] = copied
+            rebuilt[carrier] = copied.storage_path
+    if len(targets) > 1:
+        raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path} binds more than one source blob")
+    target = next(iter(targets.values()), None)
+    if target is None:
+        return rebuilt, False
+    rebuilt["blob_ref"] = str(target.id)
+    if ("path" in rebuilt and not str(rebuilt["path"]).startswith(BLOB_REF_PATH_PREFIX)) or (
+        "path" not in rebuilt and "file" not in rebuilt
+    ):
+        rebuilt["path"] = target.storage_path
+    if "file" in rebuilt and not str(rebuilt["file"]).startswith(BLOB_REF_PATH_PREFIX):
+        rebuilt["file"] = target.storage_path
+    return rebuilt, True
+
+
+def _contains_exact_string(value: object, needles: frozenset[str]) -> bool:
+    if type(value) is str:
+        return value in needles or any(value == f"{BLOB_REF_PATH_PREFIX}{needle}" for needle in needles)
+    if type(value) is dict:
+        return any(_contains_exact_string(item, needles) for item in value.values())
+    if type(value) is list:
+        return any(_contains_exact_string(item, needles) for item in value)
+    return False
+
+
+def _rewrite_guided_blob_custody(
+    composer_meta: Mapping[str, Any] | None,
+    blob_map: dict[UUID, BlobRecord],
+    source_blob_path_map: dict[str, BlobRecord],
+) -> tuple[dict[str, Any] | None, bool]:
+    if composer_meta is None:
+        return None, False
+    if "guided_session" not in composer_meta:
+        return dict(composer_meta), False
+    guided_raw = composer_meta["guided_session"]
+    if type(guided_raw) is not dict:
+        raise AuditIntegrityError("Tier 1 audit anomaly: composer_meta.guided_session must be an exact dict")
+    # Parse first and again after reconstruction: reviewed and pending sources
+    # are schema-owned objects, not arbitrary JSON dictionaries.
+    guided = GuidedSession.from_dict(guided_raw)
+    rebuilt = guided.to_dict()
+    rewritten = False
+    for stable_id, reviewed in rebuilt["reviewed_sources"].items():
+        reviewed["options"], changed = _rewrite_source_blob_options(
+            reviewed["options"],
+            blob_map,
+            source_blob_path_map,
+            field_path=f"guided_session.reviewed_sources[{stable_id!r}].options",
+        )
+        rewritten = rewritten or changed
+    for stable_id, pending in rebuilt["pending_source_intents"].items():
+        if pending["options"] is not None:
+            pending["options"], changed = _rewrite_source_blob_options(
+                pending["options"],
+                blob_map,
+                source_blob_path_map,
+                field_path=f"guided_session.pending_source_intents[{stable_id!r}].options",
+            )
+            rewritten = rewritten or changed
+        inspection = pending["inspection_facts"]
+        if inspection is not None:
+            identity = inspection["redacted_identity"]
+            old_ref = identity.get("blob_id")
+            if old_ref is not None:
+                try:
+                    old_blob_id = UUID(old_ref)
+                except (TypeError, ValueError) as exc:
+                    raise AuditIntegrityError("Tier 1 audit anomaly: pending source inspection blob_id is not a UUID string") from exc
+                copied = blob_map.get(old_blob_id)
+                if copied is None:
+                    raise AuditIntegrityError(
+                        "Tier 1 audit anomaly: pending source inspection blob_id was absent from the frozen fork plan"
+                    )
+                identity["blob_id"] = str(copied.id)
+                rewritten = True
+    rebuilt = GuidedSession.from_dict(rebuilt).to_dict()
+    source_ids = frozenset(str(blob_id) for blob_id in blob_map)
+    if _contains_exact_string(rebuilt, source_ids):
+        raise AuditIntegrityError("Tier 1 audit anomaly: forked guided metadata retained a parent blob id")
+    result = dict(composer_meta)
+    result["guided_session"] = rebuilt
+    return result, rewritten
+
+
+def _rewrite_fork_state_blob_custody(
+    state: Any,
+    blob_map: dict[UUID, BlobRecord],
+    source_blob_path_map: dict[str, BlobRecord],
+    *,
+    child_session_id: UUID,
+) -> CompositionStateData | None:
+    if state is None:
+        return None
+    sources = deep_thaw(state.sources) if state.sources is not None else None
+    nodes = deep_thaw(state.nodes)
+    edges = deep_thaw(state.edges)
+    outputs = deep_thaw(state.outputs)
+    metadata = deep_thaw(state.metadata_)
+    composer_meta = deep_thaw(state.composer_meta) if state.composer_meta is not None else None
+    rewritten = False
+    if sources is not None:
+        if type(sources) is not dict:
+            raise AuditIntegrityError("Tier 1 audit anomaly: forked composition sources must be an exact dict")
+        for source_name, source in sources.items():
+            if type(source) is not dict:
+                raise AuditIntegrityError(f"Tier 1 audit anomaly: sources.{source_name} must be an exact dict")
+            if source.get("options") is not None:
+                source["options"], changed = _rewrite_source_blob_options(
+                    source["options"],
+                    blob_map,
+                    source_blob_path_map,
+                    field_path=f"sources.{source_name}.options",
+                )
+                rewritten = rewritten or changed
+    for field_name, value in (("sources", sources), ("nodes", nodes), ("outputs", outputs)):
+        rewritten = (
+            _rewrite_inline_content_blob_refs(
+                value,
+                blob_map,
+                composition_state_id=state.id,
+                new_session_id=child_session_id,
+                field_path=field_name,
+            )
+            or rewritten
+        )
+    composer_meta, guided_rewritten = _rewrite_guided_blob_custody(composer_meta, blob_map, source_blob_path_map)
+    rewritten = rewritten or guided_rewritten
+    if not rewritten:
+        return None
+    return CompositionStateData(
+        sources=sources,
+        nodes=nodes,
+        edges=edges,
+        outputs=outputs,
+        metadata_=metadata,
+        is_valid=state.is_valid,
+        validation_errors=list(state.validation_errors) if state.validation_errors else None,
+        composer_meta=composer_meta,
+    )
 
 
 def register_session_routes(router: APIRouter) -> None:
@@ -313,15 +497,20 @@ def register_session_routes(router: APIRouter) -> None:
 
             try:
                 await service.archive_session(session.id)
-            finally:
-                # Clean up ephemeral per-session state regardless of archive outcome.
-                # If archive fails, the session still exists and a retry will re-enter
-                # this path. The lock cleanup is idempotent.
-                execution_service.cleanup_session_lock(session_key)
-                compose_lock_registry = _get_session_compose_lock_registry(request)
-                await compose_lock_registry.cleanup_session_lock(session_key)
-                progress_registry = _get_composer_progress_registry(request)
-                await progress_registry.clear(session_key)
+            except SessionGuidedOperationInProgressError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot archive a session while a guided operation is in progress.",
+                ) from exc
+            # Archive is the durable boundary: preserve the live session's
+            # ephemeral coordination state when it fails. Registry cleanup
+            # retires held/waited locks only after their current users drain,
+            # so deletion cannot split one session across old and new locks.
+            execution_service.cleanup_session_lock(session_key)
+            compose_lock_registry = _get_session_compose_lock_registry(request)
+            await compose_lock_registry.cleanup_session_lock(session_key)
+            progress_registry = _get_composer_progress_registry(request)
+            await progress_registry.clear(session_key)
 
     @router.post(
         "/{session_id}/fork",
@@ -342,231 +531,133 @@ def register_session_routes(router: APIRouter) -> None:
         """
         await _verify_session_ownership(session_id, user, request)
         service: SessionServiceProtocol = request.app.state.session_service
-        settings = request.app.state.settings
-
-        try:
-            new_session, new_messages, copied_state = await service.fork_session(
-                source_session_id=session_id,
-                fork_message_id=body.from_message_id,
-                new_message_content=body.new_message_content,
-                user_id=user.user_id,
-                auth_provider_type=settings.auth_provider,
-            )
-        except InvalidForkTargetError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-        # Everything after fork_session() is a compensatable post-commit
-        # phase.  If ANY step fails, archive the fork to avoid orphaned
-        # sessions/blobs/state.  BlobQuotaExceededError gets a specific
-        # 413; all other failures re-raise after cleanup.
         blob_service: BlobServiceProtocol = request.app.state.blob_service
-        try:
-            source_blobs = await blob_service.list_blobs(session_id)
-            # Copy blobs from source session into the forked session.
-            # Returns old_id → new_blob mapping for source reference rewriting.
-            blob_map = await blob_service.copy_blobs_for_fork(session_id, new_session.id)
-            source_blob_path_map = {blob.storage_path: blob_map[blob.id] for blob in source_blobs if blob.id in blob_map}
 
-            # Rewrite source references in the forked state so the fork is
-            # self-contained.  Without this, blob_ref and path in the source
-            # options still point at the original session's assets.
-            if copied_state is not None:
-                sources_dict = deep_thaw(copied_state.sources) if copied_state.sources is not None else None
-                nodes_data = deep_thaw(copied_state.nodes)
-                edges_data = deep_thaw(copied_state.edges)
-                outputs_data = deep_thaw(copied_state.outputs)
-                metadata_data = deep_thaw(copied_state.metadata_)
-                composer_meta_data = deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None
-                rewritten = False
+        # Give structurally invalid fork targets their stable public status
+        # before reserving durable retry state. The service rechecks under the
+        # parent write lock so this read is never relied on for integrity.
+        parent_messages = await service.get_messages(session_id, limit=None)
+        fork_target = next((message for message in parent_messages if message.id == body.from_message_id), None)
+        if fork_target is None:
+            raise HTTPException(status_code=404, detail=f"Message {body.from_message_id} not found")
+        if fork_target.role != "user":
+            raise HTTPException(status_code=422, detail=str(InvalidForkTargetError(str(fork_target.id), fork_target.role)))
 
-                if sources_dict is not None and type(sources_dict) is not dict:
-                    raise AuditIntegrityError(
-                        f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                        f"has sources type {type(sources_dict).__name__}, expected dict "
-                        f"before fork blob rewrite for session {new_session.id}."
+        async def _replay(result: object) -> ForkSessionResponse:
+            if type(result) is not GuidedSessionResult:
+                raise AuditIntegrityError("Session fork replay locator has the wrong result kind")
+            return ForkSessionResponse(session_id=result.session_id)
+
+        while True:
+            try:
+                reserved = await reserve_or_replay_guided_operation(
+                    service=service,
+                    session_id=session_id,
+                    kind="session_fork",
+                    request=body,
+                    replay=_replay,
+                )
+            except SessionNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="Session not found") from exc
+            if reserved is None:  # pragma: no cover - reservation is enabled
+                raise AuditIntegrityError("Session fork operation was not reserved")
+            if not isinstance(reserved, GuidedOperationLease):
+                return reserved
+
+            fence = reserved.fence
+            staged = None
+            try:
+                staged = await service.fork_session(
+                    fence,
+                    fork_message_id=body.from_message_id,
+                    new_message_content=body.new_message_content,
+                )
+
+                async def _checkpoint() -> None:
+                    nonlocal fence
+                    fence = await service.renew_guided_operation(
+                        fence,
+                        actor="composer_route",
+                        lease_seconds=300,
                     )
 
-                if sources_dict is not None:
-                    for source_name, source_dict in sources_dict.items():
-                        if type(source_dict) is not dict:
-                            raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                                f"has sources.{source_name} type {type(source_dict).__name__}, "
-                                f"expected dict before fork blob rewrite for session {new_session.id}."
-                            )
-                        if "options" not in source_dict or source_dict["options"] is None:
-                            continue
+                source_blobs = {entry.source_blob_id: await blob_service.get_blob(entry.source_blob_id) for entry in staged.blob_plan}
+                blob_map = await blob_service.copy_blobs_for_fork(
+                    session_id,
+                    staged.session.id,
+                    staged.blob_plan,
+                    BlobForkWriteFence(
+                        source_session_id=session_id,
+                        target_session_id=staged.session.id,
+                        operation_id=fence.operation_id,
+                        lease_token=fence.lease_token,
+                        attempt=fence.attempt,
+                    ),
+                    checkpoint=_checkpoint,
+                )
+                source_blob_path_map = {source_blobs[source_id].storage_path: copied for source_id, copied in blob_map.items()}
+                rewritten_state = _rewrite_fork_state_blob_custody(
+                    staged.state,
+                    blob_map,
+                    source_blob_path_map,
+                    child_session_id=staged.session.id,
+                )
+                response = ForkSessionResponse(session_id=staged.session.id)
+                await _checkpoint()
+                await service.settle_guided_fork_operation(
+                    GuidedForkSettlementCommand(
+                        fence=fence,
+                        child_session_id=staged.session.id,
+                        expected_current_state_id=staged.state.id if staged.state is not None else None,
+                        edited_message_id=staged.messages[-1].id,
+                        rewritten_state_id=uuid4() if rewritten_state is not None else None,
+                        rewritten_state=rewritten_state,
+                        response_hash=guided_response_hash(response),
+                        actor="composer_route",
+                    )
+                )
+                return response
+            except (GuidedOperationFenceLostError, BlobForkFenceLostError):
+                # A stale worker never cleans a child now owned by takeover.
+                continue
+            except Exception as primary_exc:
+                failure_code: GuidedOperationFailureCode = (
+                    "quota_exceeded"
+                    if isinstance(primary_exc, BlobQuotaExceededError)
+                    else "integrity_error"
+                    if isinstance(primary_exc, AuditIntegrityError)
+                    else "operation_failed"
+                )
+                try:
+                    failed = await service.fail_guided_operation(
+                        fence,
+                        failure_code=failure_code,
+                        actor="composer_route",
+                    )
+                except GuidedOperationFenceLostError:
+                    # Only the fail-CAS winner owns cleanup.
+                    continue
 
-                        options = source_dict["options"]
-                        if type(options) is not dict:
-                            raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                                f"has sources.{source_name}.options type {type(options).__name__}, expected "
-                                f"dict before fork blob rewrite for session {new_session.id}."
-                            )
-
-                        rewrite_target = None
-                        # Remap blob_ref to the new blob's ID.
-                        # composition_states.sources is Tier 1 ("our data") — the
-                        # composer writes blob_ref as the blob's UUID string. A
-                        # non-UUID value here means a write-path bug, DB
-                        # corruption, or tampering — crash with a diagnostic
-                        # rather than silently skipping the remap.
-                        old_ref = options["blob_ref"] if "blob_ref" in options else None
-                        if old_ref is not None:
-                            if type(old_ref) is not str:
-                                raise AuditIntegrityError(
-                                    f"Tier 1 audit anomaly: composition_state "
-                                    f"{copied_state.id} has blob_ref type "
-                                    f"{type(old_ref).__name__} in sources.{source_name}.options "
-                                    f"(expected a UUID string). Fork aborted to prevent "
-                                    f"cross-session blob reference in forked "
-                                    f"session {new_session.id}."
-                                )
-                            try:
-                                old_uuid = UUID(old_ref)
-                            except ValueError as exc:
-                                raise AuditIntegrityError(
-                                    f"Tier 1 audit anomaly: composition_state "
-                                    f"{copied_state.id} has non-UUID blob_ref "
-                                    f"{old_ref!r} in sources.{source_name}.options (expected a "
-                                    f"UUID string). Fork aborted to prevent cross-session blob "
-                                    f"reference in forked session {new_session.id}."
-                                ) from exc
-                            if old_uuid not in blob_map:
-                                raise AuditIntegrityError(
-                                    f"Tier 1 audit anomaly: composition_state "
-                                    f"{copied_state.id} has source blob_ref "
-                                    f"{old_ref!r}, but the source blob was not "
-                                    f"copied into forked session {new_session.id}."
-                                )
-                            rewrite_target = blob_map[old_uuid]
-
-                        if rewrite_target is None:
-                            for path_key in ("path", "file"):
-                                if path_key not in options:
-                                    continue
-                                path_value = options[path_key]
-                                if type(path_value) is str and path_value in source_blob_path_map:
-                                    rewrite_target = source_blob_path_map[path_value]
-                                    break
-
-                        if rewrite_target is not None:
-                            options["blob_ref"] = str(rewrite_target.id)
-                            if "path" in options or "file" not in options:
-                                options["path"] = rewrite_target.storage_path
-                            if "file" in options:
-                                options["file"] = rewrite_target.storage_path
-                            source_dict["options"] = options
-                            rewritten = True
-
-                if sources_dict is not None:
-                    rewritten = (
-                        _rewrite_inline_content_blob_refs(
-                            sources_dict,
-                            blob_map,
-                            composition_state_id=copied_state.id,
-                            new_session_id=new_session.id,
-                            field_path="sources",
+                if staged is not None:
+                    try:
+                        cleanup = await blob_service.cleanup_blobs_for_fork(
+                            session_id,
+                            staged.session.id,
+                            fence.operation_id,
                         )
-                        or rewritten
-                    )
-                rewritten = (
-                    _rewrite_inline_content_blob_refs(
-                        nodes_data,
-                        blob_map,
-                        composition_state_id=copied_state.id,
-                        new_session_id=new_session.id,
-                        field_path="nodes",
-                    )
-                    or rewritten
-                )
-                rewritten = (
-                    _rewrite_inline_content_blob_refs(
-                        outputs_data,
-                        blob_map,
-                        composition_state_id=copied_state.id,
-                        new_session_id=new_session.id,
-                        field_path="outputs",
-                    )
-                    or rewritten
-                )
+                    except (AuditIntegrityError, BlobError, SQLAlchemyError, OSError) as cleanup_exc:
+                        primary_exc.add_note(
+                            f"RecoveryFailed[{type(cleanup_exc).__name__}]: fork blob cleanup failed for "
+                            f"child {staged.session.id} ({cleanup_exc})"
+                        )
+                    else:
+                        for error in cleanup.errors:
+                            primary_exc.add_note(
+                                f"RecoveryFailed[{error.exc_type}]: could not delete fork blob {error.blob_id} "
+                                f"from child {staged.session.id} ({error.detail})"
+                            )
+                    # The failed child is retained as archived audit evidence.
+                    # Only its copied blobs are compensatable; deleting the
+                    # session would also destroy the frozen plan envelope.
 
-                if rewritten:
-                    # Save updated state with remapped sources. Preserve the
-                    # source state's composer_meta — fork inherits the
-                    # operational provenance of the parent compose.
-                    state_data = CompositionStateData(
-                        sources=sources_dict,
-                        nodes=nodes_data,
-                        edges=edges_data,
-                        outputs=outputs_data,
-                        metadata_=metadata_data,
-                        is_valid=copied_state.is_valid,
-                        validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
-                        composer_meta=composer_meta_data,
-                    )
-                    copied_state = await service.save_composition_state(
-                        new_session.id,
-                        state_data,
-                        # The blob-reference rewrite is part of the fork
-                        # operation: it rewrites copied state so the new
-                        # session is self-contained after blob copy.
-                        provenance="session_fork",
-                    )
-
-                    # The edited user message (last in list) still references
-                    # the pre-rewrite state.  Re-point it at the replacement
-                    # state so message-state lineage is self-contained.
-                    user_msg = new_messages[-1]
-                    await service.update_message_composition_state(
-                        user_msg.id,
-                        copied_state.id,
-                    )
-                    new_messages[-1] = ChatMessageRecord(
-                        id=user_msg.id,
-                        session_id=user_msg.session_id,
-                        role=user_msg.role,
-                        content=user_msg.content,
-                        raw_content=user_msg.raw_content,
-                        tool_calls=user_msg.tool_calls,
-                        created_at=user_msg.created_at,
-                        sequence_no=user_msg.sequence_no,
-                        composition_state_id=copied_state.id,
-                        writer_principal=user_msg.writer_principal,
-                        tool_call_id=user_msg.tool_call_id,
-                        parent_assistant_id=user_msg.parent_assistant_id,
-                    )
-        except BlobQuotaExceededError:
-            # Build the HTTPException up-front so cleanup failures can be
-            # attached as a note on the object that actually propagates —
-            # the inner BlobQuotaExceededError is suppressed by `from None`
-            # and any note attached to it would never reach operator logs.
-            quota_exc = HTTPException(
-                status_code=413,
-                detail="Blob quota exceeded during fork — unable to copy files",
-            )
-            cleanup_note = await _archive_session_capturing_failure(service, new_session.id, context="after blob quota rollback")
-            if cleanup_note is not None:
-                quota_exc.add_note(cleanup_note)
-            raise quota_exc from None
-        except Exception as primary_exc:
-            # Mirror the RecoveryFailed[...] convention from
-            # ``BlobServiceImpl.copy_blobs_for_fork`` and
-            # ``BlobServiceImpl.finalize_run_output_blobs`` (web/blobs/service.py):
-            # cleanup failures must NOT mask the original error.  The
-            # best-effort archive captures any recoverable cleanup failure as a
-            # note attached to primary_exc; the bare `raise` preserves
-            # primary_exc and its original traceback as the headline.
-            cleanup_note = await _archive_session_capturing_failure(service, new_session.id, context="during fork rollback")
-            if cleanup_note is not None:
-                primary_exc.add_note(cleanup_note)
-            raise
-
-        return ForkSessionResponse(
-            session=_session_response(new_session),
-            messages=[_message_response(m) for m in new_messages],
-            composition_state=_state_response(copied_state) if copied_state else None,
-        )
+                raise_guided_operation_failure(failed)

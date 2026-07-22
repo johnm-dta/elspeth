@@ -4,15 +4,38 @@ module top must remain available on this deployment.
 Phase 8 introduced unconditional imports of
 ``opentelemetry.exporter.prometheus.PrometheusMetricReader`` and
 ``prometheus_client`` (CONTENT_TYPE_LATEST, generate_latest) at
-``src/elspeth/web/app.py:21-23``.  The merge body documents that the
-``[all]`` extra has a resolver conflict with these packages and that
-they live in the ``[webui]`` extra instead.  This test fails the suite
-loudly if a future extras reshuffle drops the prometheus packages from
-the deployment image, instead of letting the regression surface as a
-boot-time ``ImportError`` during staging deploy.
+``src/elspeth/web/app.py:21-23``.  The release Dockerfile installs the
+``[all]`` extra by default, so both ``[webui]`` and ``[all]`` must carry
+these imports.  These tests fail locally if a future extras reshuffle
+drops the packages, instead of letting the regression surface as a
+boot-time ``ImportError`` during deployment.
 """
 
 from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+_ROOT = Path(__file__).resolve().parents[3]
+_PROMETHEUS_DEPENDENCIES = {
+    "opentelemetry-exporter-prometheus",
+    "prometheus-client",
+}
+
+
+def test_prometheus_dependencies_are_in_webui_and_all_extras() -> None:
+    """The default release extra must include every unconditional web import."""
+    with (_ROOT / "pyproject.toml").open("rb") as handle:
+        optional = tomllib.load(handle)["project"]["optional-dependencies"]
+
+    for extra in ("webui", "all"):
+        dependency_names = {canonicalize_name(Requirement(dependency).name) for dependency in optional[extra]}
+        assert dependency_names >= _PROMETHEUS_DEPENDENCIES, (
+            f"[{extra}] is missing release-critical dependencies: {sorted(_PROMETHEUS_DEPENDENCIES - dependency_names)}"
+        )
 
 
 def test_prometheus_extras_are_importable() -> None:

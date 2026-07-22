@@ -82,6 +82,13 @@ export function GuidedChatHistory({
   }
 
   const sorted = [...chatHistory].sort((a, b) => a.seq - b.seq);
+  // Retry is a recovery for the transcript's LAST turn only. A synthetic
+  // failure the conversation has moved past (a later re-send, a reply, any
+  // subsequent turn) must not keep a live Retry: the handler re-sends the
+  // user turn preceding the FAILURE, so a stale Retry replays an out-of-stage
+  // prompt at the current step (tutorial run 19: a recovered step-1 failure's
+  // Retry re-sent the source prompt ~22 times during the sink stage).
+  const lastSeq = sorted[sorted.length - 1].seq;
 
   const rows: React.ReactNode[] = [];
   let previousStep: ChatTurn["step"] | null = null;
@@ -131,7 +138,7 @@ export function GuidedChatHistory({
           <div className="bubble bubble-error message-bubble-content">
             <span className="sr-only">Error:</span>
             {turn.content}
-            {onRetrySyntheticFailure && (
+            {onRetrySyntheticFailure && turn.seq === lastSeq && (
               <div className="message-failed-row">
                 <button
                   type="button"

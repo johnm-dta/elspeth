@@ -279,6 +279,18 @@ _LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
     "lands in <query_key>_<response_field>, and each typed output_fields "
     "entry lands in <query_key>_<suffix>. Downstream mappers and sinks "
     "reference those exact prefixed names.",
+    # run-4 E1: the CLOSED per-query key set + namespace arbitration.
+    "The ONLY per-query keys you author are input_fields (REQUIRED), "
+    "template, and output_fields. The mapping key supplies the query name. "
+    "There is NO per-query response_field or schema — output naming comes "
+    "exclusively from the query-key prefix, and the node-level schema block "
+    "declares any guaranteed prefixed fields.",
+    # run-4 P4: no interpretation delivery exists for per-query templates.
+    "NEVER put {{interpretation:...}} tokens inside a queries.*.template — "
+    "review resolution rewrites only the node-level prompt_template/"
+    "prompt_template_parts, so a per-query token survives resolution and is "
+    "rejected at the compose gate. Reviewed slots belong in the node-level "
+    "template; per-query templates reference plain query variables only.",
     "Sink hygiene: the auto-appended <response_field>_usage / _model audit "
     "fields ride the row automatically — do not map or require them into "
     "sinks unless the user asked for token/model reporting.",

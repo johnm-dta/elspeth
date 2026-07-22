@@ -13,11 +13,13 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.config_base import PluginConfig
+from elspeth.plugins.infrastructure.templates import TemplateError
+from elspeth.plugins.transforms.llm.templates import PromptTemplate
 
 
 class OutputFieldType(StrEnum):
@@ -141,6 +143,39 @@ class QueryDefinition(BaseModel):
         default=None,
         description="Per-query Jinja2 template override (None = use the config-level prompt_template).",
     )
+
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, v: str | None) -> str | None:
+        """Compile-check per-query templates at config time (compose parity).
+
+        Pack pressure-suite run 4 (P4): ``options.prompt_template`` is
+        Jinja-compiled by ``LLMConfig.validate_prompt_template`` at config
+        time, but per-query overrides were compiled only at ENGINE BUILD
+        (``QueryExecutor.__post_init__``) — so a compose-accepted candidate
+        could crash the run at setup. Same gate, both template slots.
+
+        ``{{interpretation:...}}`` tokens get a targeted rejection: the
+        interpretation resolver rewrites only the node-level
+        ``prompt_template``/``prompt_template_parts`` — there is NO delivery
+        mechanism into per-query templates, so a token here survives review
+        resolution verbatim and dies as a Jinja syntax error at build.
+        """
+        if v is None:
+            return v
+        if "{{interpretation:" in v:
+            raise ValueError(
+                "queries.*.template cannot carry {{interpretation:...}} tokens: "
+                "interpretation review resolution rewrites only the node-level "
+                "prompt_template/prompt_template_parts. Put reviewed slots in the "
+                "node-level template and reference plain row variables here."
+            )
+        try:
+            PromptTemplate(v)
+        except TemplateError as exc:
+            raise ValueError(f"Invalid Jinja2 template in queries entry: {exc}") from exc
+        return v
+
     max_tokens: int | None = Field(
         default=None,
         description="Per-query max_tokens override (None = use the config-level max_tokens).",

@@ -2392,3 +2392,51 @@ def test_private_profile_option_rejection_names_the_real_cause(tmp_path: Path) -
     assert "max_capacity_retry_seconds" in lead.message  # the offending option, named
     assert "operator profile supplies" in lead.message
     assert "no longer available" not in lead.message
+
+
+def test_query_template_interpretation_token_is_rejected_at_the_compose_gate(tmp_path: Path) -> None:
+    # Pack pressure-suite run 4 (P4, f494da2a8 parity family): the compose
+    # gate Jinja-compiles options.prompt_template but never compiled
+    # queries.*.template — candidates carrying {{interpretation:...}} tokens
+    # in per-query templates passed compose and crash ENGINE BUILD after
+    # operator review resolution (the resolver rewrites only the node-level
+    # template; no delivery mechanism exists for per-query slots).
+    context = _operator_profile_view(tmp_path)
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path.write_text("a\n1\n")
+    args = _linear_args(tmp_path)
+    args["source"]["options"]["path"] = str(csv_path)
+    args["source"]["options"]["schema"] = {"mode": "flexible", "fields": ["a: str"]}
+    args["nodes"] = [
+        {
+            "id": "assess",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "profile": "sonnet",
+                "prompt_template": "Assess {{ row.a }}.",
+                "required_input_fields": ["a"],
+                "response_field": "assessment",
+                "schema": {"mode": "observed"},
+                "queries": {
+                    "cool": {
+                        "input_fields": {"field_a": "a"},
+                        "template": "Rate {{interpretation:cool}} for {{ field_a }}",
+                    }
+                },
+            },
+        }
+    ]
+    args["edges"] = []
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), context)
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "plugin_options_invalid"
+    assert "interpretation" in lead.message

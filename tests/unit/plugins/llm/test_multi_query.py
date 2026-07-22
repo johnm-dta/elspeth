@@ -469,3 +469,43 @@ class TestQueryDefinitionDualForm:
 
         with pytest.raises(ValidationError):
             QueryDefinition.model_validate({"input_fields": {"text": "a"}, "unexpected_key": 1})
+
+
+class TestQueryTemplateCompileParity:
+    """queries.*.template must fail at CONFIG time exactly like prompt_template.
+
+    Pack pressure-suite run 4 (P4, compose-vs-execute parity class): the
+    candidate validator Jinja-compiles options.prompt_template (LLMConfig
+    field validator) but never queries.*.template — three "passing" pipelines
+    carried {{interpretation:...}} tokens inside per-query templates that
+    crash ENGINE BUILD (QueryExecutor pre-compiles overrides at init) after
+    operator review resolution. Compose-ready passed what execute refuses.
+    """
+
+    def test_interpretation_token_in_query_template_is_rejected_with_the_platform_gap_named(self) -> None:
+        import pytest
+
+        from elspeth.plugins.transforms.llm.multi_query import QueryDefinition
+
+        with pytest.raises(ValueError, match="interpretation"):
+            QueryDefinition(
+                input_fields={"field_a": "field_a"},
+                template="Rate {{interpretation:cool}} for {{ field_a }}",
+            )
+
+    def test_jinja_invalid_query_template_is_rejected_at_config_time(self) -> None:
+        import pytest
+
+        from elspeth.plugins.transforms.llm.multi_query import QueryDefinition
+
+        with pytest.raises(ValueError, match=r"[Tt]emplate"):
+            QueryDefinition(
+                input_fields={"field_a": "field_a"},
+                template="Broken {% if unclosed",
+            )
+
+    def test_valid_query_template_still_accepted(self) -> None:
+        from elspeth.plugins.transforms.llm.multi_query import QueryDefinition
+
+        q = QueryDefinition(input_fields={"field_a": "field_a"}, template="Rate {{ field_a }}")
+        assert q.template == "Rate {{ field_a }}"

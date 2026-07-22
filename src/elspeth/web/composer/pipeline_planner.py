@@ -271,10 +271,10 @@ class _PlannerAttemptTrail:
     logger: closed codes and kinds, identifiers, and counts; never raw
     provider text or row content.
 
-    - ``phase``: discovery | candidate | repair | hatch
+    - ``phase``: discovery | candidate | repair | hatch | prose
     - ``outcome``: discovery_executed | candidate_rejected | arg_error |
-      deferred_claim | truncated | guard_fired | budget_exhausted |
-      declined | accepted
+      deferred_claim | truncated | prose_nudged | prose_reply |
+      guard_fired | budget_exhausted | declined | accepted
     - ``led_to``: continue | repair | hatch | terminal | done
     - ``planner_code``: the closed loop-control code when a guard or budget
       resolved the attempt (e.g. DISCOVERY_CYCLE, REPAIR_EXHAUSTED)
@@ -544,7 +544,12 @@ def _parse_response_tool_calls(response: Any, *, allow_text: bool = False) -> tu
         content = _provider_field(message, "content")
         if allow_text and type(content) is str and content.strip():
             return message, ()
-        raise PipelinePlannerError("planner response must call a declared tool", code="MALFORMED_RESPONSE")
+        # The no-tool-call class (prose thinking-aloud or an empty reply)
+        # gets its own code so the loop can nudge-retry it — mid-plan prose
+        # is ordinary LLM behaviour, not provider breakage. The loop
+        # converts it back to terminal MALFORMED_RESPONSE once the nudge
+        # budget is spent; the code never escapes the planner.
+        raise PipelinePlannerError("planner response must call a declared tool", code="PROSE_REPLY")
     parsed: list[_ParsedToolCall] = []
     for raw_call in raw_calls:
         call_id = _provider_field(raw_call, "id")
@@ -575,6 +580,17 @@ def _truncated_response_notice() -> str:
         "Respond again more compactly: shorter prompt templates, omit optional fields, and emit "
         "the tool call with no surrounding prose."
     )
+
+
+# Bounded retries for the no-tool-call response class, separate from the
+# repair budget: repairs answer candidate rejections, nudges answer a model
+# that thought aloud instead of calling a tool (tutorial session a2513c3c
+# died terminal on a single prose reply with its whole repair budget unspent).
+_PROSE_NUDGE_BUDGET = 2
+
+
+def _prose_reply_notice() -> str:
+    return "Your previous reply called no tool. You must respond with a declared tool call — continue from where you were."
 
 
 def _escape_hatch_notice() -> str:
@@ -1242,6 +1258,7 @@ async def _plan_pipeline_inner(
     discovery_turns = 0
     composition_turns = 0
     repair_count = 0
+    prose_nudges = 0
     seen_discovery: set[tuple[str, str]] = set()
     seen_discovery_round = 0
 
@@ -1426,7 +1443,7 @@ async def _plan_pipeline_inner(
             try:
                 parsed_response = _parse_response_tool_calls(response, allow_text=allow_text_reply)
             except PipelinePlannerError as exc:
-                if exc.code != "MALFORMED_RESPONSE":
+                if exc.code not in ("MALFORMED_RESPONSE", "PROSE_REPLY"):
                     raise
                 # A response that consumed the whole completion budget and
                 # failed to parse was almost certainly cut off mid-write —
@@ -1498,6 +1515,29 @@ async def _plan_pipeline_inner(
             else:
                 message, calls, audited_call = await call_model()
         except PipelinePlannerError as exc:
+            if exc.code == "PROSE_REPLY":
+                # A no-tool-call reply (thinking aloud) mid-plan: nudge the
+                # model back to tool calling on its own bounded budget —
+                # separate from the repair budget, which answers candidate
+                # rejections. Past the budget, the original terminal
+                # MALFORMED_RESPONSE disposition stands unchanged.
+                trail.begin_attempt()
+                if is_hatch_turn:
+                    # The advisor's one shot produced nothing usable: the
+                    # hatch is spent, the original exhaustion stands.
+                    trail.log_attempt("hatch", "prose_reply", led_to="terminal")
+                    assert hatch_error is not None
+                    raise hatch_error from None
+                prose_nudges += 1
+                if prose_nudges > _PROSE_NUDGE_BUDGET:
+                    trail.log_attempt("prose", "prose_reply", planner_code="MALFORMED_RESPONSE", led_to="terminal")
+                    raise PipelinePlannerError(
+                        "planner response must call a declared tool",
+                        code="MALFORMED_RESPONSE",
+                    ) from exc
+                trail.log_attempt("prose", "prose_nudged", led_to="continue")
+                messages.append({"role": "user", "content": _prose_reply_notice()})
+                continue
             if exc.code != "RESPONSE_TRUNCATED":
                 raise
             trail.begin_attempt()

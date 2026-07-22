@@ -2091,7 +2091,10 @@ async def test_settlement_failure_after_success_fails_the_request(
     [
         _Response(choices=[], usage={"cost": 0.01}),
         _Response(choices=[_Choice(message=None)], usage={"cost": 0.01}),  # type: ignore[arg-type]
-        _Response(choices=[_Choice(message=_Message(content=None, tool_calls=None))], usage={"cost": 0.01}),
+        # NOTE: the no-tool-call shape (content=None, tool_calls=None) left
+        # this matrix when the loop gained the bounded prose nudge — see
+        # test_prose_reply_gets_bounded_nudge_then_converges and
+        # test_prose_replies_exhaust_nudge_budget_then_terminate_malformed.
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=None)]))],
             usage={"cost": 0.01},
@@ -2118,7 +2121,6 @@ async def test_settlement_failure_after_success_fails_the_request(
     ids=[
         "choices",
         "message",
-        "calls",
         "function",
         "name",
         "arguments-type",
@@ -2558,12 +2560,81 @@ async def test_truncated_responses_exhaust_repair_budget_without_hatch(
 
 
 @pytest.mark.asyncio
-async def test_untruncated_malformed_response_stays_fatal(
+async def test_prose_reply_gets_bounded_nudge_then_converges(
     tmp_path: Path,
     tool_context: ToolContext,
 ) -> None:
-    """A short prose reply (well under the cap) is genuine malformed output."""
-    completion = _ScriptedCompletion(_text_response("I think you should use a csv source."))
+    """A prose reply mid-plan is nudged back to tool calling, not fatal.
+
+    Tutorial session a2513c3c (2026-07-22): four clean discovery rounds, then
+    the model thought aloud in prose — no tool call — and the loop died
+    terminal MALFORMED_RESPONSE with zero repair consumed. A single prose
+    reply is ordinary LLM behaviour; like truncation (4115fac13) it gets a
+    bounded retry with a static notice before the terminal code.
+    """
+    completion = _ScriptedCompletion(
+        _text_response("I think a csv source feeding one passthrough is right; let me lay that out."),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    assert len(completion.requests) == 2
+    notices = [
+        message
+        for message in completion.requests[1]["messages"]
+        if message["role"] == "user" and "called no tool" in str(message.get("content"))
+    ]
+    assert len(notices) == 1
+    # The prose reply is discarded from the conversation (parallel to the
+    # truncation repair) and audited with its own discriminant.
+    assert recorder.llm_calls[0].error_message == "PROSE_REPLY"
+
+
+@pytest.mark.asyncio
+async def test_prose_replies_exhaust_nudge_budget_then_terminate_malformed(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """The nudge budget is its own bound: prose past it is the old terminal.
+
+    The nudge budget is separate from the repair budget (repair_budget=1
+    here would otherwise die one round earlier) and the exhausted case keeps
+    the existing terminal MALFORMED_RESPONSE disposition.
+    """
+    completion = _ScriptedCompletion(
+        _text_response("Thinking aloud, round one."),
+        _text_response("Thinking aloud, round two."),
+        _text_response("Thinking aloud, round three."),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, repair_budget=1)
+
+    assert excinfo.value.code == "MALFORMED_RESPONSE"
+    assert len(completion.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_call_arguments_stay_fatal(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """Genuinely malformed output (non-prose) keeps the immediate terminal.
+
+    The nudge covers only the no-tool-call class; a tool call whose
+    arguments are not strict JSON is provider/model breakage, not thinking
+    aloud, and dies MALFORMED_RESPONSE on the spot exactly as before.
+    """
+    bad_call = _ToolCall(id="call-1", function=_Function(name="list_sources", arguments="{not json"))
+    completion = _ScriptedCompletion(
+        _Response(
+            choices=[_Choice(message=_Message(content=None, tool_calls=[bad_call]))],
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01},
+        )
+    )
 
     with pytest.raises(PipelinePlannerError) as excinfo:
         await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)

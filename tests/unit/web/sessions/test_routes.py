@@ -212,7 +212,7 @@ def _make_composer_mock(
             state=state or _EMPTY_STATE,
         ),
     )
-    mock.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+    mock.surface_pending_interpretation_reviews = AsyncMock(spec=ComposerService.surface_pending_interpretation_reviews, return_value=None)
     return mock
 
 
@@ -902,7 +902,9 @@ def test_send_message_auto_commit_settles_exact_pipeline_intent(tmp_path, monkey
     )
     assert row.pipeline_metadata is not None
     composer = SimpleNamespace()
-    composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+    composer.surface_pending_interpretation_reviews = AsyncMock(
+        spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+    )
     composer.compose = AsyncMock(
         spec=ComposerService.compose,
         return_value=ComposerResult(
@@ -959,7 +961,9 @@ def test_send_message_explicit_approval_leaves_canonical_pipeline_pending(tmp_pa
         )
     )
     composer = SimpleNamespace()
-    composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+    composer.surface_pending_interpretation_reviews = AsyncMock(
+        spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+    )
     composer.compose = AsyncMock(
         spec=ComposerService.compose,
         return_value=ComposerResult(message="Pipeline prepared for review.", state=_EMPTY_STATE),
@@ -995,7 +999,9 @@ def test_recompose_auto_commit_uses_shared_pipeline_settlement(tmp_path, monkeyp
     )
     assert row.pipeline_metadata is not None
     composer = SimpleNamespace()
-    composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+    composer.surface_pending_interpretation_reviews = AsyncMock(
+        spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+    )
     composer.compose = AsyncMock(
         spec=ComposerService.compose,
         return_value=ComposerResult(
@@ -4031,7 +4037,9 @@ class TestMessageRoutes:
             _llm_call(provider_request_id="chatcmpl-b", prompt_tokens=5, completion_tokens=16, total_tokens=21),
         )
         composer = SimpleNamespace()
-        composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+        composer.surface_pending_interpretation_reviews = AsyncMock(
+            spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+        )
         composer.compose = AsyncMock(
             spec=ComposerService.compose, return_value=ComposerResult(message="Saved with audit.", state=_EMPTY_STATE, llm_calls=llm_calls)
         )
@@ -4203,7 +4211,9 @@ class TestMessageRoutes:
         """
         app, service = _make_app(tmp_path)
         composer = SimpleNamespace()
-        composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+        composer.surface_pending_interpretation_reviews = AsyncMock(
+            spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+        )
         composer.compose = AsyncMock(
             spec=ComposerService.compose,
             return_value=ComposerResult(
@@ -4267,7 +4277,9 @@ class TestMessageRoutes:
             actor="composer-web:user-test",
         )
         composer = SimpleNamespace()
-        composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+        composer.surface_pending_interpretation_reviews = AsyncMock(
+            spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+        )
         composer.compose = AsyncMock(
             spec=ComposerService.compose,
             return_value=ComposerResult(
@@ -10715,7 +10727,9 @@ def test_assistant_raw_content_is_persisted_but_not_returned(tmp_path) -> None:
         raw_assistant_content="The pipeline is complete and valid.",
     )
     composer = SimpleNamespace()
-    composer.surface_pending_interpretation_reviews = AsyncMock(return_value=None)
+    composer.surface_pending_interpretation_reviews = AsyncMock(
+        spec=ComposerService.surface_pending_interpretation_reviews, return_value=None
+    )
     composer.compose = AsyncMock(spec=ComposerService.compose, return_value=composer_result)
     app.state.composer_service = composer
 

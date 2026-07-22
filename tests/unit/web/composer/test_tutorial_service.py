@@ -57,12 +57,16 @@ def test_launch_blocker_names_empty_transforms_distinctly() -> None:
     """
     from unittest.mock import MagicMock
 
+    from elspeth.web.catalog.protocol import CatalogService
     from elspeth.web.composer.state import (
         CompositionState,
         OutputSpec,
         PipelineMetadata,
         SourceSpec,
     )
+    from elspeth.web.plugin_policy import WebPluginPolicy
+    from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
+    from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 
     state = CompositionState(
         sources={
@@ -81,11 +85,11 @@ def test_launch_blocker_names_empty_transforms_distinctly() -> None:
     )
     blocker = _tutorial_launch_blocker(
         state=state,
-        policy=MagicMock(),
-        snapshot=MagicMock(),
+        policy=MagicMock(spec=WebPluginPolicy),
+        snapshot=MagicMock(spec=PluginAvailabilitySnapshot),
         tutorial_profile="tutorial-default",
-        profile_registry=MagicMock(),
-        catalog=MagicMock(),
+        profile_registry=MagicMock(spec=OperatorProfileRegistry),
+        catalog=MagicMock(spec=CatalogService),
     )
     assert blocker is not None
     code, detail = blocker

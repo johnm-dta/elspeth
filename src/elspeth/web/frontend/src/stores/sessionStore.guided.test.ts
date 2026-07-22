@@ -942,6 +942,46 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(findGuidedRetry("guided_respond", RETRY_SESSION_ID)).toBeNull();
   });
 
+  it("respondGuided: starts composer-progress polling and applies the loaded snapshot", async () => {
+    // wire-page-ux follow-up (6996bdb38): the decision-submit path never
+    // started the progress poller, so the indicator showed elapsed time with
+    // no phase text during the multi-minute step-3 planner respond. Mirrors
+    // chatGuided's elspeth-a8eeebb3aa seam test: the REAL polling seam, not
+    // composerProgress injected via setState.
+    const { respondGuided: apiRespond, fetchComposerProgress } = await import("@/api/client");
+    (apiRespond as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleRespondResponse);
+    (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+      session_id: RETRY_SESSION_ID,
+      request_id: null,
+      phase: "calling_model",
+      headline: "Planning the pipeline against the reviewed components.",
+      evidence: [],
+      likely_next: null,
+      reason: null,
+      updated_at: "2026-07-23T00:00:00Z",
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(fetchComposerProgress).toHaveBeenCalledWith(RETRY_SESSION_ID);
+    expect(useSessionStore.getState().composerProgress).toEqual(
+      expect.objectContaining({ phase: "calling_model" }),
+    );
+  });
+
   it("respondGuided: a live same-page custody conflict names the pending action", async () => {
     const { respondGuided: apiRespond } = await import("@/api/client");
     (apiRespond as ReturnType<typeof vi.fn>).mockRejectedValueOnce(

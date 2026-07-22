@@ -2511,6 +2511,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             },
           }),
     });
+    // Live phase text for the multi-minute planner respond (6996bdb38
+    // follow-up: the decision-submit path never started the poller, so the
+    // indicator had elapsed time and no phase). Started AFTER the gates and
+    // custody acquire (a blocked submit polls nothing) and generation-fenced
+    // like sendMessage/chatGuided so a newer turn's poll span wins.
+    const progressPollGeneration = get().startComposerProgressPolling(requestedSessionId);
     // A generation-stale drop must still SETTLE the in-flight submit when the
     // requested session is still active (a same-session generation advance —
     // e.g. a seedGuided resync — published nothing on this submit's behalf):
@@ -2902,6 +2908,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         reason: retainsRetryCustody ? "unsettled" : "rejected",
         message: responseErrorMessage,
       };
+    } finally {
+      get().stopComposerProgressPolling(requestedSessionId, progressPollGeneration);
+      // One-shot terminal pickup — only while this turn still owns the
+      // poller; a newer turn's own polling handles it otherwise. Mirrors
+      // sendMessage/chatGuided's finally semantics, scoped to the session
+      // captured before the await.
+      if (progressPollGeneration === composerProgressPollGeneration) {
+        await get().loadComposerProgress(requestedSessionId);
+      }
     }
   },
 

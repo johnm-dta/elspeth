@@ -2885,6 +2885,20 @@ async def post_guided_respond(
                             checkpoint_id = uuid4()
                             successor_proposal_id = uuid4()
                             predecessor_hash = composition_content_hash(state)
+                            # Live phase progress for the multi-minute planner run
+                            # (decision-progress indicator 6996bdb38: the respond
+                            # path had no sink, so the indicator showed elapsed
+                            # time with no phase text). Mirrors guided_plan.py's
+                            # wiring; local import per the signed-layout module's
+                            # function-internal-edits-only discipline.
+                            from .._helpers import _composer_progress_sink, _get_composer_progress_registry
+
+                            planner_progress = _composer_progress_sink(
+                                _get_composer_progress_registry(request),
+                                session_id=str(session_id),
+                                request_id=body.operation_id,
+                                user_id=user.user_id,
+                            )
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=planner_intent,
                                 current_state=state,
@@ -2898,6 +2912,7 @@ async def post_guided_respond(
                                 supersedes_draft_hash=authority.proposal.draft_hash,
                                 recorder=planner_recorder,
                                 operation_fence=fence,
+                                progress=planner_progress,
                             )
                             projection = build_guided_proposal_projection(
                                 proposal_id=successor_proposal_id,
@@ -3224,6 +3239,20 @@ async def post_guided_respond(
                             checkpoint_id = uuid4()
                             successor_proposal_id = uuid4()
                             predecessor_hash = composition_content_hash(state)
+                            # Live phase progress for the multi-minute planner run
+                            # (decision-progress indicator 6996bdb38: the respond
+                            # path had no sink, so the indicator showed elapsed
+                            # time with no phase text). Mirrors guided_plan.py's
+                            # wiring; local import per the signed-layout module's
+                            # function-internal-edits-only discipline.
+                            from .._helpers import _composer_progress_sink, _get_composer_progress_registry
+
+                            planner_progress = _composer_progress_sink(
+                                _get_composer_progress_registry(request),
+                                session_id=str(session_id),
+                                request_id=body.operation_id,
+                                user_id=user.user_id,
+                            )
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=body.correction_feedback,
                                 current_state=predecessor_candidate,
@@ -3242,6 +3271,7 @@ async def post_guided_respond(
                                 supersedes_draft_hash=authority.proposal.draft_hash,
                                 recorder=planner_recorder,
                                 operation_fence=fence,
+                                progress=planner_progress,
                                 correction_target=correction_target,
                             )
                             projection = build_guided_proposal_projection(
@@ -3737,6 +3767,20 @@ async def post_guided_respond(
                                 content=planner_intent,
                                 user_id=user.user_id,
                             )
+                            # Live phase progress for the multi-minute planner run
+                            # (decision-progress indicator 6996bdb38: the respond
+                            # path had no sink, so the indicator showed elapsed
+                            # time with no phase text). Mirrors guided_plan.py's
+                            # wiring; local import per the signed-layout module's
+                            # function-internal-edits-only discipline.
+                            from .._helpers import _composer_progress_sink, _get_composer_progress_registry
+
+                            planner_progress = _composer_progress_sink(
+                                _get_composer_progress_registry(request),
+                                session_id=str(session_id),
+                                request_id=body.operation_id,
+                                user_id=user.user_id,
+                            )
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=planner_intent,
                                 current_state=state,
@@ -3750,6 +3794,7 @@ async def post_guided_respond(
                                 supersedes_draft_hash=None,
                                 recorder=planner_recorder,
                                 operation_fence=fence,
+                                progress=planner_progress,
                             )
                             projection = build_guided_proposal_projection(
                                 proposal_id=proposal_id,

@@ -2821,6 +2821,46 @@ class TestStep2IntraStep:
             assert storage_path not in json.dumps(restored)
             assert all(storage_path not in repr(event.payload) for event in events)
 
+    def test_respond_planner_call_threads_a_live_progress_sink(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The respond route's planner runs must publish live phase progress.
+
+        The decision-progress indicator (6996bdb38) had no phase text on the
+        respond path: post_guided_respond wired no progress sink into its
+        plan_guided_pipeline calls (guided_plan.py does). The sink must reach
+        the planner and its events must land in the app's progress registry so
+        GET /composer/progress serves phase text during the multi-minute
+        planner run.
+        """
+        from elspeth.contracts.composer_progress import ComposerProgressEvent
+
+        session_id = _create_session(composer_test_client)
+        app = composer_test_client.app
+        original = app.state.composer_service.plan_guided_pipeline
+        seen: dict[str, Any] = {}
+
+        async def capturing_planner(**kwargs: Any):
+            seen["progress"] = kwargs.get("progress")
+            if seen["progress"] is not None:
+                await seen["progress"](
+                    ComposerProgressEvent(
+                        phase="calling_model",
+                        headline="Planning the pipeline against the reviewed components.",
+                    )
+                )
+            return await original(**{k: v for k, v in kwargs.items() if k != "progress"})
+
+        monkeypatch.setattr(app.state.composer_service, "plan_guided_pipeline", capturing_planner)
+        self._stage_proposal(composer_test_client, session_id, filename="progress_sink.jsonl")
+
+        assert seen.get("progress") is not None, "plan_guided_pipeline received no progress sink"
+        snapshot = asyncio.run(app.state.composer_progress_registry.get_latest(session_id))
+        assert snapshot.phase == "calling_model"
+        assert snapshot.headline == "Planning the pipeline against the reviewed components."
+
     def test_confirm_wiring_surfaces_pending_interpretation_events_for_committed_llm_prompts(
         self,
         composer_test_client: TestClient,

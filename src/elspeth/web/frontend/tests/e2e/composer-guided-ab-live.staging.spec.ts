@@ -450,8 +450,17 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
       // spending pipeline tokens on a run that would be ruled invalid anyway.
       await assertAbForkCoalesceTopology(ctx, sessionId);
 
+      // The wire-confirm commit surfaces the committed pipeline's
+      // interpretation-review events AFTER the terminal lands (the event
+      // writer boundary validates nodes against the committed state), so the
+      // ready surface renders fresh Accept cards — run 16 (session 329c753a):
+      // llm_prompt_template + prompt_injection_shield_recommendation for each
+      // of the two A/B llm nodes, with "Run pipeline" gated ("Resolve pending
+      // interpretation first."). Drain them with the same card contract the
+      // step primaries use, THEN expect the run to enable.
       const runButton = page.getByRole("button", { name: "Run pipeline" }).first();
-      await expect(runButton).toBeEnabled();
+      await advanceWhenReady(page, runButton, "Run pipeline");
+      await shot(page, "reviews-resolved-run-enabled");
       await runButton.click();
 
       // Credential-egress confirmation: the run leaves the composer and uses

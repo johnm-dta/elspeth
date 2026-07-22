@@ -586,8 +586,28 @@ def bind_guided_reviewed_components(
         connection_names = (
             {node.get("input") for node in topology_nodes if isinstance(node, dict)} if isinstance(topology_nodes, list) else set()
         )
+        # Coalesce branch VALUES are consumption sites too: each names the
+        # connection a branch transform publishes via ``on_success`` and the
+        # coalesce consumes. Those names appear in no node's ``input`` and are
+        # not node ids, so without them here every legal fork->coalesce
+        # candidate's intermediate connections read as dangling and the
+        # rewrite below re-targets the branch transforms at the reviewed sink
+        # — manufacturing the exact ``coalesce_branch_unreachable`` rejection
+        # (with sink-lure facts blaming the planner for the binder's own
+        # rewrite) on every attempt including the escape hatch (guided
+        # session 1f7241de, 2026-07-22, four identical rejections).
+        branch_connection_names: set[str] = set()
+        if isinstance(topology_nodes, list):
+            for topology_node in topology_nodes:
+                if not isinstance(topology_node, dict):
+                    continue
+                branches = topology_node.get("branches")
+                if isinstance(branches, dict):
+                    branch_connection_names.update(value for value in branches.values() if type(value) is str)
+                elif isinstance(branches, list):
+                    branch_connection_names.update(value for value in branches if type(value) is str)
         # "discard" is the legal drop-route sentinel, not a reference.
-        known_targets = set(expected_output_names) | node_ids | connection_names | {"discard"}
+        known_targets = set(expected_output_names) | node_ids | connection_names | branch_connection_names | {"discard"}
 
         def _resolve_dangling(member: dict[str, Any], key: str) -> None:
             value = member.get(key)

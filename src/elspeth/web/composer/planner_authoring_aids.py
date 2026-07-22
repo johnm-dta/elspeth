@@ -21,6 +21,7 @@ from copy import deepcopy
 from typing import Any, Final
 
 from elspeth.web.catalog.policy_view import PolicyCatalogView
+from elspeth.web.catalog.schemas import PluginSummary
 
 # The prompt never models a fabricated identifier — provenance is the lesson.
 PLACEHOLDER_BLOB_ID: Final[str] = "<blob_id copied verbatim from a list_blobs or create_blob result>"
@@ -75,12 +76,67 @@ def _usable_llm_profile_alias(catalog: PolicyCatalogView) -> str | None:
     return dict(snapshot.usable_profile_aliases)[llm_id][0]
 
 
-def _visible_plugin_names(catalog: PolicyCatalogView) -> dict[str, frozenset[str]]:
+def _plugin_summaries(catalog: PolicyCatalogView) -> dict[str, list[PluginSummary]]:
+    """One catalog sweep shared by every aid — the expensive step of a build."""
     return {
-        "source": frozenset(plugin.name for plugin in catalog.list_sources()),
-        "transform": frozenset(plugin.name for plugin in catalog.list_transforms()),
-        "sink": frozenset(plugin.name for plugin in catalog.list_sinks()),
+        "source": catalog.list_sources(),
+        "transform": catalog.list_transforms(),
+        "sink": catalog.list_sinks(),
     }
+
+
+def _visible_plugin_names(
+    catalog: PolicyCatalogView, summaries: Mapping[str, list[PluginSummary]] | None = None
+) -> dict[str, frozenset[str]]:
+    if summaries is None:
+        summaries = _plugin_summaries(catalog)
+    return {kind: frozenset(plugin.name for plugin in plugins) for kind, plugins in summaries.items()}
+
+
+def _digest_entries(plugins: list[PluginSummary]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": plugin.name,
+            "purpose": plugin.description,
+            "required_options": [field.name for field in plugin.config_fields if field.required],
+            "composer_hints": list(plugin.composer_hints),
+        }
+        for plugin in plugins
+    ]
+
+
+def discovery_digest(
+    catalog: PolicyCatalogView,
+    *,
+    summaries: Mapping[str, list[PluginSummary]] | None = None,
+) -> dict[str, Any]:
+    """Per-plugin digest of the policy-visible catalog for the planner prompt.
+
+    Targets ``planner_code=DISCOVERY_CYCLE`` churn: a significant share of
+    planner calls were ``list_*``/``get_plugin_schema`` rounds re-learning the
+    same catalog every session. Each entry carries the plugin's name, one-line
+    purpose, required knobs, and its ``composer_hints`` verbatim — the hints
+    are the designated live channel for web-policy facts that plugin schemas
+    cannot express.
+    """
+    if summaries is None:
+        summaries = _plugin_summaries(catalog)
+    return {
+        "sources": _digest_entries(summaries["source"]),
+        "transforms": _digest_entries(summaries["transform"]),
+        "sinks": _digest_entries(summaries["sink"]),
+    }
+
+
+_DISCOVERY_DIGEST_GUIDANCE: Final[str] = (
+    "This digest is rendered from the live policy-visible catalog at prompt "
+    "build and is current for this deployment: you rarely need "
+    "list_sources/list_transforms/list_sinks or get_plugin_schema calls — "
+    "plan directly from it. Model identifiers still come only from "
+    "list_models, and blob/secret discovery is unchanged. Use "
+    "get_plugin_assistance and explain_validation_error for structured "
+    "repair when a proposal is rejected."
+)
 
 
 def source_custody_exemplar_args(
@@ -306,10 +362,12 @@ def build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
 
 
 def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
-    visible = _visible_plugin_names(catalog)
+    summaries = _plugin_summaries(catalog)
+    visible = _visible_plugin_names(catalog, summaries)
     aids: dict[str, Any] = {
         "purpose": (
-            "Server-rendered worked exemplars from the live policy-visible catalog. These shapes validate against the current deployment."
+            "Server-rendered worked exemplars and catalog digest from the live "
+            "policy-visible catalog. These shapes validate against the current deployment."
         ),
     }
     custody = source_custody_exemplar_args(catalog, visible=visible)
@@ -326,12 +384,17 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
             "rules": list(_FORK_COALESCE_RULES),
             "set_pipeline_exemplar": fork_coalesce,
         }
+    aids["discovery_digest"] = {
+        "guidance": _DISCOVERY_DIGEST_GUIDANCE,
+        "plugins": discovery_digest(catalog, summaries=summaries),
+    }
     return aids
 
 
 __all__ = [
     "PLACEHOLDER_BLOB_ID",
     "build_planner_authoring_aids",
+    "discovery_digest",
     "fork_coalesce_exemplar_args",
     "source_custody_exemplar_args",
 ]

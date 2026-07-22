@@ -25,6 +25,7 @@ from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.planner_authoring_aids import (
     PLACEHOLDER_BLOB_ID,
     build_planner_authoring_aids,
+    discovery_digest,
     fork_coalesce_exemplar_args,
     source_custody_exemplar_args,
 )
@@ -328,6 +329,50 @@ class TestForkCoalesceExemplar:
         rules = " ".join(section["rules"])
         assert "separate LLM" in rules
         assert "not a queries map" in rules
+
+
+class TestDiscoveryDigest:
+    def test_digest_covers_every_policy_visible_plugin(self) -> None:
+        """DISCOVERY_CYCLE churn re-derives the catalog; the digest IS the catalog."""
+        view, _snapshot = _trained_view()
+
+        digest = discovery_digest(view)
+
+        assert {entry["name"] for entry in digest["sources"]} == {plugin.name for plugin in view.list_sources()}
+        assert {entry["name"] for entry in digest["transforms"]} == {plugin.name for plugin in view.list_transforms()}
+        assert {entry["name"] for entry in digest["sinks"]} == {plugin.name for plugin in view.list_sinks()}
+
+    def test_digest_entries_carry_purpose_required_knobs_and_hints(self) -> None:
+        view, _snapshot = _trained_view()
+
+        digest = discovery_digest(view)
+
+        csv_source = next(entry for entry in digest["sources"] if entry["name"] == "csv")
+        assert csv_source["purpose"] == next(plugin.description for plugin in view.list_sources() if plugin.name == "csv")
+        assert {"schema", "path", "on_validation_failure"} <= set(csv_source["required_options"])
+        # composer_hints are the designated live channel for web-policy facts
+        # (e.g. the json sink's explicit collision_policy contract) — the
+        # digest must surface them verbatim, not summarize them away.
+        json_sink = next(entry for entry in digest["sinks"] if entry["name"] == "json")
+        assert json_sink["composer_hints"] == list(next(plugin.composer_hints for plugin in view.list_sinks() if plugin.name == "json"))
+        assert any("collision_policy" in hint for hint in json_sink["composer_hints"])
+
+    def test_payload_carries_digest_with_discovery_short_circuit_guidance(self) -> None:
+        view, _snapshot = _trained_view()
+
+        payload = build_planner_authoring_aids(view)
+
+        section = payload["discovery_digest"]
+        assert section["plugins"] == discovery_digest(view)
+        guidance = section["guidance"]
+        assert "rarely need" in guidance
+        assert "get_plugin_schema" in guidance
+        assert "current" in guidance
+        # The digest short-circuits catalog re-discovery only: model ids still
+        # come solely from list_models, and structured-repair tooling
+        # (get_plugin_assistance) keeps its role.
+        assert "list_models" in guidance
+        assert "get_plugin_assistance" in guidance
 
 
 class TestAuthoringAidsPayload:

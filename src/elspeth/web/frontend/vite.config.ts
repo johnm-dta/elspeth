@@ -8,6 +8,17 @@ const frontendPort = Number(process.env.PLAYWRIGHT_FRONTEND_PORT ?? "5173");
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Deploy-cache coherence (with the version beacon, f2d105691): keep the
+    // previous generations' hashed assets so a stale open tab can still
+    // lazy-load ITS chunks after a rebuild — the beacon banner announces the
+    // new version; retained assets keep the tab functional until the user
+    // refreshes. Unbounded growth is prevented by the postbuild prune
+    // (scripts/prune-stale-assets.mjs): rebuilds rewrite every output with a
+    // fresh mtime (verified empirically), so age-based pruning can never
+    // touch the current generation.
+    emptyOutDir: false,
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

@@ -826,26 +826,24 @@
   overflow-wrap: anywhere;
 }
 
-/* Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
-   composer's child content is a lean single-row strip — pulse dots +
-   adaptive headline + elapsed + Stop. It replaces the whole .chat-input
-   strip, so it carries that strip's docked-band chrome itself (border-top
-   seam + padding, same trade as .guided-step-chat-sent above). min-height
-   approximates the idle strip (2-row textarea box + hint line) so the
-   conversation column above barely reflows on the swap. */
+/* Chat-pending working strip (elspeth-6a9673ecd3; placement pass
+   2026-07-23): pulse dots + adaptive headline + elapsed + Stop, riding IN
+   the conversation flow as the last child of .guided-workspace-scroll — the
+   provisional reply slot, matching the decision-submit indicator — instead
+   of swapping over the composer's typing area. The docked-band chrome
+   (border-top seam, input-strip min-height) died with the swap; margins
+   align it to the scroll region's card gutter alongside .ack-stack and
+   .guided-current-decision. */
 .guided-pending-strip {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-md);
-  min-height: 76px;
-  padding: var(--space-sm) var(--space-lg);
-  border-top: 1px solid var(--color-border);
+  padding: var(--space-xs) 0;
 }
 
-/* Programmatic focus landing (tabIndex=-1), not a user tab stop — no ring. */
-.guided-pending-strip:focus {
-  outline: none;
+.guided-workspace-scroll > .guided-pending-strip {
+  margin-inline: var(--space-lg);
 }
 
 .guided-pending-strip-status {

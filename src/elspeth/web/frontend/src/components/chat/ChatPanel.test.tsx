@@ -2480,11 +2480,13 @@ assistant_message_kind: "synthetic_failure",
     ).toBeNull();
   });
 
-  it("swaps the ChatInput for the pending strip with Stop while a guided chat is in flight", () => {
-    // Pending swap (elspeth-6a9673ecd3): the input is UNMOUNTED — not
-    // disabled — while /guided/chat is in flight; the working strip carries
-    // the abort affordance. The landmark section must survive the swap (AT
-    // navigation + staging e2e locators find the composer by region name).
+  it("keeps the ChatInput mounted (disabled) and shows the pending strip with Stop while a guided chat is in flight", () => {
+    // Operator pass 2026-07-23: the strip no longer replaces the input (the
+    // old swap read as a large panel occluding the typing area). The input
+    // stays mounted with its ordinary disabled state; the strip — still
+    // carrying the abort affordance — rides in the conversation flow. The
+    // landmark section survives untouched (AT navigation + staging e2e
+    // locators find the composer by region name).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2496,7 +2498,8 @@ assistant_message_kind: "synthetic_failure",
 
     const { container } = render(<ChatPanel />);
 
-    expect(screen.queryByTestId("chat-input")).toBeNull();
+    const input = screen.getByTestId("chat-input");
+    expect(input.dataset.disabled).toBe("true");
     expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
     expect(
       screen.getByRole("button", { name: "Stop composing" }),
@@ -2504,6 +2507,33 @@ assistant_message_kind: "synthetic_failure",
     expect(
       screen.getByRole("region", { name: "Describe what you want" }),
     ).toBeInTheDocument();
+  });
+
+  it("mounts the chat-pending indicator in the conversation flow, never over the message input", () => {
+    // Placement parity with the decision-submit indicator (operator
+    // 2026-07-23): every guided pending indicator renders inline in the
+    // conversation region — the provisional reply slot — and never inside
+    // the composer section where it would cover the typing area.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const strip = container.querySelector(".guided-pending-strip");
+    expect(strip).not.toBeNull();
+    const scroll = container.querySelector(".guided-workspace-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll!.contains(strip)).toBe(true);
+    const composer = screen.getByRole("region", {
+      name: "Describe what you want",
+    });
+    expect(composer.contains(strip)).toBe(false);
   });
 
   it("tutorial step 2: shows guided-chat substep progress while composition is pending", () => {
@@ -2772,11 +2802,14 @@ assistant_message_kind: "synthetic_failure",
     expect(screen.getByTestId("chat-input").dataset.maxLength).toBe("4096");
   });
 
-  it("unmounts the guided ChatInput while guidedChatPending=true (409-race pin)", () => {
-    // Regression pin (sits next to the guided-resend 409 fix): with the
-    // pending swap, no input is mounted while the build is in flight, so a
-    // second send cannot race it AT ALL — stronger than the old disabled
-    // gate, whose textarea never actually received `disabled`.
+  it("disables the guided ChatInput while guidedChatPending=true (409-race pin)", () => {
+    // Regression pin (sits next to the guided-resend 409 fix): the input
+    // stays mounted while the build is in flight but its disabled prop gates
+    // handleSend (ChatInput returns early), and sendGuidedChat's own
+    // admission gate (guidedChatPending || guidedResponsePending) rejects a
+    // request that somehow slips past — two layers where the old unmount
+    // swap was one. The swap itself is gone: it read as a panel occluding
+    // the typing area (operator 2026-07-23).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2788,7 +2821,7 @@ assistant_message_kind: "synthetic_failure",
 
     const { container } = render(<ChatPanel />);
 
-    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
     // Silent-compute affordance: the lean working strip is the busy signal
     // (the old detached ComposingIndicator card is gone from guided).
     expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
@@ -2811,12 +2844,14 @@ assistant_message_kind: "synthetic_failure",
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
   });
 
-  it("pending-swap focus contract: strip wrapper takes focus in, composer section takes it back out", () => {
-    // Unmounting the focused composer content would strand focus at <body>
-    // (WCAG 2.4.3). Into pending: focus moves to the strip's tabIndex=-1
-    // wrapper — never the Stop button (double-Enter would abort the request
-    // just sent). Out of pending: focus returns into the composer (under the
-    // ChatInput mock inputRef never attaches, so the section is the landing).
+  it("pending focus contract: focus stays in the composer into pending and restores out of it", () => {
+    // With the swap gone the input never unmounts on the pending flip, so
+    // focus simply STAYS where the user left it (WCAG 2.4.3 without any
+    // programmatic move — the strip in the conversation flow must not steal
+    // it). Out of pending: the restore lands back inside the composer (under
+    // the ChatInput mock inputRef never attaches, so the section is the
+    // landing; the tutorial's "Sent" line replacing the input rides the same
+    // branch).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2835,9 +2870,8 @@ assistant_message_kind: "synthetic_failure",
     act(() => {
       useSessionStore.setState({ guidedChatPending: true });
     });
-    const strip = container.querySelector(".guided-pending-strip");
-    expect(strip).not.toBeNull();
-    expect(document.activeElement).toBe(strip);
+    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId("chat-input"));
 
     act(() => {
       useSessionStore.setState({ guidedChatPending: false });

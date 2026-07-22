@@ -1,17 +1,20 @@
 // src/components/chat/guided/GuidedPendingStrip.tsx
 
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useState } from "react";
 
 import type { ComposerProgressSnapshot } from "@/types/api";
 import { ElapsedReadout } from "../ComposingIndicator";
 
 /**
  * Pointer-arming delay for the Stop button. A mouse double-click on Send is
- * common muscle memory; the strip mounts in the space Send just vacated, so
- * without this the second click of a double-click aborts the request the
- * user just started. CSS `pointer-events: none` for this window — keyboard
- * access is deliberately unaffected (focus never lands on Stop; see the
- * focus contract in ChatPanel).
+ * common muscle memory; guarding the first ~300ms after mount means a stray
+ * second click can never abort the request the user just started. With the
+ * strip riding in the conversation flow (not mounting where Send sat, as the
+ * retired composer swap did) the window is belt-and-braces, but it stays:
+ * the cost is nil and layout shifts can still move Stop under a pointer.
+ * CSS `pointer-events: none` for this window — keyboard access is
+ * deliberately unaffected (focus never lands on Stop; see the focus
+ * contract in ChatPanel).
  */
 export const STOP_ARMING_DELAY_MS = 300;
 
@@ -24,12 +27,6 @@ interface GuidedPendingStripProps {
    * elspeth-fb4464cdf0).
    */
   onStop?: () => void;
-  /**
-   * Focus target for ChatPanel's pending-swap focus contract: the wrapper is
-   * tabIndex=-1 (programmatic-only) and deliberately NOT the Stop button —
-   * a habitual double-Enter after Send must land on a non-activatable node.
-   */
-  stripRef?: RefObject<HTMLDivElement>;
   substeps?: readonly string[];
   activeSubstepIndex?: number;
 }
@@ -56,25 +53,25 @@ function pendingHeadline(progress: ComposerProgressSnapshot | null): string {
 }
 
 /**
- * Lean single-row working strip that REPLACES the guided ChatInput while a
- * /guided/chat request is in flight (elspeth-6a9673ecd3). The swap — rather
- * than a disabled input — is the honest state: the old arrangement kept a
- * fully-alive-looking textarea with a quietly dead Send and grew the dock
- * with a detached status card below (clipped at wide viewports).
+ * Lean single-row working strip shown while a /guided/chat request is in
+ * flight. Placement (operator pass 2026-07-23): it rides IN the conversation
+ * flow — the bottom of the guided scroll column, the provisional reply slot,
+ * matching the decision-submit indicator — and never replaces or overlays
+ * the message input (the retired elspeth-6a9673ecd3 swap read as a panel
+ * occluding the typing area; the input now keeps its place with its
+ * ordinary disabled state).
  *
  * Structure contract:
  * - role="status" wraps ONLY the announcement content (dots + headline +
  *   elapsed), never the Stop button — a control inside a live region gets
- *   re-announced on unrelated content mutations.
+ *   re-announced on unrelated content mutations. The mount must stay
+ *   OUTSIDE every role="log" container (elspeth-76a0cc485e).
  * - The elapsed readout stays aria-hidden inside the status region (its
  *   once-per-second tick would spam AT; the headline is the AT signal).
- * - Height ≈ the idle input strip so the conversation column above barely
- *   reflows on the swap.
  */
 export function GuidedPendingStrip({
   composerProgress,
   onStop,
-  stripRef,
   substeps,
   activeSubstepIndex = 0,
 }: GuidedPendingStripProps): JSX.Element {
@@ -85,7 +82,7 @@ export function GuidedPendingStrip({
   }, []);
 
   return (
-    <div ref={stripRef} tabIndex={-1} className="guided-pending-strip">
+    <div className="guided-pending-strip">
       <div role="status" className="guided-pending-strip-status">
         <span className="composing-pulse" aria-hidden="true">
           <span className="composing-dot" />

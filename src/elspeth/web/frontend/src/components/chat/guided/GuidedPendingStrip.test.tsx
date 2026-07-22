@@ -95,20 +95,12 @@ describe("GuidedPendingStrip", () => {
     expect(pulse!.getAttribute("aria-hidden")).toBe("true");
   });
 
-  it("is a programmatic-only focus target (tabIndex=-1 wrapper)", () => {
-    const { container } = render(
-      <GuidedPendingStrip composerProgress={null} />,
-    );
-    const strip = container.querySelector(".guided-pending-strip");
-    expect(strip).not.toBeNull();
-    expect(strip!.getAttribute("tabindex")).toBe("-1");
-  });
-
   it("arms Stop against pointer double-clicks: pointer-suppressed on mount, live after the delay", () => {
     render(<GuidedPendingStrip composerProgress={null} onStop={vi.fn()} />);
     const stop = screen.getByRole("button", { name: "Stop composing" });
-    // Mounted where Send just sat — the second click of a muscle-memory
-    // double-click must not abort the request the user just started.
+    // A stray second click of a muscle-memory double-click must not abort
+    // the request the user just started (belt-and-braces now the strip rides
+    // in the conversation flow rather than mounting where Send sat).
     expect(stop.className).toContain("guided-pending-strip-stop--arming");
     act(() => {
       vi.advanceTimersByTime(STOP_ARMING_DELAY_MS);

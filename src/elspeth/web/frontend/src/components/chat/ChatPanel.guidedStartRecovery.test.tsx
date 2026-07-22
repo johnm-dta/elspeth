@@ -141,7 +141,11 @@ describe("ChatPanel cold guided-start recovery with the real ChatInput", () => {
     await user.type(textarea, "Original prompt that is not persisted");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(screen.queryByLabelText("Message input")).not.toBeInTheDocument();
+    // The input keeps its place while the start is pending (the old pending
+    // swap that unmounted it is retired — operator 2026-07-23); the box
+    // cleared on send and the text is nowhere client-persisted, so the
+    // submitted prompt is still unrecoverable-by-design.
+    expect(screen.getByLabelText("Message input")).toHaveValue("");
     expect(screen.getByRole("status")).toHaveTextContent("Guided setup running");
     expect(window.sessionStorage.getItem("elspeth_guided_operation_retries_v2")).not.toContain(
       "Original prompt that is not persisted",

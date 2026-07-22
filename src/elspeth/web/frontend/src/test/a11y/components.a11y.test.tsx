@@ -1257,12 +1257,13 @@ describe("ChatPanelTutorialWorkspace", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("has no axe violations while a guided chat is in flight (pending strip swap)", async () => {
-    // Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
-    // composer's child content is the GuidedPendingStrip (status region +
-    // Stop), not the ChatInput. chat_history holds only the PRIOR step's
-    // turns — the current step's user turn is server-emitted on response, so
-    // mid-flight the step is not "built" and the strip owns the slot.
+  it("has no axe violations while a guided chat is in flight (pending strip in conversation flow)", async () => {
+    // Placement pass 2026-07-23: while /guided/chat is in flight the
+    // GuidedPendingStrip (status region + Stop) rides in the conversation
+    // scroll region — the provisional reply slot — and the ChatInput keeps
+    // its place, disabled. chat_history holds only the PRIOR step's turns —
+    // the current step's user turn is server-emitted on response, so
+    // mid-flight the step is not "built" and both surfaces render.
     Element.prototype.scrollIntoView = vi.fn();
     vi.mocked(apiClient.fetchRuns).mockResolvedValue([]);
     const session = makeTutorialGuidedSession();
@@ -1285,12 +1286,17 @@ describe("ChatPanelTutorialWorkspace", () => {
       />,
     );
 
-    // Non-vacuous: the strip replaced the input, Stop is offered, and the
-    // composer landmark survived the swap.
-    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    // Non-vacuous: the strip rides in the conversation region, Stop is
+    // offered, and the composer landmark + input both survive (the input is
+    // no longer swapped out from under the typing area).
+    const strip = container.querySelector(".guided-pending-strip");
+    expect(strip).not.toBeNull();
+    const scroll = container.querySelector(".guided-workspace-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll!.contains(strip)).toBe(true);
     screen.getByRole("button", { name: "Stop composing" });
     screen.getByRole("region", { name: "Describe what you want" });
-    expect(screen.queryByLabelText("Message input")).toBeNull();
+    expect(screen.getByLabelText("Message input")).toBeInTheDocument();
 
     expect(await axe(container)).toHaveNoViolations();
   });

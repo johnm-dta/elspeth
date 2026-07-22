@@ -17,6 +17,7 @@ Operational procedures for ELSPETH pipeline management.
 | [Backup and Recovery](backup-and-recovery.md) | Backup audit trail, restore from backup |
 | [Ansible Ubuntu Deployment](ansible-ubuntu-deployment.md) | Automate Ubuntu 24.04/22.04 VM, Azure Front Door, and Azure container deployments |
 | [AWS ECS Deployment](aws-ecs-deployment.md) | Deploying ELSPETH web to AWS ECS Fargate with Aurora PostgreSQL |
+| [AWS ECS Bedrock Opus and Sonnet](aws-ecs-bedrock-opus-sonnet.md) | Configure and validate operator-approved Bedrock Opus and Sonnet profiles on ECS |
 | [Audit Tier-1 Violation](audit-tier1-violation.md) | Compose-loop audit counters or audit-grade transcript logging fail |
 
 ---

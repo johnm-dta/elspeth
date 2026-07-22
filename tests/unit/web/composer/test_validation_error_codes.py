@@ -388,5 +388,161 @@ class TestPlannerFeedbackCarriesStructuralFacts:
         assert codes == ("validation_error", "schema_contract_violation")
 
 
+def _make_gate(id: str, input: str, fork_to: tuple[str, ...]) -> NodeSpec:
+    return NodeSpec(
+        id=id,
+        node_type="gate",
+        plugin=None,
+        input=input,
+        on_success=None,
+        on_error=None,
+        options={},
+        condition="'all'",
+        routes={"all": "fork"},
+        fork_to=fork_to,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _make_coalesce(id: str, branches: Any) -> NodeSpec:
+    return NodeSpec(
+        id=id,
+        node_type="coalesce",
+        plugin=None,
+        input="branches",
+        on_success=None,
+        on_error=None,
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=branches,
+        policy="require_all",
+        merge="union",
+    )
+
+
+def _orphaned_coalesce_state(branches: Any) -> CompositionState:
+    """Fork/coalesce pipeline whose branch transforms bypass the coalesce.
+
+    Reconstruction of guided session 277fb6c4 (attempts 3/6/9/10, 2026-07-22):
+    the per-branch transforms publish straight to the sink — legal in
+    isolation, so no companion code fires — leaving the coalesce's branches
+    values naming connections nothing produces. The ONLY rejection is
+    ``coalesce_branch_unreachable``, exactly matching the observed
+    single-code per-attempt trail.
+    """
+    state = _empty_state()
+    state = state.with_source(_make_source(on_success="rows"))
+    state = state.with_node(_make_gate("fan_out", "rows", ("branch_a", "branch_b")))
+    state = state.with_node(_make_transform("t_a", "branch_a", "main"))
+    state = state.with_node(_make_transform("t_b", "branch_b", "main"))
+    state = state.with_node(_make_coalesce("merge", branches))
+    state = state.with_node(_make_transform("tidy", "merge", "main"))
+    state = state.with_output(_make_output())
+    return state
+
+
+class TestCoalesceReachabilityFacts:
+    """The coalesce reachability rejection carries instance wiring facts.
+
+    Guided session 277fb6c4 died REPAIR_EXHAUSTED on four identical
+    ``coalesce_branch_unreachable`` rejections: the static guidance directs
+    the repair at the coalesce node, but the observed miswiring lives in the
+    branch transforms' ``on_success`` — a repair the planner cannot find
+    from a bare code. These facts name each unreachable branches value and
+    the connections the pipeline actually produces (node ids and connection
+    names the planner itself authored — never user row content).
+    """
+
+    def test_orphaned_coalesce_rejects_with_the_single_observed_code(self) -> None:
+        state = _orphaned_coalesce_state({"branch_a": "a_done", "branch_b": "b_done"})
+        result = state.validate()
+        assert not result.is_valid
+        assert [e.error_code for e in result.errors] == ["coalesce_branch_unreachable"]
+
+    def test_reachability_facts_name_unreachable_pairs_and_produced_connections(self) -> None:
+        from elspeth.web.composer.state import coalesce_reachability_facts
+
+        state = _orphaned_coalesce_state({"branch_a": "a_done", "branch_b": "b_done"})
+        facts = coalesce_reachability_facts(state)
+        assert facts == {
+            "merge": {
+                "unreachable_branches": {"branch_a": "a_done", "branch_b": "b_done"},
+                # Sink names and the coalesce's own published id are excluded:
+                # both pass the membership walk today but are not connections a
+                # branch value should be steered toward.
+                "produced_connections": ["branch_a", "branch_b", "rows"],
+            }
+        }
+
+    def test_reachability_facts_handle_list_form_branches(self) -> None:
+        from elspeth.web.composer.state import coalesce_reachability_facts
+
+        state = _orphaned_coalesce_state(("a_done", "b_done"))
+        facts = coalesce_reachability_facts(state)
+        assert facts == {
+            "merge": {
+                "unreachable_branches": {"a_done": "a_done", "b_done": "b_done"},
+                "produced_connections": ["branch_a", "branch_b", "rows"],
+            }
+        }
+
+    def test_reachability_facts_empty_for_correctly_wired_coalesce(self) -> None:
+        from elspeth.web.composer.state import coalesce_reachability_facts
+
+        state = _empty_state()
+        state = state.with_source(_make_source(on_success="rows"))
+        state = state.with_node(_make_gate("fan_out", "rows", ("branch_a", "branch_b")))
+        state = state.with_node(_make_transform("t_a", "branch_a", "a_done"))
+        state = state.with_node(_make_transform("t_b", "branch_b", "b_done"))
+        state = state.with_node(_make_coalesce("merge", {"branch_a": "a_done", "branch_b": "b_done"}))
+        state = state.with_node(_make_transform("tidy", "merge", "main"))
+        state = state.with_output(_make_output())
+        assert state.validate().is_valid
+        assert coalesce_reachability_facts(state) == {}
+
+    def test_allowlisted_feedback_projects_connectivity_facts(self) -> None:
+        from elspeth.web.composer.pipeline_planner import _allowlisted_candidate_feedback
+        from elspeth.web.composer.tools import ToolResult
+
+        state = _orphaned_coalesce_state({"branch_a": "a_done", "branch_b": "b_done"})
+        result = ToolResult(
+            success=False,
+            updated_state=state,
+            validation=state.validate(),
+            affected_nodes=(),
+        )
+        feedback = _allowlisted_candidate_feedback(result)
+        projected = feedback["validation"]["errors"][0]
+        assert projected["error_code"] == "coalesce_branch_unreachable"
+        assert "message" not in projected
+        assert projected["connectivity"] == {
+            "unreachable_branches": {"branch_a": "a_done", "branch_b": "b_done"},
+            "produced_connections": ["branch_a", "branch_b", "rows"],
+        }
+
+    def test_allowlisted_feedback_omits_connectivity_for_other_codes(self) -> None:
+        from elspeth.web.composer.pipeline_planner import _allowlisted_candidate_feedback
+        from elspeth.web.composer.tools import ToolResult
+
+        entry = ValidationEntry(
+            component="node:merge",
+            message="anything",
+            severity="high",
+            error_code="coalesce_missing_policy",
+        )
+        result = ToolResult(
+            success=False,
+            updated_state=_empty_state(),
+            validation=ValidationSummary(is_valid=False, errors=(entry,), warnings=(), suggestions=()),
+            affected_nodes=(),
+        )
+        feedback = _allowlisted_candidate_feedback(result)
+        assert "connectivity" not in feedback["validation"]["errors"][0]
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

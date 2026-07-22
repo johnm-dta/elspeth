@@ -351,9 +351,14 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     ),
     (
         r"coalesce_branch_unreachable|branches .* are not reachable",
-        "A coalesce branches mapping names an incoming connection that no runtime routing field produces.",
-        "Each branches VALUE must be a connection some upstream node actually publishes (a transform's on_success, or a gate "
-        "fork_to branch name when the branch has no transforms). Re-emit the coalesce with values matching the real incoming connections.",
+        "A coalesce branches mapping names an incoming connection that no runtime routing field produces. The usual cause is "
+        "the WIRING AROUND the coalesce, not the coalesce itself: a branch transform's on_success routes past the coalesce "
+        "(e.g. straight to a sink), so nothing arrives under the connection name the branches value claims. The rejection's "
+        "connectivity facts list each unreachable branches value and every connection the pipeline actually produces.",
+        "Wire each fork branch end-to-end: the gate fork_to name is the branch transform's input; that transform's on_success "
+        "must be a unique connection name (NOT a sink); the coalesce branches VALUE for that branch is exactly that connection. "
+        "A branch with no transforms uses its fork branch name as the value. Repair the branch transforms' on_success together "
+        "with the coalesce, drawing every branches value from the connectivity facts' produced_connections.",
     ),
     (
         r"node_input_not_reachable|input '(.+)' is not reachable",
@@ -463,17 +468,23 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         r"coalesce_missing_policy|Coalesce '(.+)' is missing required field 'policy'",
         "A coalesce node must declare how it settles branches.",
-        "Set policy='require_all' (wait for every branch) and merge='union' (combine branch fields into one row); branches maps each branch name to its incoming connection, e.g. branches={'branch_a': 'branch_a', 'branch_b': 'branch_b'}.",
+        "Set policy='require_all' (wait for every branch) and merge='union' (combine branch fields into one row); branches maps "
+        "each fork branch name to the connection ARRIVING at the coalesce — the branch's last transform on_success (e.g. "
+        "branches={'branch_a': 'a_done', 'branch_b': 'b_done'}), or the fork branch name itself only when that branch has no transforms.",
     ),
     (
         r"coalesce_missing_branches|Coalesce '(.+)' is missing required field 'branches'",
         "A coalesce node must name the branch connections it rejoins.",
-        "Set branches to a mapping of branch name -> incoming connection name, e.g. branches={'branch_a': 'branch_a', 'branch_b': 'branch_b'}, plus policy='require_all' and merge='union'.",
+        "Set branches to a mapping of fork branch name -> the connection ARRIVING at the coalesce: the branch's last transform "
+        "on_success (e.g. branches={'branch_a': 'a_done', 'branch_b': 'b_done'}), or the fork branch name itself only when that "
+        "branch has no transforms. Add policy='require_all' and merge='union'.",
     ),
     (
         r"transform_missing_on_success|Transform '(.+)' is missing required field 'on_success'",
         "Every transform must route its successful rows somewhere.",
-        "Set the transform's on_success to the next connection or sink name; use on_error='discard' unless failed rows need a quarantine sink.",
+        "Set the transform's on_success to the next connection or sink name; use on_error='discard' unless failed rows need a "
+        "quarantine sink. A transform on a fork branch that rejoins at a coalesce must publish the connection named by that "
+        "coalesce's branches value for its branch — not a sink.",
     ),
     (
         r"transform_missing_on_error|Transform '(.+)' is missing required field 'on_error'",

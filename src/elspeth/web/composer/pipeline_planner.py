@@ -65,7 +65,7 @@ from elspeth.web.composer.progress import (
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import SetPipelineArgumentsModel
 from elspeth.web.composer.reviewed_source_authority import resolve_reviewed_source_authority
-from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.state import CompositionState, coalesce_reachability_facts
 from elspeth.web.composer.tools._common import RuntimePreflight, ToolContext, ToolResult
 from elspeth.web.composer.tools._dispatch import (
     execute_discovery_tool_with_context,
@@ -646,6 +646,7 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
     """
     validation = result.validation
     errors: list[dict[str, Any]] = []
+    reachability_facts: dict[str, dict[str, Any]] | None = None
     for entry in validation.errors:
         code = entry.error_code or "validation_error"
         projected: dict[str, Any] = {
@@ -657,6 +658,20 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
         guidance = explain_validation_code(code)
         if guidance is not None:
             projected["explanation"], projected["suggested_fix"] = guidance
+        if code == "coalesce_branch_unreachable":
+            # Instance wiring facts derived from the REJECTED state the result
+            # carries — same redaction class as the contract facts below (node
+            # ids + connection names the planner itself authored). Without
+            # them the observed miswiring (branch transforms publishing past
+            # the coalesce, e.g. straight to a sink) is invisible: guided
+            # session 277fb6c4 burned its whole repair budget re-emitting the
+            # coalesce because nothing named the connections that actually
+            # exist.
+            if reachability_facts is None:
+                reachability_facts = coalesce_reachability_facts(result.updated_state)
+            connectivity = reachability_facts.get(entry.component.removeprefix("node:"))
+            if connectivity is not None:
+                projected["connectivity"] = connectivity
         if entry.contract is not None:
             # Structured contract facts: producer/consumer component ids and
             # schema FIELD NAMES from validated contract config — pipeline

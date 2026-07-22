@@ -768,6 +768,54 @@ def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
     return consumers
 
 
+def coalesce_reachability_facts(state: CompositionState) -> dict[str, dict[str, Any]]:
+    """Redaction-safe wiring facts for coalesce branch-reachability rejections.
+
+    Maps each coalesce node id whose ``branches`` values name connections no
+    runtime routing field produces to the facts a repair needs:
+    ``unreachable_branches`` (branch key -> consumed connection value, exactly
+    as authored — list-form branches key by the entry itself) and
+    ``produced_connections`` (the membership set ``validate()``'s
+    ``coalesce_branch_unreachable`` check tests, minus sink names and the
+    coalesce's own published id — both pass the walk but are never a correct
+    branch value, so the facts must not steer a repair toward them).
+
+    Guided session 277fb6c4 (2026-07-22) exhausted its repair budget on four
+    identical ``coalesce_branch_unreachable`` rejections: the observed
+    miswiring — branch transforms publishing straight to the sink — is
+    invisible from the bare code, and the planner's repair feedback strips
+    raw messages. Everything here is a node id or connection name the
+    session owner / planner authored — the same redaction judgment as
+    ``SchemaContractDetail`` — so forwarding it through the message-stripped
+    repair feedback does not re-open the redaction boundary.
+    """
+    targets = _runtime_connection_targets(state.sources, state.nodes)
+    sink_names = {output.name for output in state.outputs}
+    facts: dict[str, dict[str, Any]] = {}
+    for node in state.nodes:
+        if node.node_type != "coalesce" or node.branches is None:
+            continue
+        unreachable = {
+            str(branch_name): branch_connection
+            for branch_name, branch_connection in zip(
+                _coalesce_branch_names(node.branches),
+                _coalesce_branch_connections(node.branches),
+                strict=True,
+            )
+            if branch_connection not in targets
+        }
+        if not unreachable:
+            continue
+        facts[node.id] = {
+            "unreachable_branches": unreachable,
+            # _FORK_ROUTE_TARGET is the reserved route keyword ("go to
+            # fork_to"), not a connection — it rides the membership set but
+            # must not be advertised as a wirable name.
+            "produced_connections": sorted(targets - sink_names - {node.id, _FORK_ROUTE_TARGET}),
+        }
+    return facts
+
+
 def _validate_runtime_route_destinations(
     sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],

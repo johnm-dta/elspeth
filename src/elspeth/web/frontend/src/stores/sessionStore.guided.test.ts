@@ -103,6 +103,7 @@ const sampleProposalTurn: TurnPayload = {
   payload: {
     proposal_id: PROPOSAL_ID,
     draft_hash: PROPOSAL_HASH,
+    supersedes_draft_hash: null,
     summary: "guided.proposal.summary.full_graph.v1",
     rationale: "guided.proposal.rationale.review_required.v1",
     component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },

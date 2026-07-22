@@ -893,6 +893,7 @@ describe("ProposePipelineTurn", () => {
     return {
       proposal_id: PROPOSAL_ID,
       draft_hash: DRAFT_HASH,
+      supersedes_draft_hash: null,
       summary: "guided.proposal.summary.a11y.v1",
       rationale: "guided.proposal.rationale.a11y.v1",
       component_counts: { sources: 1, nodes: 1, edges: 5, outputs: 1 },
@@ -1043,7 +1044,33 @@ describe("ProposePipelineTurn", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("has no axe violations in the tutorial render (live primary, off-script controls withheld)", async () => {
+  it("has no axe violations in the tutorial revision render (live primary, off-script controls withheld)", async () => {
+    const reviewState: GuidedProposalReviewState = {
+      status: "active",
+      proposal_id: PROPOSAL_ID,
+      draft_hash: DRAFT_HASH,
+    };
+    const { container } = render(
+      <ProposePipelineTurn
+        payload={proposalPayload({ supersedes_draft_hash: "e".repeat(64) })}
+        reviewState={reviewState}
+        onSubmit={() => {}}
+        isTutorial
+      />,
+    );
+    // Non-vacuous: the tutorial teaching note renders, the live "Review
+    // wiring" primary stays actionable (the tutorial proposal is a REAL
+    // planner proposal the learner must accept to advance; the primary is
+    // live only once the frozen-prompt revision supersedes the pre-Send
+    // auto-proposal), and the off-script reject/revise controls are withheld.
+    screen.getByText(/press Review wiring to continue/i);
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the tutorial pre-Send auto-proposal render (primary withheld)", async () => {
     const reviewState: GuidedProposalReviewState = {
       status: "active",
       proposal_id: PROPOSAL_ID,
@@ -1052,12 +1079,11 @@ describe("ProposePipelineTurn", () => {
     const { container } = render(
       <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} isTutorial />,
     );
-    // Non-vacuous: the tutorial teaching note renders, the live "Review
-    // wiring" primary stays actionable (the tutorial proposal is a REAL
-    // planner proposal the learner must accept to advance), and the
-    // off-script reject/revise controls are withheld.
-    screen.getByText(/press Review wiring to continue/i);
-    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    // Non-vacuous: the pre-Send auto-proposal (supersedes_draft_hash null)
+    // withholds every action and directs the learner to Send the frozen
+    // transforms prompt instead (tutorial run 18 committed the passthrough).
+    screen.getByText(/press Send/i);
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
     expect(await axe(container)).toHaveNoViolations();

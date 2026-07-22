@@ -108,6 +108,7 @@ function payload(): ProposePipelinePayload {
   return {
     proposal_id: IDS.proposal,
     draft_hash: "d".repeat(64),
+    supersedes_draft_hash: null,
     summary: "guided.proposal.summary.full_graph.v1",
     rationale: "guided.proposal.rationale.review_required.v1",
     component_counts: { sources: 2, nodes: 4, edges: edges.length, outputs: 2 },
@@ -418,18 +419,21 @@ describe("ProposePipelineTurn", () => {
     expect(screen.getByRole("button", { name: "Revise node-1" })).toBeDisabled();
   });
 
-  it("keeps the live Review wiring primary in tutorials while withholding reject/revise", async () => {
+  it("keeps the live Review wiring primary on a tutorial revision proposal while withholding reject/revise", async () => {
     // Post-7.1 the tutorial's transforms phase yields a REAL planner proposal
     // (no canned recipe exhibit exists), so the primary must render and
     // dispatch — read-only rendering made the tutorial unfinishable. The
     // off-script affordances (Reject discards the build; Revise re-enters
     // planner rounds) stay withheld for the passive learner, mirroring
-    // InspectAndConfirmTurn's hidden "Edit columns…".
+    // InspectAndConfirmTurn's hidden "Edit columns…". The primary is live
+    // only once the frozen-prompt revision has superseded the pre-Send
+    // auto-proposal (supersedes_draft_hash is set).
     const user = userEvent.setup();
     const onSubmit = vi.fn();
+    const revision = { ...payload(), supersedes_draft_hash: "e".repeat(64) };
     render(
       <ProposePipelineTurn
-        payload={payload()}
+        payload={revision}
         reviewState={activeReview()}
         onSubmit={onSubmit}
         isTutorial
@@ -453,5 +457,47 @@ describe("ProposePipelineTurn", () => {
         control_signal: null,
       }],
     ]);
+  });
+
+  it("withholds Review wiring on the tutorial pre-Send auto-proposal and tells the learner to press Send", () => {
+    // Tutorial run 18 (session 07e8a3a8): the step-2→step-3 transition
+    // auto-plans a first proposal from the degenerate fallback intent before
+    // the learner's frozen transforms prompt is sent — a source→sink
+    // passthrough. Accepting it commits a transform-less pipeline that the
+    // tutorial launch gate then 409s. The auto-proposal is identified by
+    // supersedes_draft_hash === null; withhold the primary and direct the
+    // learner to Send so the revision re-plan carries the real scenario.
+    const onSubmit = vi.fn();
+    render(
+      <ProposePipelineTurn
+        payload={payload()}
+        reviewState={activeReview()}
+        onSubmit={onSubmit}
+        isTutorial
+      />,
+    );
+    expect(screen.getByRole("img", { name: /pipeline proposal graph/i })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+    expect(screen.getByText(/press Send/i)).toBeVisible();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps the non-tutorial surface unchanged for a first proposal with no superseded draft", () => {
+    // Live guided mode legitimately accepts a root-intent auto-proposal
+    // (the colour flow depends on it) — the null discriminator must gate
+    // nothing outside tutorial mode.
+    const onSubmit = vi.fn();
+    render(
+      <ProposePipelineTurn
+        payload={payload()}
+        reviewState={activeReview()}
+        onSubmit={onSubmit}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Reject proposal" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Revise node-1" })).toBeEnabled();
   });
 });

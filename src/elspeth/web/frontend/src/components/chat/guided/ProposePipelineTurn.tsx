@@ -298,30 +298,46 @@ export function ProposePipelineTurn({
           frozen-prompt proposal arrives unblocked: revise — the only in-turn
           affordance that clears a blocker — is withheld, and the one blocker
           the tutorial realistically sees (interpretation_required) clears via
-          the Accept cards outside this turn. */}
+          the Accept cards outside this turn.
+
+          That presupposition only holds AFTER the frozen prompt has been
+          sent. The step-2→step-3 transition auto-plans a FIRST proposal
+          before any transforms instruction exists (tutorial run 18: a
+          source→sink passthrough that committed and then failed the tutorial
+          launch gate). The auto-proposal carries supersedes_draft_hash null;
+          a Send re-plans it as a superseding revision. Until that revision
+          arrives, withhold "Review wiring" and direct the learner to Send. */}
       {isTutorial ? (
-        <p className="guided-proposal__tutorial-note">
-          The assistant planned this pipeline from your prompt. Review how its sources, processing steps, routes, and outputs fit together, then press Review wiring to continue.
-        </p>
+        payload.supersedes_draft_hash === null ? (
+          <p className="guided-proposal__tutorial-note">
+            This starting sketch only connects your reviewed source to your output. Press Send below to give the assistant your processing instructions — it will replan the pipeline with those steps before you review the wiring.
+          </p>
+        ) : (
+          <p className="guided-proposal__tutorial-note">
+            The assistant planned this pipeline from your prompt. Review how its sources, processing steps, routes, and outputs fit together, then press Review wiring to continue.
+          </p>
+        )
       ) : null}
       <div className="guided-proposal__controls">
         <div className="guided-proposal__primary-actions">
-          <button
-            type="button"
-            className="guided-turn-primary"
-            disabled={!actionEnabled({ kind: "review_wiring" }) || payload.blockers.length > 0}
-            onClick={() => onSubmit({
-              chosen: ["review_wiring"],
-              edited_values: null,
-              custom_inputs: null,
-              edit_target: null,
-              control_signal: null,
-              proposal_id: payload.proposal_id,
-              draft_hash: payload.draft_hash,
-            } satisfies GuidedRespondAction)}
-          >
-            Review wiring
-          </button>
+          {!(isTutorial && payload.supersedes_draft_hash === null) && (
+            <button
+              type="button"
+              className="guided-turn-primary"
+              disabled={!actionEnabled({ kind: "review_wiring" }) || payload.blockers.length > 0}
+              onClick={() => onSubmit({
+                chosen: ["review_wiring"],
+                edited_values: null,
+                custom_inputs: null,
+                edit_target: null,
+                control_signal: null,
+                proposal_id: payload.proposal_id,
+                draft_hash: payload.draft_hash,
+              } satisfies GuidedRespondAction)}
+            >
+              Review wiring
+            </button>
+          )}
           {!isTutorial && (
             <button
               type="button"

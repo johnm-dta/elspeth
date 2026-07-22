@@ -113,6 +113,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
 const PROPOSAL_PAYLOAD: ProposePipelinePayload = {
   proposal_id: "00000000-0000-4000-8000-000000000401",
   draft_hash: "d".repeat(64),
+  supersedes_draft_hash: null,
   summary: "guided.proposal.summary.full_graph.v1",
   rationale: "guided.proposal.rationale.review_required.v1",
   component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },

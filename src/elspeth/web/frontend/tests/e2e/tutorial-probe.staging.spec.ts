@@ -111,12 +111,18 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   const runHeading = page.getByRole("heading", { name: /Running your pipeline/i });
   const acceptButtons = page.getByRole("button", { name: /^Accept /i });
   const promptRegions = page.getByRole("region", { name: "Prompt template review" });
+  // "Review wiring" carries a send-first guard (below): the step-2→step-3
+  // transition auto-plans a FIRST proposal from a fallback intent before the
+  // locked transforms prompt is sent; accepting it commits a source→sink
+  // passthrough the tutorial launch gate rejects (run 18). Honor the primary
+  // only after the Transforms-phase Send, mirroring tutorial-reliability.
+  const reviewWiring = page.getByRole("button", { name: "Review wiring", exact: true });
   const primaries = [
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     // Pipeline proposal turn (propose_pipeline): the transforms phase yields a
     // REAL planner proposal; accepting it (chosen ["review_wiring"]) is the
     // only advance into the wire stage. Renders only on the proposal turn.
-    page.getByRole("button", { name: "Review wiring", exact: true }),
+    reviewWiring,
     page.getByRole("button", { name: "Continue", exact: true }),
     // Source inspection review (inspect_and_confirm): rendered after the
     // chat-resolved inline source is materialized into a session blob and
@@ -181,6 +187,9 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
     }
     if (!advanced) {
       for (const p of primaries) {
+        // Send-first guard: never accept a transforms proposal before the
+        // locked Transforms prompt has been sent this walk.
+        if (p === reviewWiring && lastDrivenPhase !== "Transforms") continue;
         if ((await p.count().catch(() => 0)) > 0 && (await p.isEnabled().catch(() => false))) {
           const label = (await p.textContent().catch(() => "")) ?? "";
           await p.click().catch(() => {});

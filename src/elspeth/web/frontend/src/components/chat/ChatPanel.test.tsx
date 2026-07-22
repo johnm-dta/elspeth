@@ -455,7 +455,7 @@ describe("ChatPanel mode discriminator", () => {
   const proposalId = "00000000-0000-4000-8000-000000000701";
   const proposalHash = "f".repeat(64);
 
-  function proposalTurn(): TurnPayload {
+  function proposalTurn(supersedesDraftHash: string | null = null): TurnPayload {
     const sourceId = "00000000-0000-4000-8000-000000000702";
     const outputId = "00000000-0000-4000-8000-000000000703";
     return {
@@ -465,6 +465,7 @@ describe("ChatPanel mode discriminator", () => {
       payload: {
         proposal_id: proposalId,
         draft_hash: proposalHash,
+        supersedes_draft_hash: supersedesDraftHash,
         summary: "guided.proposal.summary.full_graph.v1",
         rationale: "guided.proposal.rationale.review_required.v1",
         component_counts: { sources: 1, nodes: 0, edges: 2, outputs: 1 },
@@ -544,10 +545,35 @@ describe("ChatPanel mode discriminator", () => {
     },
   );
 
-  it("keeps the live Review wiring primary on the tutorial proposal review", () => {
+  it("keeps the live Review wiring primary on the tutorial revision proposal review", () => {
     // The tutorial proposal is a REAL planner proposal (no canned exhibit
     // exists post-7.1); the learner advances by accepting it, so the primary
-    // must stay live while the off-script reject/revise stay withheld.
+    // must stay live while the off-script reject/revise stay withheld. The
+    // primary is live only on the frozen-prompt REVISION proposal
+    // (supersedes_draft_hash set) — the pre-Send auto-proposal withholds it.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: proposalTurn("e".repeat(64)),
+      guidedProposalReview: proposalReview("active"),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByText("Review pipeline proposal")).toBeVisible();
+    expect(screen.getByText("orders-source · csv")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+  });
+
+  it("withholds the tutorial Review wiring primary on the pre-Send auto-proposal", () => {
+    // Tutorial run 18: accepting the transition auto-proposal (planned before
+    // the frozen transforms prompt is sent) commits a source→sink
+    // passthrough. The null supersedes_draft_hash identifies it; the learner
+    // is directed to Send instead.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -560,10 +586,17 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel isTutorial />);
 
     expect(screen.getByText("Review pipeline proposal")).toBeVisible();
-    expect(screen.getByText("orders-source · csv")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
-    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.getByText(/press Send/i)).toBeVisible();
+    // The withheld primary must leave a live path forward: the docked
+    // composer's Send is the ONLY advance on this turn (it re-plans the
+    // proposal as the frozen-prompt revision) — without it this turn is a
+    // dead end, strictly worse than the wrong-completion it prevents.
+    // ChatInput is mocked in this suite; its stub mirrors the live enabled
+    // state via data-disabled, and the region landmark is the same one the
+    // staging drivers target for the Send.
+    expect(screen.getByRole("region", { name: "Describe what you want" })).toBeVisible();
+    expect(screen.getByTestId("chat-input")).toHaveAttribute("data-disabled", "false");
   });
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {

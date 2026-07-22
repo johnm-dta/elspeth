@@ -139,12 +139,23 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // Stage primary affordances, in priority order. "Confirm wiring" is the wire
   // gate (D12): it stays disabled until the stage's interpretation cards are
   // resolved, which resolveVisibleReviews handles each pass.
+  //
+  // "Review wiring" carries a send-first guard (below): the step-2→step-3
+  // transition auto-plans a FIRST proposal from a fallback intent BEFORE the
+  // locked transforms prompt is sent — accepting that one commits a
+  // source→sink passthrough that the tutorial launch gate rejects (run 18,
+  // session 07e8a3a8). The primary is honored only after this driver has
+  // Sent the Transforms-phase prompt, so the proposal it accepts is the
+  // frozen-prompt revision. (The tutorial UI withholds the button on the
+  // pre-Send auto-proposal too — supersedes_draft_hash null — this guard
+  // keeps the driver correct on its own.)
+  const reviewWiring = page.getByRole("button", { name: "Review wiring", exact: true });
   const primaries = [
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     // Pipeline proposal turn (propose_pipeline): the transforms phase yields a
     // REAL planner proposal; accepting it (chosen ["review_wiring"]) is the
     // only advance into the wire stage. Renders only on the proposal turn.
-    page.getByRole("button", { name: "Review wiring", exact: true }),
+    reviewWiring,
     page.getByRole("button", { name: "Continue", exact: true }),
     // Source inspection review (inspect_and_confirm): rendered after the
     // chat-resolved inline source is materialized into a session blob and
@@ -219,6 +230,9 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     // 1. Advance through the structured result via an enabled stage primary.
     let advanced = false;
     for (const primary of primaries) {
+      // Send-first guard: never accept a transforms proposal before the
+      // locked Transforms prompt has been sent this walk.
+      if (primary === reviewWiring && lastDrivenPhase !== "Transforms") continue;
       if (
         (await primary.count().catch(() => 0)) > 0 &&
         (await primary.isEnabled().catch(() => false))

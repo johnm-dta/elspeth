@@ -574,6 +574,14 @@ export type ProposalNodeBehavior =
 export interface ProposePipelinePayload {
   proposal_id: string;
   draft_hash: string;
+  /**
+   * Revision discriminator: null for a first (transition auto-planned)
+   * proposal; the superseded proposal's draft hash for a revision re-plan.
+   * Tutorial mode withholds "Review wiring" while this is null — the
+   * pre-Send auto-proposal is a source→sink passthrough planned before the
+   * learner's frozen transforms prompt has been sent.
+   */
+  supersedes_draft_hash: string | null;
   summary: string;
   rationale: string;
   component_counts: {

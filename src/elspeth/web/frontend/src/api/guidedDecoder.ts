@@ -358,11 +358,17 @@ function validateProposalFlow(value: unknown, path: string): DecodedProposalFlow
 
 function validateProposalPayload(value: unknown, path: string): void {
   const payload = exactRecord(value, path, [
-    "proposal_id", "draft_hash", "summary", "rationale", "component_counts",
+    "proposal_id", "draft_hash", "supersedes_draft_hash", "summary", "rationale", "component_counts",
     "blockers", "graph", "nodes", "outputs", "edit_targets",
   ]);
   canonicalUuid(payload.proposal_id, `${path}.proposal_id`);
   if (!SHA256.test(stringValue(payload.draft_hash, `${path}.draft_hash`))) invalid(`${path}.draft_hash`, "expected sha256");
+  if (
+    payload.supersedes_draft_hash !== null &&
+    !SHA256.test(stringValue(payload.supersedes_draft_hash, `${path}.supersedes_draft_hash`))
+  ) {
+    invalid(`${path}.supersedes_draft_hash`, "expected null or sha256");
+  }
   if (stringValue(payload.summary, `${path}.summary`) !== PROPOSAL_SUMMARY_TEMPLATE) invalid(`${path}.summary`, "unknown template id");
   if (stringValue(payload.rationale, `${path}.rationale`) !== PROPOSAL_RATIONALE_TEMPLATE) invalid(`${path}.rationale`, "unknown template id");
 
@@ -1057,7 +1063,7 @@ function decodeProposalBehavior(
 function decodeProposalPayload(value: unknown, path: string): ProposePipelinePayload {
   validateProposalPayload(value, path);
   const payload = exactRecord(value, path, [
-    "proposal_id", "draft_hash", "summary", "rationale", "component_counts",
+    "proposal_id", "draft_hash", "supersedes_draft_hash", "summary", "rationale", "component_counts",
     "blockers", "graph", "nodes", "outputs", "edit_targets",
   ]);
   const counts = exactRecord(payload.component_counts, `${path}.component_counts`, ["sources", "nodes", "edges", "outputs"]);
@@ -1098,6 +1104,10 @@ function decodeProposalPayload(value: unknown, path: string): ProposePipelinePay
   return {
     proposal_id: canonicalUuid(payload.proposal_id, `${path}.proposal_id`),
     draft_hash: stringValue(payload.draft_hash, `${path}.draft_hash`),
+    supersedes_draft_hash:
+      payload.supersedes_draft_hash === null
+        ? null
+        : stringValue(payload.supersedes_draft_hash, `${path}.supersedes_draft_hash`),
     summary: stringValue(payload.summary, `${path}.summary`),
     rationale: stringValue(payload.rationale, `${path}.rationale`),
     component_counts: {

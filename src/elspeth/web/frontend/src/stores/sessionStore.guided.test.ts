@@ -579,6 +579,52 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedProposalReview?.status).not.toBe("submitting");
   });
 
+  it("respondGuided: maps the concurrent-operation 409 to a clean retryable settle", async () => {
+    // Server half dad8b8abd: a competing different-body respond answers 409
+    // {error_type: "guided_operation_conflict", code: "operation_in_progress"}
+    // after a bounded admission wait. Transient by definition — the OTHER
+    // operation is still settling — so it is neither a proposal-authority
+    // conflict (nothing about the binding changed; no custody-discarding GET
+    // resync) nor the locked refresh-the-session error: pending clears, the
+    // review re-arms retryable, and the user re-presses once the in-flight
+    // action lands.
+    const { respondGuided: apiRespond, getGuided } = await import("@/api/client");
+    (apiRespond as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      status: 409,
+      error_type: "guided_operation_conflict",
+      detail: "another guided operation is in progress for this session",
+    });
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleProposalTurn,
+    });
+
+    const outcome = await useSessionStore.getState().respondGuided({
+      chosen: ["review_wiring"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(outcome.status).toBe("not_applied");
+    const state = useSessionStore.getState();
+    expect(state.guidedResponsePending).toBe(false);
+    expect(state.guidedProposalReview).toMatchObject({
+      status: "error",
+      retryable: true,
+      proposal_id: PROPOSAL_ID,
+      draft_hash: PROPOSAL_HASH,
+    });
+    expect(state.error).toMatch(/still settling/i);
+    // The misroute guard: a proposal-bound conflict must NOT trigger the
+    // proposal-authority resync (which would discard custody and reload).
+    expect(getGuided).not.toHaveBeenCalled();
+  });
+
   it("respondGuided: reuses one operation id for an ambiguous retry of the exact action and turn", async () => {
     const { respondGuided } = await import("@/api/client");
     const respondMock = respondGuided as ReturnType<typeof vi.fn>;

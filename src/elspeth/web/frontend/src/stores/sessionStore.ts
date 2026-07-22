@@ -2577,6 +2577,43 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
       }
 
+      // A competing guided operation held the session admission lease past
+      // the server's bounded wait (dad8b8abd: 409 guided_operation_conflict /
+      // operation_in_progress). Transient by definition — the OTHER operation
+      // is still settling — so it is neither a proposal-authority conflict
+      // (nothing about the binding changed; no custody-discarding GET resync)
+      // nor the locked refresh-the-session error. Settle pending, re-arm the
+      // review retryable, and let the user re-press once the in-flight action
+      // lands. Checked BEFORE the proposal-authority discriminator, whose
+      // proposal_id !== null arm would otherwise misroute every
+      // proposal-bound conflict into the resync path.
+      if (isHttpConflict(err) && apiErr.error_type === "guided_operation_conflict") {
+        const conflictMessage =
+          "Another action on this session is still settling. Wait a moment, then try again.";
+        set({
+          error: conflictMessage,
+          errorDetails: null,
+          guidedResponsePending: false,
+          guidedSelfHealNotice: null,
+          ...(proposalBinding !== null && proposalRetryAction !== null
+            ? {
+                guidedProposalReview: {
+                  status: "error",
+                  ...proposalBinding,
+                  message: conflictMessage,
+                  retryable: true,
+                  retry_action: proposalRetryAction,
+                },
+              }
+            : {}),
+        });
+        return {
+          status: "not_applied",
+          reason: "rejected",
+          message: conflictMessage,
+        };
+      }
+
       // A proposal-authority conflict means the bound proposal changed before
       // settlement (or the server now requires a binding). Discard operation
       // custody and replace the actionable projection from GET; never replay

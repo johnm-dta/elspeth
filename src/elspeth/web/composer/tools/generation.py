@@ -357,8 +357,9 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "connectivity facts list each unreachable branches value and every connection the pipeline actually produces.",
         "Wire each fork branch end-to-end: the gate fork_to name is the branch transform's input; that transform's on_success "
         "must be a unique connection name (NOT a sink); the coalesce branches VALUE for that branch is exactly that connection. "
-        "A branch with no transforms uses its fork branch name as the value. Repair the branch transforms' on_success together "
-        "with the coalesce, drawing every branches value from the connectivity facts' produced_connections.",
+        "A branch with no transforms uses its fork branch name as the value. If a branches value names a connection nothing "
+        "produces, repair that branch's transform — point its on_success at the branches value — rather than merely swapping "
+        "the branches value for one of the produced_connections.",
     ),
     (
         r"node_input_not_reachable|input '(.+)' is not reachable",

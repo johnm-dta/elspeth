@@ -543,6 +543,18 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         'Use routes={"true": <destination>, "false": <destination>}. For a pure fan-out gate: condition=\'True\', routes={"true": "fork", "false": "fork"}, fork_to=[<branch connections>]. Only string-returning conditions may use custom route labels.',
     ),
     (
+        r"interpretation_review_contract_unsatisfied|drops web-scrape raw field",
+        "A cleanup node that drops web-scrape raw fields (field_mapper with select_only=true) must stage an interpretation review recording that decision before the pipeline is accepted.",
+        "On the cleanup field_mapper node, add options.interpretation_requirements — a SIBLING of mapping, never inside it — containing one pending entry: "
+        '{"kind": "pipeline_decision", "user_term": "drop_raw_html_fields", "status": "pending", "draft": "<one sentence naming the dropped raw fields and why>"}. '
+        "Then re-emit the FULL set_pipeline call with that requirement in place; rejected set_pipeline calls do not persist partial nodes.",
+    ),
+    (
+        r"file_sink_write_policy_invalid|must set collision_policy explicitly|must set mode explicitly",
+        "File sinks require an explicit write policy: options.mode and options.collision_policy must both be present and consistent.",
+        "Set options.mode='write' with collision_policy='auto_increment' (or 'fail_if_exists'), or options.mode='append' with collision_policy='append_or_create', on every file-based outputs[] entry.",
+    ),
+    (
         r"no_source_configured|No source configured",
         "The pipeline has no source; every pipeline reads rows from exactly one configured source (or named sources).",
         "Include a source block in the set_pipeline call — plugin, on_success connection, and options with a schema.",
@@ -721,6 +733,11 @@ _CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
     "coalesce_on_success_unknown_sink",
     "aggregation_trigger_invalid",
     "web_scrape_http_identity_invalid",
+    # ── Pre-application semantic rejections (tutorial op 1152d7e3 closure) ──
+    # Previously codeless _failure_result sites: the planner saw only the
+    # 'validation_error' placeholder while the actionable message was redacted.
+    "interpretation_review_contract_unsatisfied",
+    "file_sink_write_policy_invalid",
 )
 
 

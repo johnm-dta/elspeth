@@ -363,6 +363,65 @@ class TestPlannerFeedbackCarriesStructuralFacts:
         feedback = _allowlisted_candidate_feedback(result)
         assert feedback["validation"]["errors"][0]["error_code"] == "validation_error"
 
+    def test_rejected_mutation_gates_stale_state_errors_out_of_feedback_and_trail(self) -> None:
+        """A pre-application rejection must not carry the unchanged state's errors.
+
+        Tutorial session 38e3e7f8 (op 1152d7e3, 2026-07-22): every semantic
+        set_pipeline rejection on the empty-seed surface reached the planner
+        as ``['no_sinks_configured', 'no_source_configured', 'validation_error']``
+        — the real reason reduced to a bare placeholder and two red herrings
+        describing a state the planner was not editing (it authors a full
+        replacement pipeline). The planner "converged" by dropping every node.
+        When a ``rejected_mutation`` entry is present, feedback and trail must
+        carry ONLY the rejection entries.
+        """
+        from elspeth.web.composer.pipeline_planner import (
+            _allowlisted_candidate_feedback,
+            _candidate_rejection_codes,
+        )
+        from elspeth.web.composer.tools._common import _failure_result
+
+        result = _failure_result(
+            _empty_state(),
+            "File sink 'json' must set mode explicitly. Use 'write' or 'append'.",
+        )
+        # The empty state contributes no_source_configured/no_sinks_configured
+        # to validation.errors — stale-state noise for a full-replacement tool.
+        assert {entry.error_code for entry in result.validation.errors} >= {"no_source_configured", "no_sinks_configured"}
+
+        feedback = _allowlisted_candidate_feedback(result)
+        assert [entry["component"] for entry in feedback["validation"]["errors"]] == ["rejected_mutation"]
+        assert _candidate_rejection_codes(result) == ("validation_error",)
+
+    def test_validated_candidate_rejections_pass_through_ungated(self) -> None:
+        """Without a rejected_mutation entry, every real error must survive.
+
+        Guards the instance-1 class (built candidate validated, real errors,
+        e.g. coalesce_branch_unreachable) against over-gating.
+        """
+        from elspeth.web.composer.pipeline_planner import (
+            _allowlisted_candidate_feedback,
+            _candidate_rejection_codes,
+        )
+        from elspeth.web.composer.tools import ToolResult
+
+        entries = (
+            ValidationEntry(component="node:merge", message="m", severity="high", error_code="coalesce_branch_unreachable"),
+            ValidationEntry(component="node:copy", message="m", severity="high", error_code="node_input_not_reachable"),
+        )
+        result = ToolResult(
+            success=False,
+            updated_state=_empty_state(),
+            validation=ValidationSummary(is_valid=False, errors=entries, warnings=(), suggestions=()),
+            affected_nodes=(),
+        )
+        feedback = _allowlisted_candidate_feedback(result)
+        assert [entry["error_code"] for entry in feedback["validation"]["errors"]] == [
+            "coalesce_branch_unreachable",
+            "node_input_not_reachable",
+        ]
+        assert _candidate_rejection_codes(result) == ("coalesce_branch_unreachable", "node_input_not_reachable")
+
     def test_rejection_trail_codes_never_empty_when_entries_exist(self) -> None:
         """The per-attempt trail must name every rejection, coded or not.
 

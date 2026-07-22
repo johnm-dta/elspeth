@@ -474,7 +474,11 @@ def build_set_pipeline_candidate(
     if validated.source is not None and validated.sources is not None:
         return _failure_result(state, "set_pipeline must use either source or sources, not both.")
     if validated.source is None and validated.sources is None:
-        return _failure_result(state, "set_pipeline requires source or sources.")
+        # Carries the same closed code the state-level check would emit so the
+        # planner's redacted feedback resolves to the "include a source block"
+        # guidance (the stale-state rider that used to smuggle this code in is
+        # gated out of planner feedback — see _rejection_entries).
+        return _failure_result(state, "set_pipeline requires source or sources.", error_code="no_source_configured")
 
     source_specs: dict[str, SourceSpec] = {}
     resolved_source_blob: _ResolvedSourceBlob | None = None
@@ -869,7 +873,7 @@ def build_set_pipeline_candidate(
             require_explicit=data_dir is not None,
         )
         if out_collision_error is not None:
-            return _failure_result(state, f"Output '{out_name}': {out_collision_error}")
+            return _failure_result(state, f"Output '{out_name}': {out_collision_error}", error_code="file_sink_write_policy_invalid")
 
     # 4. Construct specs (same field extraction as individual handlers)
     # ``node_type`` / ``edge_type`` are typed as ``str`` on
@@ -989,7 +993,12 @@ def build_set_pipeline_candidate(
         )
     review_contract_error = composition_review_contract_error(new_state)
     if review_contract_error is not None:
-        return _failure_result(state, review_contract_error)
+        # Tutorial op 1152d7e3 (2026-07-22): this rejection reached the planner
+        # as a bare 'validation_error' placeholder — the actionable staging
+        # instruction was redacted with the message — and the planner converged
+        # by dropping every node. The closed code resolves to static guidance
+        # via explain_validation_code.
+        return _failure_result(state, review_contract_error, error_code="interpretation_review_contract_unsatisfied")
 
     # 6. Report all nodes + sources + outputs as affected
     affected = (*(_source_component_id(name) for name in source_specs), *(n.id for n in node_specs), *(o.name for o in output_specs))

@@ -634,6 +634,25 @@ def _feedback_error_codes(feedback: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(entry["error_code"] for entry in errors if isinstance(entry, Mapping) and isinstance(entry.get("error_code"), str))
 
 
+def _rejection_entries(result: ToolResult) -> tuple[Any, ...]:
+    """Return the entries the planner should actually repair against.
+
+    A pre-application semantic rejection (``_failure_result``) prepends a
+    ``rejected_mutation`` entry naming the real reason and then appends
+    ``state.validate()`` of the UNCHANGED current state. On the guided and
+    tutorial surfaces that current state is the empty seed, so every such
+    rejection also carried ``no_source_configured`` + ``no_sinks_configured``
+    — red herrings describing a state the planner is not editing (set_pipeline
+    authors a full replacement). Tutorial session 38e3e7f8 (op 1152d7e3,
+    2026-07-22) burned its repair budget on exactly that noise and "converged"
+    by dropping every node. When rejection entries are present, they are the
+    ONLY entries feedback and trail may carry; validated-candidate rejections
+    (no ``rejected_mutation`` entry) pass through untouched.
+    """
+    rejection = tuple(entry for entry in result.validation.errors if entry.component == "rejected_mutation")
+    return rejection if rejection else tuple(result.validation.errors)
+
+
 def _candidate_rejection_codes(result: ToolResult) -> tuple[str, ...]:
     """Name every rejection entry for the per-attempt trail, coded or not.
 
@@ -644,7 +663,7 @@ def _candidate_rejection_codes(result: ToolResult) -> tuple[str, ...]:
     existed (guided session 5113b7ac, 2026-07-22): the run looked
     rejection-free precisely when the planner was blindest.
     """
-    return tuple(entry.error_code or "validation_error" for entry in result.validation.errors)
+    return tuple(entry.error_code or "validation_error" for entry in _rejection_entries(result))
 
 
 def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
@@ -663,7 +682,7 @@ def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
     validation = result.validation
     errors: list[dict[str, Any]] = []
     reachability_facts: dict[str, dict[str, Any]] | None = None
-    for entry in validation.errors:
+    for entry in _rejection_entries(result):
         code = entry.error_code or "validation_error"
         projected: dict[str, Any] = {
             "component": entry.component,

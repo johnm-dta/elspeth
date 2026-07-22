@@ -1122,7 +1122,12 @@ async def test_missing_source_candidate_fails_closed_before_full_candidate_is_ac
     feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
     assert feedback["success"] is False
     assert feedback["validation"]["is_valid"] is False
-    assert any(error["component"] == "source" for error in feedback["validation"]["errors"])
+    # The pre-application rejection carries the closed code itself; the
+    # unchanged empty state's errors are gated out of planner feedback
+    # (tutorial op 1152d7e3: they were red herrings on every OTHER semantic
+    # rejection, steering repairs toward re-authoring source/sinks).
+    assert [error["component"] for error in feedback["validation"]["errors"]] == ["rejected_mutation"]
+    assert feedback["validation"]["errors"][0]["error_code"] == "no_source_configured"
     assert all(error["error_class"] == "ValidationError" for error in feedback["validation"]["errors"])
 
 

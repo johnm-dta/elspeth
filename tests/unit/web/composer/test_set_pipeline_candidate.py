@@ -2158,3 +2158,80 @@ def test_parent_traversal_sink_path_still_rejected(tmp_path: Path) -> None:
 
     assert candidate.acceptable is False
     assert ".." in ((candidate.result.data or {}).get("error") or "")
+
+
+def _scrape_cleanup_args(tmp_path: Path) -> dict[str, Any]:
+    """web_scrape -> field_mapper(select_only) chain that DROPS the raw fields
+    without staging the drop_raw_html_fields review requirement."""
+    args = _linear_args(tmp_path)
+    args["source"]["on_success"] = "url_rows"
+    args["source"]["options"]["schema"] = {"mode": "flexible", "fields": ["url: str"]}
+    args["nodes"] = [
+        {
+            "id": "scrape_page",
+            "node_type": "transform",
+            "plugin": "web_scrape",
+            "input": "url_rows",
+            "on_success": "scraped_rows",
+            "on_error": "discard",
+            "options": {
+                "schema": {"mode": "observed"},
+                "url_field": "url",
+                "content_field": "page_content",
+                "fingerprint_field": "page_fingerprint",
+                "http": {
+                    "abuse_contact": "noreply@example.gov.au",
+                    "scraping_reason": "candidate rejection code characterization",
+                },
+            },
+        },
+        {
+            "id": "cleanup_fields",
+            "node_type": "transform",
+            "plugin": "field_mapper",
+            "input": "scraped_rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "schema": {"mode": "observed"},
+                "select_only": True,
+                "mapping": {"url": "url"},
+            },
+        },
+    ]
+    args["edges"] = []
+    args["metadata"] = {"name": "scrape-cleanup"}
+    return args
+
+
+def test_review_contract_rejection_carries_closed_code(tmp_path: Path) -> None:
+    # Tutorial op 1152d7e3 (2026-07-22): the raw-HTML cleanup review contract
+    # rejected node-bearing candidates CODELESSLY — the planner saw only the
+    # 'validation_error' placeholder (plus empty-seed red herrings) and
+    # converged by dropping every node. The site must carry a closed code so
+    # the redacted feedback resolves to actionable guidance.
+    candidate = build_set_pipeline_candidate(
+        _scrape_cleanup_args(tmp_path),
+        _empty_state(),
+        _trained_context(data_dir=tmp_path),
+    )
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "interpretation_review_contract_unsatisfied"
+
+
+def test_file_sink_write_policy_rejection_carries_closed_code(tmp_path: Path) -> None:
+    # Same characterization for the file-sink write-policy family
+    # (collision_policy / mode presence and consistency): previously codeless,
+    # producing the identical bare-placeholder rejection signature.
+    args = _linear_args(tmp_path)
+    del args["outputs"][0]["options"]["mode"]
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "file_sink_write_policy_invalid"

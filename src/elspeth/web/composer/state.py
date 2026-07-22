@@ -788,31 +788,63 @@ def coalesce_reachability_facts(state: CompositionState) -> dict[str, dict[str, 
     session owner / planner authored — the same redaction judgment as
     ``SchemaContractDetail`` — so forwarding it through the message-stripped
     repair feedback does not re-open the redaction boundary.
+
+    ``sink_targeting_branches`` names the lure explicitly: for each
+    unreachable branch whose branch-side transform CHAIN terminates in a
+    sink-publishing hop, the entry carries that transform's id, the sink it
+    publishes to, and the connection the coalesce expects instead. Guided
+    attempt 14 (session 04200b45) re-wired branch transforms to the
+    reviewed sink three times WITH the bare facts live — the repair needs
+    the exact miswired node named.
     """
     targets = _runtime_connection_targets(state.sources, state.nodes)
     sink_names = {output.name for output in state.outputs}
+    transform_by_input: dict[str, NodeSpec] = {}
+    for node in state.nodes:
+        if node.node_type == "transform" and node.input not in transform_by_input:
+            transform_by_input[node.input] = node
+
+    def _sink_lure(branch_key: str) -> tuple[str, str] | None:
+        """Follow the transform chain consuming ``branch_key`` to a sink hop."""
+        connection = branch_key
+        for _ in range(len(state.nodes)):
+            consumer = transform_by_input.get(connection)
+            if consumer is None or consumer.on_success is None:
+                return None
+            if consumer.on_success in sink_names:
+                return consumer.id, consumer.on_success
+            connection = consumer.on_success
+        return None
+
     facts: dict[str, dict[str, Any]] = {}
     for node in state.nodes:
         if node.node_type != "coalesce" or node.branches is None:
             continue
-        unreachable = {
-            str(branch_name): branch_connection
-            for branch_name, branch_connection in zip(
-                _coalesce_branch_names(node.branches),
-                _coalesce_branch_connections(node.branches),
-                strict=True,
-            )
-            if branch_connection not in targets
-        }
+        unreachable: dict[str, str] = {}
+        sink_targeting: list[dict[str, str]] = []
+        for branch_name, branch_connection in zip(
+            _coalesce_branch_names(node.branches),
+            _coalesce_branch_connections(node.branches),
+            strict=True,
+        ):
+            if branch_connection in targets:
+                continue
+            unreachable[str(branch_name)] = branch_connection
+            lure = _sink_lure(str(branch_name))
+            if lure is not None:
+                sink_targeting.append({"node_id": lure[0], "on_success_sink": lure[1], "expected_connection": branch_connection})
         if not unreachable:
             continue
-        facts[node.id] = {
+        entry: dict[str, Any] = {
             "unreachable_branches": unreachable,
             # _FORK_ROUTE_TARGET is the reserved route keyword ("go to
             # fork_to"), not a connection — it rides the membership set but
             # must not be advertised as a wirable name.
             "produced_connections": sorted(targets - sink_names - {node.id, _FORK_ROUTE_TARGET}),
         }
+        if sink_targeting:
+            entry["sink_targeting_branches"] = sink_targeting
+        facts[node.id] = entry
     return facts
 
 

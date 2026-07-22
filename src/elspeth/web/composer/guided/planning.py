@@ -409,6 +409,15 @@ def guided_redacted_planner_context(guided: GuidedSession) -> dict[str, object]:
             for stable_id in guided.output_order
             for output in (guided.reviewed_outputs[stable_id],)
         ],
+        # Static usage line, never per-request data. Unlike freeform, the
+        # staged surface hands the planner reviewed sink names up front, and
+        # planners repeatedly wired fork-branch transforms straight to them
+        # (guided session 04200b45: three coalesce_branch_unreachable repairs
+        # all re-targeting the visible sink).
+        "output_usage": (
+            "Reviewed sink names are commit targets for the pipeline's FINAL producer only — "
+            "never for branch transforms feeding a coalesce."
+        ),
         "deferred_intents": [
             {
                 "intent_id": intent.intent_id,

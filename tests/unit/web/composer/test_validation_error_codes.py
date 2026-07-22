@@ -475,6 +475,15 @@ class TestCoalesceReachabilityFacts:
                 # both pass the membership walk today but are not connections a
                 # branch value should be steered toward.
                 "produced_connections": ["branch_a", "branch_b", "rows"],
+                # The lure, named: each unreachable branch whose branch-side
+                # transform publishes to a SINK instead of the expected
+                # connection (guided attempt 14, session 04200b45 — the model
+                # wired branch transforms to the reviewed sink 3x with the
+                # bare facts live).
+                "sink_targeting_branches": [
+                    {"node_id": "t_a", "on_success_sink": "main", "expected_connection": "a_done"},
+                    {"node_id": "t_b", "on_success_sink": "main", "expected_connection": "b_done"},
+                ],
             }
         }
 
@@ -483,12 +492,39 @@ class TestCoalesceReachabilityFacts:
 
         state = _orphaned_coalesce_state(("a_done", "b_done"))
         facts = coalesce_reachability_facts(state)
+        # List-form branch keys are the arriving connection names themselves —
+        # nothing consumes them as an input, so no branch-side transform chain
+        # exists to attribute a sink lure to.
         assert facts == {
             "merge": {
                 "unreachable_branches": {"a_done": "a_done", "b_done": "b_done"},
                 "produced_connections": ["branch_a", "branch_b", "rows"],
             }
         }
+
+    def test_sink_lure_attribution_follows_transform_chains_and_skips_non_sink_dangles(self) -> None:
+        """The lure walk follows a branch's transform CHAIN to the sink hop.
+
+        branch_a: t_a -> x_mid -> t_mid -> main (sink): the transform to
+        repair is t_mid, the chain's sink-publishing hop. branch_b: t_b
+        publishes a dangling non-sink name — unreachable, but not the sink
+        lure, so no attribution entry.
+        """
+        from elspeth.web.composer.state import coalesce_reachability_facts
+
+        state = _empty_state()
+        state = state.with_source(_make_source(on_success="rows"))
+        state = state.with_node(_make_gate("fan_out", "rows", ("branch_a", "branch_b")))
+        state = state.with_node(_make_transform("t_a", "branch_a", "x_mid"))
+        state = state.with_node(_make_transform("t_mid", "x_mid", "main"))
+        state = state.with_node(_make_transform("t_b", "branch_b", "b_dangle"))
+        state = state.with_node(_make_coalesce("merge", {"branch_a": "a_done", "branch_b": "b_done"}))
+        state = state.with_node(_make_transform("tidy", "merge", "main"))
+        state = state.with_output(_make_output())
+        facts = coalesce_reachability_facts(state)
+        assert facts["merge"]["sink_targeting_branches"] == [
+            {"node_id": "t_mid", "on_success_sink": "main", "expected_connection": "a_done"},
+        ]
 
     def test_reachability_facts_empty_for_correctly_wired_coalesce(self) -> None:
         from elspeth.web.composer.state import coalesce_reachability_facts
@@ -522,6 +558,10 @@ class TestCoalesceReachabilityFacts:
         assert projected["connectivity"] == {
             "unreachable_branches": {"branch_a": "a_done", "branch_b": "b_done"},
             "produced_connections": ["branch_a", "branch_b", "rows"],
+            "sink_targeting_branches": [
+                {"node_id": "t_a", "on_success_sink": "main", "expected_connection": "a_done"},
+                {"node_id": "t_b", "on_success_sink": "main", "expected_connection": "b_done"},
+            ],
         }
 
     def test_allowlisted_feedback_omits_connectivity_for_other_codes(self) -> None:

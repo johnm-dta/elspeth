@@ -339,6 +339,14 @@ def test_planner_context_is_redacted_but_private_anchor_keeps_exact_reviewed_fac
                 "on_write_failure": "discard",
             }
         ],
+        # Static anti-lure guidance, never per-request data: the staged
+        # surface shows reviewed sink names the freeform surface doesn't,
+        # and planners repeatedly wired fork-branch transforms straight to
+        # them (guided session 04200b45).
+        "output_usage": (
+            "Reviewed sink names are commit targets for the pipeline's FINAL producer only — "
+            "never for branch transforms feeding a coalesce."
+        ),
         "deferred_intents": [],
     }
 

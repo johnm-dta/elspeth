@@ -57,6 +57,10 @@ _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
     "by a coalesce — not a queries map on a single llm node.",
     "Key the coalesce branches map by FORK BRANCH NAME; each value names the "
     "connection arriving at the coalesce after that branch's transforms.",
+    "When branches rejoin at a coalesce, each branch transform MUST publish "
+    "the connection named in the coalesce's branches values. A branch "
+    "transform must never publish to a sink — only the coalesce's downstream "
+    "path reaches sinks.",
     "A coalesce publishes its merged rows under its own node id — the "
     "downstream consumer sets input to the coalesce id. Do not author "
     "on_success on a coalesce unless it routes directly to a sink.",

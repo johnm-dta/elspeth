@@ -31,6 +31,7 @@ from sqlalchemy import select
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.pipeline_planner import _PROSE_NUDGE_BUDGET
 from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.config import WebSettings
@@ -244,11 +245,14 @@ def _assert_no_sentinel_leak(engine: Any, response_text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("completion_factory", "expected_status", "expected_failure_code", "expected_planner_code"),
+    ("completion_factory", "expected_status", "expected_failure_code", "expected_planner_code", "expected_llm_audit_rows"),
     [
-        (_malformed_completion, 502, "invalid_provider_response", "MALFORMED_RESPONSE"),
-        (_timeout_completion, 504, "provider_timeout", "TIMEOUT"),
-        (_provider_error_completion, 503, "provider_unavailable", "PROVIDER_ERROR"),
+        # The prose (no-tool-call) reply is nudge-retried on its own bounded
+        # budget before the terminal MALFORMED_RESPONSE, so every nudged
+        # attempt lands as durable audit evidence alongside the terminal one.
+        (_malformed_completion, 502, "invalid_provider_response", "MALFORMED_RESPONSE", _PROSE_NUDGE_BUDGET + 1),
+        (_timeout_completion, 504, "provider_timeout", "TIMEOUT", 1),
+        (_provider_error_completion, 503, "provider_unavailable", "PROVIDER_ERROR", 1),
     ],
     ids=["malformed", "timeout", "provider_error"],
 )
@@ -259,6 +263,7 @@ def test_send_message_freeform_planner_failure_is_translated(
     expected_status: int,
     expected_failure_code: str,
     expected_planner_code: str,
+    expected_llm_audit_rows: int,
 ) -> None:
     client, engine, _sessions = _build_app(tmp_path, monkeypatch, completion_factory())
     session_id = client.post("/api/sessions", json={"title": "freeform planner failure"}).json()["id"]
@@ -287,7 +292,7 @@ def test_send_message_freeform_planner_failure_is_translated(
 
     # The already-durable planner LLM-call audit evidence still lands (and is
     # NOT re-persisted as a duplicate) alongside the disposition record.
-    assert len(_llm_audit_rows(engine)) == 1
+    assert len(_llm_audit_rows(engine)) == expected_llm_audit_rows
 
     # (d) no raw provider content / usage / model metadata leaks anywhere.
     _assert_no_sentinel_leak(engine, response.text)

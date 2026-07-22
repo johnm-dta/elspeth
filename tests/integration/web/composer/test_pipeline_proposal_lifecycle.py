@@ -1232,6 +1232,215 @@ async def test_prepare_pipeline_commit_uses_one_total_timeout_budget(
 
 
 @pytest.mark.asyncio
+async def test_wire_confirm_commit_preserves_accepted_proposal_transform_nodes(
+    service: SessionServiceImpl,
+    tmp_path,
+) -> None:
+    """The guided wire-confirm commit must carry every accepted transform node.
+
+    Invariant guard for the 2026-07-22 tutorial run-18 investigation (session
+    07e8a3a8, committed v11 with ``nodes == []``): the suspected defect was the
+    tool_call commit assembling reviewed sources/outputs while dropping the
+    accepted proposal's transform nodes. This pins the invariant at the deepest
+    unsigned commit seam (``prepare_pipeline_proposal_commit``, the wire-confirm
+    route's only state assembler): a tutorial-shaped accepted proposal — blob
+    reviewed csv source, ``web_scrape -> llm -> field_mapper``, json sink — must
+    produce a committed candidate containing the proposal's nodes with their
+    routing intact. The commit is faithful to ``authority.proposal.pipeline``;
+    an empty-nodes commit therefore means an empty-nodes *proposal*.
+    """
+    from elspeth.web.blobs.service import BlobServiceImpl
+    from elspeth.web.composer.guided.planning import (
+        bind_guided_reviewed_components,
+        guided_private_reviewed_facts,
+    )
+    from elspeth.web.composer.guided.protocol import GuidedStep
+    from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    blob = await BlobServiceImpl(service._engine, tmp_path).create_blob(
+        session_id,
+        "project_urls.csv",
+        b"url\nhttps://example.gov.au/project-1.html\n",
+        "text/csv",
+    )
+    source_options = {
+        "schema": {"fields": ["url: str"], "mode": "flexible"},
+        "path": f"blob:{blob.id}",
+        "delimiter": ",",
+        "encoding": "utf-8",
+    }
+    output_options = {
+        "schema": {"mode": "observed"},
+        "path": "outputs/output.json",
+        "collision_policy": "auto_increment",
+        "mode": "write",
+    }
+    source_stable_id = str(uuid4())
+    output_stable_id = str(uuid4())
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        source_order=(source_stable_id,),
+        output_order=(output_stable_id,),
+        reviewed_sources={
+            source_stable_id: SourceResolved(
+                name="source",
+                plugin="csv",
+                options=source_options,
+                observed_columns=("url",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        reviewed_outputs={
+            output_stable_id: SinkOutputResolved(
+                name="output",
+                plugin="json",
+                options=output_options,
+                required_fields=("url",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    planner_pipeline = {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "options": dict(source_options),
+                "on_success": "raw_rows",
+                "on_validation_failure": "discard",
+            }
+        },
+        "nodes": [
+            {
+                "id": "scrape",
+                "node_type": "transform",
+                "plugin": "web_scrape",
+                "input": "raw_rows",
+                "on_success": "scraped",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": "page_content",
+                    "fingerprint_field": "page_fingerprint",
+                    "http": {"abuse_contact": "noreply@dta.gov.au", "scraping_reason": "Tutorial demo"},
+                },
+            },
+            {
+                "id": "summarise",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped",
+                "on_success": "summarised",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ page_content }}",
+                },
+            },
+            {
+                "id": "shape",
+                "node_type": "transform",
+                "plugin": "field_mapper",
+                "input": "summarised",
+                "on_success": "output",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}, "mapping": {"page_content": "summary"}},
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {"sink_name": "output", "plugin": "json", "options": dict(output_options), "on_write_failure": "discard"},
+        ],
+        "metadata": {"name": "tutorial"},
+    }
+    finalized = deep_thaw(bind_guided_reviewed_components(planner_pipeline, guided))
+    facts = guided_private_reviewed_facts(guided)
+    plan = PipelinePlanResult(
+        proposal=PipelineProposal.create(
+            pipeline=finalized,
+            base=AbsentBase(),
+            reviewed_facts=facts,
+            surface=PlannerSurface.TUTORIAL_PROFILE,
+            repair_count=0,
+            skill_hash=stable_hash("tutorial planner skill"),
+            covered_deferred_intent_ids=(),
+            supersedes_draft_hash=None,
+        ),
+        tool_call_id="planner-terminal-call",
+        custody_result="not_required",
+        model_identifier="planner-model",
+        model_version="planner-model-v1",
+        provider="test",
+    )
+    row = await service.create_pipeline_composition_proposal(
+        session_id=session_id,
+        plan=plan,
+        summary="Replace the pipeline.",
+        rationale="Requested by the operator.",
+        affects=("graph", "validation"),
+        arguments_redacted_json=_redacted_pipeline(finalized),
+        actor="composer-web:user:alice",
+        composer_model_identifier="planner-model",
+        composer_model_version="planner-model-v1",
+        composer_provider="provider",
+    )
+    authority = await service.get_authoritative_pipeline_proposal(
+        session_id=session_id,
+        proposal_id=row.id,
+        reviewed_facts=facts,
+    )
+    catalog = create_catalog_service()
+    snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    policy = PolicyCatalogView.for_trained_operator(catalog, snapshot)
+
+    prepared = await prepare_pipeline_proposal_commit(
+        authority=authority,
+        reviewed_facts=facts,
+        current_state=CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1),
+        current_state_id=None,
+        policy_catalog=policy,
+        plugin_snapshot=snapshot,
+        config=PipelineCommitConfig(
+            data_dir=str(tmp_path),
+            session_engine=service._engine,
+            secret_service=None,
+            user_id="alice",
+            user_message_content=None,
+            max_blob_storage_per_session_bytes=1_000_000,
+            runtime_preflight=None,
+            timeout_seconds=10.0,
+        ),
+        recorder=BufferingRecorder(),
+        actor="user:alice",
+        settlement_surface="guided",
+    )
+
+    committed = prepared.result.updated_state
+    assert [(node.id, node.node_type, node.plugin) for node in committed.nodes] == [
+        ("scrape", "transform", "web_scrape"),
+        ("summarise", "transform", "llm"),
+        ("shape", "transform", "field_mapper"),
+    ]
+    routing = {node.id: (node.input, node.on_success) for node in committed.nodes}
+    assert routing == {
+        "scrape": ("raw_rows", "scraped"),
+        "summarise": ("scraped", "summarised"),
+        "shape": ("summarised", "output"),
+    }
+    assert set(committed.sources) == {"source"}
+    assert [output.name for output in committed.outputs] == ["output"]
+    assert prepared.candidate_content_hash == prepared.executor_content_hash
+
+
+@pytest.mark.asyncio
 async def test_prepare_pipeline_commit_detects_candidate_executor_mismatch_after_audited_dispatch(
     service: SessionServiceImpl,
     tmp_path,

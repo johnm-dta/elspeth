@@ -26,6 +26,7 @@ from elspeth.web.composer.tutorial_service import (
     _count_discarded_rows,
     _parse_rows_content,
     _rows_from_artifacts,
+    _tutorial_launch_blocker,
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.protocol import RunRecord
@@ -43,6 +44,53 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
+
+
+def test_launch_blocker_names_empty_transforms_distinctly() -> None:
+    """A committed source→sink pipeline with NO nodes gets its own blocker.
+
+    Regression for tutorial run 18 (session 07e8a3a8, committed v11): a guided
+    walk that accepts the step-3 auto-proposal without the transforms
+    instruction commits a valid source→sink passthrough, and the launch gate
+    rejected it with the generic plugin-set message — indistinguishable from a
+    wrong-plugin build. Emptiness is a distinct, actionable state: name it.
+    """
+    from unittest.mock import MagicMock
+
+    from elspeth.web.composer.state import (
+        CompositionState,
+        OutputSpec,
+        PipelineMetadata,
+        SourceSpec,
+    )
+
+    state = CompositionState(
+        sources={
+            "source": SourceSpec(
+                plugin="csv",
+                on_success="output",
+                options={},
+                on_validation_failure="discard",
+            )
+        },
+        nodes=(),
+        edges=(),
+        outputs=(OutputSpec(name="output", plugin="json", options={}, on_write_failure="discard"),),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    blocker = _tutorial_launch_blocker(
+        state=state,
+        policy=MagicMock(),
+        snapshot=MagicMock(),
+        tutorial_profile="tutorial-default",
+        profile_registry=MagicMock(),
+        catalog=MagicMock(),
+    )
+    assert blocker is not None
+    code, detail = blocker
+    assert code == "tutorial_transforms_missing"
+    assert "no transform" in detail.lower()
 
 
 def test_tutorial_recipe_authors_only_opaque_llm_profile() -> None:

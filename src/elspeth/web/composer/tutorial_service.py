@@ -120,6 +120,15 @@ def _tutorial_launch_blocker(
         PluginId("source", "json"),
     }
     output_valid = len(output_ids) == 1 and output_ids[0] == PluginId("sink", "json")
+    if source_valid and output_valid and not state.nodes:
+        # A source→sink passthrough is a valid composition, so it can be
+        # committed (tutorial run 18: the step-3 auto-proposal accepted without
+        # the transforms instruction) — name the emptiness distinctly instead
+        # of blaming an unsupported plugin set.
+        return (
+            "tutorial_transforms_missing",
+            "The saved tutorial pipeline has no transform steps — it wires the source directly to the sink.",
+        )
     if (
         not source_valid
         or not output_valid

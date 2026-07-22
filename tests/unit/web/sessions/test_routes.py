@@ -72,7 +72,12 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
-from elspeth.web.sessions._guided_step_chat import GuidedStepChatOnlyResult, Step1SourceResolvedResult, StepChatResult
+from elspeth.web.sessions._guided_step_chat import (
+    _MODEL_SHAPE_REJECTED_MESSAGE,
+    GuidedStepChatOnlyResult,
+    Step1SourceResolvedResult,
+    StepChatResult,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -4604,10 +4609,13 @@ class TestMessageRoutes:
         assert persisted_turn["assistant_message_kind"] == "synthetic_failure"
         assert persisted_turn["synthetic_failure_reason"] == "not_applied"
 
-    def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
-        """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""
+    def test_guided_chat_malformed_source_tool_args_return_model_shape_rejection(self, tmp_path) -> None:
+        """Malformed Step-1 source resolver tool output must not escape as HTTP 500.
+
+        Since the GuidedToolArgumentShapeError reclassification, non-JSON tool
+        arguments are a MODEL defect with honest copy — not "unavailable".
+        """
         from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
-        from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
 
         app, service = _make_app(tmp_path)
         catalog = MagicMock(spec=CatalogService)
@@ -4668,7 +4676,7 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 200
         body = send_resp.json()
-        assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+        assert body["assistant_message"] == _MODEL_SHAPE_REJECTED_MESSAGE
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["next_turn"]["turn_token"] == choose_source_resp.json()["next_turn"]["turn_token"]
         app.state.blob_service.reserve_inline_custody.assert_not_called()
@@ -4681,12 +4689,11 @@ class TestMessageRoutes:
         llm_audit_rows = _llm_call_audit_rows(persisted)
         assert len(llm_audit_rows) == 1
         assert llm_audit_rows[0][1]["call"]["status"] == ComposerLLMCallStatus.MALFORMED_RESPONSE.value
-        assert llm_audit_rows[0][1]["call"]["error_class"] == "JSONDecodeError"
+        assert llm_audit_rows[0][1]["call"]["error_class"] == "GuidedToolArgumentShapeError"
 
-    def test_guided_chat_source_plugin_mismatch_returns_synthetic_unavailable(self, tmp_path) -> None:
+    def test_guided_chat_source_plugin_mismatch_returns_model_shape_rejection(self, tmp_path) -> None:
         """Step-1 source resolver plugin mismatch must not commit source state."""
         from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
-        from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
 
         app, service = _make_app(tmp_path)
         catalog = MagicMock(spec=CatalogService)
@@ -4759,7 +4766,7 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 200
         body = send_resp.json()
-        assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+        assert body["assistant_message"] == _MODEL_SHAPE_REJECTED_MESSAGE
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["next_turn"]["turn_token"] == choose_source_resp.json()["next_turn"]["turn_token"]
         app.state.blob_service.reserve_inline_custody.assert_not_called()
@@ -4775,7 +4782,7 @@ class TestMessageRoutes:
         llm_audit_rows = _llm_call_audit_rows(persisted)
         assert len(llm_audit_rows) == 1
         assert llm_audit_rows[0][1]["call"]["status"] == ComposerLLMCallStatus.MALFORMED_RESPONSE.value
-        assert llm_audit_rows[0][1]["call"]["error_class"] == "ValueError"
+        assert llm_audit_rows[0][1]["call"]["error_class"] == "GuidedToolArgumentShapeError"
 
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:

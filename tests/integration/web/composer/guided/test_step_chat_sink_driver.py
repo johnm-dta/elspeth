@@ -18,8 +18,10 @@ from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import (
     GuidedChatEmptyOutcome,
     GuidedChatProseOutcome,
+    GuidedToolArgumentShapeError,
     Step2SinkChatOutcome,
     Step2SinkResolvedOutcome,
+    _parse_step_2_sink_tool_arguments,
     maybe_resolve_step_2_sink_chat,
 )
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
@@ -390,9 +392,67 @@ async def test_sink_wrapper_classifies_strict_snapshot_failure_as_malformed_and_
         )
 
     assert type(result) is GuidedStepChatOnlyResult
-    assert result.chat.error_class == "ValueError"
-    assert result.chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+    # Strict-snapshot failures are model-output defects: since the
+    # GuidedToolArgumentShapeError reclassification they route through the
+    # dedicated shape branch (honest copy + INVARIANT_VIOLATED), no longer
+    # the generic "unavailable" transient catch.
+    assert result.chat.error_class == "GuidedToolArgumentShapeError"
+    assert result.chat.status == ComposerChatTurnStatus.INVARIANT_VIOLATED
     assert recorder.llm_calls[-1].status is ComposerLLMCallStatus.MALFORMED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_sink_wrapper_classifies_argument_shape_error_as_model_defect_not_unavailable() -> None:
+    """An extra top-level key in resolve_sink args is a MODEL defect, not provider weather.
+
+    Observed live (session f9836d91, 2026-07-23): the exact-set key check
+    rejected the model's arguments and the generic transient catch told the
+    user "I'm unavailable right now" — false on both counts (the provider
+    answered in 12.4s, and retrying is the right move). The dedicated
+    GuidedToolArgumentShapeError branch must classify it honestly.
+    """
+    shape_args = {**_JSON_SINK_ARGS, "confidence": "high"}
+
+    async def _return_shape_error_response(**_kwargs: object) -> SimpleNamespace:
+        return _fake_resolve_sink_response(shape_args)
+
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=_return_shape_error_response,
+    ):
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="s1",
+            user_id="u1",
+            model="anthropic/claude-sonnet-4.6",
+            user_message="write a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            timeout_seconds=30.0,
+        )
+
+    assert type(result) is GuidedStepChatOnlyResult
+    assert result.chat.error_class == "GuidedToolArgumentShapeError"
+    assert result.chat.status == ComposerChatTurnStatus.INVARIANT_VIOLATED
+    assert "unavailable" not in result.chat.assistant_message.lower()
+    assert "connection is fine" in result.chat.assistant_message
+
+
+def test_parse_step_2_sink_rejects_extra_top_level_key_with_value_free_diagnostics() -> None:
+    """The shape error names the offending KEY, never the model's VALUE."""
+    args = {**_JSON_SINK_ARGS, "confidence": "certainly-high-sentinel"}
+    with pytest.raises(GuidedToolArgumentShapeError) as excinfo:
+        _parse_step_2_sink_tool_arguments(json.dumps(args))
+    message = str(excinfo.value)
+    assert "got keys" in message
+    assert "confidence" in message
+    assert "certainly-high-sentinel" not in message
+
+
+def test_parse_step_2_sink_rejects_non_json_arguments_as_shape_error() -> None:
+    with pytest.raises(GuidedToolArgumentShapeError):
+        _parse_step_2_sink_tool_arguments("not json at all {")
 
 
 @pytest.mark.asyncio

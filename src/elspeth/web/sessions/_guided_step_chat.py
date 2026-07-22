@@ -27,6 +27,7 @@ from elspeth.web.composer.guided.chat_solver import (
     GuidedChatDeferredManagementOutcome,
     GuidedChatEmptyOutcome,
     GuidedChatProseOutcome,
+    GuidedToolArgumentShapeError,
     Step1SourceChatResolution,
     Step1SourceResolvedOutcome,
     Step2SinkResolvedOutcome,
@@ -188,6 +189,12 @@ type Step2SinkChatResult = (
 # experience whether the failure was on a user message or a step-entry
 # opener. The wizard widgets remain functional; chat is best-effort.
 _SYNTHETIC_UNAVAILABLE_MESSAGE = "I'm unavailable right now; you can still use the wizard controls."
+
+_MODEL_SHAPE_REJECTED_MESSAGE = (
+    "I put that step result together incorrectly just now — the connection is fine "
+    "and nothing you did caused it. Press Retry to have me redo this step, or use "
+    "the wizard controls."
+)
 
 # Message returned when the strict source/sink commit seam rejects a resolved
 # Step-1/Step-2 chat action. The service and model are not unavailable; the
@@ -483,6 +490,33 @@ async def resolve_step_1_source_chat_with_auto_drop(
                 error_class=type(exc).__name__,
             ),
         )
+    except GuidedToolArgumentShapeError as exc:
+        # A ValueError subclass, so this branch MUST precede the transient
+        # set: the LLM call succeeded and the model replied — the reply just
+        # violates resolve_source's argument contract. Calling that
+        # "unavailable" mislabels a model-output defect as provider weather
+        # (observed live: session f9836d91, 2026-07-23). The message is
+        # value-free by construction, so it is journal-safe verbatim.
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_1_source_chat_model_shape_rejected",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_1_SOURCE.value,
+            exc_class=type(exc).__name__,
+            error_detail=str(exc),
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
+                assistant_message=_MODEL_SHAPE_REJECTED_MESSAGE,
+                status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
     except _guided_tool_transient_exception_types() as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(
@@ -648,6 +682,29 @@ async def resolve_step_2_sink_chat_with_auto_drop(
         )
     # A malformed discovery-tool dispatch deep in the sink loop raises a
     # GuidedSolverResponseShapeError; the shared tool classification absorbs it.
+    except GuidedToolArgumentShapeError as exc:
+        # Mirror of the step-1 branch; see the comment there. Must precede
+        # the transient set (GuidedToolArgumentShapeError is a ValueError).
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_2_sink_chat_model_shape_rejected",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_2_SINK.value,
+            exc_class=type(exc).__name__,
+            error_detail=str(exc),
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return GuidedStepChatOnlyResult(
+            chat=StepChatResult(
+                assistant_message=_MODEL_SHAPE_REJECTED_MESSAGE,
+                status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
     except _guided_tool_transient_exception_types() as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(

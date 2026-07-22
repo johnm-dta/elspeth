@@ -965,6 +965,24 @@ async def maybe_manage_deferred_intent_chat(
         )
 
 
+class GuidedToolArgumentShapeError(ValueError):
+    """The model's tool-call arguments failed the resolver's shape contract.
+
+    Distinct from provider weather: the LLM call SUCCEEDED and the model
+    replied, but the reply violates the tool's argument contract. Kept as a
+    ``ValueError`` subclass so the trust-boundary invariants on the parsers
+    ("raises ValueError ...; never coerces malformed model output") remain
+    true verbatim. Messages are value-free by construction — key names,
+    types, and expected vocabulary only, never model-provided values — so
+    classification sites may journal ``str(exc)`` without a redaction pass.
+    """
+
+
+def _shape_safe_keys(mapping: Mapping[str, Any]) -> list[str]:
+    """Key names only, bounded, for value-free shape diagnostics."""
+    return [str(key)[:40] for key in sorted(mapping, key=str)[:12]]
+
+
 @trust_boundary(
     tier=3,
     source="LLM-emitted resolve_source tool-call arguments (untrusted model output JSON)",
@@ -982,9 +1000,12 @@ async def maybe_manage_deferred_intent_chat(
 )
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
     """Validate the resolve_source tool arguments from a LiteLLM response."""
-    data = json.loads(arguments)
+    try:
+        data = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise GuidedToolArgumentShapeError("resolve_source arguments are not valid JSON") from exc
     if not isinstance(data, Mapping):
-        raise ValueError(f"resolve_source arguments must decode to an object; got {type(data).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_source arguments must decode to an object; got {type(data).__name__}")
 
     missing = {
         "resolution",
@@ -998,31 +1019,31 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
         "assistant_message",
     } - set(data.keys())
     if missing:
-        raise ValueError(f"resolve_source arguments missing required keys: {sorted(missing)}")
+        raise GuidedToolArgumentShapeError(f"resolve_source arguments missing required keys: {sorted(missing)}")
     if data["resolution"] != "source":
-        raise ValueError(f"resolve_source resolution must be 'source'; got {data['resolution']!r}")
+        raise GuidedToolArgumentShapeError("resolve_source resolution key must be exactly 'source'")
 
     plugin = data["plugin"]
     if not isinstance(plugin, str) or not plugin:
-        raise ValueError(f"resolve_source plugin must be a non-empty string; got {plugin!r}")
+        raise GuidedToolArgumentShapeError(f"resolve_source plugin must be a non-empty string; got {type(plugin).__name__}")
     if plugin_hint is not None and plugin != plugin_hint:
-        raise ValueError(f"resolve_source plugin {plugin!r} does not match current Step 1 plugin {plugin_hint!r}")
+        raise GuidedToolArgumentShapeError(f"resolve_source plugin does not match current Step 1 plugin {plugin_hint!r}")
 
     filename = data["filename"]
     if not isinstance(filename, str) or not filename:
-        raise ValueError(f"resolve_source filename must be a non-empty string; got {filename!r}")
+        raise GuidedToolArgumentShapeError(f"resolve_source filename must be a non-empty string; got {type(filename).__name__}")
 
     mime_type = data["mime_type"]
     if not isinstance(mime_type, str) or mime_type not in ALLOWED_MIME_TYPES:
-        raise ValueError(f"resolve_source mime_type must be one of {sorted(ALLOWED_MIME_TYPES)}; got {mime_type!r}")
+        raise GuidedToolArgumentShapeError(f"resolve_source mime_type must be one of {sorted(ALLOWED_MIME_TYPES)}")
 
     content = data["content"]
     if not isinstance(content, str) or not content:
-        raise ValueError("resolve_source content must be a non-empty string")
+        raise GuidedToolArgumentShapeError("resolve_source content must be a non-empty string")
 
     options = data["options"]
     if not isinstance(options, Mapping):
-        raise ValueError(f"resolve_source options must be an object; got {type(options).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_source options must be an object; got {type(options).__name__}")
     # Drop SERVER-OWNED keys the model may have parroted back from the threaded
     # current_source (see _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS). Their absence
     # is always correct here — they are re-stamped authoritatively at commit, and
@@ -1033,20 +1054,20 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
 
     observed_columns_raw = data["observed_columns"]
     if not isinstance(observed_columns_raw, list):
-        raise ValueError(f"resolve_source observed_columns must be a list; got {type(observed_columns_raw).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_source observed_columns must be a list; got {type(observed_columns_raw).__name__}")
     observed_columns: list[str] = []
     for idx, column in enumerate(observed_columns_raw):
         if not isinstance(column, str) or not column:
-            raise ValueError(f"resolve_source observed_columns[{idx}] must be a non-empty string; got {column!r}")
+            raise GuidedToolArgumentShapeError(f"resolve_source observed_columns[{idx}] must be a non-empty string")
         observed_columns.append(column)
 
     sample_rows_raw = data["sample_rows"]
     if not isinstance(sample_rows_raw, list):
-        raise ValueError(f"resolve_source sample_rows must be a list; got {type(sample_rows_raw).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_source sample_rows must be a list; got {type(sample_rows_raw).__name__}")
     sample_rows: list[dict[str, Any]] = []
     for idx, row in enumerate(sample_rows_raw):
         if not isinstance(row, Mapping):
-            raise ValueError(f"resolve_source sample_rows[{idx}] must be an object; got {type(row).__name__}")
+            raise GuidedToolArgumentShapeError(f"resolve_source sample_rows[{idx}] must be an object; got {type(row).__name__}")
         sample_rows.append(dict(row))
 
     assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_source")
@@ -1078,7 +1099,7 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
             on_validation_failure=on_validation_failure,
         )
     except (InvariantError, TypeError) as exc:
-        raise ValueError("resolve_source snapshot is malformed") from exc
+        raise GuidedToolArgumentShapeError("resolve_source snapshot is malformed") from exc
 
 
 async def _bounded_acompletion(kwargs: dict[str, Any], timeout_seconds: float) -> Any:
@@ -1396,43 +1417,50 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
 )
 def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
     """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""
-    data = json.loads(arguments)
+    try:
+        data = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise GuidedToolArgumentShapeError("resolve_sink arguments are not valid JSON") from exc
     if not isinstance(data, Mapping):
-        raise ValueError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")
     expected_top = {"resolution", "output", "assistant_message"}
     if set(data) != expected_top:
-        raise ValueError(f"resolve_sink arguments must contain exactly {sorted(expected_top)}")
+        raise GuidedToolArgumentShapeError(
+            f"resolve_sink arguments must contain exactly {sorted(expected_top)}; got keys {_shape_safe_keys(data)}"
+        )
     if data["resolution"] != "sink":
-        raise ValueError(f"resolve_sink resolution must be 'sink'; got {data['resolution']!r}")
+        raise GuidedToolArgumentShapeError("resolve_sink resolution key must be exactly 'sink'")
     item = data["output"]
     if not isinstance(item, Mapping):
-        raise ValueError(f"resolve_sink output must be an object; got {type(item).__name__}")
+        raise GuidedToolArgumentShapeError(f"resolve_sink output must be an object; got {type(item).__name__}")
     expected = {"name", "plugin", "options", "required_fields", "schema_mode", "on_write_failure"}
     if set(item) != expected:
-        raise ValueError(f"resolve_sink output must contain exactly {sorted(expected)}")
+        raise GuidedToolArgumentShapeError(
+            f"resolve_sink output must contain exactly {sorted(expected)}; got keys {_shape_safe_keys(item)}"
+        )
     name = item["name"]
     if type(name) is not str or not name:
-        raise ValueError("resolve_sink output.name must be a non-empty string")
+        raise GuidedToolArgumentShapeError("resolve_sink output.name must be a non-empty string")
     plugin = item.get("plugin")
     if not isinstance(plugin, str) or not plugin:
-        raise ValueError(f"resolve_sink output.plugin must be a non-empty string; got {plugin!r}")
+        raise GuidedToolArgumentShapeError(f"resolve_sink output.plugin must be a non-empty string; got {type(plugin).__name__}")
     options = item.get("options")
     if not isinstance(options, Mapping):
-        raise ValueError("resolve_sink output.options must be an object")
+        raise GuidedToolArgumentShapeError("resolve_sink output.options must be an object")
     required_fields_raw = item.get("required_fields")
     if not isinstance(required_fields_raw, list):
-        raise ValueError("resolve_sink output.required_fields must be a list")
+        raise GuidedToolArgumentShapeError("resolve_sink output.required_fields must be a list")
     required_fields: list[str] = []
     for col_idx, col in enumerate(required_fields_raw):
         if not isinstance(col, str) or not col:
-            raise ValueError(f"resolve_sink output.required_fields[{col_idx}] must be a non-empty string")
+            raise GuidedToolArgumentShapeError(f"resolve_sink output.required_fields[{col_idx}] must be a non-empty string")
         required_fields.append(col)
     schema_mode = item.get("schema_mode")
     if schema_mode not in ("fixed", "flexible", "observed"):
-        raise ValueError(f"resolve_sink output.schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
+        raise GuidedToolArgumentShapeError("resolve_sink output.schema_mode must be fixed/flexible/observed")
     on_write_failure = item["on_write_failure"]
     if type(on_write_failure) is not str or not on_write_failure:
-        raise ValueError("resolve_sink output.on_write_failure must be a non-empty string")
+        raise GuidedToolArgumentShapeError("resolve_sink output.on_write_failure must be a non-empty string")
     try:
         output = SinkOutputResolved(
             name=name,
@@ -1443,7 +1471,7 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
             on_write_failure=on_write_failure,
         )
     except (InvariantError, TypeError) as exc:
-        raise ValueError("resolve_sink output snapshot is malformed") from exc
+        raise GuidedToolArgumentShapeError("resolve_sink output snapshot is malformed") from exc
     assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_sink")
     return SinkResolved(outputs=(output,)), assistant_message
 

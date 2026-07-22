@@ -221,6 +221,10 @@ def _log_guided_planner_failure(
         surface=surface,
         planner_code=exc.code,
         rejection_codes=sorted(set(exc.detail_codes)),
+        # The typed message is module-authored (closed codes; the candidate
+        # construction path names the offending key) — bounded, never raw
+        # provider/row content.
+        error_detail=str(exc)[:300],
     )
 
 

@@ -737,30 +737,42 @@ export function ChatPanel({
   const guidedLogRef = useRef<HTMLDivElement>(null);
   // Guided-chat pending focus contract (elspeth-6a9673ecd3, placement pass
   // 2026-07-23). The input stays MOUNTED (disabled) while /guided/chat is in
-  // flight — the old unmount swap is retired — so into pending, focus simply
-  // stays where the user left it; no programmatic move (yanking focus to the
-  // strip down in the conversation flow would be the disruption WCAG 2.4.3
-  // guards against). composerFocusWithinRef tracks whether focus is inside
-  // the composer section via bubbled focus/blur on the section —
-  // event-driven, so it is already correct BEFORE the pending flag flips.
+  // flight — the old unmount swap is retired — so into pending there is no
+  // programmatic move (yanking focus to the strip down in the conversation
+  // flow would be the disruption WCAG 2.4.3 guards against). An Enter-key
+  // send keeps focus in the textarea throughout; a mouse-click send drops
+  // focus to <body> mid-flight (Send clears the box synchronously → canSend
+  // flips false → the focused button disables under the pointer), which the
+  // out-of-pending restore below recovers. composerFocusWithinRef tracks
+  // whether focus is inside the composer section via bubbled focus/blur on
+  // the section — event-driven, so it is already correct BEFORE the pending
+  // flag flips.
   const composerSectionRef = useRef<HTMLElement | null>(null);
   const composerFocusWithinRef = useRef(false);
   const prevGuidedChatPendingRef = useRef(guidedChatPending);
   // useLayoutEffect (not useEffect) so no frame paints with focus at body.
-  // Out of pending: the ONE remaining unmount case is the tutorial resolve —
-  // the static "Sent" line replaces ChatInput on the same commit the flag
-  // drops (inputRef null — React clears detached refs before layout
-  // effects), which would strand the focused textarea's focus at <body>.
-  // Restore to the textarea (usually a no-op: focus never left it) or land
-  // on the section, only if focus stayed inside the composer — a user who
-  // moved away to re-read the transcript must not be yanked back. The
+  // Out of pending: restore into the composer — to the textarea, or to the
+  // section when the tutorial resolve has replaced ChatInput with the
+  // static "Sent" line on the same commit the flag drops (inputRef null —
+  // React clears detached refs before layout effects). Safe-to-restore
+  // mirrors the freeform isComposing restore above: focus stayed inside
+  // the composer (Enter path — usually a no-op), OR nobody holds focus at
+  // all (the mouse-click path's blur-to-body, which also flipped
+  // composerFocusWithinRef false via the section's null-relatedTarget blur).
+  // A user who moved away to re-read the transcript holds focus on a real
+  // element outside the composer and must not be yanked back. The
   // step-advance effect then owns the move to the fresh decision card.
   useLayoutEffect(() => {
     const was = prevGuidedChatPendingRef.current;
     prevGuidedChatPendingRef.current = guidedChatPending;
     if (guidedChatPending === was) return;
     if (guidedChatPending) return;
-    if (!composerFocusWithinRef.current) return;
+    const active = document.activeElement;
+    const safeToRestore =
+      composerFocusWithinRef.current ||
+      active === null ||
+      active === document.body;
+    if (!safeToRestore) return;
     if (inputRef.current !== null) {
       inputRef.current.focus({ preventScroll: true });
     } else {

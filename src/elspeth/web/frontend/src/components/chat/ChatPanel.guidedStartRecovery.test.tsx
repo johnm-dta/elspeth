@@ -170,4 +170,38 @@ describe("ChatPanel cold guided-start recovery with the real ChatInput", () => {
       "Revised prompt",
     );
   });
+
+  it("recovers focus into the composer after a mouse-click send round-trip", async () => {
+    // Clicking Send clears the box synchronously → canSend flips false → the
+    // focused Send button gets `disabled` → browsers drop focus to <body>
+    // (and the section's blur handler marks focus as "left"). The
+    // out-of-pending restore must treat a body/null activeElement as
+    // safe-to-restore — freeform's rule — or a mouse-driven user comes out
+    // of every round-trip with no focus at all.
+    const user = userEvent.setup();
+    apiMocks.startGuidedSession
+      .mockImplementationOnce(
+        (_sessionId: string, _command: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(signal.reason));
+          }),
+      )
+      .mockResolvedValueOnce(completedResponse);
+    apiMocks.reconcileGuidedStartOperation.mockResolvedValueOnce({
+      status: "failed",
+      failure_code: "request_cancelled",
+    });
+
+    render(<ChatPanel />);
+    await user.type(screen.getByLabelText("Message input"), "Prompt");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Guided setup running");
+
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await screen.findByLabelText("Message input");
+    const section = screen.getByRole("region", {
+      name: "Describe what you want",
+    });
+    expect(section.contains(document.activeElement)).toBe(true);
+  });
 });

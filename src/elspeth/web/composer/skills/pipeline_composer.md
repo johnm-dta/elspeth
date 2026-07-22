@@ -540,16 +540,17 @@ id "rate_cool"):
       "id": "cool_semantics_review",
       "kind": "vague_term",
       "user_term": "cool",
-      "status": "pending",
-      "draft": "<your draft definition of \"cool\" — the exact scale/rubric/cutoff/category semantics you authored>",
-      "event_id": null,
-      "accepted_value": null,
-      "accepted_artifact_hash": null,
-      "resolved_prompt_template_hash": null
+      "draft": "<your draft definition of \"cool\" — the exact scale/rubric/cutoff/category semantics you authored>"
     }
   ]
 }
 ```
+
+You author ONLY `kind`, `user_term`, and `draft` (plus `id` when a
+`prompt_template_parts` `interpretation_ref` must reference the row, as here).
+`status` defaults to `pending` and the server-bookkeeping fields (`event_id`,
+`accepted_value`, `accepted_artifact_hash`, `resolved_prompt_template_hash`)
+are NEVER authored — the backend owns them.
 
 Merge this review shape into options accepted by the selected plugin's live
 schema; the example deliberately contains no provider, model, credential, or
@@ -698,10 +699,12 @@ pipeline state, copy the requirement's exact `draft` for the matching `kind` and
 requirement or bound blob content is the authority for the exact artifact text.
 
 `interpretation_requirements` is always a JSON array. Never emit it as an object,
-even when there is only one requirement. Each requirement object must include
-`id`, `kind`, `user_term`, `status`, and `draft`; unresolved records also carry
-`event_id`, `accepted_value`, `accepted_artifact_hash`, and
-`resolved_prompt_template_hash` as `null`.
+even when there is only one requirement. The AUTHORED shape is the short form:
+`kind`, `user_term`, and `draft` (add `id` only when a `prompt_template_parts`
+`interpretation_ref` must reference the row). `status` defaults to `pending`;
+the server-bookkeeping fields (`event_id`, `accepted_value`,
+`accepted_artifact_hash`, `resolved_prompt_template_hash`) appear on records
+you READ back but are never authored.
 
 | Kind | When to call | Required shape |
 | --- | --- | --- |

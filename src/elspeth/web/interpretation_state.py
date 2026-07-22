@@ -48,7 +48,10 @@ REGISTERED_PIPELINE_DECISION_USER_TERMS: Final[frozenset[str]] = frozenset(
         "prompt_injection_shield_recommendation",
     }
 )
-RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
+# Sink-neutral wording (pack pressure-suite run 2, G6): the old "JSON output"
+# clause forced a false audit statement onto CSV/text sinks. The recognition
+# markers ("raw html", "fingerprint") are unchanged.
+RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the output."
 WEB_SCRAPE_HTTP_IDENTITY_USER_TERM: Final[str] = "web_scrape_http_identity"
 PROMPT_SHIELD_USER_TERM: Final[str] = "prompt_injection_shield_recommendation"
 PROMPT_SHIELD_WARNING_DRAFT: Final[str] = (

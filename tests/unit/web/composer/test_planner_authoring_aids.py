@@ -773,3 +773,66 @@ class TestNamedButMissingFile:
         assert "never uploaded" in rules
         assert "list_blobs" in rules
         assert "named gap" in rules
+
+
+class TestRun2PackEdits:
+    """Pack pressure-suite run-2 gap closures (G2/G3/G4/G6/G9), pinned.
+
+    Same discipline as the shield rules: product constants imported so the
+    taught text can never drift; teaching co-located with the mandate it
+    completes (the aids bless multi_query as the only multi-field shape, so
+    the aids must also carry that shape's contract).
+    """
+
+    def test_llm_output_rules_teach_the_query_definition_contract(self) -> None:
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["llm_output_contract"]["rules"])
+        assert "input_fields" in rendered  # G2: REQUIRED per-query mapping
+        assert "'template'" in rendered or '"template"' in rendered  # G2: per-query key is template
+        assert "prompt_template" in rendered  # G2: top-level still required
+        assert "max_capacity_retry_seconds" in rendered  # G9: web retry cap
+        from elspeth.web.provider_config_policy import WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS
+
+        assert str(WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS) in rendered
+
+    def test_custody_rules_name_the_discovered_path_binding_slot(self) -> None:
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["source_custody"]["rules"])
+        assert "options.path" in rendered  # G4: where a discovered blobs/ path goes
+        assert "blob_id" in rendered
+
+    def test_raw_html_cleanup_rules_quote_the_constants_verbatim(self) -> None:
+        # G6: the cleanup draft ships verbatim next to the shield draft — the
+        # aids are the verbatim-constants channel (imported, drift-proof).
+        from elspeth.web.interpretation_state import (
+            RAW_HTML_CLEANUP_REVIEW_DRAFT,
+            RAW_HTML_CLEANUP_USER_TERM,
+        )
+
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["raw_html_cleanup"]["rules"])
+        assert RAW_HTML_CLEANUP_USER_TERM in rendered
+        assert RAW_HTML_CLEANUP_REVIEW_DRAFT in rendered
+        assert "field_mapper" in rendered  # attachment point
+
+    def test_llm_digest_hint_scopes_the_shield_advisory_to_fetched_content(self) -> None:
+        # G3 DECIDED: the advisory covers llms consuming untrusted REMOTE
+        # (fetched) producer output — not "every unshielded llm". The old
+        # hint contradicted the skill and the aids' own prompt_shield rule.
+        view, _snapshot = _trained_view()
+        aids = build_planner_authoring_aids(view)
+        llm_entry = next(e for e in aids["discovery_digest"]["plugins"]["transforms"] if e["name"] == "llm")
+        hints = "\n".join(llm_entry["composer_hints"])
+        assert "EVERY LLM node" not in hints
+        assert "externally-fetched" in hints or "externally fetched" in hints
+
+    def test_skill_authoring_exemplar_carries_no_server_review_fields(self) -> None:
+        # G5: an exemplar demonstrated the heavy server-side review row
+        # (event_id/accepted_value/...) where the authored contract is the
+        # short form (canonicalize_authored_node_review_requirements) —
+        # three run-2 sims tripled the heavy row identically.
+        from elspeth.web.composer.skills import load_skill
+
+        skill = load_skill("pipeline_composer")
+        assert '"event_id": null' not in skill
+        assert '"accepted_artifact_hash": null' not in skill

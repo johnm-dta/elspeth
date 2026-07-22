@@ -41,8 +41,11 @@ from elspeth.web.interpretation_state import (
     PROMPT_SHIELD_AVAILABLE_DRAFT,
     PROMPT_SHIELD_USER_TERM,
     PROMPT_SHIELD_WARNING_DRAFT,
+    RAW_HTML_CLEANUP_REVIEW_DRAFT,
+    RAW_HTML_CLEANUP_USER_TERM,
     REGISTERED_PIPELINE_DECISION_USER_TERMS,
 )
+from elspeth.web.provider_config_policy import WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS
 
 # The prompt never models a fabricated identifier — provenance is the lesson.
 PLACEHOLDER_BLOB_ID: Final[str] = "<blob_id copied verbatim from a list_blobs or create_blob result>"
@@ -63,6 +66,12 @@ _SOURCE_CUSTODY_RULES: Final[tuple[str, ...]] = (
     "narrow upload/selection question — or, on a surface with no question "
     "channel, decline with a named gap. Never fabricate a path, blob id, or "
     "stand-in rows.",
+    # run-2 G4: the digest hands a discovered blobs/<name> PATH but nothing
+    # said which slot it binds to; sims put it in blob_id (UUID-typed) and died.
+    "A DISCOVERED operator file path (a blobs/<name> the session's discovery "
+    "facts or blob metadata handed you) binds through source options.path, "
+    "copied verbatim. source.blob_id accepts ONLY the UUID a blob tool "
+    "returned this session — a path in blob_id is always rejected.",
 )
 
 _INLINE_EXEMPLAR_FILENAME: Final[str] = "stock_levels.csv"
@@ -133,6 +142,30 @@ def _prompt_shield_rules(*, shield_available: bool, untrusted_producers: tuple[s
     ]
 
 
+def _raw_html_cleanup_rules(*, untrusted_producers: tuple[str, ...]) -> list[str]:
+    """Raw-HTML cleanup review rules quoting the registered constants verbatim.
+
+    run-2 G6: the shield draft shipped verbatim (reproduced 3/3) while the
+    cleanup draft did not — sims paraphrased and the contract's marker
+    recognition ("raw html" + "fingerprint" substrings) treated the row as
+    absent, re-firing interpretation_review_contract_unsatisfied. Same
+    imported-constants discipline as the shield rules.
+    """
+    producers = " or ".join(sorted(untrusted_producers))
+    return [
+        f"When a field_mapper with select_only=true drops {producers} raw fields "
+        "(raw content / fingerprint) before the sink, stage the cleanup review ON "
+        "THAT field_mapper node: one pending pipeline_decision entry in its "
+        "options.interpretation_requirements (a SIBLING of mapping, never inside it).",
+        f'Use exactly: {{"kind": "pipeline_decision", "user_term": "{RAW_HTML_CLEANUP_USER_TERM}", "draft": "{RAW_HTML_CLEANUP_REVIEW_DRAFT}"}} '
+        "— copy the user_term and draft strings verbatim.",
+        "The row is RECOGNIZED only when the draft text names both the raw HTML "
+        "and the fingerprint fields — a paraphrased draft is treated as absent "
+        "and the same rejection fires again.",
+        "An explicit user instruction to drop the fields does NOT waive the row — it records that decision for the audit trail.",
+    ]
+
+
 def _model_custody_rules(profile_alias: str | None) -> list[str]:
     """Model-provisioning custody with the sanctioned alternative rendered live.
 
@@ -174,6 +207,15 @@ def _model_custody_rules(profile_alias: str | None) -> list[str]:
     return rules
 
 
+# run-2 G9: web policy rejects sequential (pool_size 1) multi_query llm nodes
+# with unbounded capacity retries; the ceiling is imported so the taught
+# number can never drift from provider_config_policy.
+_WEB_MULTI_QUERY_RETRY_RULE: Final[str] = (
+    "A web-authored llm node using queries with pool_size 1 (sequential) must "
+    f"bound capacity retries: set max_capacity_retry_seconds <= {WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS}, "
+    "or set pool_size > 1 for pooled retry handling."
+)
+
 _LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
     "An llm node writes the model's reply as ONE raw string into the field "
     "named by options.response_field (default llm_response). Prompt text that "
@@ -187,6 +229,17 @@ _LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
     "If a prompt asks for structured JSON anyway, the JSON arrives as one "
     "string in the response field; wire a schema-proven parser transform "
     "when downstream nodes need its keys as row fields.",
+    # ── multi_query QueryDefinition contract (run-2 G2: the blessed-shape
+    # mandate above shipped without the shape's contract) ─────────────────
+    "queries is a mapping of query name to a query OBJECT (list form needs "
+    "name in each entry). Every query object REQUIRES input_fields — a "
+    "mapping of template variable name to row column name, e.g. "
+    '{"field_a": "field_a", "field_b": "field_b"} — a query without '
+    "input_fields is rejected.",
+    "The per-query prompt key is 'template' (a Jinja2 override), NOT "
+    "prompt_template. The top-level options.prompt_template is STILL "
+    "required and is the fallback for any query that omits template.",
+    _WEB_MULTI_QUERY_RETRY_RULE,
 )
 
 
@@ -635,6 +688,8 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
                 untrusted_producers=visible_untrusted_producers,
             ),
         }
+    if visible_untrusted_producers and "field_mapper" in visible["transform"]:
+        aids["raw_html_cleanup"] = {"rules": _raw_html_cleanup_rules(untrusted_producers=visible_untrusted_producers)}
     aids["discovery_digest"] = {
         "guidance": _DISCOVERY_DIGEST_GUIDANCE,
         "plugins": discovery_digest(catalog, summaries=summaries),

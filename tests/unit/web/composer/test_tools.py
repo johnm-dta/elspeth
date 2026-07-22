@@ -10321,8 +10321,11 @@ class TestGetPluginAssistance:
         payload = result.to_dict()["data"]
         assert payload["issue_code"] is None
         hints = " ".join(payload["composer_hints"])
-        assert "reviewed for EVERY LLM node" in hints
-        assert "surfaced as an advisory (never blocking)" in hints
+        # run-2 G3 (decided): the advisory covers llms consuming externally-
+        # fetched remote content — not "every unshielded llm"; the old hint
+        # contradicted the skill and the aids' prompt_shield rule.
+        assert "externally-fetched remote content" in hints
+        assert "always advisory (never blocking)" in hints
         assert "azure_prompt_shield" in hints
         assert "only when discovery lists it" in hints
         assert "whenever no authorized shield is upstream (State B/C)" in hints

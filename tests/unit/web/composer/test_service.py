@@ -7317,3 +7317,56 @@ class TestComposeLoopFreeformRecipeIntentRouting:
                 )
             ).all()
         assert audit_messages == []
+
+
+def test_log_guided_planner_failure_emits_typed_disposition() -> None:
+    """A guided planner failure logs its closed code + deduped rejection codes.
+
+    Parity with the freeform ``planner_failure_disposition`` (which carries
+    ``planner_code`` + ``rejection_codes``): the guided route's terminal slog
+    records only ``exc_class`` + frames, so a churned guided failure
+    (REPAIR_EXHAUSTED after the escape hatch, tutorial run 7 / session
+    cbb00f4b) was opaque. This is the one in-fence emit that names the wall.
+    """
+    from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+    from elspeth.web.composer.service import _log_guided_planner_failure
+
+    exc = PipelinePlannerError(
+        "planner repair budget exhausted",
+        code="REPAIR_EXHAUSTED",
+        # Unsorted with a duplicate: the emit must dedupe and sort.
+        detail_codes=("web_scrape_http_identity", "plugin_options_invalid", "web_scrape_http_identity"),
+    )
+
+    with structlog.testing.capture_logs() as events:
+        _log_guided_planner_failure(
+            exc,
+            session_id="cbb00f4b-b7b7-4e95-9068-29db1dccb0c9",
+            operation_id="d3ea675b-84f2-41aa-99f3-68ca54082ab4",
+            surface="tutorial_profile",
+        )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["event"] == "composer.guided_planner_failure"
+    assert event["log_level"] == "error"
+    assert event["planner_code"] == "REPAIR_EXHAUSTED"
+    assert event["rejection_codes"] == ["plugin_options_invalid", "web_scrape_http_identity"]
+    assert event["session_id"] == "cbb00f4b-b7b7-4e95-9068-29db1dccb0c9"
+    assert event["operation_id"] == "d3ea675b-84f2-41aa-99f3-68ca54082ab4"
+    assert event["surface"] == "tutorial_profile"
+
+
+def test_log_guided_planner_failure_empty_rejection_codes_on_non_rejection_failure() -> None:
+    """A non-rejection failure (timeout/provider) carries no rejection codes."""
+    from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+    from elspeth.web.composer.service import _log_guided_planner_failure
+
+    exc = PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT")
+
+    with structlog.testing.capture_logs() as events:
+        _log_guided_planner_failure(exc, session_id="s", operation_id="o", surface="guided_staged")
+
+    assert len(events) == 1
+    assert events[0]["planner_code"] == "TIMEOUT"
+    assert events[0]["rejection_codes"] == []

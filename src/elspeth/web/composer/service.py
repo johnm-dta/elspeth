@@ -100,6 +100,7 @@ from elspeth.web.composer.llm_response_parsing import (
     token_usage_from_response,
 )
 from elspeth.web.composer.pipeline_planner import (
+    PipelinePlannerError,
     PipelinePlanResult,
     PlannerBudgetPolicy,
     PlannerCustodyConfig,
@@ -189,6 +190,38 @@ from elspeth.web.sessions.models import sessions_table
 from elspeth.web.validation import _redact_sensitive_content
 
 slog = structlog.get_logger()
+
+
+def _log_guided_planner_failure(
+    exc: PipelinePlannerError,
+    *,
+    session_id: str,
+    operation_id: str,
+    surface: str,
+) -> None:
+    """Emit the typed planner disposition when a guided planner call fails.
+
+    The freeform surface records ``planner_code`` and the last candidate
+    rejection's ``rejection_codes`` in a durable ``planner_failure_disposition``
+    audit row (``routes/_helpers._handle_planner_failure``). The guided route's
+    terminal-failure ``slog`` carries only ``exc_class`` + frames (route-side,
+    signed), so a guided planner 5xx hid the closed ``PipelinePlannerError.code``
+    and the ``detail_codes`` that name the wall the repair loop hit — leaving a
+    churned failure (e.g. REPAIR_EXHAUSTED after the escape hatch) opaque. Emit
+    them here, the one in-fence site that holds the typed exception (it awaits
+    ``plan_pipeline``), so a guided failure is as diagnosable as a freeform one.
+    Structured and session/operation scoped; the caller re-raises so the
+    terminal-failure path is unchanged. This is a diagnostic log, not a durable
+    audit row — the guided cohort/terminalization is not reachable from in-fence.
+    """
+    slog.error(
+        "composer.guided_planner_failure",
+        session_id=session_id,
+        operation_id=operation_id,
+        surface=surface,
+        planner_code=exc.code,
+        rejection_codes=sorted(set(exc.detail_codes)),
+    )
 
 
 async def _await_tool_turn_with_deferred_cancellation[T](
@@ -2148,7 +2181,11 @@ class ComposerServiceImpl:
         if not self._availability.available:
             raise ComposerServiceError(self._availability.reason or "Composer is unavailable.")
 
-        plan = await plan_pipeline(
+        # Await inside a try so a typed planner failure is logged with its
+        # code+rejection_codes before re-raising to the (signed) guided route
+        # (see _log_guided_planner_failure); the coroutine runs nothing until
+        # awaited, so every PipelinePlannerError surfaces inside the guard.
+        guided_full_planner_call = plan_pipeline(
             intent=intent,
             current_state=current_state,
             provider_current_state=current_state.to_dict(),
@@ -2202,6 +2239,16 @@ class ComposerServiceImpl:
             recorder=recorder,
             candidate_finalizer=_identity_pipeline_candidate,
         )
+        try:
+            plan = await guided_full_planner_call
+        except PipelinePlannerError as exc:
+            _log_guided_planner_failure(
+                exc,
+                session_id=originating_message.session_id,
+                operation_id=str(operation_fence.operation_id),
+                surface=PlannerSurface.GUIDED_FULL.value,
+            )
+            raise
         return plan, {
             "source": frozenset(item.name for item in policy_catalog.list_sources()),
             "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
@@ -2276,7 +2323,11 @@ class ComposerServiceImpl:
 
         planner_surface = PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED
         planner_profile = "tutorial" if planner_surface is PlannerSurface.TUTORIAL_PROFILE else "ordinary"
-        plan = await plan_pipeline(
+        # Build the coroutine, then await inside a try so a typed planner failure
+        # is logged with its code+rejection_codes before it re-raises to the
+        # (signed) guided route. An ``async def`` runs nothing until awaited, so
+        # every PipelinePlannerError surfaces at ``await``, inside the guard.
+        guided_planner_call = plan_pipeline(
             intent=intent,
             current_state=current_state,
             provider_current_state=guided_redacted_current_state_context(current_state),
@@ -2330,6 +2381,16 @@ class ComposerServiceImpl:
             recorder=recorder,
             candidate_finalizer=lambda candidate: bind_guided_reviewed_components(candidate, guided),
         )
+        try:
+            plan = await guided_planner_call
+        except PipelinePlannerError as exc:
+            _log_guided_planner_failure(
+                exc,
+                session_id=originating_message.session_id,
+                operation_id=str(operation_fence.operation_id),
+                surface=planner_surface.value,
+            )
+            raise
         catalog_ids: Mapping[str, frozenset[str]] = {
             "source": frozenset(item.name for item in policy_catalog.list_sources()),
             "transform": frozenset(item.name for item in policy_catalog.list_transforms()),

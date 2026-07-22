@@ -383,6 +383,74 @@ class TestForkCoalesceExemplar:
         section = payload["fork_coalesce"]
         assert section["set_pipeline_exemplar"] == fork_coalesce_exemplar_args(view)
 
+
+class TestExemplarDomainDisjointness:
+    """Exemplars teach STRUCTURE, never a live acceptance test's solution.
+
+    The fork/coalesce exemplar previously mirrored the live colour-A/B
+    acceptance test (color_name/hex source fields, tone/usage branches,
+    emotional-tone prompts) — effectively the test's answer key. When a live
+    test's domain vocabulary appears in an exemplar, the test measures
+    pack-lookup, not planner capability, and its pass signal is contaminated.
+    These tests pin the neutral domains and the structural elements that must
+    survive any future domain change.
+    """
+
+    # The live colour A/B acceptance vocabulary. json.dumps + lowercase scan.
+    _COLOUR_ACCEPTANCE_TOKENS = ("color_name", "hex", "cerulean", "saffron", "colour", "color")
+
+    def test_fork_coalesce_exemplar_is_disjoint_from_the_colour_acceptance_domain(self, tmp_path: Path) -> None:
+        trained_view, _ = _trained_view()
+        profile_view, _ = _profile_view(tmp_path)
+        for view in (trained_view, profile_view):
+            args = fork_coalesce_exemplar_args(view)
+            assert args is not None
+            rendered = json.dumps(args).lower()
+            for token in self._COLOUR_ACCEPTANCE_TOKENS:
+                assert token not in rendered, f"acceptance-domain token {token!r} in fork/coalesce exemplar"
+            # The neutral domain is present and carried end to end: source
+            # schema fields reappear in the cleanup mapping.
+            assert "ticket_id" in rendered and "body" in rendered
+
+    def test_source_custody_exemplar_is_domain_neutral(self) -> None:
+        view, _snapshot = _trained_view()
+        args = source_custody_exemplar_args(view)
+        assert args is not None
+        rendered = json.dumps(args).lower()
+        for token in self._COLOUR_ACCEPTANCE_TOKENS:
+            assert token not in rendered, f"acceptance-domain token {token!r} in custody exemplar"
+        # The old quarterly-totals domain is retired with the rewrite.
+        assert "quarterly" not in rendered
+        assert "sku" in rendered
+
+    def test_llm_branch_prompts_interpolate_the_row_namespace_over_guaranteed_fields(self, tmp_path: Path) -> None:
+        """Prompts use {{ row.<field> }} and only name source-guaranteed fields.
+
+        Candidate-level CI does not validate prompt interpolation (the run-19
+        readiness rejection came from planners copying a {{ field }} prompt),
+        so the exemplar's prompts are pinned here: every placeholder uses the
+        row namespace and resolves to a field the source guarantees.
+        """
+        import re
+
+        view, _snapshot = _profile_view(tmp_path)
+        args = fork_coalesce_exemplar_args(view)
+        assert args is not None
+        guaranteed = set(args["source"]["options"]["schema"]["guaranteed_fields"])
+        llms = [node for node in args["nodes"] if node.get("plugin") == "llm"]
+        assert len(llms) == 2
+        for llm in llms:
+            prompt = llm["options"]["prompt_template"]
+            placeholders = re.findall(r"\{\{\s*([^}]+?)\s*\}\}", prompt)
+            assert placeholders, "each branch prompt must interpolate the row"
+            for placeholder in placeholders:
+                assert placeholder.startswith("row."), f"placeholder {{{{ {placeholder} }}}} must use the row namespace"
+                assert placeholder.removeprefix("row.") in guaranteed
+            # The short review-requirement form survives the domain rewrite.
+            requirements = llm["options"]["interpretation_requirements"]
+            assert all(set(row) == {"kind", "user_term", "draft"} for row in requirements)
+            assert all(row["user_term"] for row in requirements)
+
     def test_payload_states_the_per_branch_shape_rule(self, tmp_path: Path) -> None:
         view, _snapshot = _profile_view(tmp_path)
 

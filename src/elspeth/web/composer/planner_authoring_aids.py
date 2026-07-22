@@ -12,6 +12,15 @@ current validator rejects fails CI rather than teaching planners a dead shape.
 Evidence base: the 2026-07-22 pack stress test (0/6 cold planners converged;
 5/6 fabricated a ``blob_id``, 1/6 missed the source options contract). See
 ``scratch/planner-skill-pack-assessment.md``.
+
+Exemplars are structural teaching, not solutions: they demonstrate wiring
+(gate/fork/coalesce), custody binding, and review-row shapes in a neutral
+domain deliberately disjoint from every live acceptance test. If a live
+test's domain vocabulary ever appears in an exemplar, that test stops
+measuring planner capability and starts measuring pack-lookup — the exemplar
+has become the test's answer key and the acceptance signal is contaminated.
+The rules text states principles generically and never names the exemplar's
+domain fields as if they were required.
 """
 
 from __future__ import annotations
@@ -37,9 +46,9 @@ _SOURCE_CUSTODY_RULES: Final[tuple[str, ...]] = (
     "Custody owns the storage binding: author schema.mode and on_validation_failure on a blob-bound source, never path or blob_ref.",
 )
 
-_INLINE_EXEMPLAR_FILENAME: Final[str] = "quarterly_totals.csv"
+_INLINE_EXEMPLAR_FILENAME: Final[str] = "stock_levels.csv"
 _INLINE_EXEMPLAR_MIME: Final[str] = "text/csv"
-_INLINE_EXEMPLAR_CONTENT: Final[str] = "region,total\nnorth,412\nsouth,388\n"
+_INLINE_EXEMPLAR_CONTENT: Final[str] = "sku,on_hand\nAX-100,12\nBX-204,7\n"
 
 _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
     "When the user asks for separate per-branch processing compared side by "
@@ -55,7 +64,7 @@ _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
     "When a branch transform is an llm node, author its interpretation_requirements in the short form {kind, user_term, draft} — user_term is mandatory; a row without it is rejected. Omitting the whole block is also legal (required reviews auto-stage).",
 )
 
-_FORK_EXEMPLAR_CONTENT: Final[str] = "color_name,hex\ncerulean,#2A52BE\nsaffron,#F4C430\n"
+_FORK_EXEMPLAR_CONTENT: Final[str] = "ticket_id,body\nT-1001,Cannot log in since the update\nT-1002,Invoice totals look wrong\n"
 
 
 def _usable_llm_profile_alias(catalog: PolicyCatalogView) -> str | None:
@@ -186,7 +195,7 @@ def source_custody_exemplar_args(
                 "sink_name": "main",
                 "plugin": "json",
                 "options": {
-                    "path": "outputs/quarterly_totals.json",
+                    "path": "outputs/stock_levels.json",
                     "format": "json",
                     "schema": {"mode": "observed"},
                     "mode": "write",
@@ -269,7 +278,7 @@ def fork_coalesce_exemplar_args(
             "options": {
                 "profile": profile_alias,
                 "prompt_template": question,
-                "required_input_fields": ["color_name", "hex"],
+                "required_input_fields": ["ticket_id", "body"],
                 "response_field": response_field,
                 "schema": {"mode": "observed"},
                 # The short review-requirement form: id/status are synthesized
@@ -288,24 +297,24 @@ def fork_coalesce_exemplar_args(
     if profile_alias is not None:
         branch_nodes = [
             _branch_llm(
-                "assess_tone",
+                "assess_sentiment",
                 "branch_a",
-                "tone",
-                "What is the emotional tone of the colour {{ row.color_name }} ({{ row.hex }})? Reply with one short phrase.",
+                "sentiment",
+                "What is the sentiment of support ticket {{ row.ticket_id }}: {{ row.body }}? Reply with one short phrase.",
             ),
             _branch_llm(
-                "assess_usage",
+                "assess_urgency",
                 "branch_b",
-                "usage",
-                "Name one design usage for the colour {{ row.color_name }} ({{ row.hex }}). Reply with one short phrase.",
+                "urgency",
+                "Classify the urgency of support ticket {{ row.ticket_id }}: {{ row.body }}. Reply with a single category word.",
             ),
         ]
-        coalesce_branches = {"branch_a": "tone_done", "branch_b": "usage_done"}
+        coalesce_branches = {"branch_a": "sentiment_done", "branch_b": "urgency_done"}
         tidy_mapping = {
-            "color_name": "color_name",
-            "hex": "hex",
-            "tone": "tone",
-            "usage": "usage",
+            "ticket_id": "ticket_id",
+            "body": "body",
+            "sentiment": "sentiment",
+            "urgency": "urgency",
         }
         metadata = {
             "name": "Per-branch LLM assessment",
@@ -338,7 +347,7 @@ def fork_coalesce_exemplar_args(
             },
         ]
         coalesce_branches = {"branch_a": "branch_a_done", "branch_b": "branch_b_done"}
-        tidy_mapping = {"color_name": "color_name", "hex": "hex"}
+        tidy_mapping = {"ticket_id": "ticket_id", "body": "body"}
         metadata = {
             "name": "Per-branch fan-out and rejoin",
             "description": "Fan rows out to one transform per branch, rejoin with a coalesce, tidy, and save.",
@@ -351,13 +360,13 @@ def fork_coalesce_exemplar_args(
             "options": {
                 "schema": {
                     "mode": "flexible",
-                    "fields": ["color_name: str", "hex: str"],
-                    "guaranteed_fields": ["color_name", "hex"],
+                    "fields": ["ticket_id: str", "body: str"],
+                    "guaranteed_fields": ["ticket_id", "body"],
                 }
             },
             "on_validation_failure": "discard",
             "inline_blob": {
-                "filename": "colours.csv",
+                "filename": "support_tickets.csv",
                 "mime_type": "text/csv",
                 "content": _FORK_EXEMPLAR_CONTENT,
                 "description": "Literal rows the user pasted into chat",
@@ -402,7 +411,7 @@ def fork_coalesce_exemplar_args(
                 "sink_name": "main",
                 "plugin": "json",
                 "options": {
-                    "path": "outputs/colour_assessments.json",
+                    "path": "outputs/ticket_assessments.json",
                     "format": "json",
                     "schema": {"mode": "observed"},
                     "mode": "write",

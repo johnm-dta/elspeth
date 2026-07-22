@@ -2641,3 +2641,101 @@ async def test_repair_exhaustion_records_last_rejection_codes(
     assert excinfo.value.detail_codes, "exhaustion must carry the last rejection's codes"
     # Codes are the closed, leak-safe discriminant — no messages/paths.
     assert all(isinstance(c, str) for c in excinfo.value.detail_codes)
+
+
+@pytest.mark.asyncio
+async def test_planner_attempt_trail_names_reject_repair_accept(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """Every attempt emits a trail event; success emits a summary too.
+
+    The terminal disposition only carries the LAST failure's codes, so a run
+    whose final attempt failed at a non-candidate layer reported
+    rejection_codes=[] and the whole repair history was invisible (guided
+    session 5a5082e6, op 408acf3a). The per-attempt trail names each round —
+    and the success-path summary closes the churn-observability gap
+    (assessment item 5) at the same time.
+    """
+    from structlog.testing import capture_logs
+
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    origin = _origin()
+
+    with capture_logs() as logs:
+        proposal = await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            originating_message=origin,
+        )
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    attempts = [entry for entry in logs if entry["event"] == "composer.planner_attempt"]
+    assert [entry["attempt"] for entry in attempts] == [1, 2, 3]
+    assert all(entry["session_id"] == origin.session_id for entry in attempts)
+    assert all(entry["surface"] == "freeform" for entry in attempts)
+
+    discovery, rejected, accepted = attempts
+    assert (discovery["phase"], discovery["outcome"]) == ("discovery", "discovery_executed")
+    assert discovery["tool_calls"] == 1
+    assert (rejected["phase"], rejected["outcome"]) == ("candidate", "candidate_rejected")
+    assert rejected["rejection_codes"], "the rejected attempt must name its codes"
+    assert rejected["led_to"] == "repair"
+    assert (accepted["phase"], accepted["outcome"]) == ("repair", "accepted")
+    assert accepted["led_to"] == "done"
+
+    summaries = [entry for entry in logs if entry["event"] == "composer.planner_summary"]
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["final_outcome"] == "accepted"
+    assert summary["total_attempts"] == 3
+    assert summary["phase_counts"] == {"discovery": 1, "candidate": 1, "repair": 1}
+    assert summary["rejection_history"] == [
+        {"attempt": 2, "outcome": "candidate_rejected", "codes": rejected["rejection_codes"]},
+    ]
+    assert summary["session_id"] == origin.session_id
+
+
+@pytest.mark.asyncio
+async def test_planner_summary_on_exhaustion_carries_the_full_code_history(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """REPAIR_EXHAUSTED with a shape-level last failure is no longer blind:
+    the summary names every earlier round's rejection codes."""
+    from structlog.testing import capture_logs
+
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+    )
+
+    with capture_logs() as logs, pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(
+            tmp_path=tmp_path,
+            tool_context=tool_context,
+            completion=completion,
+            repair_budget=1,
+            model_overrides={"escape_hatch_model": None},
+        )
+
+    assert excinfo.value.code == "REPAIR_EXHAUSTED"
+    attempts = [entry for entry in logs if entry["event"] == "composer.planner_attempt"]
+    assert [entry["outcome"] for entry in attempts] == ["candidate_rejected", "candidate_rejected"]
+    assert attempts[0]["led_to"] == "repair"
+    assert attempts[1]["led_to"] == "terminal"
+    assert attempts[1]["planner_code"] == "REPAIR_EXHAUSTED"
+
+    summaries = [entry for entry in logs if entry["event"] == "composer.planner_summary"]
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary["final_outcome"] == "REPAIR_EXHAUSTED"
+    assert summary["total_attempts"] == 2
+    # BOTH rounds' codes survive — the blindspot this trail exists to close.
+    assert [entry["attempt"] for entry in summary["rejection_history"]] == [1, 2]
+    assert all(entry["codes"] for entry in summary["rejection_history"])

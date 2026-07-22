@@ -1353,6 +1353,160 @@ class TestStep2IntraStep:
         assert len(proposals) == 1
         assert proposals[0].status == "pending"
 
+    def test_prose_revision_replans_full_pipeline_with_instruction_as_intent(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A docked-composer instruction re-plans the whole pipeline.
+
+        The proposal-review turn accepts a prose ``revision_instruction`` (no
+        ``edit_target``). It supersedes the pending proposal and re-plans the
+        full pipeline with the instruction as the planner intent. With no root
+        intent (the tutorial / auto-proposal case), the planner originating
+        content is the instruction alone.
+        """
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="prose-revise.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+        old_proposal_id = payload["proposal_id"]
+        assert _full_guided_session(staged)["deferred_intents"] == []
+
+        captured: dict[str, object] = {}
+        original_planner = composer_test_client.app.state.composer_service.plan_guided_pipeline
+
+        async def spy_planner(**kwargs: object) -> object:
+            captured.update(kwargs)
+            return await original_planner(**kwargs)
+
+        monkeypatch.setattr(composer_test_client.app.state.composer_service, "plan_guided_pipeline", spy_planner)
+
+        instruction = "Add a deduplication transform before the output."
+        operation_id = str(uuid4())
+        request_payload = {
+            "operation_id": operation_id,
+            "turn_token": turn["turn_token"],
+            "proposal_id": payload["proposal_id"],
+            "draft_hash": payload["draft_hash"],
+            "edited_values": {"revision_instruction": instruction},
+        }
+
+        revised = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+
+        assert revised.status_code == 200, revised.json()
+        body = revised.json()
+        assert body["next_turn"]["type"] == "propose_pipeline"
+        successor_id = body["next_turn"]["payload"]["proposal_id"]
+        assert successor_id != old_proposal_id
+        # The instruction is the planner intent verbatim, and with no root intent
+        # the originating content is exactly the instruction (root-absent branch).
+        assert captured["intent"] == instruction
+        assert captured["originating_message"].content == instruction
+
+        guided = _full_guided_session(body)
+        assert guided["deferred_intents"] == []
+        assert guided["active_proposal"]["proposal_id"] == successor_id
+
+        proposals = {
+            str(proposal.id): proposal
+            for proposal in asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
+        }
+        assert proposals[old_proposal_id].status == "rejected"
+        assert proposals[successor_id].status == "pending"
+
+        # The operation is idempotent: replaying the same request returns the
+        # settled body without a second planner call.
+        captured.clear()
+        replay = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+        assert replay.status_code == 200, replay.json()
+        assert replay.json() == body
+        assert captured == {}
+
+    def test_prose_revision_appends_instruction_to_root_intent(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With a live root intent, the instruction is appended after it.
+
+        The planner originating content is the root intent first, then the
+        instruction on a new paragraph (root-present branch).
+        """
+        session_id = _create_session(composer_test_client)
+        intent = "Author a pipeline that ingests the CSV and writes JSON results."
+        started = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={"profile": "live", "intent": intent, "operation_id": str(uuid4())},
+        )
+        assert started.status_code == 200, started.json()
+        staged = self._stage_proposal(composer_test_client, session_id, filename="prose-root.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+
+        captured: dict[str, object] = {}
+        original_planner = composer_test_client.app.state.composer_service.plan_guided_pipeline
+
+        async def spy_planner(**kwargs: object) -> object:
+            captured.update(kwargs)
+            return await original_planner(**kwargs)
+
+        monkeypatch.setattr(composer_test_client.app.state.composer_service, "plan_guided_pipeline", spy_planner)
+
+        instruction = "Insert a deduplication transform between the source and the sink."
+        revised = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": payload["proposal_id"],
+                "draft_hash": payload["draft_hash"],
+                "edited_values": {"revision_instruction": instruction},
+            },
+        )
+
+        assert revised.status_code == 200, revised.json()
+        assert revised.json()["next_turn"]["type"] == "propose_pipeline"
+        assert captured["intent"] == instruction
+        assert captured["originating_message"].content == f"{intent}\n\n{instruction}"
+
+    @pytest.mark.parametrize("instruction", ["", "   ", "x" * 8193, 123])
+    def test_prose_revision_rejects_invalid_instruction_without_mutation(
+        self,
+        composer_test_client: TestClient,
+        instruction: object,
+    ) -> None:
+        """Blank, oversized, or non-string instructions are a stable 400."""
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="prose-invalid.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+
+        rejected = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": payload["proposal_id"],
+                "draft_hash": payload["draft_hash"],
+                "edited_values": {"revision_instruction": instruction},
+            },
+        )
+
+        assert rejected.status_code == 400, rejected.json()
+        assert rejected.json()["detail"] == ("Guided proposal revision instruction must be a non-empty string of at most 8192 characters.")
+        current = _get_guided(composer_test_client, session_id)
+        assert current["next_turn"]["payload"] == payload
+        proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1
+        assert proposals[0].status == "pending"
+
     def test_component_back_edit_rejects_stale_target_without_mutation(
         self,
         composer_test_client: TestClient,

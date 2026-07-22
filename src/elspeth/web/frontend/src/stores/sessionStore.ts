@@ -2965,6 +2965,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (guidedNextTurn === null) {
       throw new Error("chatGuided called without a current unanswered turn");
     }
+    // Step-3 proposal revision. The 7.1 planner auto-stages a pipeline proposal
+    // at Output→Transforms, so step_3 now BEGINS with a propose_pipeline turn.
+    // A docked-composer Send there is a request to revise that proposal, not a
+    // /guided/chat message — and /guided/chat rejects at step_3/4 when there are
+    // no deferred intents to manage (the tutorial's deterministic 409). Route the
+    // instruction through the RESPOND action as a prose revision: it regenerates
+    // the whole pipeline following the instruction, reusing respondGuided's
+    // turn_token + operation-id custody. Deferred-intent management surfaces are
+    // unaffected — they are not propose_pipeline turns. (deferred_intents are not
+    // on the GuidedSessionResponse wire, so the gate is the proposal turn itself.)
+    if (
+      guidedSession.step === "step_3_transforms" &&
+      guidedNextTurn.type === "propose_pipeline"
+    ) {
+      await get().respondGuided({
+        proposal_id: guidedNextTurn.payload.proposal_id,
+        draft_hash: guidedNextTurn.payload.draft_hash,
+        chosen: null,
+        edited_values: { revision_instruction: message },
+        custom_inputs: null,
+        edit_target: null,
+        control_signal: null,
+      });
+      return;
+    }
     // Capture session + step identity before the await (stale-fetch guard
     // mirroring respondGuided / startGuided).  If the user switches
     // session or the wizard advances mid-flight, the response is dropped.

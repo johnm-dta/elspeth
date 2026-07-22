@@ -263,6 +263,16 @@ export type GuidedRespondAction =
       control_signal: null;
     })
   | (BoundProposalFields & {
+      // Prose proposal revision: a free-text instruction (from the docked
+      // step-3 composer) that regenerates the whole pipeline. No edit_target —
+      // this is a full re-plan, not a component-scoped rewind.
+      chosen: null;
+      edited_values: { revision_instruction: string };
+      custom_inputs: null;
+      edit_target: null;
+      control_signal: null;
+    })
+  | (BoundProposalFields & {
       chosen: null;
       edited_values: null;
       custom_inputs: null;

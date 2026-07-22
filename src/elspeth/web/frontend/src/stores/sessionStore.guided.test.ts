@@ -2662,6 +2662,66 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedSession).toEqual(sampleChatResponse.guided_session);
     });
 
+    it("routes a step-3 proposal-turn send through /guided/respond as a prose revision", async () => {
+      const { chatGuided, respondGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleRespondResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+        guidedNextTurn: sampleProposalTurn,
+        compositionState: sampleCompositionState,
+      });
+
+      await useSessionStore
+        .getState()
+        .chatGuided("Add a deduplication transform before the output.");
+
+      // The instruction is a proposal revision, not a chat message: it goes to
+      // /guided/respond with the proposal binding + the closed revision bag, and
+      // never touches /guided/chat.
+      expect(chatGuided).not.toHaveBeenCalled();
+      expect(respondGuided).toHaveBeenCalledTimes(1);
+      expect(respondGuided).toHaveBeenCalledWith(
+        RETRY_SESSION_ID,
+        expect.objectContaining({
+          proposal_id: PROPOSAL_ID,
+          draft_hash: PROPOSAL_HASH,
+          chosen: null,
+          edited_values: {
+            revision_instruction: "Add a deduplication transform before the output.",
+          },
+          custom_inputs: null,
+          edit_target: null,
+          control_signal: null,
+          turn_token: sampleProposalTurn.turn_token,
+          operation_id: expect.any(String),
+        }),
+      );
+    });
+
+    it("keeps a non-proposal step-3 send on /guided/chat", async () => {
+      const { chatGuided, respondGuided } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleChatResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: RETRY_SESSION_ID,
+        // Step 3, but the current turn is an ordinary chat-eligible turn (e.g. a
+        // deferred-intent management surface), not the proposal review — the
+        // revision gate must NOT intercept it.
+        guidedSession: { ...sampleGuidedSession, step: "step_3_transforms" },
+        guidedNextTurn: sampleNextTurn,
+        compositionState: sampleCompositionState,
+      });
+
+      await useSessionStore.getState().chatGuided("Which columns exist?");
+
+      expect(respondGuided).not.toHaveBeenCalled();
+      expect(chatGuided).toHaveBeenCalledTimes(1);
+    });
+
     it("applies all authoritative fields from a pure chat transition", async () => {
       const { chatGuided } = await import("@/api/client");
       (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(

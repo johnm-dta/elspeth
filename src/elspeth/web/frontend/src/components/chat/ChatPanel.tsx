@@ -1484,11 +1484,15 @@ export function ChatPanel({
     );
   }
 
-  // STEP_3 begins with NO proposal: the per-stage transforms prompt drives the
-  // build via /guided/start (intent=the first ordinary message), so there is no
-  // server turn yet. Render the guided surface — crucially the chat box — even
-  // without a next turn so the operator can describe the transforms; otherwise
-  // the panel falls through to the "Preparing…" flash and the build never starts.
+  // STEP_3 renders the guided surface — crucially the docked composer — so the
+  // operator can describe the transforms. The 7.1 planner auto-stages a pipeline
+  // proposal at Output→Transforms, so step_3 now begins WITH a propose_pipeline
+  // turn: a Send here goes through chatGuided, which forwards it to /guided/respond
+  // as a prose proposal revision (regenerate the pipeline following the
+  // instruction) instead of /guided/chat — /guided/chat rejects a step_3 send with
+  // no deferred intents to manage. Render even without a next turn (e.g. a
+  // transient proposal-generation failure returned next_turn=null) so the box
+  // survives for retry; otherwise the panel falls through to the "Preparing…" flash.
   //
   // The predicate is shared with App (isGuidedBuildActive), which suppresses
   // the freeform SideRail while this branch renders — the workspace rail
@@ -1532,10 +1536,12 @@ export function ChatPanel({
     // "press Send → confirm what it built" reading order is preserved by the
     // step-advance/type focus effect, which scrolls the just-built decision
     // (above) into view after a Send.
-    // It routes plain English through the store's `chatGuided` action. The
-    // first ordinary message uses /guided/start to establish the durable root;
-    // later messages use /guided/chat against an existing checkpoint. The
-    // caption is keyed on the live step via GUIDED_CHAT_PLACEHOLDERS.
+    // It routes plain English through the store's `chatGuided` action, which
+    // picks the endpoint by state: the first ordinary message uses /guided/start
+    // to establish the durable root; a step-3 proposal-review turn revises the
+    // staged proposal via /guided/respond; other later messages use /guided/chat
+    // against the existing checkpoint. The caption is keyed on the live step via
+    // GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
         // The composer docks as a plain input strip under the conversation

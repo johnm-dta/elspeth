@@ -2354,10 +2354,30 @@ async def post_guided_respond(
                 and body.custom_inputs is None
                 and body.control_signal is None
             )
-            if sum((is_review_wiring, is_reject, is_revise)) != 1:
+            # Prose revision: the docked composer sends a free-text instruction to
+            # regenerate the whole pipeline. Its only response field is a closed
+            # ``{"revision_instruction": <str>}`` bag (no edit_target — this is a
+            # full re-plan, not a component-scoped rewind).
+            is_prose_revise = (
+                body.edited_values is not None
+                and set(body.edited_values) == {"revision_instruction"}
+                and body.chosen is None
+                and body.custom_inputs is None
+                and body.control_signal is None
+                and body.edit_target is None
+            )
+            if sum((is_review_wiring, is_reject, is_revise, is_prose_revise)) != 1:
                 raise HTTPException(status_code=400, detail="Guided proposal action has an invalid closed shape.")
             if is_revise:
                 _require_bound_revision_target(current_turn, public_error=True)
+            if is_prose_revise:
+                instruction = (body.edited_values or {}).get("revision_instruction")
+                # Bound is the 8192-char contract mirrored in the settlement branch.
+                if type(instruction) is not str or not instruction.strip() or len(instruction) > 8192:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Guided proposal revision instruction must be a non-empty string of at most 8192 characters.",
+                    )
             return None
         if not is_active_exit and observed_guided.step is GuidedStep.STEP_4_WIRE:
             if observed_guided.correction_messages:
@@ -2648,18 +2668,47 @@ async def post_guided_respond(
                             )
                             return _response_from_record(rejected.result_state)
 
-                        if body.edit_target is not None:
-                            _require_bound_revision_target(current_turn, public_error=False)
-                            target = {
-                                "kind": body.edit_target.kind,
-                                "stable_id": body.edit_target.stable_id,
-                            }
-                            response_payload = {
-                                "action": "revise",
-                                "proposal_id": str(authority.row.id),
-                                "draft_hash": authority.proposal.draft_hash,
-                                "edit_target": target,
-                            }
+                        # A prose revision (a docked-composer instruction) carries a
+                        # closed ``{"revision_instruction": <str>}`` bag and no
+                        # edit_target. It drives the SAME full re-plan as a node/edge
+                        # component revision below, differing only in the planner
+                        # intent and originating content. The shape/bound is already
+                        # gated in the preflight; re-derive it defensively before any
+                        # durable write, mirroring the module's post-reservation
+                        # custody re-checks.
+                        revision_instruction: str | None = None
+                        if body.edited_values is not None:
+                            instruction_value = body.edited_values.get("revision_instruction")
+                            if (
+                                set(body.edited_values) != {"revision_instruction"}
+                                or type(instruction_value) is not str
+                                or not instruction_value.strip()
+                                or len(instruction_value) > 8192
+                            ):
+                                raise AuditIntegrityError("guided proposal prose revision instruction changed after reservation")
+                            revision_instruction = instruction_value
+
+                        if body.edit_target is not None or revision_instruction is not None:
+                            if body.edit_target is not None:
+                                _require_bound_revision_target(current_turn, public_error=False)
+                                response_payload = {
+                                    "action": "revise",
+                                    "proposal_id": str(authority.row.id),
+                                    "draft_hash": authority.proposal.draft_hash,
+                                    "edit_target": {
+                                        "kind": body.edit_target.kind,
+                                        "stable_id": body.edit_target.stable_id,
+                                    },
+                                }
+                            else:
+                                if revision_instruction is None:  # pragma: no cover - the branch condition guarantees this
+                                    raise AuditIntegrityError("guided proposal revision lost its instruction after reservation")
+                                response_payload = {
+                                    "action": "revise",
+                                    "proposal_id": str(authority.row.id),
+                                    "draft_hash": authority.proposal.draft_hash,
+                                    "revision_instruction": revision_instruction,
+                                }
                             prepared_response = prepare_guided_json_payload(
                                 payload_store,
                                 purpose="turn_response",
@@ -2670,7 +2719,7 @@ async def post_guided_respond(
                                 response_hash=prepared_response.payload_id,
                                 summary="Guided pipeline proposal revision requested.",
                             )
-                            if body.edit_target.kind in {"source", "output"}:
+                            if body.edit_target is not None and body.edit_target.kind in {"source", "output"}:
                                 component_target = ComponentTarget(
                                     kind=body.edit_target.kind,
                                     stable_id=body.edit_target.stable_id,
@@ -2796,17 +2845,34 @@ async def post_guided_respond(
                                 if planning_guided.root_intent_message_id is not None
                                 else None
                             )
-                            revision_intents = {
-                                "source": "Regenerate the complete pipeline while revising the selected source component.",
-                                "node": "Regenerate the complete pipeline while revising the selected node component.",
-                                "edge": "Regenerate the complete pipeline while revising the selected edge component.",
-                                "output": "Regenerate the complete pipeline while revising the selected output component.",
-                            }
-                            planner_intent = revision_intents[body.edit_target.kind]
+                            if body.edit_target is not None:
+                                revision_intents = {
+                                    "source": "Regenerate the complete pipeline while revising the selected source component.",
+                                    "node": "Regenerate the complete pipeline while revising the selected node component.",
+                                    "edge": "Regenerate the complete pipeline while revising the selected edge component.",
+                                    "output": "Regenerate the complete pipeline while revising the selected output component.",
+                                }
+                                planner_intent = revision_intents[body.edit_target.kind]
+                                originating_content = root_message.content if root_message is not None else planner_intent
+                            else:
+                                # Prose revision (``revision_instruction`` is non-None
+                                # here by the enclosing branch condition): the
+                                # instruction is the planner intent verbatim. With a
+                                # root intent, the planner sees the root content first,
+                                # then the instruction on a new paragraph; with no root
+                                # (e.g. the tutorial) the instruction stands alone.
+                                if revision_instruction is None:  # pragma: no cover - the branch condition guarantees this
+                                    raise AuditIntegrityError("guided proposal revision lost its instruction after reservation")
+                                planner_intent = revision_instruction
+                                originating_content = (
+                                    f"{root_message.content}\n\n{revision_instruction}"
+                                    if root_message is not None
+                                    else revision_instruction
+                                )
                             originating_message = PlannerOriginatingMessage(
                                 session_id=str(session_id),
                                 message_id=str(root_message.id) if root_message is not None else None,
-                                content=root_message.content if root_message is not None else planner_intent,
+                                content=originating_content,
                                 user_id=user.user_id,
                             )
                             checkpoint_id = uuid4()

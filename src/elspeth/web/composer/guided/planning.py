@@ -600,11 +600,33 @@ def bind_guided_reviewed_components(
     return cast(GuidedBoundPipeline, bound)
 
 
-def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
-    raw = cast(dict[str, Any], deep_thaw(proposal.pipeline))
+def _canonical_state_from_private_pipeline(raw: dict[str, Any]) -> CompositionState:
+    """Canonicalise a planner-authored private pipeline dict into a state.
+
+    The set_pipeline tool schema leaves per-node ``plugin``/``on_success``/
+    ``on_error``/``options`` and per-source ``options``/``on_validation_failure``
+    optional (a coalesce is TOLD to omit ``on_success``); the canonical Spec
+    ``from_dict`` constructors are strict. Apply the same defaults the
+    freeform candidate builder applies so a schema-legal plan cannot die at
+    this adapter.
+    """
     if "source" in raw and "sources" not in raw:
         source = raw.pop("source")
         raw["sources"] = {"source": source} if source is not None else {}
+    sources = raw.get("sources")
+    if type(sources) is dict:
+        for source_spec in sources.values():
+            if type(source_spec) is dict:
+                source_spec.setdefault("options", {})
+                source_spec.setdefault("on_validation_failure", "discard")
+    nodes = raw.get("nodes")
+    if type(nodes) is list:
+        for node in nodes:
+            if type(node) is dict:
+                node.setdefault("plugin", None)
+                node.setdefault("on_success", None)
+                node.setdefault("on_error", None)
+                node.setdefault("options", {})
     outputs = raw.get("outputs")
     if type(outputs) is list:
         for output in outputs:
@@ -624,6 +646,10 @@ def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
         return CompositionState.from_dict(raw)
     except (KeyError, TypeError, ValueError) as exc:
         raise AuditIntegrityError("guided proposal private pipeline is not canonical") from exc
+
+
+def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
+    return _canonical_state_from_private_pipeline(cast(dict[str, Any], deep_thaw(proposal.pipeline)))
 
 
 def guided_candidate_state(proposal: PipelineProposal) -> CompositionState:

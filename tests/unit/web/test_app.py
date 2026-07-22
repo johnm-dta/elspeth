@@ -509,6 +509,44 @@ class TestSystemStatusEndpoint:
         assert response.status_code == 200
         assert response.json()["composer_timeout_seconds"] == 300.0
 
+    def test_reports_the_deployed_frontend_build_identity(self, tmp_path) -> None:
+        """Deploy-cache coherence beacon: stale tabs must self-announce.
+
+        After a rebuild, an open tab kept running the previous bundle against
+        the new dist — lazy chunks 404'd (vite emptyOutDir wipes old hashed
+        assets) and newly-shipped features were silently absent. The status
+        payload the SPA already polls carries the served bundle's identity so
+        the client can compare it with its own and offer a refresh.
+        """
+        from elspeth.web.app import _frontend_build_identity
+
+        app = create_app(_settings(tmp_path))
+        response = TestClient(app).get("/api/system/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "frontend_build" in body
+        # The unit app serves the repo's real dist when present; the value is
+        # either the parsed entry asset name or null (dist absent in CI).
+        expected = _frontend_build_identity(Path(app_module.__file__).parent / "frontend" / "dist")
+        assert body["frontend_build"] == expected
+
+    def test_frontend_build_identity_parses_the_entry_asset(self, tmp_path) -> None:
+        from elspeth.web.app import _frontend_build_identity
+
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text(
+            '<html><head><script type="module" crossorigin src="/assets/index-Bk0OsIay.js"></script>'
+            '<link rel="stylesheet" href="/assets/index-abc123.css"></head><body></body></html>'
+        )
+        assert _frontend_build_identity(dist) == "index-Bk0OsIay.js"
+        # Absent dist (dev/test deployments): the beacon disarms with null.
+        assert _frontend_build_identity(tmp_path / "missing") is None
+        # An index.html without a hashed entry asset also disarms.
+        (dist / "index.html").write_text("<html><body>plain</body></html>")
+        assert _frontend_build_identity(dist) is None
+
     def test_reports_separate_plugin_policy_rows_and_missing_tutorial_profile(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         response = TestClient(app).get("/api/system/status")

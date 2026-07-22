@@ -736,6 +736,28 @@ class _BrowserDocumentHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+def _frontend_build_identity(dist_dir: Path) -> str | None:
+    """Parse the served SPA bundle's identity from the built index.html.
+
+    Deploy-cache coherence beacon: the hashed entry asset name (e.g.
+    ``index-Bk0OsIay.js``) identifies the deployed frontend generation. The
+    SPA compares this against its own entry script at runtime and offers a
+    refresh when they diverge (a stale tab otherwise 404s lazy chunks and
+    silently lacks newly shipped features). Read once at startup — never per
+    request. Returns ``None`` when the dist or a hashed entry is absent
+    (dev/test deployments), which disarms the client feature.
+    """
+    import re
+
+    index_html = dist_dir / "index.html"
+    try:
+        content = index_html.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"/assets/(index-[A-Za-z0-9_-]+\.js)", content)
+    return match.group(1) if match else None
+
+
 def create_app(settings: WebSettings | None = None) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -1350,6 +1372,10 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             content={"ready": report.ready, "checks": [asdict(check) for check in report.checks]},
         )
 
+    # Deploy-cache coherence beacon: resolved once at startup from the same
+    # dist the SPA mount below serves; None disarms the client feature.
+    app.state.frontend_build = _frontend_build_identity(Path(__file__).parent / "frontend" / "dist")
+
     @app.get("/api/system/status")
     async def system_status() -> dict[str, object]:
         composer = app.state.composer_availability
@@ -1374,6 +1400,9 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             # wall clock (there is no fixed maximum — only transport-ceiling
             # headroom), not just the checked-in deployment default.
             "composer_timeout_seconds": settings.composer_timeout_seconds,
+            # The served SPA bundle's identity (deploy-cache coherence
+            # beacon); null when no built dist is present.
+            "frontend_build": app.state.frontend_build,
         }
 
     # --- Prometheus metrics scrape endpoint ---

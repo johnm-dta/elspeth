@@ -1,6 +1,11 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import "./styles/index.css";
 import * as api from "./api/client";
+import {
+  STALE_BUILD_POLLS_REQUIRED,
+  nextStaleBuildStreak,
+  ownFrontendBuild,
+} from "./utils/deployBeacon";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";
 import { Layout } from "./components/common/Layout";
@@ -67,6 +72,14 @@ initStoreSubscriptions();
  */
 function App() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  // Deploy-cache coherence beacon: this tab's own bundle identity (null in
+  // dev disarms the feature) plus the stable-mismatch latch. Latched once
+  // the polled frontend_build differs across STALE_BUILD_POLLS_REQUIRED
+  // consecutive health checks; only a refresh clears it — never auto-reload
+  // (an in-flight guided operation must not be yanked).
+  const ownBuild = useMemo(() => ownFrontendBuild(), []);
+  const staleBuildStreakRef = useRef(0);
+  const [staleBuildDetected, setStaleBuildDetected] = useState(false);
   const [backendAvailable, setBackendAvailable] = useState<boolean | null>(null);
   const [showSecrets, setShowSecrets] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
@@ -255,6 +268,16 @@ function App() {
         }
         sessionState.setComposerTimeoutUnavailable(true);
       }
+      // Deploy beacon: debounce across consecutive polls so a mid-deploy
+      // status flap never flashes the banner; latch once stable.
+      staleBuildStreakRef.current = nextStaleBuildStreak(
+        staleBuildStreakRef.current,
+        ownBuild,
+        status.frontend_build,
+      );
+      if (staleBuildStreakRef.current >= STALE_BUILD_POLLS_REQUIRED) {
+        setStaleBuildDetected(true);
+      }
       setBackendAvailable(true);
       setLastHealthCheckAt(null);
     } catch (err) {
@@ -273,7 +296,7 @@ function App() {
     } finally {
       setHealthChecking(false);
     }
-  }, []);
+  }, [ownBuild]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -494,6 +517,23 @@ function App() {
             <span>
               <strong>Preferences:</strong> {preferencesWriteError}
             </span>
+          </div>
+        )}
+
+        {/* Deploy beacon: this tab is running a previous bundle (stale
+            hashed assets may 404 and new features are absent). Non-blocking,
+            persistent once latched; refresh is the only clear. */}
+        {staleBuildDetected && (
+          <div role="status" className="alert-banner">
+            <span>
+              A new version of ELSPETH is available — refresh to load it.
+            </span>
+            <button
+              onClick={() => window.location.reload()}
+              className="alert-banner-action"
+            >
+              Refresh
+            </button>
           </div>
         )}
 

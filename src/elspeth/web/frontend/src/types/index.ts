@@ -984,6 +984,13 @@ export interface ApiStructuredError {
 }
 
 export interface SystemStatus {
+  /**
+   * The served SPA bundle's identity (hashed entry asset name, e.g.
+   * "index-Bk0OsIay.js") parsed server-side from the built index.html at
+   * startup — the deploy-cache coherence beacon. Null when the backend
+   * serves no built dist; optional for fixture tolerance.
+   */
+  frontend_build?: string | null;
   composer_available: boolean;
   composer_model: string;
   composer_provider: string | null;

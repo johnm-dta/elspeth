@@ -680,7 +680,11 @@ def build_set_pipeline_candidate(
 
         src_prevalidation = _prevalidate_source(src_plugin, legacy_src_options, src_on_vf)
         if src_prevalidation is not None:
-            return _failure_result(state, src_prevalidation)
+            # Parity with the sources-map branch above: the identical
+            # option-shape message was coded there and codeless here (pack
+            # pressure-suite run 1 surfaced the asymmetry as a bare
+            # 'validation_error' in the planner view).
+            return _failure_result(state, src_prevalidation, error_code="plugin_options_invalid")
         source_specs["source"] = SourceSpec(
             plugin=src_plugin,
             on_success=legacy_source_model.on_success,

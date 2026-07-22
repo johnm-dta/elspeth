@@ -2290,3 +2290,20 @@ def test_guidance_exact_row_flips_review_contract_rejection_to_accept(tmp_path: 
     candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
 
     assert candidate.acceptable is True
+
+
+def test_singular_source_prevalidation_carries_plugin_options_invalid(tmp_path: Path) -> None:
+    # Parity: the sources-map branch codes option-shape prevalidation as
+    # plugin_options_invalid; the singular-source branch emitted the SAME
+    # message codeless (pack-suite run 1, t1-linear n2: bare 'validation_error'
+    # in the planner view for "Invalid options for source 'csv': path: Field
+    # required"). Same check, same code, both branches.
+    args = _linear_args(tmp_path)
+    del args["source"]["options"]["path"]
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "plugin_options_invalid"

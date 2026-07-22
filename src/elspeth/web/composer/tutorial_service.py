@@ -39,6 +39,7 @@ from elspeth.web.composer.tutorial_models import (
     TutorialRunResponse,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
 from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
 from elspeth.web.landscape_access import open_landscape_db
@@ -265,11 +266,34 @@ async def _run_live_tutorial(
     session_service: SessionServiceProtocol,
 ) -> _LiveTutorialRun:
     execution_service: ExecutionService = request.app.state.execution_service
-    run_id = await execution_service.execute(
-        session_id,
-        user_id=user.user_id,
-        auth_provider_type=settings.auth_provider,
-    )
+    try:
+        run_id = await execution_service.execute(
+            session_id,
+            user_id=user.user_id,
+            auth_provider_type=settings.auth_provider,
+        )
+    except UnresolvedInterpretationPlaceholderError as exc:
+        # A pending interpretation review (e.g. the planner-authored LLM
+        # prompt awaiting its Accept card) is a launch blocker in the
+        # ``tutorial_not_ready`` family, not a server fault: answer the same
+        # coded 409 shape as ``_require_tutorial_launch_readiness`` so the
+        # run-turn UI renders a named, actionable message instead of the
+        # empty alert an unmapped 500 produced (session e1332b5a). Sanitized:
+        # site component ids are planner-authored node ids — name the count
+        # and the action, never the raw identifiers.
+        pending_count = len(exc.sites)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "tutorial_not_ready",
+                "code": "tutorial_interpretations_pending",
+                "detail": (
+                    f"{pending_count} review card{'s' if pending_count != 1 else ''} "
+                    "from the pipeline build still need your approval. Resolve the "
+                    "review cards shown in the composer, then run the tutorial again."
+                ),
+            },
+        ) from exc
     run_timeout_seconds = settings.composer_transport_idle_ceiling_seconds - settings.composer_transport_headroom_seconds
     run_record = await _wait_for_terminal_run(
         session_service,

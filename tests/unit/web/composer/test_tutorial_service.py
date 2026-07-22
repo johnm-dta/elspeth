@@ -172,6 +172,60 @@ async def test_failed_live_tutorial_run_response_omits_raw_run_error(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_pending_interpretation_reviews_block_tutorial_run_as_coded_409(tmp_path: Path) -> None:
+    """An unresolved interpretation review is a coded launch blocker, not a 500.
+
+    Session e1332b5a: the guided walk completed but the committed llm node
+    still carried a pending ``llm_prompt_template`` review, so
+    ``execution_service.execute`` raised
+    ``UnresolvedInterpretationPlaceholderError`` — which the tutorial route
+    surfaced as a raw 500 (and the run-turn UI rendered an EMPTY alert for the
+    unmapped shape). The run must answer 409 in the ``tutorial_not_ready``
+    family with a stable machine code and a user-facing message naming what to
+    resolve — and never leak raw site identifiers (planner-authored node ids).
+    """
+    from elspeth.contracts.composer_interpretation import InterpretationKind
+    from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+    from elspeth.web.interpretation_state import InterpretationReviewSite
+
+    session_id = uuid4()
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            raise UnresolvedInterpretationPlaceholderError(
+                sites=(
+                    InterpretationReviewSite(
+                        component_id="summarize_page_SENTINEL_NODE_ID",
+                        component_type="transform",
+                        user_term="llm_prompt_template:summarize_page_SENTINEL_NODE_ID",
+                        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+                    ),
+                ),
+            )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(tmp_path)
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id=session_id,
+            settings=settings,
+            session_service=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 409
+    detail = exc_info.value.detail
+    assert detail["error_type"] == "tutorial_not_ready"
+    assert detail["code"] == "tutorial_interpretations_pending"
+    assert "review" in detail["detail"].lower()
+    assert "SENTINEL_NODE_ID" not in repr(detail)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_live_tutorial_run_returns_409_with_machine_code(tmp_path: Path) -> None:
     """A run that terminates ``cancelled`` is a deliberate user action, not a
     failure: the route must answer 409 with the stable machine code

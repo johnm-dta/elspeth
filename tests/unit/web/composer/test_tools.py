@@ -9699,6 +9699,22 @@ class TestExplainValidationCode:
         assert "web_scrape_http_identity" in fix
         assert "prompt_injection_shield_recommendation" in fix
 
+    def test_interpretation_requirements_invalid_teaches_full_row_shape(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        resolved = explain_validation_code("interpretation_requirements_invalid")
+        assert resolved is not None
+        explanation, fix = resolved
+        # The guided step skills carry no interpretation_requirements exemplar,
+        # so this guidance is the ONLY place the staged planner learns the
+        # authorable row shape after a rejection.
+        assert "user_term" in fix
+        assert "kind" in fix and "draft" in fix
+        # Escape valve is load-bearing: the shield review is advisory, so
+        # omitting the block entirely converges where a malformed row loops.
+        assert "omit" in fix.lower()
+        assert "user_term" in explanation or "malformed" in explanation.lower()
+
     def test_unmatched_code_returns_none(self) -> None:
         from elspeth.web.composer.tools.generation import explain_validation_code
 

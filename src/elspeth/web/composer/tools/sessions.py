@@ -114,6 +114,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_COMPONENT_ID,
     composition_review_contract_error,
     interpretation_sites,
+    parse_interpretation_requirements,
     reconcile_authoritative_reviews,
     transform_vague_term_site_tuples,
     vague_term_wiring_count,
@@ -283,6 +284,46 @@ def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) 
     if nodes_changed:
         normalized["nodes"] = new_nodes
     return normalized
+
+
+def authored_node_interpretation_requirement_parse_error(
+    node_id: str,
+    options: Mapping[str, Any],
+) -> str | None:
+    """Return a repairable rejection when a node's authored review rows cannot parse.
+
+    Completes the contract :func:`canonicalize_authored_node_review_requirements`
+    documents but could not enforce: a review row missing a usable ``user_term``
+    (absent, empty, non-string, or under a misnamed key) gets no synthesized
+    ``id``, and the always-on prompt-shield walk in ``CompositionState.validate``
+    then raised ``KeyError('id')`` out of the candidate builder — surfacing on
+    the guided planner surfaces as a terminal
+    ``planner_code=CANDIDATE_CONSTRUCTION_ERROR`` (sessions deebaaa6 / f7ba27ca
+    ``guided_staged``, 470631e8 ``tutorial_profile``, 2026-07-22). The guided
+    step skills carry no ``interpretation_requirements`` exemplar (unlike the
+    freeform ``pipeline_composer.md``), so the staged planner authors these rows
+    from repair-feedback fragments alone and cannot avoid the malformed shapes.
+
+    Parse the authored rows through the same validated accessor the review
+    walks use (:func:`parse_interpretation_requirements`) so ANY row those
+    walks would crash on is rejected here as a recoverable candidate failure
+    the planner repair loop can act on. The message keeps the literal phrase
+    ``interpretation_requirements must be a list`` for non-list values — the
+    established wording for that rejection.
+    """
+    if INTERPRETATION_REQUIREMENTS_KEY not in options:
+        return None
+    try:
+        parse_interpretation_requirements(options)
+    except (KeyError, TypeError, ValueError):
+        return (
+            f"Node '{node_id}': options.{INTERPRETATION_REQUIREMENTS_KEY} is malformed — "
+            f"{INTERPRETATION_REQUIREMENTS_KEY} must be a list of review entry objects, each carrying "
+            "string fields kind, user_term, and draft (server-owned id/status are filled automatically; "
+            "never author resolved review metadata). Re-emit each entry as {kind, user_term, draft}, or "
+            f"omit {INTERPRETATION_REQUIREMENTS_KEY} entirely — required LLM reviews are auto-staged."
+        )
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,6 +696,14 @@ def build_set_pipeline_candidate(
         )
         if runtime_owned_error is not None:
             return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
+        # A review row the canonicalizer could not complete (no usable
+        # user_term → no synthesizable id) would otherwise escape
+        # CompositionState.validate's unguarded prompt-shield walk as a raw
+        # KeyError('id') — reject it here as a planner-repairable failure
+        # with a closed, explainable error_code instead.
+        review_parse_error = authored_node_interpretation_requirement_parse_error(node_id, node_options)
+        if review_parse_error is not None:
+            return _failure_result(state, review_parse_error, error_code="interpretation_requirements_invalid")
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id=node_id,

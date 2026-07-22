@@ -458,6 +458,11 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "Remove the pipeline_decision entry from the node's interpretation_requirements (record the rationale in metadata.description instead), or use an llm_prompt_template review for prompt-shaped decisions. Registered kinds: drop_raw_html_fields, web_scrape_http_identity, prompt_injection_shield_recommendation.",
     ),
     (
+        r"interpretation_requirements_invalid",
+        "A node's interpretation_requirements entry is malformed. interpretation_requirements is a list of review entry objects, each carrying string fields kind, user_term, and draft; the server-owned id and status fields are filled automatically.",
+        'Simplest fix: omit interpretation_requirements entirely — the required LLM reviews (prompt template, model choice) are auto-staged by the server, and the prompt-injection-shield recommendation is advisory. If you must stage a review, re-emit each entry as an object {kind, user_term, draft} with non-empty string values — e.g. {"kind": "pipeline_decision", "user_term": "prompt_injection_shield_recommendation", "draft": "<recommendation text>"} — and never author id, status, or resolved review metadata.',
+    ),
+    (
         r"plugin_options_invalid",
         "One or more of the component's options failed its plugin schema (missing required option, wrong shape, flexible schema without fields, or — for llm — a missing/invalid operator profile alias).",
         "Call get_plugin_schema(<plugin_type>, <plugin_name>) for the exact option shapes and allowed values (the llm transform's 'profile' enum lists the operator-approved aliases), fix only the offending options, and re-emit. For schema options: use {mode: observed} to infer types, or provide explicit fields with mode fixed/flexible.",

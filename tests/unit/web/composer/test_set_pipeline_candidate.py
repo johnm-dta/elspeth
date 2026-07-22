@@ -860,6 +860,167 @@ def test_guided_tutorial_shape_short_form_review_builds_a_valid_candidate(tmp_pa
     assert shield["status"] == "pending"
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param({"kind": "pipeline_decision", "draft": "Add a shield."}, id="missing-user_term"),
+        pytest.param({"kind": "pipeline_decision", "user_term": "", "draft": "Add a shield."}, id="empty-user_term"),
+        pytest.param({"kind": "pipeline_decision", "user_term": 3, "draft": "Add a shield."}, id="non-string-user_term"),
+        pytest.param({"kind": "pipeline_decision", "term": "shield", "draft": "Add a shield."}, id="misnamed-user_term-key"),
+        pytest.param("not-a-mapping", id="non-mapping-row"),
+    ],
+)
+def test_uncanonicalizable_node_review_row_is_a_repairable_rejection(tmp_path: Path, row: Any) -> None:
+    """A review row the canonicalizer cannot complete must reject, not crash.
+
+    Regression for the guided A/B + tutorial planner failures (sessions
+    deebaaa6 / f7ba27ca / 470631e8, 2026-07-22): the guided step skills carry
+    no ``interpretation_requirements`` exemplar, so the staged planner authors
+    rows the ``canonicalize_authored_node_review_requirements`` boundary cannot
+    complete — a row without a usable ``user_term`` gets no synthesized ``id``,
+    and ``CompositionState.validate``'s always-on prompt-shield walk then
+    raised ``KeyError('id')`` out of ``build_set_pipeline_candidate``
+    (surfacing as planner_code=CANDIDATE_CONSTRUCTION_ERROR, a terminal
+    planner death). The 04f0696ab contract — "a row missing user_term/kind
+    surfaces as a recoverable validation failure, never a crash" — must
+    actually hold: the builder rejects with a closed, explainable error_code
+    the planner repair loop can act on.
+    """
+    args = _structured_llm_args(tmp_path)
+    args["nodes"][0]["options"]["interpretation_requirements"] = [row]
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.error_code == "interpretation_requirements_invalid"
+    # The rejection names the offending node so the planner edits the right row.
+    assert "classify" in lead.message
+
+
+def test_guided_shape_malformed_review_row_is_repairable_not_a_keyerror(tmp_path: Path) -> None:
+    """Guided-staged seam: bind + canonicalize + build must reject, not KeyError.
+
+    Mirrors ``test_guided_tutorial_shape_short_form_review_builds_a_valid_candidate``
+    but with the review row the live guided planners actually die on: a
+    ``pipeline_decision`` entry with no ``user_term``. The staged surface
+    (``bind_guided_reviewed_components`` finalizer) must surface the same
+    repairable rejection as the freeform surface, never an unguarded
+    ``KeyError('id')``.
+    """
+    from elspeth.web.composer.guided.planning import (
+        bind_guided_reviewed_components,
+        guided_private_reviewed_facts,
+    )
+    from elspeth.web.composer.guided.protocol import GuidedStep
+    from elspeth.web.composer.guided.resolved import SinkOutputResolved, SourceResolved
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+
+    engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
+    blob = blobs[0]
+    source_options = {
+        "schema": {"fields": ["url: str"], "mode": "flexible"},
+        "path": f"blob:{blob.id}",
+        "delimiter": ",",
+        "encoding": "utf-8",
+    }
+    output_options = {
+        "schema": {"mode": "observed"},
+        "path": "outputs/output.json",
+        "collision_policy": "auto_increment",
+        "mode": "write",
+    }
+    source_id = str(uuid4())
+    output_id = str(uuid4())
+    guided = GuidedSession(
+        step=GuidedStep.STEP_3_TRANSFORMS,
+        source_order=(source_id,),
+        reviewed_sources={
+            source_id: SourceResolved(
+                name="source",
+                plugin="csv",
+                options=source_options,
+                observed_columns=("url",),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        output_order=(output_id,),
+        reviewed_outputs={
+            output_id: SinkOutputResolved(
+                name="output",
+                plugin="json",
+                options=output_options,
+                required_fields=("url",),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+    )
+    planner_pipeline = {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "options": deepcopy(source_options),
+                "on_success": "raw_rows",
+                "on_validation_failure": "discard",
+            }
+        },
+        "nodes": [
+            {
+                "id": "summarise",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "raw_rows",
+                "on_success": "output",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ url }}",
+                    # The live crash shape: no user_term, nothing to synthesize
+                    # an id from.
+                    "interpretation_requirements": [{"kind": "pipeline_decision", "draft": "Recommend a prompt-injection shield."}],
+                },
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {"sink_name": "output", "plugin": "json", "options": deepcopy(output_options), "on_write_failure": "discard"},
+        ],
+        "metadata": {"name": "guided-malformed-review"},
+    }
+
+    finalized = bind_guided_reviewed_components(planner_pipeline, guided)
+    facts = guided_private_reviewed_facts(guided)
+    authority = resolve_reviewed_source_authority(
+        engine=engine,
+        session_id=session_id,
+        user_id="review-owner",
+        reviewed_facts=facts,
+        expected_reviewed_anchor_hash=reviewed_anchor_hash(facts),
+    )
+
+    candidate = build_set_pipeline_candidate(
+        dict(finalized),
+        _empty_state(),
+        _trained_context(
+            data_dir=tmp_path,
+            session_engine=engine,
+            session_id=session_id,
+            user_id="review-owner",
+            reviewed_source_authority=authority,
+        ),
+    )
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.error_code == "interpretation_requirements_invalid"
+    assert "summarise" in lead.message
+
+
 def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) -> None:
     args = _linear_args(tmp_path)
     args["source"]["on_success"] = "main"

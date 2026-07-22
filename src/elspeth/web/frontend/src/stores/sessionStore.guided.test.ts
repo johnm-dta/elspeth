@@ -808,6 +808,174 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(respondMock.mock.calls[1]?.[1]).toEqual(originalRequest);
   });
 
+  it("respondGuided: reconciles a reload-orphaned descriptor instead of blocking every different action", async () => {
+    // Session 09cde460: Send on the step-3 prompt (2-min respond in flight),
+    // reload mid-flight. The descriptor survives in sessionStorage by design,
+    // but the reload discarded the only copy of the request body — nothing in
+    // this page load can ever replay it, so it has NO custody value and every
+    // different (kind, fingerprint) action conflicted forever ("A previous
+    // operation is unsettled…"). An orphaned descriptor must reconcile:
+    // clear, refresh the authoritative guided state, and let the new action
+    // proceed — a still-running server op is arbitrated by the admission
+    // gate's coded 409, not by a client block the user cannot resolve.
+    const { getGuided, respondGuided: apiRespond } = await import("@/api/client");
+    const { GUIDED_RETRY_STORAGE_KEY } = await import("./guidedOperationRetry");
+    window.sessionStorage.setItem(
+      GUIDED_RETRY_STORAGE_KEY,
+      JSON.stringify({
+        schema: "guided-operation-retries.v2",
+        descriptors: [
+          {
+            kind: "guided_respond",
+            sessionId: RETRY_SESSION_ID,
+            requestFingerprint: "a".repeat(64),
+            operationId: "11111111-1111-4111-8111-111111111111",
+            createdAt: Date.now(),
+          },
+        ],
+      }),
+    );
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue(sampleGetGuidedResponse);
+    (apiRespond as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleRespondResponse);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
+
+    const outcome = await useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+    });
+
+    expect(outcome).toMatchObject({ status: "applied" });
+    expect(apiRespond).toHaveBeenCalledTimes(1);
+    // The reconcile refreshed the authoritative state before proceeding.
+    expect(getGuided).toHaveBeenCalled();
+    // No conflict copy shown for a block the user could never resolve.
+    expect(useSessionStore.getState().error).toBeNull();
+  });
+
+  it("chatGuided: reconciles a reload-orphaned chat descriptor the same way", async () => {
+    const { chatGuided: apiChat, getGuided } = await import("@/api/client");
+    const { GUIDED_RETRY_STORAGE_KEY } = await import("./guidedOperationRetry");
+    window.sessionStorage.setItem(
+      GUIDED_RETRY_STORAGE_KEY,
+      JSON.stringify({
+        schema: "guided-operation-retries.v2",
+        descriptors: [
+          {
+            kind: "guided_chat",
+            sessionId: RETRY_SESSION_ID,
+            requestFingerprint: "b".repeat(64),
+            operationId: "22222222-2222-4222-8222-222222222222",
+            createdAt: Date.now(),
+          },
+        ],
+      }),
+    );
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValue(sampleGetGuidedResponse);
+    (apiChat as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleChatResponse);
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      compositionState: sampleCompositionState as never,
+    });
+
+    await useSessionStore.getState().chatGuided("add one more column");
+
+    expect(apiChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("seedGuided: an orphaned descriptor of any kind never wedges the load path", async () => {
+    // Severity upgrade (session 09cde460): refresh did NOT recover — the
+    // load-time acquire conflicted with a surviving orphaned descriptor and
+    // seedGuided returned early, bricking the surface with the
+    // retry-same-action escape unreachable. Load paths sweep every
+    // descriptor this page load cannot replay BEFORE acquiring: the lead
+    // case (a guided_respond orphan) plus the true cross-fingerprint brick
+    // (a guided_start orphan from the chat-start path, whose ["live",
+    // message] identity never matches seedGuided's [profileKind]).
+    const { startGuidedSession } = await import("@/api/client");
+    const { GUIDED_RETRY_STORAGE_KEY, findGuidedRetry } = await import("./guidedOperationRetry");
+    window.sessionStorage.setItem(
+      GUIDED_RETRY_STORAGE_KEY,
+      JSON.stringify({
+        schema: "guided-operation-retries.v2",
+        descriptors: [
+          {
+            kind: "guided_respond",
+            sessionId: RETRY_SESSION_ID,
+            requestFingerprint: "c".repeat(64),
+            operationId: "33333333-3333-4333-8333-333333333333",
+            createdAt: Date.now(),
+          },
+          {
+            kind: "guided_start",
+            sessionId: RETRY_SESSION_ID,
+            requestFingerprint: "d".repeat(64),
+            operationId: "44444444-4444-4444-8444-444444444444",
+            createdAt: Date.now(),
+          },
+        ],
+      }),
+    );
+    (startGuidedSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
+    useSessionStore.setState({ activeSessionId: RETRY_SESSION_ID });
+
+    await useSessionStore.getState().seedGuided(RETRY_SESSION_ID, "tutorial");
+
+    // The surface loaded: start fired, no conflict copy, state applied.
+    expect(startGuidedSession).toHaveBeenCalledTimes(1);
+    expect(useSessionStore.getState().error).toBeNull();
+    expect(useSessionStore.getState().guidedSession).toEqual(
+      sampleGetGuidedResponse.guided_session,
+    );
+    // Both orphans are gone — a later respond cannot conflict on the stale
+    // respond descriptor either.
+    expect(findGuidedRetry("guided_respond", RETRY_SESSION_ID)).toBeNull();
+  });
+
+  it("respondGuided: a live same-page custody conflict names the pending action", async () => {
+    const { respondGuided: apiRespond } = await import("@/api/client");
+    (apiRespond as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new TypeError("network response lost"),
+    );
+    useSessionStore.setState({
+      activeSessionId: RETRY_SESSION_ID,
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+    });
+    const original: GuidedRespondAction = {
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      proposal_id: null,
+      draft_hash: null,
+      edit_target: null,
+      control_signal: null,
+      component_action: { action: "add", component_kind: "source" },
+    };
+    await useSessionStore.getState().respondGuided(original);
+
+    const conflict = await useSessionStore.getState().respondGuided({
+      ...original,
+      component_action: { action: "finish", component_kind: "source" },
+    });
+
+    expect(conflict).toMatchObject({ status: "not_applied", reason: "custody_conflict" });
+    // The copy names WHAT is pending (a wizard answer), not just "a previous
+    // operation", and still tells the user the designed recovery.
+    expect(useSessionStore.getState().error).toMatch(/answer/i);
+    expect(useSessionStore.getState().error).toMatch(/unsettled.*same action/i);
+  });
+
   it("respondGuided: resyncs decoded success before accepting an action for the authoritative turn", async () => {
     const { getGuided, respondGuided } = await import("@/api/client");
     const respondMock = respondGuided as ReturnType<typeof vi.fn>;

@@ -39,6 +39,17 @@ const MAX_STORAGE_BYTES = 8192;
 let fallbackDescriptors: GuidedRetryDescriptor[] = [];
 let fallbackAuthoritative = false;
 
+// Operation ids acquired by THIS page load. Replay custody is only real while
+// the page that acquired the descriptor is alive: the request body exists
+// nowhere but page memory (descriptors persist only a fingerprint), so a
+// descriptor that survives a reload can never be replayed by the new page —
+// except through the designed same-action recovery, where the user re-performs
+// the identical action and the same-fingerprint acquire below re-adopts the
+// stored operation id (and, with the body back in hand, re-arms liveness).
+// A conflicting descriptor that is NOT live is an orphan: it must reconcile
+// (clear + authoritative refresh), never block the user indefinitely.
+const liveOperationIds = new Set<string>();
+
 function sessionStorageOrNull(): Storage | null {
   try {
     return typeof window === "undefined" ? null : window.sessionStorage;
@@ -249,6 +260,9 @@ export function acquireGuidedRetry(
     (descriptor) => descriptor.requestFingerprint === fingerprint,
   );
   if (existing !== undefined) {
+    // Same-action recovery: the caller holds the body again, so replay
+    // custody is re-armed for this page load.
+    liveOperationIds.add(existing.operationId);
     return { status: "acquired", handle: { ...existing } };
   }
   if (scoped.length > 0) {
@@ -262,6 +276,7 @@ export function acquireGuidedRetry(
     operationId: crypto.randomUUID(),
     createdAt: Date.now(),
   };
+  liveOperationIds.add(descriptor.operationId);
   writeDescriptors([
     ...descriptors,
     descriptor,
@@ -269,7 +284,15 @@ export function acquireGuidedRetry(
   return { status: "acquired", handle: { ...descriptor } };
 }
 
+// True when THIS page load holds the request body for the descriptor's
+// operation (see liveOperationIds above) — the only state in which blocking
+// a different action on it has replay value.
+export function isGuidedRetryReplayable(handle: GuidedRetryHandle): boolean {
+  return liveOperationIds.has(handle.operationId);
+}
+
 export function clearGuidedRetry(handle: GuidedRetryHandle): void {
+  liveOperationIds.delete(handle.operationId);
   writeDescriptors(
     readDescriptors().filter(
       (descriptor) =>
@@ -297,8 +320,14 @@ export function clearGuidedRetriesForSession(
   kind: GuidedRetryKind,
   sessionId: string,
 ): void {
+  const descriptors = readDescriptors();
+  for (const descriptor of descriptors) {
+    if (descriptor.kind === kind && descriptor.sessionId === sessionId) {
+      liveOperationIds.delete(descriptor.operationId);
+    }
+  }
   writeDescriptors(
-    readDescriptors().filter(
+    descriptors.filter(
       (descriptor) =>
         descriptor.kind !== kind || descriptor.sessionId !== sessionId,
     ),
@@ -306,7 +335,34 @@ export function clearGuidedRetriesForSession(
 }
 
 export function clearAllGuidedRetries(): void {
+  liveOperationIds.clear();
   writeDescriptors([]);
+}
+
+// Load-time orphan sweep (session 09cde460 severity upgrade): a reload
+// orphans every in-flight descriptor — the request bodies existed only in
+// the previous page's memory — and a surviving cross-fingerprint descriptor
+// then conflicts the LOAD path itself (seedGuided / chat-start acquire),
+// wedging the surface with no reachable recovery. On session activation,
+// clear every descriptor for the session that THIS page load cannot replay.
+// The load's own authoritative GET/start is the state reconciliation; a
+// still-running server op is arbitrated by the admission gate's coded 409 on
+// the next action. Returns the cleared kinds so callers may surface a
+// notice.
+export function clearOrphanedGuidedRetriesForSession(sessionId: string): GuidedRetryKind[] {
+  const descriptors = readDescriptors();
+  const cleared: GuidedRetryKind[] = [];
+  const kept = descriptors.filter((descriptor) => {
+    if (descriptor.sessionId !== sessionId || liveOperationIds.has(descriptor.operationId)) {
+      return true;
+    }
+    cleared.push(descriptor.kind);
+    return false;
+  });
+  if (cleared.length > 0) {
+    writeDescriptors(kept);
+  }
+  return cleared;
 }
 
 export function isAmbiguousGuidedRetryFailure(error: unknown): boolean {

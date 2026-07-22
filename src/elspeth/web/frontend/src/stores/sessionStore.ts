@@ -25,7 +25,7 @@ import type {
   GuidedRespondResponse,
   GuidedStartOperationReconciliation,
 } from "@/types/guided";
-import type { GuidedRetryHandle } from "./guidedOperationRetry";
+import type { GuidedRetryAcquisition, GuidedRetryHandle, GuidedRetryKind } from "./guidedOperationRetry";
 import * as api from "@/api/client";
 import {
   COMPOSE_TIMEOUT_ABORT_REASON,
@@ -40,8 +40,10 @@ import {
   clearAllGuidedRetries,
   clearGuidedRetry,
   clearGuidedRetriesForSession,
+  clearOrphanedGuidedRetriesForSession,
   findGuidedRetry,
   isAmbiguousGuidedRetryFailure,
+  isGuidedRetryReplayable,
 } from "./guidedOperationRetry";
 
 export type GuidedRespondOutcome =
@@ -171,12 +173,93 @@ const GUIDED_START_IN_PROGRESS_MESSAGE =
   "Guided setup is still running. Wait for it to settle, then reload to recover the result.";
 const GUIDED_START_UNKNOWN_MESSAGE =
   "Could not confirm whether guided setup settled. Reload to retry recovery before sending another request.";
-const GUIDED_RETRY_CONFLICT_STATE = {
-  error:
-    "A previous operation is unsettled. Retry the same action before choosing another.",
-  errorDetails: null,
-  guidedSelfHealNotice: null,
-} as const;
+// Human names for the pending action in a live custody conflict — the copy
+// must tell the user WHAT is unsettled, because "retry the same action" is
+// only actionable when they know which action it means (session 09cde460:
+// the anonymous copy left the operator guessing).
+const GUIDED_RETRY_KIND_LABELS: Record<GuidedRetryKind, string> = {
+  guided_start: "guided setup request",
+  guided_respond: "wizard answer",
+  guided_chat: "chat message",
+  guided_convert: "conversion request",
+  guided_reenter: "guided re-entry",
+  guided_plan: "planning request",
+  state_revert: "version revert",
+  session_fork: "session fork",
+};
+
+function guidedRetryConflictState(kind: GuidedRetryKind): {
+  error: string;
+  errorDetails: null;
+  guidedSelfHealNotice: null;
+} {
+  return {
+    error:
+      `Your earlier ${GUIDED_RETRY_KIND_LABELS[kind]} is unsettled. ` +
+      "Retry that same action to let it finish before choosing another.",
+    errorDetails: null,
+    guidedSelfHealNotice: null,
+  };
+}
+
+// Reconcile a conflicting retry descriptor this page load cannot replay
+// (session 09cde460: a reload mid-flight orphans the descriptor — the body
+// existed only in the previous page's memory — and every DIFFERENT action
+// then conflicted forever). An orphan has no custody value: clear it,
+// best-effort refresh the authoritative guided state (the orphaned op may
+// have settled server-side and advanced the wizard), and let the caller's
+// action proceed. A still-running server op is arbitrated by the admission
+// gate's coded 409 (guided_operation_conflict -> the retryable "still
+// settling" copy), not by an unresolvable client block. Live custody
+// (acquired by THIS page load, ambiguous-failure window) keeps today's
+// blocking behavior — the exact replay it protects is really available.
+async function reconcileOrphanedGuidedRetry(
+  existing: GuidedRetryHandle,
+  requestedSessionId: string,
+): Promise<boolean> {
+  if (isGuidedRetryReplayable(existing)) {
+    return false;
+  }
+  clearGuidedRetry(existing);
+  try {
+    const resynced = await api.getGuided(requestedSessionId);
+    if (useSessionStore.getState().activeSessionId === requestedSessionId) {
+      useSessionStore.setState({
+        guidedSession: resynced.guided_session,
+        guidedNextTurn: resynced.next_turn,
+        guidedTerminal: resynced.terminal,
+        guidedProposalReview: proposalReviewForTurn(resynced.next_turn),
+        compositionState: resynced.composition_state,
+      });
+    }
+  } catch {
+    // Best-effort: the cleared descriptor already unblocks the user, and the
+    // next action re-validates against the server regardless (a stale turn
+    // token takes the turn_not_emitted self-heal; a still-running op answers
+    // the coded admission conflict).
+  }
+  return true;
+}
+
+// Conflict-path orphan reconciliation. Callers keep their SYNCHRONOUS
+// acquire (the gate-check -> acquire -> pending-set sequence is the
+// double-click mutual exclusion and must not gain an await on the fast
+// path); only an actual conflict may go async. On an orphaned descriptor:
+// reconcile, then re-acquire — the synchronous ledger is the tiebreaker if
+// another action slipped in during the await (exactly one proceeds; the
+// other gets a genuine live conflict). A surviving conflict is a real
+// live-custody block the caller surfaces with named copy.
+async function reconcileGuidedRetryConflict(
+  existing: GuidedRetryHandle,
+  kind: GuidedRetryKind,
+  sessionId: string,
+  requestIdentity: readonly unknown[],
+): Promise<GuidedRetryAcquisition> {
+  if (!(await reconcileOrphanedGuidedRetry(existing, sessionId))) {
+    return { status: "conflict", existing };
+  }
+  return acquireGuidedRetry(kind, sessionId, requestIdentity);
+}
 const GUIDED_NO_ACTIVE_SESSION_MESSAGE =
   "No active session is available for this guided response.";
 const GUIDED_NO_CURRENT_TURN_MESSAGE =
@@ -1201,6 +1284,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     getExecutionStore().clearValidation();
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
+    // Session activation is a load path: descriptors this page load cannot
+    // replay have no custody value here and must never block the surface
+    // (session 09cde460). The activation's own authoritative reads are the
+    // state reconciliation.
+    clearOrphanedGuidedRetriesForSession(id);
     const selectionGeneration = advanceGuidedPublicationGeneration();
 
     set({
@@ -2001,12 +2089,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     clearComposerProgressPollTimer();
     clearInflightMessagesPollTimer();
-    const acquisition = acquireGuidedRetry("session_fork", activeSessionId, [
+    let acquisition = acquireGuidedRetry("session_fork", activeSessionId, [
       messageId,
       newContent,
     ]);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "session_fork", activeSessionId, [
+      messageId,
+      newContent,
+    ]);
+    }
+    if (acquisition.status === "conflict") {
+      set(guidedRetryConflictState(acquisition.existing.kind));
       return;
     }
     const retry = acquisition.handle;
@@ -2221,9 +2315,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async seedGuided(sessionId: string, profileKind: "tutorial") {
     const requestedSessionId = sessionId;
     const publicationGeneration = advanceGuidedPublicationGeneration();
-    const acquisition = acquireGuidedRetry("guided_start", sessionId, [profileKind]);
+    // Load path MUST NOT wedge on orphaned descriptors (session 09cde460:
+    // a cross-fingerprint orphan conflicted this acquire and bricked the
+    // surface at load, with the retry-same-action escape unreachable).
+    // Sweep every descriptor this page load cannot replay before acquiring;
+    // the seed's own authoritative response IS the state reconciliation.
+    clearOrphanedGuidedRetriesForSession(sessionId);
+    let acquisition = acquireGuidedRetry("guided_start", sessionId, [profileKind]);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_start", sessionId, [profileKind]);
+    }
+    if (acquisition.status === "conflict") {
+      set(guidedRetryConflictState(acquisition.existing.kind));
       return;
     }
     const retry = acquisition.handle;
@@ -2273,9 +2376,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // flight, the response is dropped rather than overwriting the newly active
     // session's guided state.
     const requestedSessionId = sessionId;
-    const acquisition = acquireGuidedRetry("guided_convert", sessionId, []);
+    let acquisition = acquireGuidedRetry("guided_convert", sessionId, []);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_convert", sessionId, []);
+    }
+    if (acquisition.status === "conflict") {
+      set(guidedRetryConflictState(acquisition.existing.kind));
       return;
     }
     const retry = acquisition.handle;
@@ -2357,16 +2463,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         message: GUIDED_NO_CURRENT_TURN_MESSAGE,
       };
     }
-    const acquisition = acquireGuidedRetry("guided_respond", requestedSessionId, [
+    let acquisition = acquireGuidedRetry("guided_respond", requestedSessionId, [
       requestedTurnToken ?? "terminal",
       body,
     ]);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_respond", requestedSessionId, [
+      requestedTurnToken ?? "terminal",
+      body,
+    ]);
+    }
+    if (acquisition.status === "conflict") {
+      const conflictState = guidedRetryConflictState(acquisition.existing.kind);
+      set(conflictState);
       return {
         status: "not_applied",
         reason: "custody_conflict",
-        message: GUIDED_RETRY_CONFLICT_STATE.error,
+        message: conflictState.error,
       };
     }
     const retry = acquisition.handle;
@@ -2834,9 +2947,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       throw new Error("reenterGuided called without active session");
     }
     const requestedSessionId = activeSessionId;
-    const acquisition = acquireGuidedRetry("guided_reenter", activeSessionId, []);
+    let acquisition = acquireGuidedRetry("guided_reenter", activeSessionId, []);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_reenter", activeSessionId, []);
+    }
+    if (acquisition.status === "conflict") {
+      set(guidedRetryConflictState(acquisition.existing.kind));
       return;
     }
     const retry = acquisition.handle;
@@ -2946,12 +3062,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
         if (reconciliation === "stale") return;
       }
-      const acquisition = acquireGuidedRetry("guided_start", requestedSessionId, [
+      let acquisition = acquireGuidedRetry("guided_start", requestedSessionId, [
         "live",
         message,
       ]);
+    if (acquisition.status === "conflict") {
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_start", requestedSessionId, [
+        "live",
+        message,
+      ]);
+    }
       if (acquisition.status === "conflict") {
-        set({ ...GUIDED_RETRY_CONFLICT_STATE, guidedChatPending: false });
+        set({ ...guidedRetryConflictState(acquisition.existing.kind), guidedChatPending: false });
         return;
       }
       const retry = acquisition.handle;
@@ -3074,13 +3196,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // session or the wizard advances mid-flight, the response is dropped.
     const requestedSessionId = activeSessionId;
     const requestedTurnToken = guidedNextTurn.turn_token;
-    const acquisition = acquireGuidedRetry("guided_chat", requestedSessionId, [
+    let acquisition = acquireGuidedRetry("guided_chat", requestedSessionId, [
       requestedTurnToken,
       message,
     ]);
     if (acquisition.status === "conflict") {
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "guided_chat", requestedSessionId, [
+      requestedTurnToken,
+      message,
+    ]);
+    }
+    if (acquisition.status === "conflict") {
       set({
-        ...GUIDED_RETRY_CONFLICT_STATE,
+        ...guidedRetryConflictState(acquisition.existing.kind),
         guidedChatPending: false,
       });
       return;
@@ -3237,9 +3365,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async revertToVersion(stateId: string) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
-    const acquisition = acquireGuidedRetry("state_revert", activeSessionId, [stateId]);
+    let acquisition = acquireGuidedRetry("state_revert", activeSessionId, [stateId]);
     if (acquisition.status === "conflict") {
-      set(GUIDED_RETRY_CONFLICT_STATE);
+      acquisition = await reconcileGuidedRetryConflict(acquisition.existing, "state_revert", activeSessionId, [stateId]);
+    }
+    if (acquisition.status === "conflict") {
+      set(guidedRetryConflictState(acquisition.existing.kind));
       return;
     }
     const retry = acquisition.handle;

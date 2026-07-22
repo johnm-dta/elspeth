@@ -2347,3 +2347,48 @@ def test_unknown_llm_provider_is_a_coded_rejection_not_an_escape(tmp_path: Path)
     assert lead.component == "rejected_mutation"
     assert lead.error_code == "plugin_options_invalid"
     assert "Unknown LLM provider" in lead.message
+
+
+def test_private_profile_option_rejection_names_the_real_cause(tmp_path: Path) -> None:
+    # Pack pressure-suite run 3 (P2): a profile-bound llm node carrying an
+    # operator-private option (max_capacity_retry_seconds) was rejected as
+    # "operator profile is no longer available" — the generic ValueError
+    # collapse in plugin_policy/validation swallowed private_profile_option
+    # into the availability message. The profile IS available; the author
+    # included an option the operator layer owns. The finding must say so,
+    # or no planner can repair it.
+    context = _operator_profile_view(tmp_path)
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path.write_text("a\n1\n")
+    args = _linear_args(tmp_path)
+    args["source"]["options"]["path"] = str(csv_path)
+    args["nodes"] = [
+        {
+            "id": "summarise",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "profile": "sonnet",
+                "prompt_template": "hi {{ row.a }}",
+                "required_input_fields": ["a"],
+                "response_field": "r",
+                "schema": {"mode": "observed"},
+                "max_capacity_retry_seconds": 30,
+            },
+        }
+    ]
+    args["edges"] = []
+    args["source"]["options"]["schema"] = {"mode": "flexible", "fields": ["a: str"]}
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), context)
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.error_code == "plugin_options_invalid"
+    assert "max_capacity_retry_seconds" in lead.message  # the offending option, named
+    assert "operator profile supplies" in lead.message
+    assert "no longer available" not in lead.message

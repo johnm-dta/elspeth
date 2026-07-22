@@ -225,13 +225,29 @@ def _lower_profiled_components(
             key=lambda error: tuple(str(part) for part in error.absolute_path),
         )
         if schema_errors:
+            # Name the defect value-free (pack pressure-suite run 3, P2): the
+            # bare "do not match" message hid WHICH option broke profile
+            # authoring — a profile-bound node carrying an operator-private
+            # option (e.g. max_capacity_retry_seconds) read as "profile gone"
+            # and no planner could repair it. Unexpected option NAMES are
+            # author-authored keys; offending VALUES are never echoed.
+            allowed_properties = set(public_schema.get("properties") or ())
+            unexpected = sorted(set(public_options) - allowed_properties)
+            if unexpected:
+                detail = (
+                    f"option(s) not authorable on a profile-bound node: {unexpected}. "
+                    "The operator profile supplies provider/model/credential/pacing settings — remove them."
+                )
+            else:
+                failing = sorted({"/".join(str(part) for part in error.absolute_path) or "<options>" for error in schema_errors})
+                detail = f"option(s) failing the public profile schema: {failing}."
             findings.append(
                 PluginPolicyFinding(
                     stage="operator_profile_options",
                     component_id=component.component_id,
                     component_type=component.component_type,
                     error_code="profile_unavailable",
-                    message=f"Plugin '{plugin_id}' options do not match its public operator-profile schema.",
+                    message=f"Plugin '{plugin_id}' options do not match its public operator-profile schema; {detail}",
                 )
             )
             continue
@@ -243,14 +259,27 @@ def _lower_profiled_components(
                 alias=alias,
                 safe_options=authored_options,
             )
-        except ValueError:
+        except ValueError as exc:
+            # Discriminate the two lowering rejections (pack pressure-suite
+            # run 3, P2): collapsing private_profile_option into the
+            # availability message told authors the profile was gone when the
+            # real defect was an operator-private option in their node — a
+            # message no planner can repair from.
+            if str(exc) == "private_profile_option":
+                message = (
+                    f"Plugin '{plugin_id}' profile-bound options include operator-private option(s) "
+                    "(provider/model/credential/pacing settings such as pool_size or "
+                    "max_capacity_retry_seconds). Remove them — the operator profile supplies these."
+                )
+            else:
+                message = f"Plugin '{plugin_id}' operator profile is no longer available."
             findings.append(
                 PluginPolicyFinding(
                     stage="operator_profile_options",
                     component_id=component.component_id,
                     component_type=component.component_type,
                     error_code="plugin_unavailable",
-                    message=f"Plugin '{plugin_id}' operator profile is no longer available.",
+                    message=message,
                 )
             )
             continue

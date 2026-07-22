@@ -207,7 +207,11 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // summary (.guided-schema-summary), not an editable form. The first time a
   // summary is visible, assert no editable schema input is shown alongside it.
   let assertedSummary = false;
-  const deadline = Date.now() + 600_000;
+  // The walk crosses TWO inherent sequential planner runs (the step-2→3
+  // auto-proposal plus the frozen-prompt replan), measured at 222s + 233s on
+  // 2026-07-22 — a 600s ceiling was the binding constraint that failed an
+  // otherwise-converging walk. Budget both plus discovery-turn variance.
+  const deadline = Date.now() + 900_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
     if (await runHeading.isVisible().catch(() => false)) {
@@ -318,7 +322,7 @@ function substantiveRowCount(
 }
 
 async function runOnce(page: Page, runIndex: number): Promise<void> {
-  test.setTimeout(900_000); // real compose + tutorial run; headroom for the draft-wait (≤420s) + run-wait (≤360s) below
+  test.setTimeout(1_800_000); // walk (≤900s, two sequential planner runs) + draft-wait (≤420s) + run-wait (≤360s) + grading
 
   // --- per-run state (Task 5 capture targets; all consumed in the record) ---
   let sessionId: string | null = null;

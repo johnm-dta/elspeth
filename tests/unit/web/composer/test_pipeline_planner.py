@@ -187,6 +187,61 @@ def _invalid_pipeline(data_dir: Path) -> dict[str, Any]:
     return pipeline
 
 
+def _pipeline_with_short_form_llm_review(data_dir: Path) -> dict[str, Any]:
+    """A valid csv -> llm -> json plan whose LLM node carries the skill's short form.
+
+    The composer skill instructs the planner to stage a ``pipeline_decision``
+    review as ``{kind, user_term, draft}`` (no server-owned ``id`` / ``status``).
+    """
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"path": str(data_dir / "blobs" / "input.csv"), "schema": {"mode": "observed"}},
+            "on_validation_failure": "discard",
+        },
+        "nodes": [
+            {
+                "id": "summarise",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "summarised",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ text }}",
+                    "interpretation_requirements": [
+                        {
+                            "kind": "pipeline_decision",
+                            "user_term": "prompt_injection_shield_recommendation",
+                            "draft": "Recommend inserting a prompt-injection shield before this LLM.",
+                        }
+                    ],
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "summarised",
+                "plugin": "json",
+                "options": {
+                    "path": str(data_dir / "outputs" / "result.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+    }
+
+
 def _budget(**overrides: object) -> PlannerBudgetPolicy:
     values: dict[str, object] = {
         "max_total_provider_calls": 4,
@@ -483,6 +538,58 @@ async def test_happy_path_returns_proposal_and_audits_exact_marked_wire_payload(
     assert audit.max_completion_tokens_requested == policy.max_completion_tokens
     assert audit.planner_policy_hash == policy.audit_hash
     assert audit.planner_call_ordinal == 1
+
+
+@pytest.mark.asyncio
+async def test_authored_short_form_node_review_is_canonicalized_into_the_sealed_proposal(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """The durable proposal — not only the transient candidate — carries the full form.
+
+    Regression for the guided first-run tutorial 500: the planner authors the
+    skill's short-form ``{kind, user_term, draft}`` review; canonicalisation must
+    reach ``safe_pipeline`` so the sealed proposal a later accept/commit re-reads
+    is already valid, not a latent re-crash.
+    """
+    pipeline = _pipeline_with_short_form_llm_review(tmp_path)
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": pipeline})))
+
+    proposal = await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    sealed = deep_thaw(proposal.proposal.pipeline)
+    requirements = sealed["nodes"][0]["options"]["interpretation_requirements"]
+    shield = next(item for item in requirements if item["user_term"] == "prompt_injection_shield_recommendation")
+    assert shield["id"] == "prompt_injection_shield_recommendation:summarise"
+    assert shield["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_unguarded_candidate_error_becomes_typed_planner_failure(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KeyError/TypeError/ValueError escaping the candidate builder is not a raw 500.
+
+    Backstop for any residual unguarded lookup: it must surface as the planner's
+    typed failure idiom naming the offending key, not propagate as a bare
+    exception the route reports as "The operation failed."
+    """
+    import elspeth.web.composer.pipeline_planner as planner_module
+
+    def _raise_unguarded(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyError("status")
+
+    monkeypatch.setattr(planner_module, "build_set_pipeline_candidate", _raise_unguarded)
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    with pytest.raises(PipelinePlannerError) as caught:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    assert caught.value.code == "CANDIDATE_CONSTRUCTION_ERROR"
+    assert "KeyError" in str(caught.value)
+    assert "status" in str(caught.value)
 
 
 @pytest.mark.asyncio

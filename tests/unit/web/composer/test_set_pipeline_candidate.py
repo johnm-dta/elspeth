@@ -659,6 +659,52 @@ def test_reviewed_source_facts_for_another_source_cannot_authorize_candidate(tmp
     assert candidate.acceptable is False
 
 
+def _short_form_shield_review() -> dict[str, Any]:
+    """The exact short form the composer skill instructs the planner to author.
+
+    ``interpretation_state.raw_html_cleanup_review_contract_error`` and the
+    ``generation.py`` repair hints both tell the model to stage a
+    ``pipeline_decision`` entry naming only ``user_term`` and ``draft`` — no
+    server-owned ``id`` / ``status``. ``_coerce_requirement`` nonetheless
+    mandates ``id`` and ``status`` and the always-on prompt-shield walk in
+    ``CompositionState.validate`` reaches it through an unguarded path, so this
+    shape used to raise ``KeyError('id')`` out of the candidate builder.
+    """
+    return {
+        "kind": "pipeline_decision",
+        "user_term": "prompt_injection_shield_recommendation",
+        "draft": "Recommend inserting a prompt-injection shield before this LLM.",
+    }
+
+
+def test_authored_short_form_llm_review_is_canonicalized_not_a_keyerror(tmp_path: Path) -> None:
+    """A skill-shaped short-form node review must not crash candidate construction.
+
+    Regression for the guided first-run tutorial: the step-3 planner authors a
+    web_scrape -> llm -> field_mapper pipeline and, following the composer skill,
+    stages a ``prompt_injection_shield_recommendation`` review on the LLM node as
+    ``{kind, user_term, draft}``. The candidate builder validated that node
+    through ``CompositionState.validate`` -> ``prompt_shield_recommendation_warning_pairs``
+    -> ``_coerce_requirement``, which raised ``KeyError('id')`` and escaped as a
+    raw 500 ("The operation failed.").
+    """
+    args = _structured_llm_args(tmp_path)
+    args["nodes"][0]["options"]["interpretation_requirements"] = [_short_form_shield_review()]
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is True, candidate.result.to_dict()
+    node_requirements = deep_thaw(candidate.result.updated_state.nodes[0].options["interpretation_requirements"])
+    shield = next(item for item in node_requirements if item["user_term"] == "prompt_injection_shield_recommendation")
+    # Server-owned identity/status are synthesised, canonicalising the short form.
+    assert shield["id"] == "prompt_injection_shield_recommendation:classify"
+    assert shield["status"] == "pending"
+    assert shield["draft"] == "Recommend inserting a prompt-injection shield before this LLM."
+    # The canonicalised state must itself re-validate without raising (the
+    # success path re-runs CompositionState.validate on the stored NodeSpec).
+    assert candidate.result.updated_state.validate() is not None
+
+
 def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) -> None:
     args = _linear_args(tmp_path)
     args["source"]["on_success"] = "main"

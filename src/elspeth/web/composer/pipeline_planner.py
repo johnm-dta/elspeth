@@ -71,7 +71,7 @@ from elspeth.web.composer.tools._dispatch import (
 )
 from elspeth.web.composer.tools.generation import explain_validation_code
 from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_schema
-from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate
+from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate, canonicalize_authored_node_review_requirements
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 _PLANNER_DISCOVERY_TOOL_NAME_SET: Final[frozenset[str]] = frozenset(PLANNER_DISCOVERY_TOOL_NAMES)
@@ -702,13 +702,32 @@ async def _build_valid_pipeline_plan(
 ) -> PipelinePlanResult:
     """Validate, settle custody, revalidate, and seal one exact pipeline."""
 
+    # Canonicalise skill-authored short-form node reviews (``{kind, user_term,
+    # draft}``) into the full ``_coerce_requirement`` shape BEFORE the pipeline
+    # is hashed, validated, or sealed into the proposal — the same normalisation
+    # ``build_set_pipeline_candidate`` applies, hoisted here so the value that
+    # becomes ``safe_pipeline`` (and the durable proposal) is canonical too, not
+    # only the transient candidate ``updated_state``.
+    pipeline = canonicalize_authored_node_review_requirements(pipeline)
+
     candidate_context = replace(terminal_context, tool_arguments_hash=stable_hash({"pipeline": pipeline}))
-    candidate = await run_sync(
-        build_set_pipeline_candidate,
-        pipeline,
-        current_state,
-        candidate_context,
-    )
+    try:
+        candidate = await run_sync(
+            build_set_pipeline_candidate,
+            pipeline,
+            current_state,
+            candidate_context,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        # An unguarded lookup escaping the candidate builder (e.g. a review-row
+        # field an interpretation-state walk subscripts without a guard) is a
+        # server defect, not a recoverable candidate rejection. Convert it to
+        # the planner's typed failure idiom naming the offending key so the
+        # route records a leak-safe disposition instead of a raw 500.
+        raise PipelinePlannerError(
+            f"pipeline candidate construction raised an unguarded {type(exc).__name__} ({exc})",
+            code="CANDIDATE_CONSTRUCTION_ERROR",
+        ) from exc
     if not candidate.acceptable:
         raise _PipelineCandidateRejected(candidate.result)
     covered_deferred_intent_ids = (

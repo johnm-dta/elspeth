@@ -208,6 +208,83 @@ def _options_with_inline_blob_source_review(
     )
 
 
+def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill the two server-owned interpretation-review fields the skill omits.
+
+    The composer skill instructs the planner to stage a ``pipeline_decision``
+    review as ``{kind, user_term, draft}`` — the raw-HTML-cleanup guidance in
+    ``interpretation_state.raw_html_cleanup_review_contract_error`` and the
+    ``explain_validation_code`` repair hints in ``tools.generation`` both name
+    only ``user_term`` and ``draft``. The canonical parser
+    ``interpretation_state._coerce_requirement`` however MANDATES ``id`` and
+    ``status`` (only ``draft`` / ``event_id`` / ``accepted_*`` default), and the
+    always-on prompt-injection-shield advisory walk in
+    ``CompositionState.validate`` (``prompt_shield_recommendation_warning_pairs``
+    -> ``_llm_has_shield_recommendation`` -> ``_requirements``) reaches that
+    parser through a path with no ``try``/``except``. So the exact short form the
+    skill asks the planner to author raised ``KeyError('id')`` and escaped the
+    candidate builder as a raw 500 ("The operation failed.") — the guided
+    first-run tutorial's step-3 web_scrape -> llm -> field_mapper crash.
+
+    Canonicalise that short form into the full form BEFORE any consumer parses
+    it: synthesise a stable ``id`` from ``user_term`` + node id and default the
+    absent ``status`` to ``"pending"`` — the only status composer tool input may
+    stage (``_resolver_owned_interpretation_requirement_error`` rejects every
+    other). Both defaults are lossless recoveries of a mandated-but-omitted
+    field, not a guess about intent. ``user_term`` / ``kind`` stay required and
+    non-defaultable: a row missing them still surfaces downstream as a
+    recoverable validation failure, never a crash. Copy-on-write — the input and
+    its unaffected nodes are never mutated. Idempotent: a row that already
+    carries ``id`` and ``status`` is left untouched.
+    """
+    nodes = pipeline["nodes"] if "nodes" in pipeline else None
+    if not isinstance(nodes, (list, tuple)):
+        return dict(pipeline)
+    new_nodes: list[Any] = []
+    nodes_changed = False
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            new_nodes.append(node)
+            continue
+        options = node["options"] if "options" in node else None
+        requirements = (
+            options[INTERPRETATION_REQUIREMENTS_KEY]
+            if isinstance(options, Mapping) and INTERPRETATION_REQUIREMENTS_KEY in options
+            else None
+        )
+        if not isinstance(requirements, (list, tuple)):
+            new_nodes.append(node)
+            continue
+        node_id = node["id"] if "id" in node else None
+        new_requirements: list[Any] = []
+        requirements_changed = False
+        for requirement in requirements:
+            if not isinstance(requirement, Mapping) or ("id" in requirement and "status" in requirement):
+                new_requirements.append(requirement)
+                continue
+            canonical = dict(requirement)
+            user_term = canonical.get("user_term")
+            if "id" not in canonical and isinstance(user_term, str) and user_term.strip() and isinstance(node_id, str) and node_id.strip():
+                canonical["id"] = f"{user_term}:{node_id}"
+            if "status" not in canonical:
+                canonical["status"] = "pending"
+            new_requirements.append(canonical)
+            requirements_changed = True
+        if not requirements_changed:
+            new_nodes.append(node)
+            continue
+        new_options = dict(cast(Mapping[str, Any], options))
+        new_options[INTERPRETATION_REQUIREMENTS_KEY] = new_requirements
+        new_node = dict(node)
+        new_node["options"] = new_options
+        new_nodes.append(new_node)
+        nodes_changed = True
+    normalized = dict(pipeline)
+    if nodes_changed:
+        normalized["nodes"] = new_nodes
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class SetPipelineCandidate:
     """A fully validated pipeline draft plus any unsettled inline blob."""
@@ -267,7 +344,7 @@ def build_set_pipeline_candidate(
     (type vs semantic) — same pattern as
     :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
     """
-    args = dict(arguments)
+    args = canonicalize_authored_node_review_requirements(arguments)
     catalog = context.catalog
     data_dir = context.data_dir
     session_engine = context.session_engine

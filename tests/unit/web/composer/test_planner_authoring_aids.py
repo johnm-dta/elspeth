@@ -446,10 +446,15 @@ class TestExemplarDomainDisjointness:
             for placeholder in placeholders:
                 assert placeholder.startswith("row."), f"placeholder {{{{ {placeholder} }}}} must use the row namespace"
                 assert placeholder.removeprefix("row.") in guaranteed
-            # Ownership doctrine (G3): backend-owned reviews are never
-            # hand-authored; this exemplar stages no planner-owned kinds, so
-            # the options carry no interpretation_requirements at all.
-            assert "interpretation_requirements" not in llm["options"]
+            # Ownership doctrine (G3 + run-3 E6): backend-owned reviews are
+            # never hand-authored. The sentiment branch authors no judgment
+            # semantics and stages nothing; the urgency branch authors a
+            # category rubric and stages exactly its own wired vague_term row.
+            if llm["id"] == "assess_urgency":
+                rows = llm["options"]["interpretation_requirements"]
+                assert [row["kind"] for row in rows] == ["vague_term"]
+            else:
+                assert "interpretation_requirements" not in llm["options"]
 
     def test_payload_states_the_per_branch_shape_rule(self, tmp_path: Path) -> None:
         view, _snapshot = _profile_view(tmp_path)
@@ -459,8 +464,8 @@ class TestExemplarDomainDisjointness:
         section = payload["fork_coalesce"]
         assert section["set_pipeline_exemplar"] == fork_coalesce_exemplar_args(view)
         rules = " ".join(section["rules"])
-        assert "separate LLM" in rules
-        assert "not a queries map" in rules
+        assert "SHAPE SELECTION" in rules  # run-3 E1: selection rule, not preference
+        assert "queries map (multi_query)" in rules  # run-3 E1: both shapes taught, selection by input variance
 
 
 class TestDiscoveryDigest:
@@ -836,3 +841,58 @@ class TestRun2PackEdits:
         skill = load_skill("pipeline_composer")
         assert '"event_id": null' not in skill
         assert '"accepted_artifact_hash": null' not in skill
+
+
+class TestRun3PackEdits:
+    """Pack pressure-suite run-3 closures (P2-rule, E1/E2/E3/E4/E6), pinned."""
+
+    def test_retry_rule_is_profile_form_conditional(self) -> None:
+        # run-3 P2: the unconditional retry rule steered profile-bound
+        # authors into operator-private options; profile lowering injects
+        # the bound itself.
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["llm_output_contract"]["rules"])
+        assert "PROFILE-bound llm node" in rendered
+        assert "operator-private" in rendered
+        assert "Only a provider-form llm node" in rendered
+
+    def test_shape_selection_rule_replaces_the_fork_preference(self) -> None:
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["fork_coalesce"]["rules"])
+        assert "SHAPE SELECTION" in rendered
+        assert "SAME input field" in rendered
+        assert "INDEPENDENT inputs" in rendered
+
+    def test_output_prefix_contract_is_stated(self) -> None:
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["llm_output_contract"]["rules"])
+        assert "<query_key>_<response_field>" in rendered
+        assert "<query_key>_<suffix>" in rendered
+
+    def test_http_identity_rules_bind_or_omit_never_invent(self) -> None:
+        view, _snapshot = _trained_view()
+        rendered = "\n".join(build_planner_authoring_aids(view)["web_scrape_http_identity"]["rules"])
+        assert "OMIT the http block" in rendered
+        assert "reserved-list-only" in rendered
+        assert "NEVER invent" in rendered
+
+    def test_llm_digest_entry_carries_the_live_profile_aliases(self, tmp_path: Path) -> None:
+        view, _snapshot = _profile_view(tmp_path)
+        aids = build_planner_authoring_aids(view)
+        llm_entry = next(e for e in aids["discovery_digest"]["plugins"]["transforms"] if e["name"] == "llm")
+        assert llm_entry.get("profile_aliases") == ["sonnet"]
+
+    def test_fork_exemplar_stages_its_own_classification_review(self, tmp_path: Path) -> None:
+        # run-3 E6: the exemplar's urgency branch authors category semantics;
+        # demonstrating it UN-reviewed was imported as precedent to skip
+        # review-staging (the run's one leakage incident).
+        view, _snapshot = _profile_view(tmp_path)
+        args = fork_coalesce_exemplar_args(view)
+        assert args is not None
+        urgency = next(n for n in args["nodes"] if n["id"] == "assess_urgency")
+        rows = urgency["options"]["interpretation_requirements"]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "vague_term"
+        assert rows[0]["user_term"] == "urgency"
+        parts = urgency["options"]["prompt_template_parts"]
+        assert any(p.get("kind") == "interpretation_ref" and p.get("requirement_id") == rows[0]["id"] for p in parts)

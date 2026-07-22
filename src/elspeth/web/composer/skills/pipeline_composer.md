@@ -252,6 +252,22 @@ result.
 
 ## Build Macros
 
+### Dual independent outputs (fork to two sinks, no coalesce)
+
+When one row stream must land in TWO sinks with DIFFERENT per-branch
+processing (e.g. one branch aggregates, the other passes detail rows), fork
+and let each branch terminate in its OWN sink — no coalesce, because nothing
+rejoins:
+
+- Gate: `condition='True'`, `routes={"true": "fork", "false": "fork"}`,
+  `fork_to=["branch_one", "branch_two"]`.
+- Each branch's transform consumes its branch connection (`input=
+  "branch_one"`) and sets `on_success` DIRECTLY to its own sink's
+  `sink_name` (this is the terminal hop, so sink-publishing is correct here
+  — the never-publish-to-a-sink rule applies only to branches that rejoin
+  at a coalesce).
+- Declare both sinks in `outputs[]`; each branch references exactly one.
+
 ### Blob Source
 
 Treat `create_blob` plus source binding as one operation. If you call

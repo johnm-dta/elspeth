@@ -79,10 +79,19 @@ _INLINE_EXEMPLAR_MIME: Final[str] = "text/csv"
 _INLINE_EXEMPLAR_CONTENT: Final[str] = "sku,on_hand\nAX-100,12\nBX-204,7\n"
 
 _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
-    "When the user asks for separate per-branch processing compared side by "
-    "side (e.g. separate LLM nodes, one model call per aspect), use THIS "
-    "shape — a gate fanning out to one branch transform per branch, rejoined "
-    "by a coalesce — not a queries map on a single llm node.",
+    # run-3 E1: the old unconditional fork-over-queries preference produced a
+    # wrong-topology V-pass and 0/3 multi_query adoption where it fit. Shape
+    # SELECTION is decided by what varies per assessment, not by preference.
+    "SHAPE SELECTION: several assessments of the SAME input field (aspects, "
+    "angles, questions about one piece of content) belong on a SINGLE llm "
+    "node's queries map (multi_query) — one node, one pass, prefixed output "
+    "fields. Use THIS fork/coalesce shape only when the branches take "
+    "genuinely INDEPENDENT inputs or independent per-branch processing "
+    "chains (different fields, different upstream transforms, different "
+    "plugins per branch).",
+    "When the user explicitly asks for separate nodes or one model call per "
+    "branch over independent inputs, fork with a gate fanning out to one "
+    "branch transform per branch, rejoined by a coalesce.",
     "Key the coalesce branches map by FORK BRANCH NAME; each value names the "
     "connection arriving at the coalesce after that branch's transforms.",
     "When branches rejoin at a coalesce, each branch transform MUST publish "
@@ -166,6 +175,23 @@ def _raw_html_cleanup_rules(*, untrusted_producers: tuple[str, ...]) -> list[str
     ]
 
 
+_WEB_SCRAPE_HTTP_IDENTITY_RULES: Final[tuple[str, ...]] = (
+    # run-3 E3 (mechanical half; hard-fail-vs-review doctrine is an operator
+    # item — enforcement is NOT changed here).
+    "http.abuse_contact and http.scraping_reason are IDENTITY CLAIMS made to "
+    "remote site operators. Bind them ONLY from identities discoverable in "
+    "this session — operator-provided discovery facts, session context, or "
+    "the user's own words — copied verbatim.",
+    "If no discoverable identity exists, OMIT the http block entirely and "
+    "name the gap in metadata.description; the coded rejection for a missing "
+    "required block is the correct outcome. NEVER invent a plausible "
+    "identity: validation enforcement is reserved-list-only (known-reserved "
+    "domains hard-fail), so a fabricated contact can pass validation and "
+    "SHIP a false claim — passing the validator does not make it yours to "
+    "assert.",
+)
+
+
 def _model_custody_rules(profile_alias: str | None) -> list[str]:
     """Model-provisioning custody with the sanctioned alternative rendered live.
 
@@ -210,10 +236,18 @@ def _model_custody_rules(profile_alias: str | None) -> list[str]:
 # run-2 G9: web policy rejects sequential (pool_size 1) multi_query llm nodes
 # with unbounded capacity retries; the ceiling is imported so the taught
 # number can never drift from provider_config_policy.
+# run-3 P2 correction: the previous unconditional form of this rule steered
+# PROFILE-bound authors into an operator-private option (pool_size /
+# max_capacity_retry_seconds) and a profile_unavailable rejection — the
+# operator layer auto-injects the web-safe retry bound on profile-bound
+# multi_query nodes (profiles.lower_options). The rule is form-conditional.
 _WEB_MULTI_QUERY_RETRY_RULE: Final[str] = (
-    "A web-authored llm node using queries with pool_size 1 (sequential) must "
-    f"bound capacity retries: set max_capacity_retry_seconds <= {WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS}, "
-    "or set pool_size > 1 for pooled retry handling."
+    "On a PROFILE-bound llm node (options.profile), never author pacing or "
+    "retry options — pool_size and max_capacity_retry_seconds are "
+    "operator-private and the profile layer injects the web-safe retry bound "
+    "for queries automatically. Only a provider-form llm node must bound "
+    f"sequential multi_query retries itself: max_capacity_retry_seconds <= {WEB_LLM_SEQUENTIAL_MULTI_QUERY_MAX_RETRY_SECONDS} "
+    "or pool_size > 1."
 )
 
 _LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
@@ -239,6 +273,18 @@ _LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
     "The per-query prompt key is 'template' (a Jinja2 override), NOT "
     "prompt_template. The top-level options.prompt_template is STILL "
     "required and is the fallback for any query that omits template.",
+    # run-3 E2: the output contract — each query KEY prefixes its output row
+    # fields, so downstream nodes can require them by exact name.
+    "Each query key names its output row fields by PREFIX: the raw reply "
+    "lands in <query_key>_<response_field>, and each typed output_fields "
+    "entry lands in <query_key>_<suffix>. Downstream mappers and sinks "
+    "reference those exact prefixed names.",
+    "Sink hygiene: the auto-appended <response_field>_usage / _model audit "
+    "fields ride the row automatically — do not map or require them into "
+    "sinks unless the user asked for token/model reporting.",
+    "on_error='discard' silently drops failed rows. When the user needs "
+    "failures retained or inspected, route on_error to a dedicated "
+    "quarantine sink instead of discard.",
     _WEB_MULTI_QUERY_RETRY_RULE,
 )
 
@@ -325,11 +371,25 @@ def discovery_digest(
     """
     if summaries is None:
         summaries = _plugin_summaries(catalog)
-    return {
+    digest = {
         "sources": _digest_entries(summaries["source"]),
         "transforms": _digest_entries(summaries["transform"]),
         "sinks": _digest_entries(summaries["sink"]),
     }
+    # run-3 E4: the llm entry carries the LIVE profile-alias enum so
+    # profile-first authoring never needs a discovery round to learn the
+    # aliases (they are already policy-public via the knob schema's choices).
+    llm_aliases = sorted(
+        alias
+        for plugin_id, aliases in catalog.snapshot.usable_profile_aliases
+        if plugin_id.kind == "transform" and plugin_id.name == "llm"
+        for alias in aliases
+    )
+    if llm_aliases:
+        for entry in digest["transforms"]:
+            if entry["name"] == "llm":
+                entry["profile_aliases"] = llm_aliases
+    return digest
 
 
 _DISCOVERY_DIGEST_GUIDANCE: Final[str] = (
@@ -461,7 +521,34 @@ def fork_coalesce_exemplar_args(
         return None
     profile_alias = _usable_llm_profile_alias(catalog) if "llm" in visible["transform"] else None
 
-    def _branch_llm(node_id: str, branch: str, response_field: str, question: str) -> dict[str, Any]:
+    def _branch_llm(
+        node_id: str,
+        branch: str,
+        response_field: str,
+        question: str,
+        *,
+        prompt_template_parts: list[dict[str, Any]] | None = None,
+        interpretation_requirements: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "profile": profile_alias,
+            "prompt_template": question,
+            "required_input_fields": ["ticket_id", "body"],
+            "response_field": response_field,
+            "schema": {"mode": "observed"},
+            # llm_prompt_template and llm_model_choice reviews are backend
+            # auto-staged on every llm node — never hand-authored. Planner-
+            # owned kinds (vague_term, registered pipeline_decision,
+            # invented_source) ARE authored when the node calls for them:
+            # the urgency branch below authors category semantics and must
+            # stage its own wired vague_term review (run-3 E6: an exemplar
+            # demonstrating an un-reviewed classification was imported as
+            # precedent to skip review-staging).
+        }
+        if prompt_template_parts is not None:
+            options["prompt_template_parts"] = prompt_template_parts
+        if interpretation_requirements is not None:
+            options["interpretation_requirements"] = interpretation_requirements
         return {
             "id": node_id,
             "node_type": "transform",
@@ -469,21 +556,13 @@ def fork_coalesce_exemplar_args(
             "input": branch,
             "on_success": f"{response_field}_done",
             "on_error": "discard",
-            "options": {
-                "profile": profile_alias,
-                "prompt_template": question,
-                "required_input_fields": ["ticket_id", "body"],
-                "response_field": response_field,
-                "schema": {"mode": "observed"},
-                # Deliberately NO interpretation_requirements: the
-                # llm_prompt_template and llm_model_choice reviews are
-                # backend auto-staged on every llm node (G3 — hand-authoring
-                # them here taught planners the wrong ownership). Planner-owned
-                # kinds (vague_term, registered pipeline_decision,
-                # invented_source) are authored only when the build calls for
-                # them; this exemplar needs none.
-            },
+            "options": options,
         }
+
+    _URGENCY_RUBRIC = (
+        "urgency categories: blocking = the user cannot work at all; degraded = "
+        "work continues with a broken feature; routine = a question or cosmetic issue"
+    )
 
     if profile_alias is not None:
         branch_nodes = [
@@ -497,7 +576,23 @@ def fork_coalesce_exemplar_args(
                 "assess_urgency",
                 "branch_b",
                 "urgency",
-                "Classify the urgency of support ticket {{ row.ticket_id }}: {{ row.body }}. Reply with a single category word.",
+                # Authored CLASSIFICATION semantics: the category set is the
+                # planner's invention, so the vague_term review is staged and
+                # wired below — the review-staging pattern in miniature.
+                f"Classify the urgency of support ticket {{{{ row.ticket_id }}}}: {{{{ row.body }}}} using these {_URGENCY_RUBRIC}. Reply with the single category word.",
+                prompt_template_parts=[
+                    {"kind": "text", "text": "Classify the urgency of support ticket {{ row.ticket_id }}: {{ row.body }} using these "},
+                    {"kind": "interpretation_ref", "requirement_id": "urgency_semantics_review"},
+                    {"kind": "text", "text": ". Reply with the single category word."},
+                ],
+                interpretation_requirements=[
+                    {
+                        "id": "urgency_semantics_review",
+                        "kind": "vague_term",
+                        "user_term": "urgency",
+                        "draft": _URGENCY_RUBRIC,
+                    }
+                ],
             ),
         ]
         coalesce_branches = {"branch_a": "sentiment_done", "branch_b": "urgency_done"}
@@ -690,6 +785,8 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
         }
     if visible_untrusted_producers and "field_mapper" in visible["transform"]:
         aids["raw_html_cleanup"] = {"rules": _raw_html_cleanup_rules(untrusted_producers=visible_untrusted_producers)}
+    if "web_scrape" in visible["transform"]:
+        aids["web_scrape_http_identity"] = {"rules": list(_WEB_SCRAPE_HTTP_IDENTITY_RULES)}
     aids["discovery_digest"] = {
         "guidance": _DISCOVERY_DIGEST_GUIDANCE,
         "plugins": discovery_digest(catalog, summaries=summaries),

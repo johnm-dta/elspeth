@@ -1037,6 +1037,14 @@ async def _plan_pipeline_inner(
             raise PipelinePlannerError("planner wall-clock budget exhausted", code="TIMEOUT") from exc
 
     current_validation = await run_planner_sync(policy_catalog.validate_composition_state, current_state)
+    # Server-rendered worked exemplars from the live policy-visible catalog.
+    # This is the reviewed-context channel for deployment plugin facts — the
+    # static skill pack must never carry them (no_deployment_plugin_facts
+    # gate), and the exemplar objects are CI-validated through
+    # build_set_pipeline_candidate so they cannot drift from the schemas they
+    # teach. Memoized per snapshot hash; a cold build sweeps the catalog, so
+    # it runs off-loop like the other sync planner phases.
+    authoring_aids = await run_planner_sync(build_planner_authoring_aids, policy_catalog)
     request_context = ToolContext(
         catalog=policy_catalog,
         plugin_snapshot=plugin_snapshot,
@@ -1075,14 +1083,7 @@ async def _plan_pipeline_inner(
                     "intent": intent,
                     "current_state": provider_current_state,
                     "reviewed_facts": reviewed_planner_context,
-                    # Server-rendered worked exemplars + catalog digest from the
-                    # live policy-visible catalog. This is the reviewed-context
-                    # channel for deployment plugin facts — the static skill pack
-                    # must never carry them (no_deployment_plugin_facts gate),
-                    # and the exemplar objects are CI-validated through
-                    # build_set_pipeline_candidate so they cannot drift from the
-                    # schemas they teach.
-                    "authoring_aids": build_planner_authoring_aids(policy_catalog),
+                    "authoring_aids": authoring_aids,
                     "instruction": (
                         "Use read-only discovery as needed, then call emit_pipeline_proposal exactly once "
                         "with one complete canonical set_pipeline argument object."

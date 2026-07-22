@@ -16,6 +16,8 @@ Evidence base: the 2026-07-22 pack stress test (0/6 cold planners converged;
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any, Final
 
 from elspeth.web.catalog.policy_view import PolicyCatalogView
@@ -38,6 +40,40 @@ _INLINE_EXEMPLAR_FILENAME: Final[str] = "quarterly_totals.csv"
 _INLINE_EXEMPLAR_MIME: Final[str] = "text/csv"
 _INLINE_EXEMPLAR_CONTENT: Final[str] = "region,total\nnorth,412\nsouth,388\n"
 
+_FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
+    "When the user asks for separate LLM nodes per branch (one model call per "
+    "aspect, compared side by side), use THIS shape — a gate fanning out to "
+    "one llm transform per branch, rejoined by a coalesce — not a queries map "
+    "on a single llm node.",
+    "Key the coalesce branches map by FORK BRANCH NAME; each value names the "
+    "connection arriving at the coalesce after that branch's transforms.",
+    "A coalesce publishes its merged rows under its own node id — the "
+    "downstream consumer sets input to the coalesce id. Do not author "
+    "on_success on a coalesce unless it routes directly to a sink.",
+    "Give each branch's llm node its own response_field so the union merge carries both results on one row.",
+)
+
+_FORK_EXEMPLAR_CONTENT: Final[str] = "color_name,hex\ncerulean,#2A52BE\nsaffron,#F4C430\n"
+
+
+def _usable_llm_profile_alias(catalog: PolicyCatalogView) -> str | None:
+    """Return the selected (else first usable) llm operator-profile alias."""
+    snapshot = catalog.snapshot
+    llm_id = next(
+        (
+            plugin_id
+            for plugin_id, aliases in snapshot.usable_profile_aliases
+            if plugin_id.kind == "transform" and plugin_id.name == "llm" and aliases
+        ),
+        None,
+    )
+    if llm_id is None:
+        return None
+    selected = dict(snapshot.selected_profile_aliases).get(llm_id)
+    if selected is not None:
+        return selected
+    return dict(snapshot.usable_profile_aliases)[llm_id][0]
+
 
 def _visible_plugin_names(catalog: PolicyCatalogView) -> dict[str, frozenset[str]]:
     return {
@@ -51,6 +87,7 @@ def source_custody_exemplar_args(
     catalog: PolicyCatalogView,
     *,
     blob_id: str | None = None,
+    visible: Mapping[str, frozenset[str]] | None = None,
 ) -> dict[str, Any] | None:
     """Complete ``set_pipeline`` args showing one legal source custody binding.
 
@@ -59,9 +96,11 @@ def source_custody_exemplar_args(
     :data:`PLACEHOLDER_BLOB_ID`; the validation test passes a real created
     blob's id) shows the existing-blob binding instead. Everything outside
     ``source`` is byte-identical between the variants. Returns ``None`` when
-    the plugins the exemplar names are not policy-visible.
+    the plugins the exemplar names are not policy-visible. ``visible`` lets
+    the payload builder share one catalog sweep across every exemplar.
     """
-    visible = _visible_plugin_names(catalog)
+    if visible is None:
+        visible = _visible_plugin_names(catalog)
     if "csv" not in visible["source"] or "json" not in visible["sink"]:
         return None
     if blob_id is None:
@@ -106,25 +145,186 @@ def source_custody_exemplar_args(
     }
 
 
+def fork_coalesce_exemplar_args(
+    catalog: PolicyCatalogView,
+    *,
+    visible: Mapping[str, frozenset[str]] | None = None,
+) -> dict[str, Any] | None:
+    """Complete ``set_pipeline`` args for the fork -> two-llm -> coalesce shape.
+
+    The operator-ruled A/B topology: a gate fans identical rows out to two
+    branches, each branch runs its own llm transform (own prompt, own
+    ``response_field``), a coalesce rejoins them under ``require_all``/
+    ``union``, one cleanup transform consumes the coalesce id, and a sink
+    receives the tidied rows. Returns ``None`` when the plugins it names or a
+    usable llm operator profile are not visible — an exemplar must never model
+    an invented identifier.
+    """
+    if visible is None:
+        visible = _visible_plugin_names(catalog)
+    if "csv" not in visible["source"] or "json" not in visible["sink"]:
+        return None
+    if not {"llm", "field_mapper"} <= visible["transform"]:
+        return None
+    profile_alias = _usable_llm_profile_alias(catalog)
+    if profile_alias is None:
+        return None
+
+    def _branch_llm(node_id: str, branch: str, response_field: str, question: str) -> dict[str, Any]:
+        return {
+            "id": node_id,
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": branch,
+            "on_success": f"{response_field}_done",
+            "on_error": "discard",
+            "options": {
+                "profile": profile_alias,
+                "prompt_template": question,
+                "required_input_fields": ["color_name", "hex"],
+                "response_field": response_field,
+                "schema": {"mode": "observed"},
+            },
+        }
+
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {
+                "schema": {
+                    "mode": "flexible",
+                    "fields": ["color_name: str", "hex: str"],
+                    "guaranteed_fields": ["color_name", "hex"],
+                }
+            },
+            "on_validation_failure": "discard",
+            "inline_blob": {
+                "filename": "colours.csv",
+                "mime_type": "text/csv",
+                "content": _FORK_EXEMPLAR_CONTENT,
+                "description": "Literal rows the user pasted into chat",
+            },
+        },
+        "nodes": [
+            {
+                "id": "fan_out",
+                "node_type": "gate",
+                "input": "rows",
+                "condition": "True",
+                "routes": {"true": "fork", "false": "fork"},
+                "fork_to": ["branch_a", "branch_b"],
+            },
+            _branch_llm(
+                "assess_tone",
+                "branch_a",
+                "tone",
+                "What is the emotional tone of the colour {{ color_name }} ({{ hex }})? Reply with one short phrase.",
+            ),
+            _branch_llm(
+                "assess_usage",
+                "branch_b",
+                "usage",
+                "Name one design usage for the colour {{ color_name }} ({{ hex }}). Reply with one short phrase.",
+            ),
+            {
+                "id": "merge_branches",
+                "node_type": "coalesce",
+                "input": "branches",
+                "branches": {"branch_a": "tone_done", "branch_b": "usage_done"},
+                "policy": "require_all",
+                "merge": "union",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            {
+                "id": "tidy_columns",
+                "node_type": "transform",
+                "plugin": "field_mapper",
+                "input": "merge_branches",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "mapping": {
+                        "color_name": "color_name",
+                        "hex": "hex",
+                        "tone": "tone",
+                        "usage": "usage",
+                    },
+                    "select_only": True,
+                },
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "main",
+                "plugin": "json",
+                "options": {
+                    "path": "outputs/colour_assessments.json",
+                    "format": "json",
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {
+            "name": "Per-branch LLM assessment",
+            "description": "Fan rows out to one llm transform per branch, rejoin with a coalesce, tidy, and save.",
+        },
+    }
+
+
+# Payload memo keyed by plugin-policy snapshot hash. The aids depend only on
+# the policy-visible catalog projection (plugin classes are static per
+# process; visibility and profile aliases are exactly what the snapshot hash
+# covers), and a cold build costs a full catalog sweep (~50ms) — too much to
+# repeat inside every planner call's wall-clock budget. Bounded so snapshot
+# rotation cannot grow it without limit; callers receive a deep copy so no
+# caller can poison the cached payload.
+_AIDS_MEMO: dict[str, dict[str, Any]] = {}
+_AIDS_MEMO_MAX: Final[int] = 8
+
+
 def build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
     """Assemble the live authoring-aids payload for one planner call.
 
-    Rendered fresh per call from the policy-visible catalog, so it can never
-    drift from the deployment. Sections whose plugins are policy-hidden are
-    omitted rather than rendered with invented names.
+    Rendered from the policy-visible catalog (memoized per snapshot hash), so
+    it can never drift from the deployment. Sections whose plugins are
+    policy-hidden are omitted rather than rendered with invented names.
     """
+    key = catalog.snapshot.snapshot_hash
+    cached = _AIDS_MEMO.get(key)
+    if cached is None:
+        cached = _build_planner_authoring_aids(catalog)
+        if len(_AIDS_MEMO) >= _AIDS_MEMO_MAX:
+            _AIDS_MEMO.pop(next(iter(_AIDS_MEMO)))
+        _AIDS_MEMO[key] = cached
+    return deepcopy(cached)
+
+
+def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
+    visible = _visible_plugin_names(catalog)
     aids: dict[str, Any] = {
         "purpose": (
             "Server-rendered worked exemplars from the live policy-visible catalog. These shapes validate against the current deployment."
         ),
     }
-    custody = source_custody_exemplar_args(catalog)
-    custody_blob_variant = source_custody_exemplar_args(catalog, blob_id=PLACEHOLDER_BLOB_ID)
+    custody = source_custody_exemplar_args(catalog, visible=visible)
+    custody_blob_variant = source_custody_exemplar_args(catalog, blob_id=PLACEHOLDER_BLOB_ID, visible=visible)
     if custody is not None and custody_blob_variant is not None:
         aids["source_custody"] = {
             "rules": list(_SOURCE_CUSTODY_RULES),
             "set_pipeline_exemplar_inline_blob": custody,
             "existing_blob_source_binding": custody_blob_variant["source"],
+        }
+    fork_coalesce = fork_coalesce_exemplar_args(catalog, visible=visible)
+    if fork_coalesce is not None:
+        aids["fork_coalesce"] = {
+            "rules": list(_FORK_COALESCE_RULES),
+            "set_pipeline_exemplar": fork_coalesce,
         }
     return aids
 
@@ -132,5 +332,6 @@ def build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
 __all__ = [
     "PLACEHOLDER_BLOB_ID",
     "build_planner_authoring_aids",
+    "fork_coalesce_exemplar_args",
     "source_custody_exemplar_args",
 ]

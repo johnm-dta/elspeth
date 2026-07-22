@@ -331,6 +331,39 @@ describe("GuidedChatHistory synthetic-failure turns", () => {
     expect(onRetry).toHaveBeenCalledWith(TURN_SYNTHETIC_FAILURE);
   });
 
+  it("withholds Retry on a synthetic failure the conversation has moved past", () => {
+    // Tutorial run 19 (session 921491db): a step-1 provider failure was
+    // recovered (re-send succeeded), but the recovered failure turn kept a
+    // live Retry for the rest of the walk. Clicking it re-sends the turn
+    // preceding the FAILURE — the stale step-1 prompt — at whatever step is
+    // now current, which the sink stage answered with an advisory ~22 times
+    // until the walk deadline. Retry is a recovery for the transcript's
+    // LAST turn only; once any later turn exists the conversation has moved
+    // on and re-sending the stale prompt is never the designed recovery.
+    const recovery: ChatTurn = {
+      ...TURN_USER,
+      seq: 2,
+      content: "Create the source for this pipeline.",
+    };
+    const success: ChatTurn = {
+      role: "assistant",
+      content: "Created a CSV source with three rows.",
+      seq: 3,
+      step: "step_1_source",
+      ts_iso: "2026-05-13T12:01:00+00:00",
+      assistant_message_kind: "assistant",
+      synthetic_failure_reason: null,
+    };
+    render(
+      <GuidedChatHistory
+        chatHistory={[TURN_USER, TURN_SYNTHETIC_FAILURE, recovery, success]}
+        onRetrySyntheticFailure={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("disables Retry while retryDisabled is set (no race with an in-flight resend)", () => {
     render(
       <GuidedChatHistory

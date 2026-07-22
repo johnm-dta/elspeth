@@ -166,10 +166,21 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     // the designed advance (mirrors composer-guided-live).
     page.getByRole("button", { name: "Finish sources", exact: true }),
     page.getByRole("button", { name: "Finish outputs", exact: true }),
-    // Transient provider failure on a step chat ("I'm unavailable right now")
-    // leaves a Retry affordance; pressing it is the designed recovery. Last in
-    // priority so it never preempts forward progress.
-    page.getByRole("button", { name: "Retry", exact: true }),
+    // Transient provider failure on a step chat leaves a Retry affordance;
+    // pressing it is the designed recovery. Last in priority so it never
+    // preempts forward progress. Scoped HARD to the provider-unavailable
+    // failure bubble on the transcript's LAST row: run 19 (session 921491db)
+    // showed a recovered step-1 failure kept a live Retry that the pump then
+    // clicked every pass at the sink stage — re-sending the stale source
+    // prompt ~22 times (each answered by an advisory) and starving the
+    // phase-Send branch until the walk deadline. The frontend now withholds
+    // Retry on non-final turns; this scope keeps the driver correct against
+    // a stale build too.
+    page
+      .locator(".message-row")
+      .last()
+      .filter({ hasText: "I'm unavailable right now; you can still use the wizard controls." })
+      .getByRole("button", { name: "Retry", exact: true }),
     // Output required-fields turn (multi_select_with_custom): the sink the LLM
     // built is observed-mode (pass-all-through), and the real output fields come
     // from the downstream transforms — so the correct, designed answer here is

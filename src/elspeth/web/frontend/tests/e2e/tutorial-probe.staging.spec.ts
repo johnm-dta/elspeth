@@ -133,10 +133,17 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
     // the designed advance (mirrors composer-guided-live).
     page.getByRole("button", { name: "Finish sources", exact: true }),
     page.getByRole("button", { name: "Finish outputs", exact: true }),
-    // Transient provider failure on a step chat ("I'm unavailable right now")
-    // leaves a Retry affordance; pressing it is the designed recovery. Last in
-    // priority so it never preempts forward progress.
-    page.getByRole("button", { name: "Retry", exact: true }),
+    // Transient provider failure on a step chat leaves a Retry affordance;
+    // pressing it is the designed recovery. Last in priority so it never
+    // preempts forward progress. Scoped to the provider-unavailable failure
+    // bubble on the transcript's LAST row (run 19: a recovered step-1
+    // failure's lingering Retry starved the pump at the sink stage —
+    // mirrors tutorial-reliability).
+    page
+      .locator(".message-row")
+      .last()
+      .filter({ hasText: "I'm unavailable right now; you can still use the wizard controls." })
+      .getByRole("button", { name: "Retry", exact: true }),
     // Output required-fields turn: the LLM-built sink is observed-mode, so the
     // designed answer is the escape, not ticking the source's column.
     page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),

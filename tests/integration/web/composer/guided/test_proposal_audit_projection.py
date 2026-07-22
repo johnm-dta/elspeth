@@ -567,6 +567,161 @@ def test_repeated_route_labels_are_gate_local_and_canonical_for_every_insertion_
     ]
 
 
+def _ab_coalesce_guided() -> GuidedSession:
+    return replace(
+        GuidedSession.initial(),
+        reviewed_sources={
+            SOURCE_ID: SourceResolved(
+                name="source",
+                plugin="csv",
+                options={"path": "blob:00000000-0000-0000-0000-000000000001", "schema": {"mode": "observed"}},
+                observed_columns=("color_name", "hex"),
+                sample_rows=(),
+                on_validation_failure="discard",
+            )
+        },
+        reviewed_outputs={
+            OUTPUT_ID: SinkOutputResolved(
+                name="colour_ab_out",
+                plugin="json",
+                options={"path": "out.json", "schema": {"mode": "observed"}},
+                required_fields=(),
+                schema_mode="observed",
+                on_write_failure="discard",
+            )
+        },
+        source_order=(SOURCE_ID,),
+        output_order=(OUTPUT_ID,),
+        step=GuidedStep.STEP_3_TRANSFORMS,
+    )
+
+
+def _ab_coalesce_proposal(guided: GuidedSession) -> PipelineProposal:
+    """A runnable fork -> llm x2 -> coalesce -> field_mapper A/B (session 30acb16e shape)."""
+    return PipelineProposal.create(
+        pipeline={
+            "sources": {
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "csv_rows",
+                    "options": {"path": "blob:00000000-0000-0000-0000-000000000001", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                }
+            },
+            "nodes": [
+                {
+                    "id": "fork_gate",
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "csv_rows",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "len(row['color_name']) > 0",
+                    "routes": {"true": "fork", "false": "fork"},
+                    "fork_to": ["a_rows", "b_rows"],
+                },
+                {
+                    "id": "llm_variant_a",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "a_rows",
+                    "on_success": "a_out",
+                    "on_error": "discard",
+                    "options": {"provider": "openrouter"},
+                },
+                {
+                    "id": "llm_variant_b",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "b_rows",
+                    "on_success": "b_out",
+                    "on_error": "discard",
+                    "options": {"provider": "openrouter"},
+                },
+                {
+                    "id": "reconcile",
+                    "node_type": "coalesce",
+                    "plugin": None,
+                    "input": "a_out",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "branches": {"a_rows": "a_out", "b_rows": "b_out"},
+                    "policy": "require_all",
+                    "merge": "union",
+                },
+                {
+                    "id": "cleanup",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "reconcile",
+                    "on_success": "colour_ab_out",
+                    "on_error": "discard",
+                    "options": {},
+                },
+            ],
+            "edges": [],
+            "outputs": [
+                {
+                    "name": "colour_ab_out",
+                    "plugin": "json",
+                    "options": {"path": "out.json"},
+                    "on_write_failure": "discard",
+                }
+            ],
+        },
+        base=PresentBase(state_id=CHECKPOINT_ID, composition_content_hash="a" * 64),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+        surface=PlannerSurface.GUIDED_STAGED,
+        repair_count=0,
+        skill_hash=stable_hash("guided planner skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
+    )
+
+
+def test_fork_coalesce_ab_projection_routes_every_branch_output_into_the_coalesce() -> None:
+    """A fork/coalesce A/B plan must project without an orphaned branch output.
+
+    Regression for guided A/B session 503cac64: ``canonical_connection_consumers``
+    keys consumers off ``node.input`` only, so the coalesce's second branch output
+    (``b_out``, referenced only via ``branches``) had "no canonical consumer" and
+    ``_build_projection`` raised AuditIntegrityError before the proposal could show.
+    """
+    guided = _ab_coalesce_guided()
+    proposal = _ab_coalesce_proposal(guided)
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"llm", "field_mapper"}),
+        "sink": frozenset({"json"}),
+    }
+
+    payload = build_guided_proposal_projection(
+        proposal_id=PROPOSAL_ID,
+        proposal=proposal,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+
+    verify_guided_proposal_projection(
+        payload=payload,
+        proposal_id=PROPOSAL_ID,
+        proposal=proposal,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+    node_id_by_role = {node["behavior"]["kind"]: node["stable_id"] for node in payload["nodes"]}
+    coalesce_id = node_id_by_role["coalesce"]
+    # Both LLM branch producers route their success output into the coalesce.
+    coalesce_incoming = [edge for edge in payload["graph"]["edges"] if edge["to_endpoint"].get("stable_id") == coalesce_id]
+    assert len(coalesce_incoming) == 2
+    assert all(edge["flow"]["kind"] == "node_success" for edge in coalesce_incoming)
+    # The coalesce republishes its merged rows to the downstream field_mapper.
+    coalesce_outgoing = [edge for edge in payload["graph"]["edges"] if edge["from_endpoint"].get("stable_id") == coalesce_id]
+    assert [edge["flow"]["kind"] for edge in coalesce_outgoing] == ["coalesce_success"]
+
+
 def test_projection_rejects_plugins_outside_the_same_catalog_snapshot() -> None:
     guided = _guided()
     with pytest.raises(AuditIntegrityError, match="catalog"):

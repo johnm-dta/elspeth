@@ -18,7 +18,7 @@ from pydantic import JsonValue
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.composer.guided.connection_consumers import canonical_connection_consumers
+from elspeth.web.composer.guided.connection_consumers import ConsumerIdentity, canonical_connection_consumers
 from elspeth.web.composer.guided.deferred_intents import DeferredIntentClaimError, evaluate_deferred_intent_coverage
 from elspeth.web.composer.guided.protocol import (
     PROPOSAL_RATIONALE_TEMPLATE,
@@ -707,7 +707,10 @@ def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_a
         }
     if node.node_type == "coalesce":
         branches = node.branches
-        names = list(branches.values()) if isinstance(branches, Mapping) else list(branches or ())
+        # Alias by branch KEY (the fork branch name), not value: the coalesce's
+        # branch aliases must be the same ordinals the gate_fork minted so each
+        # traces to its authoritative fork origin (see the branch_names comment).
+        names = list(branches.keys()) if isinstance(branches, Mapping) else list(branches or ())
         return {
             "kind": "coalesce",
             "branch_aliases": [branch_aliases[name] for name in names],
@@ -782,12 +785,33 @@ def _build_projection(
             if branch not in branch_names:
                 branch_names.append(branch)
         raw_branches = node.branches
-        values = list(raw_branches.values()) if isinstance(raw_branches, Mapping) else list(raw_branches or ())
-        for branch in values:
+        # A coalesce's branch identities are its branches KEYS (the fork branch
+        # names == gate ``fork_to`` destinations), not its values (the
+        # connections carrying each branch's data). Aliasing by value would mint
+        # a branch alias with no authoritative gate_fork origin — unsatisfiable
+        # at validate_payload. The keys are already added by the gate ``fork_to``
+        # above, so this only dedups; a tuple ``branches`` lists names directly.
+        branch_keys = list(raw_branches.keys()) if isinstance(raw_branches, Mapping) else list(raw_branches or ())
+        for branch in branch_keys:
             if branch not in branch_names:
                 branch_names.append(branch)
     route_aliases = {key: proposal_structural_label("route", index) for index, key in enumerate(route_keys)}
     branch_aliases = {name: proposal_structural_label("branch", index) for index, name in enumerate(branch_names)}
+
+    # An edge INTO a coalesce arrives on a branch VALUE connection but must carry
+    # the branch KEY's alias — validate_payload matches a coalesce's incoming
+    # branch aliases against its behavior branch_aliases (keyed by the fork branch
+    # name). Map each (coalesce id, value connection) to the key's alias so
+    # add_targets can stamp the branch when routing a producer into the fan-in.
+    coalesce_branch_alias: dict[tuple[str, str], str] = {}
+    for node in state.nodes:
+        if node.node_type != "coalesce":
+            continue
+        raw_branches = node.branches
+        branch_pairs = raw_branches.items() if isinstance(raw_branches, Mapping) else ((name, name) for name in (raw_branches or ()))
+        for branch_key, branch_value in branch_pairs:
+            if type(branch_value) is str and branch_value and branch_key in branch_aliases:
+                coalesce_branch_alias[(node_ids[node.id], branch_value)] = branch_aliases[branch_key]
 
     def gate_route_aliases(node: NodeSpec) -> dict[str, str]:
         assert node.node_type == "gate"
@@ -801,6 +825,28 @@ def _build_projection(
         )
     except ValueError as exc:  # pragma: no cover - validated state and exact IDs own this invariant
         raise AuditIntegrityError("guided proposal canonical consumer identities are malformed") from exc
+
+    # ``canonical_connection_consumers`` keys consumers off ``node.input`` and
+    # ``output.name`` only. A coalesce ALSO consumes each of its branch
+    # connections (``branches`` values) — a fan-in whose branch producers publish
+    # those connections. Without registering the coalesce as their consumer, a
+    # branch output reached only through ``branches`` (e.g. the B variant's
+    # ``on_success`` in a fork/coalesce A/B) has "no canonical consumer" and the
+    # projection raises. Register the coalesce as a consumer of every branch
+    # connection it does not already consume through its own ``input``.
+    consumers = dict(consumers)
+    for coalesce_node in state.nodes:
+        if coalesce_node.node_type != "coalesce":
+            continue
+        raw_branches = coalesce_node.branches
+        branch_connections = list(raw_branches.values()) if isinstance(raw_branches, Mapping) else list(raw_branches or ())
+        identity: ConsumerIdentity = ("node", node_ids[coalesce_node.id])
+        for connection in branch_connections:
+            if type(connection) is not str or not connection:
+                continue
+            existing = consumers.get(connection, ())
+            if identity not in existing:
+                consumers[connection] = (*existing, identity)
 
     edge_specs: list[tuple[dict[str, str], dict[str, str], dict[str, object]]] = []
 
@@ -831,7 +877,16 @@ def _build_projection(
         if not destinations:
             raise AuditIntegrityError("guided proposal connection has no canonical consumer")
         for kind, stable_id in destinations:
-            edge_specs.append((origin, _endpoint(kind, stable_id), flow))
+            edge_flow = flow
+            # An edge into a coalesce via one of its branch connections must
+            # carry that branch's alias (validate_payload rejects a branch-less
+            # flow into a coalesce). The producer emitting the flow does not know
+            # its consumer is a fan-in, so stamp the alias here per destination.
+            if kind == "node":
+                branch_alias = coalesce_branch_alias.get((stable_id, connection))
+                if branch_alias is not None:
+                    edge_flow = {**flow, "branch": branch_alias}
+            edge_specs.append((origin, _endpoint(kind, stable_id), edge_flow))
 
     for source_name, source in state.sources.items():
         origin = _endpoint("source", source_ids[source_name])
@@ -865,6 +920,14 @@ def _build_projection(
         elif node.node_type == "queue":
             add_targets(origin, node.id, {"kind": "queue_continue", "branch": None})
         elif node.node_type == "coalesce":
+            # A coalesce publishes its merged rows under its OWN node id —
+            # downstream nodes consume it via input='<coalesce id>' — and, when
+            # on_success is set, ALSO direct to that sink. Republish under the
+            # node id (skipped when nothing consumes it, e.g. a coalesce whose
+            # only output is a direct-to-sink on_success) so the merged-row edge
+            # to the downstream field_mapper is not dropped.
+            if node.id in consumers:
+                add_targets(origin, node.id, {"kind": "coalesce_success", "branch": None})
             add_targets(origin, node.on_success, {"kind": "coalesce_success", "branch": None})
         else:
             add_targets(origin, node.on_success, {"kind": "node_success", "branch": None})

@@ -2772,6 +2772,73 @@ class TestSchemaContractValidation:
             on_write_failure="discard",
         )
 
+    def _make_coalesce_schema_mode_state(
+        self,
+        *,
+        source_schema: dict[str, Any],
+        transformed_branch_schema: dict[str, Any],
+        merge: str = "union",
+        branch_order: tuple[str, str] = ("path_a", "path_b"),
+        branch_plugin: str = "value_transform",
+    ) -> CompositionState:
+        """Build a legal transformed fork/coalesce shape for schema-mode parity tests."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="gate_in",
+                options={"schema": source_schema},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="fork_gate",
+                node_type="gate",
+                plugin=None,
+                input="gate_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("path_a", "path_b"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        branch_options: dict[str, Any] = {"schema": transformed_branch_schema}
+        if branch_plugin == "value_transform":
+            branch_options["operations"] = [{"target": "value", "expression": "row['value']"}]
+        state = state.with_node(
+            self._make_transform(
+                "branch_b",
+                "path_b",
+                "path_b_done",
+                plugin=branch_plugin,
+                options=branch_options,
+            )
+        )
+        branch_connections = {"path_a": "path_a", "path_b": "path_b_done"}
+        state = state.with_node(
+            NodeSpec(
+                id="merge_results",
+                node_type="coalesce",
+                plugin=None,
+                input="path_a",
+                on_success="main",
+                on_error=None,
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches={branch_name: branch_connections[branch_name] for branch_name in branch_order},
+                policy="require_all",
+                merge=merge,
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        return state
+
     def _make_web_scrape_to_line_explode_state(
         self,
         *,
@@ -4198,6 +4265,103 @@ class TestSchemaContractValidation:
         assert result.is_valid, result.errors
         assert any("fork" in w.message.lower() and "contract" in w.message.lower() for w in result.warnings)
         assert not any(ec.to_id in {"ta", "tb"} for ec in result.edge_contracts)
+
+    @pytest.mark.parametrize("branch_order", [("path_a", "path_b"), ("path_b", "path_a")])
+    def test_union_coalesce_rejects_mixed_observed_explicit_branch_schemas_regardless_of_order(
+        self,
+        branch_order: tuple[str, str],
+    ) -> None:
+        state = self._make_coalesce_schema_mode_state(
+            source_schema={"mode": "fixed", "fields": ["id: int", "value: int"]},
+            transformed_branch_schema={"mode": "observed"},
+            branch_order=branch_order,
+        )
+
+        result = state.validate()
+
+        entries = [error for error in result.errors if error.error_code == "coalesce_schema_mode_mixed"]
+        assert len(entries) == 1, result.errors
+        assert entries[0].component == "node:merge_results"
+        assert entries[0].severity == "high"
+        assert "observed" in entries[0].message.lower()
+        assert "explicit" in entries[0].message.lower()
+
+    @pytest.mark.parametrize(
+        ("source_schema", "transformed_branch_schema"),
+        [
+            ({"mode": "observed"}, {"mode": "observed"}),
+            (
+                {"mode": "fixed", "fields": ["id: int", "value: int"]},
+                {"mode": "fixed", "fields": ["id: int", "value: int"]},
+            ),
+        ],
+    )
+    def test_union_coalesce_accepts_homogeneous_branch_schema_modes(
+        self,
+        source_schema: dict[str, Any],
+        transformed_branch_schema: dict[str, Any],
+    ) -> None:
+        state = self._make_coalesce_schema_mode_state(
+            source_schema=source_schema,
+            transformed_branch_schema=transformed_branch_schema,
+        )
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+        assert not any(error.error_code == "coalesce_schema_mode_mixed" for error in result.errors)
+
+    def test_nested_coalesce_allows_mixed_branch_schema_modes(self) -> None:
+        state = self._make_coalesce_schema_mode_state(
+            source_schema={"mode": "fixed", "fields": ["id: int", "value: int"]},
+            transformed_branch_schema={"mode": "observed"},
+            merge="nested",
+        )
+
+        result = state.validate()
+
+        assert result.is_valid, result.errors
+        assert not any(error.error_code == "coalesce_schema_mode_mixed" for error in result.errors)
+
+    def test_union_coalesce_abstains_when_a_branch_schema_mode_is_unresolved(self) -> None:
+        state = self._make_coalesce_schema_mode_state(
+            source_schema={"mode": "fixed", "fields": ["id: int", "value: int"]},
+            transformed_branch_schema={"mode": "observed"},
+            branch_plugin="not_registered",
+        )
+
+        result = state.validate()
+
+        assert not any(error.error_code == "coalesce_schema_mode_mixed" for error in result.errors)
+
+    def test_union_coalesce_unresolved_branch_does_not_hide_known_mixed_modes(self) -> None:
+        state = self._make_coalesce_schema_mode_state(
+            source_schema={"mode": "fixed", "fields": ["id: int", "value: int"]},
+            transformed_branch_schema={"mode": "observed"},
+        )
+        gate = next(node for node in state.nodes if node.id == "fork_gate")
+        coalesce = next(node for node in state.nodes if node.id == "merge_results")
+        state = state.with_node(replace(gate, fork_to=("path_a", "path_b", "path_c")))
+        state = state.with_node(
+            self._make_transform(
+                "branch_c",
+                "path_c",
+                "path_c_done",
+                plugin="not_registered",
+                options={"schema": {"mode": "observed"}},
+            )
+        )
+        state = state.with_node(
+            replace(
+                coalesce,
+                branches={"path_a": "path_a", "path_b": "path_b_done", "path_c": "path_c_done"},
+            )
+        )
+
+        result = state.validate()
+
+        entries = [error for error in result.errors if error.error_code == "coalesce_schema_mode_mixed"]
+        assert len(entries) == 1, result.errors
 
     def test_fork_gate_direct_sink_contract_checked(self) -> None:
         """Fork branches that terminate at sinks stay statically checkable."""

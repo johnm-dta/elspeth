@@ -307,7 +307,7 @@ EXPECTED_ASSESSMENT_LOCATORS = {
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_aggregation_nested_required_input_fields_without_upstream_guarantee",
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_direct_fork_to_sink_required_field_mismatch",
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_pass_through_downstream_of_coalesce",
-        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_composer_warns_but_runtime_rejects_mixed_coalesce_branch_schemas",
+        "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_mixed_coalesce_branch_schemas",
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_accept_aggregation_with_input_fields_and_required_fields",
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeGateRouteParityAgreement",
         "tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeQueueAgreement",
@@ -359,7 +359,7 @@ EXPECTED_ASSESSMENT_EVIDENCE = tuple(
     for evidence_group, locators in EXPECTED_ASSESSMENT_LOCATORS.items()
     for index, locator in enumerate(locators, start=1)
 )
-EXPECTED_EVIDENCE_REGISTRY_SHA256 = "17acb1f48fa91ef72768e11a496fdfcff94c0daac2b9f26d91562287244480ba"
+EXPECTED_EVIDENCE_REGISTRY_SHA256 = "867f145a96296ce3f72d0491c7aa9b40b8087ade49501250d9a11211fcfae03e"
 
 EXPECTED_HARNESS_EVIDENCE = (
     (

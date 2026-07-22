@@ -639,9 +639,11 @@ def fork_coalesce_exemplar_args(
     contents vary. With a usable llm operator profile the branches are two
     llm transforms (own prompt, own ``response_field``, short-form
     interpretation_requirements); without one the SAME topology renders with
-    two policy-visible non-LLM transforms picked deterministically (first two
-    alphabetically whose only required option is ``schema``; a single
-    candidate serves both branches under distinct node ids). Returns ``None``
+    one policy-visible non-LLM transform under two distinct node ids. Reusing
+    one transform/configuration keeps both union branches on the same runtime
+    schema mode; ``passthrough`` is preferred when visible, otherwise the
+    first alphabetic candidate whose only required option is ``schema`` is
+    used. Returns ``None``
     only when the fixed plugins (csv/json/field_mapper) or every branch
     candidate are policy-hidden — an exemplar must never model an invented
     identifier.
@@ -746,13 +748,12 @@ def fork_coalesce_exemplar_args(
         branch_pool = _renderable_branch_plugins(summaries["transform"])
         if not branch_pool:
             return None
-        plugin_a = branch_pool[0]
-        plugin_b = branch_pool[1] if len(branch_pool) > 1 else branch_pool[0]
+        branch_plugin = "passthrough" if "passthrough" in branch_pool else branch_pool[0]
         branch_nodes = [
             {
                 "id": "process_branch_a",
                 "node_type": "transform",
-                "plugin": plugin_a,
+                "plugin": branch_plugin,
                 "input": "branch_a",
                 "on_success": "branch_a_done",
                 "on_error": "discard",
@@ -761,7 +762,7 @@ def fork_coalesce_exemplar_args(
             {
                 "id": "process_branch_b",
                 "node_type": "transform",
-                "plugin": plugin_b,
+                "plugin": branch_plugin,
                 "input": "branch_b",
                 "on_success": "branch_b_done",
                 "on_error": "discard",

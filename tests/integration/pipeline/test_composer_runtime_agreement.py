@@ -1198,11 +1198,11 @@ class TestComposerRuntimeAgreement:
         graph = self._build_runtime_graph_from_settings(config)
         graph.validate_edge_compatibility()
 
-    def test_composer_warns_but_runtime_rejects_mixed_coalesce_branch_schemas(
+    def test_both_reject_mixed_coalesce_branch_schemas(
         self,
         tmp_path: Path,
     ) -> None:
-        """Coalesce merge semantics stay runtime-authoritative beyond composer preview."""
+        """Composer mirrors runtime rejection of mixed observed/explicit union branches."""
         csv_path = tmp_path / "input.csv"
         csv_path.write_text("id,value\n1,2\n", encoding="utf-8")
         output_path = tmp_path / "out.csv"
@@ -1273,7 +1273,7 @@ class TestComposerRuntimeAgreement:
                 condition=None,
                 routes=None,
                 fork_to=None,
-                branches=("path_a", "path_b_done"),
+                branches={"path_a": "path_a", "path_b": "path_b_done"},
                 policy="require_all",
                 merge="union",
             )
@@ -1327,8 +1327,11 @@ class TestComposerRuntimeAgreement:
         )
 
         composer_result = state.validate()
-        assert composer_result.is_valid, composer_result.errors
-        assert any("coalesce node" in warning.message.lower() for warning in composer_result.warnings)
+        assert not composer_result.is_valid
+        composer_errors = [error for error in composer_result.errors if error.error_code == "coalesce_schema_mode_mixed"]
+        assert len(composer_errors) == 1, composer_result.errors
+        assert "observed" in composer_errors[0].message.lower()
+        assert "explicit" in composer_errors[0].message.lower()
         assert not any(contract.to_id == "output:main" for contract in composer_result.edge_contracts)
 
         config = ElspethSettings(

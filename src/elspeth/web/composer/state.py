@@ -1728,6 +1728,116 @@ def _check_schema_contracts(
         _participates, guarantees = _effective_producer_vote(producer)
         return guarantees
 
+    def _known_producer_schema_mode(producer: ProducerEntry) -> Literal["observed", "explicit"] | None:
+        """Return the runtime branch-schema mode when Composer can prove it.
+
+        The DAG builder assigns each transform/aggregation its computed output
+        ``SchemaConfig`` and falls back to the raw declaration only when the
+        plugin has no computed output contract. Mirror that choice here. Draft
+        config/probe failures abstain: their existing validation paths own the
+        rejection, and a guessed mode must not create a false coalesce error.
+        """
+        contract_options = producer.options
+        contract_owner = _producer_owner(producer)
+        if not is_source_producer_id(producer.producer_id):
+            producer_node = node_by_id[producer.producer_id]
+            if producer_node.node_type == "aggregation":
+                try:
+                    contract_options, contract_owner = get_aggregation_contract_options(
+                        producer.options,
+                        owner=f"node:{producer.producer_id}",
+                    )
+                except ValueError:
+                    return None
+
+        try:
+            raw_schema = get_raw_schema_config(
+                contract_options,
+                owner=contract_owner,
+            )
+        except ValueError:
+            return None
+
+        if is_source_producer_id(producer.producer_id):
+            schema_config = raw_schema
+        else:
+            producer_node = node_by_id[producer.producer_id]
+            if producer_node.node_type not in {"transform", "aggregation"} or producer_node.plugin is None:
+                return None
+            transform = _probe_transform_construction(producer_node.plugin, producer_node.options)
+            if transform is None:
+                return None
+            schema_config = transform._output_schema_config or raw_schema
+
+        if schema_config is None:
+            return None
+        if schema_config.is_observed:
+            return "observed"
+        return "explicit" if schema_config.fields is not None else None
+
+    def _known_connection_schema_mode(
+        connection_name: str,
+        *,
+        visited: frozenset[str] = frozenset(),
+    ) -> Literal["observed", "explicit"] | None:
+        """Resolve a branch connection's mode through structural producers."""
+        if connection_name in visited:
+            return None
+        producer = resolver.find_producer_for(connection_name)
+        if producer is None:
+            return None
+        if is_source_producer_id(producer.producer_id):
+            return _known_producer_schema_mode(producer)
+
+        producer_node = node_by_id[producer.producer_id]
+        if producer_node.node_type == "gate":
+            return _known_connection_schema_mode(
+                producer_node.input,
+                visited=visited | {connection_name},
+            )
+        if producer_node.node_type == "queue":
+            # Runtime assigns every structural queue an observed output schema.
+            return "observed"
+        if producer_node.node_type == "coalesce":
+            # A nested coalesce's strategy-specific output schema is not
+            # reconstructed by Composer preview. Preserve the existing
+            # conservative abstention at that boundary.
+            return None
+        return _known_producer_schema_mode(producer)
+
+    # Runtime rejects a union coalesce whose known branch schemas mix observed
+    # and explicit modes. Composer has enough information to mirror that rule
+    # for sources, gates, queues, transforms, and aggregations. Unresolved
+    # branches are omitted: one known mode plus unknowns abstains, while an
+    # observed/explicit conflict already proven by known branches still rejects.
+    for coalesce_node in nodes:
+        if coalesce_node.node_type != "coalesce" or coalesce_node.merge != "union" or not coalesce_node.branches:
+            continue
+        branch_modes: dict[str, Literal["observed", "explicit"]] = {}
+        for branch_name, branch_connection in zip(
+            _coalesce_branch_names(coalesce_node.branches),
+            _coalesce_branch_connections(coalesce_node.branches),
+            strict=True,
+        ):
+            mode = _known_connection_schema_mode(branch_connection)
+            if mode is None:
+                continue
+            branch_modes[branch_name] = mode
+
+        observed_branches = sorted(branch for branch, mode in branch_modes.items() if mode == "observed")
+        explicit_branches = sorted(branch for branch, mode in branch_modes.items() if mode == "explicit")
+        if observed_branches and explicit_branches:
+            errors.append(
+                _err(
+                    f"node:{coalesce_node.id}",
+                    f"Coalesce '{coalesce_node.id}' has mixed observed/explicit schemas, which union merge does not allow. "
+                    f"Observed branches: {observed_branches}; explicit branches: {explicit_branches}. "
+                    "Ensure every branch uses an explicit schema with compatible fields, or every branch uses an observed schema.",
+                    "high",
+                    "coalesce_schema_mode_mixed",
+                )
+            )
+
     def _connection_propagation_vote(connection_name: str) -> tuple[bool, frozenset[str]]:
         """Resolve a connection's propagation vote across structural nodes.
 

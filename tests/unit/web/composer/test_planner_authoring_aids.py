@@ -335,8 +335,10 @@ class TestForkCoalesceExemplar:
         profile alias (as the module originally did) meant a deployment with no
         visible LLM profile lost the topology teaching entirely, which is
         exactly backwards. Branch transforms are drawn deterministically from
-        the policy-visible catalog: first two alphabetically whose only
-        required option is ``schema``.
+        the policy-visible catalog: ``passthrough`` when available, otherwise
+        the first alphabetic candidate whose only required option is
+        ``schema``. The same plugin/configuration on both branches guarantees
+        the union coalesce does not mix runtime schema modes.
         """
         view, _snapshot = _trained_view()
         args = fork_coalesce_exemplar_args(view)
@@ -364,8 +366,9 @@ class TestForkCoalesceExemplar:
             and {field.name for field in plugin.config_fields if field.required} <= {"schema"}
         )
         gate = next(node for node in nodes if node["node_type"] == "gate")
-        branch_plugins = sorted(node["plugin"] for node in nodes if node.get("input") in gate["fork_to"])
-        assert branch_plugins == renderable[:2]
+        branch_plugins = [node["plugin"] for node in nodes if node.get("input") in gate["fork_to"]]
+        expected_plugin = "passthrough" if "passthrough" in renderable else renderable[0]
+        assert branch_plugins == [expected_plugin, expected_plugin]
         # The exact bytes the prompt carries must build under this posture.
         (tmp_path / "outputs").mkdir(exist_ok=True)
         content = args["source"]["inline_blob"]["content"]

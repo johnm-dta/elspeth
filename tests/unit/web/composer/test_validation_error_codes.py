@@ -295,6 +295,7 @@ class TestClosedCodeCatalogueInvariants:
             "no_sinks_configured",
             "aggregation_missing_on_error",
             "coalesce_branch_unreachable",
+            "coalesce_schema_mode_mixed",
         ):
             assert code in _CLOSED_VALIDATION_ERROR_CODES, code
             guidance = explain_validation_code(code)

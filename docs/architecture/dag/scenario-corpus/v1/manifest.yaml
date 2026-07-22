@@ -96,8 +96,8 @@ evidence:
     stages: [config, build]
   - id: composer-runtime-agreement-05
     kind: pytest
-    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_composer_warns_but_runtime_rejects_mixed_coalesce_branch_schemas
-    claim: The known mixed-coalesce Composer/runtime disagreement remains explicitly characterized.
+    locator: tests/integration/pipeline/test_composer_runtime_agreement.py::TestComposerRuntimeAgreement::test_both_reject_mixed_coalesce_branch_schemas
+    claim: Composer and runtime reject mixed observed/explicit union coalesce branch schemas consistently.
     stages: [config, build]
   - id: composer-runtime-agreement-06
     kind: pytest

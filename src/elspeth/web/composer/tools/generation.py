@@ -446,6 +446,13 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "flexible, fixed.",
     ),
     (
+        r"coalesce_schema_mode_mixed|mixed observed/explicit schemas",
+        "A union coalesce has both observed and explicit branch schemas. Runtime cannot safely merge those modes because an "
+        "observed branch may omit fields promised by an explicit branch.",
+        "Keep the intended union row shape and make the branch schemas homogeneous: give every branch an explicit schema with "
+        "compatible fields, or set every branch schema to observed.",
+    ),
+    (
         r"sink_contract_violation|Schema contract violation: '.*' -> 'output:[^']+'",
         "A sink schema requires fields that its upstream producer does not guarantee. "
         "The rejection's contract facts name the producer, the sink, and the missing field names.",
@@ -720,8 +727,8 @@ _CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
     "interpretation_requirements_invalid",
     "plugin_options_invalid",
     # ── Schema-contract family (2026-07-22 codeless-rejection closure) ──────
-    # Emitted with a SchemaContractDetail naming producer/consumer/fields so
-    # the planner's redacted repair feedback carries actionable structure.
+    # Edge-level members carry SchemaContractDetail facts; coalesce mode
+    # conflicts carry the coalesce id and branch groups in the validation row.
     "schema_contract_violation",
     "sink_contract_violation",
     "locked_input_extras",
@@ -729,6 +736,7 @@ _CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
     "transform_contract_violation",
     "semantic_contract_violation",
     "contract_config_invalid",
+    "coalesce_schema_mode_mixed",
     # ── Structural rejections (same closure sweep) ──────────────────────────
     "no_source_configured",
     "no_sinks_configured",

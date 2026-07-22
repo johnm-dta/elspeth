@@ -275,13 +275,13 @@ def fork_coalesce_exemplar_args(
                 "assess_tone",
                 "branch_a",
                 "tone",
-                "What is the emotional tone of the colour {{ color_name }} ({{ hex }})? Reply with one short phrase.",
+                "What is the emotional tone of the colour {{ row.color_name }} ({{ row.hex }})? Reply with one short phrase.",
             ),
             _branch_llm(
                 "assess_usage",
                 "branch_b",
                 "usage",
-                "Name one design usage for the colour {{ color_name }} ({{ hex }}). Reply with one short phrase.",
+                "Name one design usage for the colour {{ row.color_name }} ({{ row.hex }}). Reply with one short phrase.",
             ),
             {
                 "id": "merge_branches",

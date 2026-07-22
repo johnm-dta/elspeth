@@ -974,12 +974,15 @@ async def test_live_authoring_aids_ride_in_the_reviewed_context_user_message(
     plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
     expected = build_planner_authoring_aids(PolicyCatalogView.for_trained_operator(full_catalog, plugin_snapshot))
     assert payload["authoring_aids"] == json.loads(canonical_json(expected))
-    # The aids stay out of the system message: skill-hash identity is pinned
-    # to the static pack, and the capability core's no-deployment-inventory
-    # claim about system text must remain true.
+    # The aids PAYLOAD stays out of the system message: skill-hash identity is
+    # pinned to the static pack, and the capability core's
+    # no-deployment-inventory claim about system text must remain true. (The
+    # core may NAME the authoring_aids channel as a pointer — what must never
+    # appear in system text is the rendered payload itself.)
     system_messages = [message for message in request["messages"] if message["role"] == "system"]
-    assert all("authoring_aids" not in message["content"] for message in system_messages)
     assert all("set_pipeline_exemplar" not in message["content"] for message in system_messages)
+    assert all("composer_hints" not in message["content"] for message in system_messages)
+    assert all('"authoring_aids"' not in message["content"] for message in system_messages)
 
 
 @pytest.mark.asyncio

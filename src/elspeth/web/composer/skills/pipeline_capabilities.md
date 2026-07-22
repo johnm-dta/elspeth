@@ -14,11 +14,15 @@ Author exactly one complete canonical pipeline proposal through
 
 1. Read current pipeline and validation state with `get_pipeline_state`,
    `diff_pipeline`, or `preview_pipeline` as relevant.
-2. Read the policy-visible inventories with `list_sources`, `list_transforms`,
-   `list_sinks`, `list_models`, and `list_recipes`.
-3. Read every selected plugin's authoritative options and output contract with
-   `get_plugin_schema`; use `get_plugin_assistance` and
-   `explain_validation_error` for structured repair rather than guessing.
+2. Consult the authoring_aids discovery digest delivered in the planning
+   context first: it is rendered from the live policy-visible catalog at
+   prompt build and is current for this deployment — plan directly from it.
+   Call `list_sources`, `list_transforms`, `list_sinks`, or `list_recipes`
+   only when a needed plugin is absent from the digest.
+3. Call `get_plugin_schema` only when a needed option or output contract is
+   absent from the digest or when repairing against a validation rejection;
+   use `get_plugin_assistance` and `explain_validation_error` for structured
+   repair when a proposal is rejected, rather than guessing.
 4. Use `get_expression_grammar` before authoring conditions. Use blob and
    secret-reference discovery when the request needs them; secret values are
    never part of planner discovery.

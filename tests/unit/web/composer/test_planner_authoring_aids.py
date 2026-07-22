@@ -357,6 +357,41 @@ class TestDiscoveryDigest:
         assert json_sink["composer_hints"] == list(next(plugin.composer_hints for plugin in view.list_sinks() if plugin.name == "json"))
         assert any("collision_policy" in hint for hint in json_sink["composer_hints"])
 
+    def test_capability_core_discovery_order_speaks_with_the_digest_voice(self) -> None:
+        """The static core and the live digest guidance must agree, zero daylight.
+
+        The campaign's central finding: in-context-every-turn contradictions
+        dominate planner behavior. The core's discovery-order steps and the
+        digest's short-circuit guidance ride in the same context every turn,
+        so where they overlap they must share exact sentences — a core that
+        says "read the inventories with list_*" every turn undercuts the
+        digest on the DISCOVERY_CYCLE failure mode it exists to fix.
+        """
+        from elspeth.web.composer.capability_skill import load_pipeline_capability_core
+        from elspeth.web.composer.planner_authoring_aids import _DISCOVERY_DIGEST_GUIDANCE
+
+        # Word-for-word agreement is about words: collapse the markdown's
+        # hard line wrapping before comparing.
+        core = load_pipeline_capability_core()
+        core_flat = " ".join(core.split())
+
+        # The old unconditional re-discovery instruction must be gone.
+        assert "Read the policy-visible inventories" not in core_flat
+        assert "Read every selected plugin's authoritative options" not in core_flat
+        # Digest-first scoping, shared word-for-word between both texts.
+        shared_phrases = (
+            "rendered from the live policy-visible catalog at prompt build and is current for this deployment",
+            "plan directly from it",
+            "for structured repair when a proposal is rejected",
+        )
+        for phrase in shared_phrases:
+            assert phrase in core_flat, f"core lacks shared phrase: {phrase!r}"
+            assert phrase in _DISCOVERY_DIGEST_GUIDANCE, f"digest guidance lacks shared phrase: {phrase!r}"
+        # The narrowing must not disturb the closed provenance rules the core
+        # keeps: model ids only from list_models, secret discovery intact.
+        assert "Model identifiers come only from `list_models`" in core
+        assert "list_secret_refs" in core
+
     def test_payload_carries_digest_with_discovery_short_circuit_guidance(self) -> None:
         view, _snapshot = _trained_view()
 

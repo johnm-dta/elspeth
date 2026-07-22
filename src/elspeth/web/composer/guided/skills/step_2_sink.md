@@ -17,12 +17,12 @@ behaviour, or output-schema options from a plugin name or from examples that
 are not attached to this request. Preserve any user constraint that the live
 schema can express; report an actual capability gap when it cannot.
 
-Some requirements are policy-level and do not appear in the option schema:
-always call `get_plugin_assistance` for the sink you picked and treat its
-hints as binding — when a hint says an option is required, must be set
-deliberately, or is rejected when left implicit, set that option explicitly
-in your resolution rather than relying on defaults. Always set the output
-path option explicitly as well.
+Some requirements are policy-level and do not appear in the option schema
+itself: `get_plugin_schema` returns `composer_hints` alongside the schema —
+treat those hints as binding. When a hint says an option is required, must be
+set deliberately, or is rejected when left implicit, set that option
+explicitly in your resolution rather than relying on defaults. Always set the
+output path option explicitly as well.
 
 Pick the sink that matches what the user asked for and configure it yourself from
 what they told you. Don't make them choose from a list, and don't ask them to

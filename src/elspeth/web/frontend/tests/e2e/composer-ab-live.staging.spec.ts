@@ -139,6 +139,16 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       await composer.goto(sessionId);
       await composer.waitForChatReady();
 
+      // Hydration race: an API-created session sometimes lands on the guided
+      // surface (observed runs 5/12/16 — the freeform transcript then never
+      // renders and the success poll starves while the backend composes
+      // fine). Normalize deterministically via the user-visible escape.
+      const exitToFreeform = page.getByRole("button", { name: "Exit to freeform" });
+      if (await exitToFreeform.isVisible({ timeout: 3_000 }).catch(() => false)) {
+        await exitToFreeform.click();
+        await composer.waitForChatReady();
+      }
+
       // ── One outcome-stated request; the planner owns the design ──────────
       const request =
         `I uploaded ${BLOB_FILENAME} (color_name,hex — ${expectedRows.length} rows). ` +

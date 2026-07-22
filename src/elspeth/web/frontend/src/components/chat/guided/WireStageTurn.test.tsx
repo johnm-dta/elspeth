@@ -104,6 +104,39 @@ describe("WireStageTurn", () => {
     expect(onCorrect).toHaveBeenCalledWith({ kind: "node", stable_id: NODE_ID }, "Add the reviewed mapping.");
   });
 
+  it("summarises route status once and renders per-route chips, not trailing prose", () => {
+    // canonicalData: one satisfied contract (connected) + one null contract
+    // (not yet checked). The per-line "— not yet checked" dangling clause was
+    // the operator-reported debug-dump read; status renders as a compact chip
+    // with the count summary above the list.
+    render(<WireStageTurn data={canonicalData()} onConfirm={vi.fn()} confirmDisabled={false} />);
+
+    expect(screen.getByText("2 routes — 1 connected, 1 not yet checked")).toBeInTheDocument();
+    expect(screen.getByText("connected")).toBeInTheDocument();
+    expect(screen.getByText("not yet checked")).toBeInTheDocument();
+    // Screen readers keep the status even though it left the visible prose:
+    // the row's accessible name carries it (aria-label overrides li content).
+    expect(
+      screen.getByRole("listitem", { name: "source-1 to node-1 (Output) — connected" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("listitem", { name: "node-1 (Output) to output-1 — not yet checked" }),
+    ).toBeInTheDocument();
+  });
+
+  it("labels the correction controls and styles them as the app's form idiom", () => {
+    render(<WireStageTurn data={canonicalData()} onConfirm={vi.fn()} confirmDisabled={false} onCorrect={vi.fn()} />);
+    const select = screen.getByLabelText("Component");
+    expect(select.tagName).toBe("SELECT");
+    expect(select).toHaveClass("guided-schema-select");
+    const feedback = screen.getByLabelText("What should change?");
+    expect(feedback.tagName).toBe("TEXTAREA");
+    // Explicit for/id association — the old wrapping-label markup overlapped
+    // the bare native select with its own label text at some widths.
+    expect(select).toHaveAttribute("id");
+    expect(feedback).toHaveAttribute("id");
+  });
+
   it("shows warnings, contract gaps, and technical stable ids", () => {
     const data = canonicalData({
       warnings: [{ message: "Review expansion cardinality." }],
@@ -253,11 +286,15 @@ describe("WireStageTurn", () => {
 
     render(<WireStageTurn data={canonicalData({ connections })} onConfirm={vi.fn()} confirmDisabled={false} />);
 
-    expect(screen.getByText("Source success — connected")).toBeInTheDocument();
-    expect(screen.getByText("Gate route route-1 — not yet checked")).toBeInTheDocument();
-    expect(screen.getByText("Gate fork route-2 as branch-1 — not yet checked")).toBeInTheDocument();
-    expect(screen.getByText("Node failure — not yet checked")).toBeInTheDocument();
-    expect(screen.getByText("Output write failure — not yet checked")).toBeInTheDocument();
+    // Flow semantics stay per-row; status moved out of the prose into chips
+    // (operator-reported "— not yet checked" dump) with a single count line.
+    expect(screen.getByText("Source success")).toBeInTheDocument();
+    expect(screen.getByText("Gate route route-1")).toBeInTheDocument();
+    expect(screen.getByText("Gate fork route-2 as branch-1")).toBeInTheDocument();
+    expect(screen.getByText("Node failure")).toBeInTheDocument();
+    expect(screen.getByText("Output write failure")).toBeInTheDocument();
+    expect(screen.getByText("6 routes — 1 connected, 5 not yet checked")).toBeInTheDocument();
+    expect(screen.getAllByText("not yet checked")).toHaveLength(5);
     expect(screen.getByText(new RegExp(EDGE_ID))).toBeInTheDocument();
   });
 });

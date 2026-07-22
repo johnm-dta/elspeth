@@ -2646,6 +2646,34 @@ assistant_message_kind: "synthetic_failure",
     expect(input.dataset.hasCancel).toBe("false");
   });
 
+  it("anchors the saving-decision status in the decision-card footer with an elapsed timer", () => {
+    // Operator-reported: "Saving decision..." rendered as bare floating text
+    // and could front a multi-minute planner run with zero motion, while
+    // "Explain this step" floated bottom-right in empty space. Both anchor
+    // into the card's footer; the pending status reuses the chat Send pending
+    // idiom (pulse + headline + elapsed readout) and keeps role="status".
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+      guidedResponsePending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const footer = container.querySelector(".guided-current-decision-footer");
+    expect(footer).not.toBeNull();
+    const status = footer?.querySelector('[role="status"]');
+    expect(status).not.toBeNull();
+    expect(status?.textContent).toContain("Saving decision...");
+    expect(status?.querySelector(".composing-elapsed")).not.toBeNull();
+    // The Explain affordance lives in the same footer, not floating alone.
+    expect(footer?.querySelector(".guided-explain-btn")).not.toBeNull();
+  });
+
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
     // Regression: a transient step-3 chat failure appends a user turn but
     // returns next_turn=null. The 'Sent' line must NOT replace the box, or the

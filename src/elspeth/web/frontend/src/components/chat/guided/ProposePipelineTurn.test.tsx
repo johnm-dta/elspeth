@@ -345,6 +345,54 @@ describe("ProposePipelineTurn", () => {
     expect(screen.getByRole("button", { name: "Revise node-1" })).toBeEnabled();
   });
 
+  it("renders the elapsed readout and live phase headline while the decision submit is pending", () => {
+    // A guided decision submit can front a multi-minute planner run; the
+    // submitting status must carry motion (elapsed readout) plus the live
+    // composer-progress headline when one is being published — the chat Send
+    // pending idiom (GuidedPendingStrip), not a bare static sentence.
+    render(
+      <ProposePipelineTurn
+        payload={payload()}
+        reviewState={{
+          status: "submitting",
+          proposal_id: IDS.proposal,
+          draft_hash: "d".repeat(64),
+        }}
+        onSubmit={vi.fn()}
+        composerProgress={{
+          session_id: "session-1",
+          request_id: "req-1",
+          phase: "calling_model",
+          headline: "Planning the wiring update.",
+          evidence: [],
+          likely_next: null,
+          reason: null,
+          updated_at: "2026-07-23T00:00:00Z",
+        }}
+      />,
+    );
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Planning the wiring update.");
+    expect(status).toHaveTextContent(/00:00/);
+  });
+
+  it("falls back to the static submitting copy (still with elapsed readout) without live progress", () => {
+    render(
+      <ProposePipelineTurn
+        payload={payload()}
+        reviewState={{
+          status: "submitting",
+          proposal_id: IDS.proposal,
+          draft_hash: "d".repeat(64),
+        }}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Submitting this proposal decision…");
+    expect(status).toHaveTextContent(/00:00/);
+  });
+
   it.each(["submitting", "reloading", "stale"] as const)(
     "disables the exact proposal controls while review state is %s",
     (status) => {

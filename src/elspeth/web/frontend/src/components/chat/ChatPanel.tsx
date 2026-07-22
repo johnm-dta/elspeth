@@ -36,6 +36,7 @@ import { GuidedPendingStrip } from "./guided/GuidedPendingStrip";
 import { GUIDED_EXPLAIN_MESSAGE } from "./guided/explainPrompt";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
+import { GuidedDecisionPendingIndicator } from "./guided/GuidedDecisionPendingIndicator";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import { isGuidedBuildActive } from "./guided/guidedBuildActive";
 import { latestAssistantRationale } from "./guided/guidedRationale";
@@ -1738,49 +1739,68 @@ export function ChatPanel({
                     : undefined
                 }
                 wireValidationIssues={wireValidationIssues}
+                composerProgress={composerProgress}
               />
             )}
           </div>
-          {/* One-click "why am I seeing this?" — sends a canned question down
-              the NORMAL guided-chat path (user turn + assistant bubble in the
-              transcript; the pending strip shows while it runs). The backend
-              advisory prompt now carries the LLM-safe current-build context,
-              so the answer names the actual plugins/settings on screen. Only
-              offered when a decision is actually showing; disabled while any
-              chat/respond is in flight (same 409 guard as the composer). */}
-          {guidedNextTurn && (
+          {/* Card footer: anchors the card's ambient furniture on one seam —
+              the pending "Saving decision" status (left) and the one-click
+              "why am I seeing this?" Explain affordance (right) — instead of
+              a floating bottom-right button over dead space plus a bare
+              status paragraph (operator-reported). Explain sends a canned
+              question down the NORMAL guided-chat path (user turn + assistant
+              bubble in the transcript; the pending strip shows while it
+              runs). The backend advisory prompt carries the LLM-safe
+              current-build context, so the answer names the actual
+              plugins/settings on screen. Only offered when a decision is
+              actually showing; disabled while any chat/respond is in flight
+              (same 409 guard as the composer). */}
+          {(guidedNextTurn !== null || guidedResponsePending) && (
             <div className="guided-current-decision-footer">
-              <button
-                type="button"
-                className="btn btn-compact guided-explain-btn"
-                onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
-                // Bootstrap race: Explain routes sendGuidedChat ->
-                // runComposeWithTimeout, which no-ops until the backend wall
-                // clock lands. A guided decision restores from server state on
-                // reload before App.checkHealth latches readiness, so gate the
-                // button (dead-button doctrine) rather than leave a silent
-                // no-op — same as the primary Send.
-                disabled={
-                  guidedChatPending || guidedResponsePending || !composeTimeoutReady
-                }
-                title={
-                  !guidedChatPending &&
-                  !guidedResponsePending &&
-                  !composeTimeoutReady
-                    ? composerTimeoutUnavailable
-                      ? COMPOSE_UNAVAILABLE_MESSAGE
-                      : COMPOSE_CONNECTING_MESSAGE
-                    : undefined
-                }
-              >
-                Explain this step
-              </button>
+              {guidedResponsePending && (
+                <p
+                  className="guided-current-decision-pending guided-decision-pending"
+                  role="status"
+                >
+                  {/* Chat Send pending idiom (pulse + adaptive headline +
+                      elapsed readout): a decision submit can front a
+                      multi-minute planner run and must not read as stalled.
+                      The headline resolves to the live composer-progress
+                      phase when one is being published, else this copy. */}
+                  <GuidedDecisionPendingIndicator
+                    fallback="Saving decision..."
+                    composerProgress={composerProgress}
+                  />
+                </p>
+              )}
+              {guidedNextTurn && (
+                <button
+                  type="button"
+                  className="btn btn-compact guided-explain-btn"
+                  onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
+                  // Bootstrap race: Explain routes sendGuidedChat ->
+                  // runComposeWithTimeout, which no-ops until the backend wall
+                  // clock lands. A guided decision restores from server state on
+                  // reload before App.checkHealth latches readiness, so gate the
+                  // button (dead-button doctrine) rather than leave a silent
+                  // no-op — same as the primary Send.
+                  disabled={
+                    guidedChatPending || guidedResponsePending || !composeTimeoutReady
+                  }
+                  title={
+                    !guidedChatPending &&
+                    !guidedResponsePending &&
+                    !composeTimeoutReady
+                      ? composerTimeoutUnavailable
+                        ? COMPOSE_UNAVAILABLE_MESSAGE
+                        : COMPOSE_CONNECTING_MESSAGE
+                      : undefined
+                  }
+                >
+                  Explain this step
+                </button>
+              )}
             </div>
-          )}
-          {guidedResponsePending && (
-            <p className="guided-current-decision-pending" role="status">
-              Saving decision...
-            </p>
           )}
           {/* C-3 self-heal notice (turn_not_emitted): a calm resync message,
               deliberately role="status" (polite) rather than role="alert"

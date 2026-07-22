@@ -402,6 +402,237 @@
   color: var(--color-text-secondary);
 }
 
+/* ── Wire-stage inventory (operator pass 2026-07-22) ──────────────────────────
+   The proposal card's structure applied to the wiring review: grid rhythm,
+   grouped regions with quiet headings, component entries as bounded card rows
+   (not a raw bullet dump), and a readable measure — the 64rem sheet width the
+   guided column already uses — so metadata lines stop sprawling across
+   ultrawide viewports. */
+.wire-stage {
+  display: grid;
+  gap: var(--space-lg);
+  max-width: 64rem;
+}
+
+.wire-stage h3,
+.wire-stage__components h4,
+.wire-stage__routes h4 {
+  margin: 0;
+}
+
+.wire-stage__warnings {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-xl);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.wire-stage__components {
+  display: grid;
+  gap: var(--space-md);
+}
+
+/* Component entries as card rows: name + plugin on the lead line, the
+   cardinality/fields/policy metadata as quiet stacked lines beneath. The
+   direct-child combinators keep the nested field lists (structured outputs,
+   business schema) as ordinary indented sub-lists inside a card. */
+.wire-stage__components > div > ul {
+  list-style: none;
+  margin: var(--space-xs) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.wire-stage__components > div > ul > li {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  overflow-wrap: anywhere;
+}
+
+.wire-stage__components li > span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__components li p {
+  margin: var(--space-2xs) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__components li ul {
+  margin: var(--space-2xs) 0 0;
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+/* Stable ID expander: same quiet operator-expander idiom as
+   .wire-stage__raw, tucked at the end of a component card. */
+.wire-stage__components li details {
+  margin-top: var(--space-2xs);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__components li details summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.wire-stage__components li details code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Routes region: one count roll-up line, then per-route rows with a status
+   chip pinned right — never a per-line trailing "— not yet checked" clause. */
+.wire-stage__routes {
+  display: grid;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.wire-stage__routes-summary {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__edges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2xs);
+}
+
+.wire-stage__edges li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-xs);
+  row-gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  overflow-wrap: anywhere;
+}
+
+.wire-stage__edges .wire-review-flow {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__edges .wire-review-status {
+  margin-left: auto;
+}
+
+.wire-stage__edges .wire-review-detail {
+  flex-basis: 100%;
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* Route contract-status chip. Status is also folded into the row's
+   accessible name (WireReviewList contract) — the chip is the sighted
+   signal and never colour-alone (each variant carries its status word). */
+.wire-review-status {
+  padding: var(--space-2xs) var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-tight);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.wire-review-status--connected {
+  border-color: var(--color-success-border);
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.wire-review-status--warning {
+  border-color: var(--color-error-border);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+/* Correction request as a proper form group (the .guided-proposal__revise
+   bordered-region idiom): quiet legend-style heading, labelled select +
+   full-width feedback field from the schema-form family, action right. */
+.wire-stage__correction {
+  margin: 0;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.wire-stage__correction h4 {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+/* The grid gap owns the rhythm inside the group. */
+.wire-stage__correction .guided-schema-field-row {
+  margin-bottom: 0;
+}
+
+.wire-stage__correction .guided-schema-select {
+  max-width: 100%;
+  align-self: start;
+}
+
+/* Prose feedback field: the schema-form input chrome at full width (the app
+   font, not the JSON textarea's monospace). */
+.wire-stage__correction-input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  line-height: 1.45;
+  min-height: var(--size-control);
+  resize: vertical;
+  transition: border-color 0.1s ease;
+}
+
+.wire-stage__correction-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.wire-stage__correction-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Confirm / Exit action row. */
+.wire-stage__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
 /* ── Guided respond rejection (elspeth-3b35abf148 variant 3) ──────────────────
    The backend's structured 409 rendered NEXT TO the turn widget it rejected. */
 .guided-respond-rejection {
@@ -558,13 +789,41 @@
   overflow-x: auto;
 }
 
-/* Decision-card footer: the one-click Explain affordance sits under the turn
-   widget's own action row (Continue / Confirm wiring), reading
-   as the card's secondary action for every widget type. */
+/* Decision-card footer: one anchored seam under the turn widget's own action
+   row for the card's ambient furniture — the pending "Saving decision" status
+   (left, with pulse + elapsed readout) and the one-click Explain affordance
+   (right). The border-top reads as the card's footer bar, so neither piece
+   floats in dead space (operator-reported orphan placement). */
 .guided-current-decision-footer {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
-  margin-top: var(--space-sm);
+  gap: var(--space-md);
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+/* The pending status hugs the footer's left edge (auto margin pushes the
+   Explain button right); its bare-paragraph top margin dies inside the
+   footer — the footer's own seam owns the spacing. */
+.guided-current-decision-footer .guided-current-decision-pending {
+  margin: 0 auto 0 0;
+}
+
+/* Pending guided decision submit (chat Send pending idiom): pulse dots +
+   adaptive headline + elapsed readout on one baseline. Shared between the
+   decision-card footer and the proposal card's submitting status. */
+.guided-decision-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.guided-decision-pending .guided-decision-pending-headline {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
@@ -2041,6 +2300,7 @@
   .guided-schema-input,
   .guided-schema-select,
   .guided-schema-textarea,
+  .wire-stage__correction-input,
   .guided-schema-advanced-toggle,
   .guided-schema-continue-btn,
   .guided-completion-save-btn,

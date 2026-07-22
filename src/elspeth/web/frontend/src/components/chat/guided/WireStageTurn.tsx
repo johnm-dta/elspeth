@@ -88,6 +88,32 @@ function edgeStatus(edge: WireEdge): string {
   return "not yet checked";
 }
 
+/** Chip variant for a route's contract state (WireReviewList status). */
+function edgeStatusKind(edge: WireEdge): "connected" | "warning" | "unchecked" {
+  if (edge.satisfied === true) return "connected";
+  if (edge.satisfied === false) return "warning";
+  return "unchecked";
+}
+
+/**
+ * One-line route roll-up ("9 routes — 2 connected, 7 not yet checked") so the
+ * list's overall state reads once, instead of every row trailing the same
+ * "— not yet checked" clause (the operator-reported debug-dump read).
+ * Zero-count categories are elided.
+ */
+export function routesSummaryText(edges: WireEdge[]): string {
+  const connected = edges.filter((edge) => edge.satisfied === true).length;
+  const broken = edges.filter((edge) => edge.satisfied === false).length;
+  const unchecked = edges.length - connected - broken;
+  const parts = [
+    ...(connected > 0 ? [`${connected} connected`] : []),
+    ...(broken > 0 ? [`${broken} not connected correctly`] : []),
+    ...(unchecked > 0 ? [`${unchecked} not yet checked`] : []),
+  ];
+  const heading = edges.length === 1 ? "1 route" : `${edges.length} routes`;
+  return parts.length > 0 ? `${heading} — ${parts.join(", ")}` : heading;
+}
+
 function humanToken(value: string): string {
   return value.replace(/_/g, " ");
 }
@@ -189,6 +215,9 @@ export function WireStageTurn({
   const entityNames = buildEntityNames(data);
   const nameFor = (id: string): string => entityNames.get(id) ?? id;
   const blockersId = useId();
+  const routesHeadingId = useId();
+  const correctionSelectId = useId();
+  const correctionFeedbackId = useId();
   const correctionTargets: Array<{ target: GuidedEditTarget; label: string }> = [
     ...data.sources.map((source) => ({ target: { kind: "source" as const, stable_id: source.stable_id }, label: source.label })),
     ...data.nodes.map((node) => ({ target: { kind: "node" as const, stable_id: node.stable_id }, label: node.label })),
@@ -367,30 +396,39 @@ export function WireStageTurn({
       </section>
 
       {/* Human step names + plain-language connection state
-          (elspeth-016f463ff0). The raw ids / connection labels stay available
-          verbatim behind the Technical details expander below. */}
-      <WireReviewList
-        className="wire-stage__edges"
-        ariaLabel="Wiring routes"
-        items={edges.map((edge) => ({
-          id: `${edge.from}\u0000${edge.label}\u0000${edge.to}`,
-          from: nameFor(edge.from),
-          to: nameFor(edge.to),
-          summary: `${flowText(edge.flow)} — ${edgeStatus(edge)}`,
-          detail:
-            edge.missing_fields.length > 0
-              ? `Missing fields: ${edge.missing_fields.join(", ")}`
-              : null,
-          ariaLabel: `${nameFor(edge.from)} to ${nameFor(edge.to)}`,
-        }))}
-      />
+          (elspeth-016f463ff0). Status renders as a per-row chip plus one
+          count roll-up (never per-row trailing "— …" prose) and is folded
+          into each row's accessible name — the li aria-label overrides its
+          text content, so a chip outside it is invisible to screen readers.
+          The raw ids / connection labels stay available verbatim behind the
+          Technical details expander. */}
       {edges.length > 0 ? (
-        <details className="wire-stage__raw">
-          <summary>Technical details</summary>
-          <pre className="wire-stage__raw-text">
-            {edges.map(rawEdgeRow).join("\n")}
-          </pre>
-        </details>
+        <section className="wire-stage__routes" aria-labelledby={routesHeadingId}>
+          <h4 id={routesHeadingId}>Routes</h4>
+          <p className="wire-stage__routes-summary">{routesSummaryText(edges)}</p>
+          <WireReviewList
+            className="wire-stage__edges"
+            ariaLabel="Wiring routes"
+            items={edges.map((edge) => ({
+              id: `${edge.from}\u0000${edge.label}\u0000${edge.to}`,
+              from: nameFor(edge.from),
+              to: nameFor(edge.to),
+              summary: flowText(edge.flow),
+              status: edgeStatusKind(edge),
+              detail:
+                edge.missing_fields.length > 0
+                  ? `Missing fields: ${edge.missing_fields.join(", ")}`
+                  : null,
+              ariaLabel: `${nameFor(edge.from)} to ${nameFor(edge.to)} — ${edgeStatus(edge)}`,
+            }))}
+          />
+          <details className="wire-stage__raw">
+            <summary>Technical details</summary>
+            <pre className="wire-stage__raw-text">
+              {edges.map(rawEdgeRow).join("\n")}
+            </pre>
+          </details>
+        </section>
       ) : null}
 
       {onCorrect !== undefined && correctionTargets.length > 0 ? (
@@ -404,28 +442,47 @@ export function WireStageTurn({
             }
           }}
         >
+          {/* Proper form-group idiom (operator-reported soup: wrapping labels
+              overlapped the bare native select and the tiny off-baseline
+              textarea). Explicit for/id association + the schema form's field
+              classes; keep the accessible names verbatim ("Component" /
+              "What should change?"). */}
           <h4>Request a wiring correction</h4>
-          <label>
-            Component
-            <select value={correctionTarget} onChange={(event) => setCorrectionTarget(event.target.value)}>
+          <div className="guided-schema-field-row">
+            <label className="guided-schema-label" htmlFor={correctionSelectId}>
+              Component
+            </label>
+            <select
+              id={correctionSelectId}
+              className="guided-schema-select"
+              value={correctionTarget}
+              onChange={(event) => setCorrectionTarget(event.target.value)}
+            >
               {correctionTargets.map((item) => (
                 <option key={`${item.target.kind}:${item.target.stable_id}`} value={item.target.stable_id}>
                   {item.label}
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            What should change?
+          </div>
+          <div className="guided-schema-field-row">
+            <label className="guided-schema-label" htmlFor={correctionFeedbackId}>
+              What should change?
+            </label>
             <textarea
+              id={correctionFeedbackId}
+              className="wire-stage__correction-input"
+              rows={2}
               value={correctionFeedback}
               maxLength={4096}
               onChange={(event) => setCorrectionFeedback(event.target.value)}
             />
-          </label>
-          <button type="submit" className="guided-turn-secondary" disabled={correctionFeedback.trim().length === 0}>
-            Re-plan wiring
-          </button>
+          </div>
+          <div className="wire-stage__correction-actions">
+            <button type="submit" className="guided-turn-secondary" disabled={correctionFeedback.trim().length === 0}>
+              Re-plan wiring
+            </button>
+          </div>
         </form>
       ) : null}
 

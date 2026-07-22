@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 
+import type { ComposerProgressSnapshot } from "@/types/api";
 import type {
   GuidedEditTarget,
   GuidedProposalReviewState,
@@ -9,6 +10,7 @@ import type {
   ProposalNodeBehavior,
   ProposePipelinePayload,
 } from "@/types/guided";
+import { GuidedDecisionPendingIndicator } from "./GuidedDecisionPendingIndicator";
 import {
   ReadOnlyPipelineGraph,
   type ReadOnlyPipelineGraphEdge,
@@ -22,6 +24,9 @@ interface ProposePipelineTurnProps {
   onSubmit: (body: GuidedRespondAction) => void;
   disabled?: boolean;
   isTutorial?: boolean;
+  /** Live compose progress (read-only) — drives the submitting status's
+   *  adaptive headline; the elapsed readout renders regardless. */
+  composerProgress?: ComposerProgressSnapshot | null;
 }
 
 const DISCARD_NODE_ID = "guided-proposal-discard";
@@ -130,6 +135,7 @@ export function ProposePipelineTurn({
   onSubmit,
   disabled = false,
   isTutorial = false,
+  composerProgress = null,
 }: ProposePipelineTurnProps): JSX.Element {
   const statusRef = useRef<HTMLParagraphElement | null>(null);
   const labelById = useMemo(() => {
@@ -237,9 +243,23 @@ export function ProposePipelineTurn({
           ref={statusRef}
           tabIndex={-1}
           role={status.role}
-          className={`guided-proposal__status guided-proposal__status--${reviewState.status}`}
+          className={`guided-proposal__status guided-proposal__status--${reviewState.status}${
+            currentBinding && reviewState.status === "submitting" ? " guided-decision-pending" : ""
+          }`}
         >
-          {status.message}
+          {/* A submitting decision can front a multi-minute planner run: show
+              motion (pulse + elapsed readout) and the live progress headline
+              when one is being published — the chat Send pending idiom
+              (GuidedPendingStrip) — instead of a static sentence. The p keeps
+              its role/ref/focus semantics; other statuses render unchanged. */}
+          {currentBinding && reviewState.status === "submitting" ? (
+            <GuidedDecisionPendingIndicator
+              fallback={status.message}
+              composerProgress={composerProgress}
+            />
+          ) : (
+            status.message
+          )}
         </p>
       ) : null}
 

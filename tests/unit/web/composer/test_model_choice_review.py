@@ -258,3 +258,46 @@ class TestExecutionGuard:
         )
 
         assert isinstance(materialized, CompositionState)
+
+    def test_profile_resolved_llm_node_is_exempt_without_explicit_arg(self) -> None:
+        """Profile-aliased model needs no review even when the caller omits the exemption.
+
+        Parity regression (freeform session 0c59fbca): the run-readiness path
+        computes ``operator_resolved_model_node_ids`` and passes it, but the
+        execute path (``execution.service`` -> ``materialize_state_for_execution``)
+        called it with no argument, so an ``ab_assess`` node carrying a profile
+        alias plus a stale pending ``llm_model_choice`` review 422'd at /execute
+        while readiness said READY. The exemption is a property of the state
+        (an LLM node bound to a ``profile`` alias), so it must hold with no
+        explicit argument.
+        """
+        node = _llm_node(
+            "ab_assess",
+            {
+                "profile": "sonnet",
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "model_choice_review:ab_assess",
+                        "kind": "llm_model_choice",
+                        "user_term": "llm_model_choice:ab_assess",
+                        "status": "pending",
+                        "draft": "sonnet",
+                        "event_id": None,
+                        "accepted_value": None,
+                        "accepted_artifact_hash": None,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        )
+        state = CompositionState(
+            nodes=(node,),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        materialized = materialize_state_for_execution(state)
+
+        assert isinstance(materialized, CompositionState)

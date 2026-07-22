@@ -641,7 +641,24 @@ def materialize_state_for_execution(
     *,
     operator_resolved_model_node_ids: frozenset[str] = frozenset(),
 ) -> CompositionState | InterpretationReviewPending:
-    """Materialize resolved interpretation state or return pending sites."""
+    """Materialize resolved interpretation state or return pending sites.
+
+    The operator-profile model exemption is a property of the state — an LLM
+    node bound to a ``profile`` alias took its concrete model from operator
+    policy, not composer authoring, so it carries no ``llm_model_choice`` review
+    card to resolve. Derive that set here (unioned with any caller-supplied ids)
+    rather than trusting every caller to compute and pass it: the run-readiness
+    path (``execution.validation``) did, but the execute path
+    (``execution.service``) called with no argument, so a profile-aliased node
+    with a stale pending ``llm_model_choice`` review passed readiness yet 422'd at
+    /execute (freeform session 0c59fbca). Deriving it makes the two agree by
+    construction. Mirrors ``execution.validation``'s ``profile``-is-str test.
+    """
+
+    profile_resolved_model_node_ids = frozenset(
+        node.id for node in state.nodes if node.plugin == "llm" and isinstance(node.options.get("profile"), str)
+    )
+    operator_resolved_model_node_ids = operator_resolved_model_node_ids | profile_resolved_model_node_ids
 
     pending_sites = interpretation_sites(
         state,

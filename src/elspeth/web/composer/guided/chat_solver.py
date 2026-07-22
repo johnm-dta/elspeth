@@ -372,8 +372,10 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "additionalProperties": False,
+            # ``resolution`` is deliberately NOT required: it is a constant
+            # implied by the tool name, and models omit constant fields.
+            # The parser accepts absence and rejects a wrong present value.
             "required": [
-                "resolution",
                 "plugin",
                 "filename",
                 "mime_type",
@@ -1007,8 +1009,11 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     if not isinstance(data, Mapping):
         raise GuidedToolArgumentShapeError(f"resolve_source arguments must decode to an object; got {type(data).__name__}")
 
+    # ``resolution`` is a constant discriminator implied by the tool name;
+    # models omit constant fields, so absence is accepted as its only legal
+    # value while a present-but-wrong value stays rejected (mirrors the
+    # resolve_sink treatment and the on_validation_failure default below).
     missing = {
-        "resolution",
         "plugin",
         "filename",
         "mime_type",
@@ -1020,8 +1025,8 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     } - set(data.keys())
     if missing:
         raise GuidedToolArgumentShapeError(f"resolve_source arguments missing required keys: {sorted(missing)}")
-    if data["resolution"] != "source":
-        raise GuidedToolArgumentShapeError("resolve_source resolution key must be exactly 'source'")
+    if data.get("resolution", "source") != "source":
+        raise GuidedToolArgumentShapeError("resolve_source resolution key must be exactly 'source' when provided")
 
     plugin = data["plugin"]
     if not isinstance(plugin, str) or not plugin:
@@ -1348,7 +1353,10 @@ _STEP_2_SINK_TOOL: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["resolution", "output", "assistant_message"],
+            # ``resolution`` is deliberately NOT required: it is a constant
+            # implied by the tool name, and models omit constant fields.
+            # The parser accepts absence and rejects a wrong present value.
+            "required": ["output", "assistant_message"],
             "properties": {
                 "resolution": {"type": "string", "enum": ["sink"]},
                 "output": {
@@ -1423,13 +1431,19 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
         raise GuidedToolArgumentShapeError("resolve_sink arguments are not valid JSON") from exc
     if not isinstance(data, Mapping):
         raise GuidedToolArgumentShapeError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")
-    expected_top = {"resolution", "output", "assistant_message"}
-    if set(data) != expected_top:
+    # ``resolution`` is a constant discriminator fully implied by the tool's
+    # name, and models habitually omit constant fields (observed live twice,
+    # session f9836d91): ABSENT is accepted as its only legal value, while a
+    # PRESENT-but-wrong value stays rejected. Mirrors the documented
+    # optional-with-default treatment of resolve_source's on_validation_failure.
+    required_top = {"output", "assistant_message"}
+    allowed_top = required_top | {"resolution"}
+    if not required_top <= set(data) or not set(data) <= allowed_top:
         raise GuidedToolArgumentShapeError(
-            f"resolve_sink arguments must contain exactly {sorted(expected_top)}; got keys {_shape_safe_keys(data)}"
+            f"resolve_sink arguments must contain {sorted(required_top)} (resolution optional); got keys {_shape_safe_keys(data)}"
         )
-    if data["resolution"] != "sink":
-        raise GuidedToolArgumentShapeError("resolve_sink resolution key must be exactly 'sink'")
+    if data.get("resolution", "sink") != "sink":
+        raise GuidedToolArgumentShapeError("resolve_sink resolution key must be exactly 'sink' when provided")
     item = data["output"]
     if not isinstance(item, Mapping):
         raise GuidedToolArgumentShapeError(f"resolve_sink output must be an object; got {type(item).__name__}")

@@ -455,6 +455,24 @@ def test_parse_step_2_sink_rejects_non_json_arguments_as_shape_error() -> None:
         _parse_step_2_sink_tool_arguments("not json at all {")
 
 
+def test_parse_step_2_sink_accepts_absent_resolution_discriminator() -> None:
+    """`resolution` is a constant fully implied by the tool's name — models
+    habitually omit constant fields (observed live twice, session f9836d91).
+    An ABSENT discriminator has exactly one legal value; a PRESENT-but-wrong
+    one stays rejected."""
+    args = {key: value for key, value in _JSON_SINK_ARGS.items() if key != "resolution"}
+    sink, assistant_message = _parse_step_2_sink_tool_arguments(json.dumps(args))
+    assert isinstance(sink, SinkResolved)
+    assert sink.outputs[0].plugin == "json"
+    assert assistant_message == _JSON_SINK_ARGS["assistant_message"]
+
+
+def test_parse_step_2_sink_still_rejects_wrong_resolution_value() -> None:
+    args = {**_JSON_SINK_ARGS, "resolution": "source"}
+    with pytest.raises(GuidedToolArgumentShapeError):
+        _parse_step_2_sink_tool_arguments(json.dumps(args))
+
+
 @pytest.mark.asyncio
 async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unavailable() -> None:
     """A malformed discovery call (non-object arguments) raises

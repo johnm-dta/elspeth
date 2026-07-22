@@ -1023,7 +1023,10 @@ def test_parse_step_2_sink_rejects_non_object_arguments() -> None:
 
 def test_step_2_sink_tool_schema_and_parser_are_exactly_singular() -> None:
     parameters = chat_solver._STEP_2_SINK_TOOL["function"]["parameters"]
-    assert parameters["required"] == ["resolution", "output", "assistant_message"]
+    # resolution is a constant discriminator: declared but deliberately not
+    # required (models omit constant fields; the parser defaults absence).
+    assert parameters["required"] == ["output", "assistant_message"]
+    assert parameters["properties"]["resolution"] == {"type": "string", "enum": ["sink"]}
     assert "outputs" not in parameters["properties"]
     assert parameters["properties"]["output"]["type"] == "object"
 
@@ -1050,7 +1053,7 @@ def test_step_2_sink_tool_schema_and_parser_are_exactly_singular() -> None:
 
 
 def test_parse_step_2_sink_rejects_legacy_plural_outputs_field() -> None:
-    with pytest.raises(ValueError, match="must contain exactly"):
+    with pytest.raises(ValueError, match="must contain"):
         _parse_step_2_sink_tool_arguments(
             json.dumps(
                 {

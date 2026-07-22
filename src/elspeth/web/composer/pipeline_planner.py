@@ -53,6 +53,7 @@ from elspeth.web.composer.llm_response_parsing import (
 )
 from elspeth.web.composer.pipeline_custody import finalize_pipeline_custody, prepare_pipeline_custody
 from elspeth.web.composer.pipeline_proposal import PipelineProposal, PlannerSurface, ProposalBase, reviewed_anchor_hash
+from elspeth.web.composer.planner_authoring_aids import build_planner_authoring_aids
 from elspeth.web.composer.progress import (
     emit_progress,
     model_call_progress_event,
@@ -1074,6 +1075,14 @@ async def _plan_pipeline_inner(
                     "intent": intent,
                     "current_state": provider_current_state,
                     "reviewed_facts": reviewed_planner_context,
+                    # Server-rendered worked exemplars + catalog digest from the
+                    # live policy-visible catalog. This is the reviewed-context
+                    # channel for deployment plugin facts — the static skill pack
+                    # must never carry them (no_deployment_plugin_facts gate),
+                    # and the exemplar objects are CI-validated through
+                    # build_set_pipeline_candidate so they cannot drift from the
+                    # schemas they teach.
+                    "authoring_aids": build_planner_authoring_aids(policy_catalog),
                     "instruction": (
                         "Use read-only discovery as needed, then call emit_pipeline_proposal exactly once "
                         "with one complete canonical set_pipeline argument object."

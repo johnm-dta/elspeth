@@ -50,6 +50,7 @@ from elspeth.web.composer.pipeline_planner import (
     planner_tool_definitions,
 )
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
+from elspeth.web.composer.planner_authoring_aids import build_planner_authoring_aids
 from elspeth.web.composer.prompts import build_system_prompt
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools._common import ToolContext
@@ -946,6 +947,39 @@ async def test_exact_intent_appears_in_the_sole_user_role_message(
     user_messages = [message for message in completion.requests[0]["messages"] if message["role"] == "user"]
     assert len(user_messages) == 1
     assert json.loads(user_messages[0]["content"])["intent"] == exact_intent
+
+
+@pytest.mark.asyncio
+async def test_live_authoring_aids_ride_in_the_reviewed_context_user_message(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """Deployment plugin exemplars enter through the live user-message channel.
+
+    The static system prompt must stay free of deployment plugin facts (the
+    ``no_deployment_plugin_facts`` gate), so the worked exemplars render at
+    prompt-build from the policy-visible catalog into the same reviewed-context
+    message that carries the intent — present on every turn, not only after a
+    failure.
+    """
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    request = completion.requests[0]
+    user_messages = [message for message in request["messages"] if message["role"] == "user"]
+    assert len(user_messages) == 1
+    payload = json.loads(user_messages[0]["content"])
+    full_catalog = create_catalog_service()
+    plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    expected = build_planner_authoring_aids(PolicyCatalogView.for_trained_operator(full_catalog, plugin_snapshot))
+    assert payload["authoring_aids"] == json.loads(canonical_json(expected))
+    # The aids stay out of the system message: skill-hash identity is pinned
+    # to the static pack, and the capability core's no-deployment-inventory
+    # claim about system text must remain true.
+    system_messages = [message for message in request["messages"] if message["role"] == "system"]
+    assert all("authoring_aids" not in message["content"] for message in system_messages)
+    assert all("set_pipeline_exemplar" not in message["content"] for message in system_messages)
 
 
 @pytest.mark.asyncio

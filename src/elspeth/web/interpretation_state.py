@@ -69,6 +69,14 @@ PROMPT_SHIELD_AVAILABLE_DRAFT: Final[str] = (
 
 _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
 
+# Stable prefix consumed by the set_pipeline boundary to select the closed
+# error code for a term-matched cleanup row whose draft fails marker
+# recognition. A term-matched row must never be silently treated as absent:
+# that re-fires the missing-row contract error against a planner that DID
+# author the row, which is unrepairable from the feedback alone (tutorial op
+# 18b4cee7, 2026-07-22).
+RAW_HTML_CLEANUP_DRAFT_MALFORMED_PREFIX: Final[str] = "Raw-html cleanup review draft is malformed"
+
 # Transform plugins whose output is externally-controlled remote content for
 # prompt-injection-defence purposes. web_scrape returns whatever the fetched
 # page served, which is by definition untrusted.
@@ -499,6 +507,13 @@ def _raw_html_cleanup_requirement_contract_error(
         if InterpretationKind(requirement["kind"]) is not InterpretationKind.PIPELINE_DECISION:
             continue
         if not _is_raw_html_cleanup_decision(user_term=requirement["user_term"], draft=requirement["draft"]):
+            if requirement["user_term"].strip() == RAW_HTML_CLEANUP_USER_TERM:
+                return (
+                    f"{RAW_HTML_CLEANUP_DRAFT_MALFORMED_PREFIX} on node {node.id!r}: the row's "
+                    f"user_term matches {RAW_HTML_CLEANUP_USER_TERM!r} but its draft text is not "
+                    "recognized. The draft must contain both 'raw html' and 'fingerprint'. "
+                    f"Copy the canonical draft verbatim, do not rephrase: {RAW_HTML_CLEANUP_REVIEW_DRAFT!r}"
+                )
             continue
         try:
             validate_pipeline_decision_semantics(

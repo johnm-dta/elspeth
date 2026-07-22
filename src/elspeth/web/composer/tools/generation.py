@@ -553,6 +553,13 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         "If a pass-through with no transforms is genuinely what the instruction calls for, re-emit the same pipeline unchanged to confirm the deliberate no-transform intent — the confirmation will be accepted.",
     ),
     (
+        r"interpretation_review_draft_malformed|cleanup review draft is malformed",
+        "The cleanup node's interpretation_requirements row IS present and its user_term matches the registered decision kind, but the draft text fails marker recognition — the contract recognizes the draft only when it contains both 'raw html' and 'fingerprint'. Do NOT add another row; the fix is the draft text alone.",
+        "On the existing cleanup row, replace ONLY the draft string with the canonical draft, copied verbatim without rephrasing: "
+        f'"{RAW_HTML_CLEANUP_REVIEW_DRAFT}". '
+        "Keep the row's user_term and every other pipeline detail unchanged, and re-emit the FULL set_pipeline call.",
+    ),
+    (
         r"interpretation_review_contract_unsatisfied|drops web-scrape raw field",
         "A cleanup node that drops web-scrape raw fields (field_mapper with select_only=true) must stage an interpretation review recording that decision before the pipeline is accepted. "
         "The row is recognized ONLY when user_term is the registered decision kind and the draft text names both the raw HTML and the fingerprint fields — a paraphrased draft is NOT recognized and this same code fires again.",
@@ -753,6 +760,7 @@ _CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
     # Previously codeless _failure_result sites: the planner saw only the
     # 'validation_error' placeholder while the actionable message was redacted.
     "interpretation_review_contract_unsatisfied",
+    "interpretation_review_draft_malformed",
     "file_sink_write_policy_invalid",
     # ── Nodeless-revision guard (same closure; proposal 3cb6532e) ──────────
     # A revision candidate netting zero transform nodes drew one coded nudge

@@ -110,6 +110,7 @@ from elspeth.web.composer.tools.sources import (
 )
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
+    RAW_HTML_CLEANUP_DRAFT_MALFORMED_PREFIX,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     composition_review_contract_error,
@@ -997,8 +998,15 @@ def build_set_pipeline_candidate(
         # as a bare 'validation_error' placeholder — the actionable staging
         # instruction was redacted with the message — and the planner converged
         # by dropping every node. The closed code resolves to static guidance
-        # via explain_validation_code.
-        return _failure_result(state, review_contract_error, error_code="interpretation_review_contract_unsatisfied")
+        # via explain_validation_code. A term-matched row whose draft fails
+        # marker recognition carries its own code: "add the missing row" is the
+        # wrong repair when the row exists and only the draft text is wrong.
+        review_contract_code = (
+            "interpretation_review_draft_malformed"
+            if review_contract_error.startswith(RAW_HTML_CLEANUP_DRAFT_MALFORMED_PREFIX)
+            else "interpretation_review_contract_unsatisfied"
+        )
+        return _failure_result(state, review_contract_error, error_code=review_contract_code)
 
     # 6. Report all nodes + sources + outputs as affected
     affected = (*(_source_component_id(name) for name in source_specs), *(n.id for n in node_specs), *(o.name for o in output_specs))

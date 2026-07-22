@@ -513,6 +513,40 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
+def test_term_matched_cleanup_row_with_rephrased_draft_is_malformed_not_absent() -> None:
+    state = _state_with_web_scrape_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "summary": "summary",
+            },
+            "select_only": True,
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "cleanup-decision",
+                    "kind": "pipeline_decision",
+                    "user_term": RAW_HTML_CLEANUP_USER_TERM,
+                    "status": "pending",
+                    "draft": "Drop the scraped HTML content and fingerprint columns before the sink.",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        }
+    )
+
+    contract_error = raw_html_cleanup_review_contract_error(state)
+
+    assert contract_error is not None
+    assert "malformed" in contract_error
+    assert "raw html" in contract_error
+    assert "fingerprint" in contract_error
+    assert "copy" in contract_error.lower()
+    assert "Stage a pending pipeline_decision" not in contract_error
+
+
 def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() -> None:
     state = _state_with_web_scrape_cleanup_node(
         {

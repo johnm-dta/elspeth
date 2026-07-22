@@ -2222,6 +2222,33 @@ def test_review_contract_rejection_carries_closed_code(tmp_path: Path) -> None:
     assert lead.error_code == "interpretation_review_contract_unsatisfied"
 
 
+def test_term_matched_rephrased_cleanup_draft_carries_malformed_code(tmp_path: Path) -> None:
+    # Tutorial op 18b4cee7 (2026-07-22): a planner that DID author the cleanup
+    # row but paraphrased the draft was told the row was missing — the
+    # "add the row" guidance can never repair a draft-text defect, so the
+    # planner looped to exhaustion. A term-matched, marker-missed row must
+    # carry its own code whose guidance names the draft text as the fix.
+    args = _scrape_cleanup_args(tmp_path)
+    args["nodes"][1]["options"]["interpretation_requirements"] = [
+        {
+            "kind": "pipeline_decision",
+            "user_term": "drop_raw_html_fields",
+            "draft": "Drop the scraped HTML content and fingerprint columns before the sink.",
+        }
+    ]
+
+    candidate = build_set_pipeline_candidate(
+        args,
+        _empty_state(),
+        _trained_context(data_dir=tmp_path),
+    )
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "interpretation_review_draft_malformed"
+
+
 def test_file_sink_write_policy_rejection_carries_closed_code(tmp_path: Path) -> None:
     # Same characterization for the file-sink write-policy family
     # (collision_policy / mode presence and consistency): previously codeless,

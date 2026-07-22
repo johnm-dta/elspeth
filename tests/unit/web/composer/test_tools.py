@@ -13965,7 +13965,7 @@ class TestExplainStructuralNodeShapeCodes:
         fix = result.data["suggested_fix"]
         assert "fork_to" in fix
         assert "coalesce" in fix
-        assert "queries" in fix
+        assert "change ONLY the invalid node" in fix
 
     def test_explains_coalesce_on_success_must_be_sink(self) -> None:
         state = _empty_state()

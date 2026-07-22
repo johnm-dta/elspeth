@@ -2235,3 +2235,31 @@ def test_file_sink_write_policy_rejection_carries_closed_code(tmp_path: Path) ->
     lead = candidate.result.validation.errors[0]
     assert lead.component == "rejected_mutation"
     assert lead.error_code == "file_sink_write_policy_invalid"
+
+
+def test_guidance_exact_row_flips_review_contract_rejection_to_accept(tmp_path: Path) -> None:
+    # Round-trip pin for the repair the guidance dictates (tutorial op
+    # 18b4cee7): adding EXACTLY the short-form row the catalogue guidance
+    # quotes — registered user_term + canonical draft constant — must flip
+    # the coded rejection to acceptance. Proves the minimal delta is both
+    # expressible through the full re-emit repair path and recognized by
+    # the contract's marker matching.
+    from elspeth.web.interpretation_state import (
+        RAW_HTML_CLEANUP_REVIEW_DRAFT,
+        RAW_HTML_CLEANUP_USER_TERM,
+    )
+
+    args = _scrape_cleanup_args(tmp_path)
+    for node in args["nodes"]:
+        if node["plugin"] == "field_mapper":
+            node["options"]["interpretation_requirements"] = [
+                {
+                    "kind": "pipeline_decision",
+                    "user_term": RAW_HTML_CLEANUP_USER_TERM,
+                    "draft": RAW_HTML_CLEANUP_REVIEW_DRAFT,
+                }
+            ]
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is True

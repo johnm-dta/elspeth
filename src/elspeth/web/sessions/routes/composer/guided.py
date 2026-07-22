@@ -3967,11 +3967,27 @@ async def post_guided_respond(
                     raise exc from carrier_error
                 raise
             except Exception as exc:
+                # Function-internal imports: this module's body layout is
+                # signed (module-position pins) and guided_plan late-binds
+                # against this module — both imports must stay runtime-late.
+                from elspeth.web.composer.pipeline_planner import PipelinePlannerError as _PlannerFailureExc
+
+                from .guided_plan import _guided_full_failure_code as _planner_failure_code
+
+                # Planner failures route through the shared /guided/plan
+                # mapper so both endpoints answer the same closed envelope
+                # (REPAIR_EXHAUSTED-family -> invalid_provider_response 502
+                # with a retry instruction). Tutorial op 18b4cee7 fell to
+                # 'operation_failed' here — a generic 500 banner with no
+                # affordance — while the identical failure on /guided/plan
+                # was already coded.
                 failure_code: GuidedOperationFailureCode = (
                     "stale_conflict"
                     if isinstance(exc, GuidedOperationSettlementConflictError)
                     else "integrity_error"
                     if isinstance(exc, (AuditIntegrityError, InvariantError))
+                    else _planner_failure_code(exc)
+                    if isinstance(exc, _PlannerFailureExc)
                     else "operation_failed"
                 )
                 with contextlib.suppress(Exception):

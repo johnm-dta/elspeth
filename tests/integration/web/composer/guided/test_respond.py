@@ -1429,6 +1429,58 @@ class TestStep2IntraStep:
         assert replay.json() == body
         assert captured == {}
 
+    def test_prose_revision_planner_exhaustion_is_coded_502_not_500(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Planner exhaustion answers the closed coded envelope, not a raw 500.
+
+        Tutorial op 18b4cee7 (session c98e8561, 2026-07-22): REPAIR_EXHAUSTED
+        on the step-3 replan fell through post_guided_respond's failure-code
+        selection to 'operation_failed' — the generic 500 banner — while the
+        sibling /guided/plan route already maps PipelinePlannerError through
+        _guided_full_failure_code to 'invalid_provider_response' (502, with a
+        retry instruction). The respond route must answer the same closed
+        shape for the same failure class.
+        """
+        from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="prose-exhaust.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+
+        async def exhausted_planner(**kwargs: object) -> object:
+            raise PipelinePlannerError(
+                "planner repair budget exhausted",
+                code="REPAIR_EXHAUSTED",
+                detail_codes=("interpretation_review_contract_unsatisfied",),
+            )
+
+        monkeypatch.setattr(
+            composer_test_client.app.state.composer_service,
+            "plan_guided_pipeline",
+            exhausted_planner,
+        )
+
+        response = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": payload["proposal_id"],
+                "draft_hash": payload["draft_hash"],
+                "edited_values": {"revision_instruction": "Summarize each row before saving."},
+            },
+        )
+
+        assert response.status_code == 502, response.text
+        detail = response.json()["detail"]
+        assert detail["error_type"] == "guided_operation_terminal_failure"
+        assert detail["failure_code"] == "invalid_provider_response"
+        assert "retry" in detail["detail"].lower()  # actionable, no planner internals
+
     def test_prose_revision_appends_instruction_to_root_intent(
         self,
         composer_test_client: TestClient,

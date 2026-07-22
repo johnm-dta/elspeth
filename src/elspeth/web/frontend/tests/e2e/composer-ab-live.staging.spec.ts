@@ -253,7 +253,14 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       // ("Review LLM provider calls") interposes with an ack token. Confirm
       // it when it appears — acknowledging the spend is this spec's point.
       const fanoutDialog = page.getByRole("alertdialog", { name: "Review LLM provider calls" });
-      if (await fanoutDialog.isVisible({ timeout: 15_000 }).catch(() => false)) {
+      // isVisible() evaluates immediately (its timeout option is a no-op) —
+      // the dialog only renders after the first execute round-trips a 428,
+      // so a real wait is required or the click is silently skipped.
+      const fanoutAppeared = await fanoutDialog
+        .waitFor({ state: "visible", timeout: 20_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (fanoutAppeared) {
         await fanoutDialog.getByRole("button", { name: "Execute" }).click();
       }
 

@@ -2426,6 +2426,70 @@ async def test_discovery_cycle_without_hatch_still_raises(
     assert len(completion.requests) == 2
 
 
+@pytest.mark.asyncio
+async def test_discovery_reread_after_candidate_rejection_is_not_a_cycle(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """Re-reading discovery after a validation rejection is repair, not cycling.
+
+    The capability core's discovery-order step 3 explicitly blesses
+    ``get_plugin_schema`` (and ``explain_validation_error``) "when repairing
+    against a validation rejection", but the repetition guard's window spanned
+    the whole request: any re-read of a key seen before the rejection tripped
+    DISCOVERY_CYCLE. Live guided sessions bad64533-08a1 and b3acc846-7b89
+    (2026-07-22) died exactly this way — discovery, candidate, repair rounds,
+    then a legitimate state re-read fired the guard and the opus hatch could
+    not save them. The window is scoped per repair round: a candidate
+    rejection resets it.
+    """
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        # Same discovery key as turn 1 — legal now, a rejection intervened.
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        recorder=recorder,
+    )
+
+    assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
+    # Both reads dispatched — the post-rejection re-read was served, not guarded.
+    assert [inv.tool_name for inv in recorder.invocations if inv.tool_name == "list_sources"] == ["list_sources", "list_sources"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_repetition_within_one_repair_round_still_trips(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """The per-round window still catches a genuinely stuck planner.
+
+    After a rejection opens a fresh round, the first re-read is served but a
+    second identical read in the SAME round is cycling by definition and must
+    trip DISCOVERY_CYCLE exactly as before.
+    """
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _invalid_pipeline(tmp_path)})),
+        _response(("list_sources", {})),
+        # Repeat within the same repair round — no rejection in between.
+        _response(("list_sources", {})),
+    )
+
+    with pytest.raises(PipelinePlannerError) as excinfo:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion)
+
+    assert excinfo.value.code == "DISCOVERY_CYCLE"
+    assert len(completion.requests) == 4
+
+
 def _truncated_response(*, completion_tokens: int, cost: object = 0.01) -> _Response:
     """A response cut off at the output token limit: no tool calls, partial text."""
     return _Response(

@@ -1098,6 +1098,7 @@ async def _plan_pipeline_inner(
     composition_turns = 0
     repair_count = 0
     seen_discovery: set[tuple[str, str]] = set()
+    seen_discovery_round = 0
 
     async def call_model(
         *,
@@ -1535,6 +1536,19 @@ async def _plan_pipeline_inner(
                 _engage_escape_hatch(PipelinePlannerError("planner discovery turn budget exhausted", code="DISCOVERY_EXHAUSTED"))
                 continue
             raise PipelinePlannerError("planner discovery turn budget exhausted", code="DISCOVERY_EXHAUSTED")
+        if repair_count != seen_discovery_round:
+            # A candidate rejection opened a new repair round. The capability
+            # core's discovery-order step 3 blesses re-reading discovery —
+            # get_plugin_schema, get_pipeline_state, explain_validation_error —
+            # against a validation rejection, so the repetition window is
+            # scoped per round rather than spanning the whole request: a
+            # post-rejection re-read is repair, not cycling (guided sessions
+            # bad64533/b3acc846 died DISCOVERY_CYCLE mid-repair for exactly
+            # this). Repetition within a single round still trips the guard
+            # below, and discovery_turns / repair_budget / cost / deadline
+            # remain the round-spanning backstops.
+            seen_discovery.clear()
+            seen_discovery_round = repair_count
         keys = tuple((call.name, stable_hash(call.arguments)) for call in calls)
         if any(key in seen_discovery for key in keys) or len(set(keys)) != len(keys):
             # A cycling planner is stuck by definition — hand the puzzle to

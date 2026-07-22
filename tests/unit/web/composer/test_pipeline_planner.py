@@ -335,6 +335,7 @@ async def _plan(
     eligible_deferred_intent_ids: tuple[str, ...] = (),
     claim_evaluator: Any = None,
     rendered_skill: str | None = None,
+    supersedes_draft_hash: str | None = None,
 ) -> Any:
     # Candidate validation needs the real plugin contracts.  ``tool_context``
     # remains in the test signature so the standard composer fixture proves
@@ -352,7 +353,7 @@ async def _plan(
         reviewed_planner_context={"request": "Build the requested pipeline."},
         eligible_deferred_intent_ids=eligible_deferred_intent_ids,
         claim_evaluator=claim_evaluator,
-        supersedes_draft_hash=None,
+        supersedes_draft_hash=supersedes_draft_hash,
         surface=surface,
         profile=profile or ("tutorial" if surface is PlannerSurface.TUTORIAL_PROFILE else "ordinary"),
         policy_catalog=policy_catalog,
@@ -1129,6 +1130,86 @@ async def test_missing_source_candidate_fails_closed_before_full_candidate_is_ac
     assert [error["component"] for error in feedback["validation"]["errors"]] == ["rejected_mutation"]
     assert feedback["validation"]["errors"][0]["error_code"] == "no_source_configured"
     assert all(error["error_class"] == "ValidationError" for error in feedback["validation"]["errors"])
+
+
+@pytest.mark.asyncio
+async def test_nodeless_revision_candidate_gets_one_coded_nudge_then_valve(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    """A guided revision that nets zero transforms is nudged once, not shipped.
+
+    Tutorial op 1152d7e3 (2026-07-22): after blind repairs the planner
+    "converged" by dropping every node — a bare passthrough whose metadata
+    still claimed to scrape/summarize/clean. On a revision turn (a rejected
+    draft is superseded, so the operator explicitly asked for changes) a
+    candidate with zero transform/aggregation nodes must draw ONE coded
+    rejection; re-emitting the same nodeless pipeline is the escape valve
+    confirming a deliberate pass-through (9137456ad omit-valve pattern).
+    """
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        surface=PlannerSurface.GUIDED_STAGED,
+        supersedes_draft_hash=stable_hash("superseded-draft"),
+    )
+
+    assert proposal.proposal.repair_count == 1
+    feedback = json.loads(completion.requests[1]["messages"][-1]["content"])
+    assert feedback["success"] is False
+    codes = [error["error_code"] for error in feedback["validation"]["errors"]]
+    assert codes == ["proposal_missing_requested_transforms"]
+    assert feedback["validation"]["errors"][0]["explanation"]
+    assert feedback["validation"]["errors"][0]["suggested_fix"]
+
+
+@pytest.mark.asyncio
+async def test_transformful_revision_candidate_passes_without_nudge(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline_with_short_form_llm_review(tmp_path)})),
+    )
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        surface=PlannerSurface.GUIDED_STAGED,
+        supersedes_draft_hash=stable_hash("superseded-draft"),
+    )
+
+    assert proposal.proposal.repair_count == 0
+
+
+@pytest.mark.asyncio
+async def test_nodeless_initial_guided_plan_is_not_nudged(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    # The initial step_3 auto-proposal (no superseded draft — the operator has
+    # not asked for a revision) may legitimately be a plain pass-through; the
+    # guard must not tax every simple walk with a nudge cycle.
+    completion = _ScriptedCompletion(
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+    )
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        surface=PlannerSurface.GUIDED_STAGED,
+        supersedes_draft_hash=None,
+    )
+
+    assert proposal.proposal.repair_count == 0
 
 
 def test_allowlisted_candidate_feedback_enriches_node_shape_codes() -> None:

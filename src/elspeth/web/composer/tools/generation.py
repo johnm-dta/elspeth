@@ -543,6 +543,12 @@ _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
         'Use routes={"true": <destination>, "false": <destination>}. For a pure fan-out gate: condition=\'True\', routes={"true": "fork", "false": "fork"}, fork_to=[<branch connections>]. Only string-returning conditions may use custom route labels.',
     ),
     (
+        r"proposal_missing_requested_transforms",
+        "The revision candidate contains no transform or aggregation nodes, but the operator's revision instruction asked for processing — a bare source-to-sink pass-through would ship a pipeline that silently performs none of the requested work behind a confident name.",
+        "Re-emit with the transform nodes the revision instruction requests, as a minimal delta: keep the reviewed source and sink wiring unchanged and add only the processing nodes. "
+        "If a pass-through with no transforms is genuinely what the instruction calls for, re-emit the same pipeline unchanged to confirm the deliberate no-transform intent — the confirmation will be accepted.",
+    ),
+    (
         r"interpretation_review_contract_unsatisfied|drops web-scrape raw field",
         "A cleanup node that drops web-scrape raw fields (field_mapper with select_only=true) must stage an interpretation review recording that decision before the pipeline is accepted.",
         "On the cleanup field_mapper node, add options.interpretation_requirements — a SIBLING of mapping, never inside it — containing one pending entry: "
@@ -738,6 +744,10 @@ _CLOSED_VALIDATION_ERROR_CODES: Final[tuple[str, ...]] = (
     # 'validation_error' placeholder while the actionable message was redacted.
     "interpretation_review_contract_unsatisfied",
     "file_sink_write_policy_invalid",
+    # ── Nodeless-revision guard (same closure; proposal 3cb6532e) ──────────
+    # A revision candidate netting zero transform nodes drew one coded nudge
+    # instead of silently shipping a passthrough with aspirational metadata.
+    "proposal_missing_requested_transforms",
 )
 
 

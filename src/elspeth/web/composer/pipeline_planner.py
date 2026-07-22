@@ -65,7 +65,7 @@ from elspeth.web.composer.progress import (
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import SetPipelineArgumentsModel
 from elspeth.web.composer.reviewed_source_authority import resolve_reviewed_source_authority
-from elspeth.web.composer.state import CompositionState, coalesce_reachability_facts
+from elspeth.web.composer.state import CompositionState, ValidationEntry, ValidationSummary, coalesce_reachability_facts
 from elspeth.web.composer.tools._common import RuntimePreflight, ToolContext, ToolResult
 from elspeth.web.composer.tools._dispatch import (
     execute_discovery_tool_with_context,
@@ -632,6 +632,38 @@ def _feedback_error_codes(feedback: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(errors, list | tuple):
         return ()
     return tuple(entry["error_code"] for entry in errors if isinstance(entry, Mapping) and isinstance(entry.get("error_code"), str))
+
+
+def _transform_node_count(pipeline: Mapping[str, Any]) -> int:
+    """Count transform/aggregation nodes in a planner-authored pipeline dict."""
+    nodes = pipeline.get("nodes")
+    if not isinstance(nodes, list):
+        return 0
+    return sum(1 for node in nodes if isinstance(node, dict) and node.get("node_type") in ("transform", "aggregation"))
+
+
+def _nodeless_revision_rejection(state: CompositionState) -> ToolResult:
+    """Synthesize the coded rejection for a nodeless revision candidate.
+
+    The entry rides the normal candidate-rejection path so repair budget,
+    hatch, and feedback projection all apply uniformly; the static guidance
+    lives in the closed catalogue under the code (tools.generation).
+    """
+    entry = ValidationEntry(
+        component="pipeline",
+        message=(
+            "Revision candidate contains no transform or aggregation nodes; "
+            "the revision instruction asked for processing this pipeline does not perform."
+        ),
+        severity="high",
+        error_code="proposal_missing_requested_transforms",
+    )
+    return ToolResult(
+        success=False,
+        updated_state=state,
+        validation=ValidationSummary(is_valid=False, errors=(entry,), warnings=(), suggestions=()),
+        affected_nodes=(),
+    )
 
 
 def _rejection_entries(result: ToolResult) -> tuple[Any, ...]:
@@ -1278,6 +1310,7 @@ async def _plan_pipeline_inner(
     composition_turns = 0
     repair_count = 0
     prose_nudges = 0
+    nodeless_nudge_given = False
     seen_discovery: set[tuple[str, str]] = set()
     seen_discovery_round = 0
 
@@ -1665,6 +1698,27 @@ async def _plan_pipeline_inner(
                 composer_model_version=audited_call.model_returned or audited_call.model_requested,
             )
             try:
+                if (
+                    not is_hatch_turn
+                    and not nodeless_nudge_given
+                    and surface in (PlannerSurface.GUIDED_STAGED, PlannerSurface.TUTORIAL_PROFILE)
+                    and supersedes_draft_hash is not None
+                    and _transform_node_count(finalized_pipeline) == 0
+                ):
+                    # Revision turn (a rejected draft is superseded — the
+                    # operator explicitly asked for changes) with zero
+                    # transform/aggregation nodes: tutorial op 1152d7e3
+                    # (2026-07-22) "converged" on exactly this shape after
+                    # blind repairs — a bare passthrough whose metadata still
+                    # claimed to scrape/summarize/clean. One coded nudge;
+                    # re-emitting the same nodeless pipeline is the escape
+                    # valve confirming deliberate pass-through intent (the
+                    # 9137456ad omit-valve pattern; bounded like
+                    # prose_nudges). Never fired on the hatch turn — the
+                    # hatch is one clean proposal or terminal, and a nudge
+                    # there guarantees failure.
+                    nodeless_nudge_given = True
+                    raise _PipelineCandidateRejected(_nodeless_revision_rejection(current_state))
                 accepted_plan = await _build_valid_pipeline_plan(
                     pipeline=finalized_pipeline,
                     current_state=current_state,

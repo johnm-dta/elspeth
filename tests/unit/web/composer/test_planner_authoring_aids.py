@@ -446,10 +446,10 @@ class TestExemplarDomainDisjointness:
             for placeholder in placeholders:
                 assert placeholder.startswith("row."), f"placeholder {{{{ {placeholder} }}}} must use the row namespace"
                 assert placeholder.removeprefix("row.") in guaranteed
-            # The short review-requirement form survives the domain rewrite.
-            requirements = llm["options"]["interpretation_requirements"]
-            assert all(set(row) == {"kind", "user_term", "draft"} for row in requirements)
-            assert all(row["user_term"] for row in requirements)
+            # Ownership doctrine (G3): backend-owned reviews are never
+            # hand-authored; this exemplar stages no planner-owned kinds, so
+            # the options carry no interpretation_requirements at all.
+            assert "interpretation_requirements" not in llm["options"]
 
     def test_payload_states_the_per_branch_shape_rule(self, tmp_path: Path) -> None:
         view, _snapshot = _profile_view(tmp_path)
@@ -664,3 +664,112 @@ class TestPromptShieldRules:
 
         rendered = "\n".join(build_planner_authoring_aids(view)["prompt_shield"]["rules"])
         assert PROMPT_SHIELD_USER_TERM in rendered
+
+
+class TestModelCustody:
+    """Suite run 1 G2 (8/8): never-invent had no sanctioned alternative."""
+
+    def test_model_custody_renders_the_live_profile_alias(self, tmp_path: Path) -> None:
+        from elspeth.web.composer.planner_authoring_aids import _usable_llm_profile_alias
+
+        view, _snapshot = _profile_view(tmp_path)
+        alias = _usable_llm_profile_alias(view)
+        assert alias is not None
+
+        rules = " ".join(build_planner_authoring_aids(view)["model_custody"]["rules"])
+        assert f"'{alias}'" in rules
+        assert "options.profile" in rules
+        assert "llm_model_choice" in rules
+        assert "list_models" in rules
+
+    def test_model_custody_without_a_profile_teaches_discovery_only(self) -> None:
+        # The trained fixture serves no llm operator profile: the section must
+        # still render and steer to list_models rather than invented slugs.
+        view, _snapshot = _trained_view()
+
+        rules = " ".join(build_planner_authoring_aids(view)["model_custody"]["rules"])
+        assert "No llm operator profile" in rules
+        assert "list_models" in rules
+
+    def test_llm_output_contract_blesses_one_string_and_multi_query_only(self) -> None:
+        view, _snapshot = _trained_view()
+
+        rules = " ".join(build_planner_authoring_aids(view)["llm_output_contract"]["rules"])
+        assert "response_field" in rules
+        assert "llm_response" in rules
+        assert "multi_query" in rules
+        assert "does NOT create row fields" in rules
+
+
+class TestReviewRegistry:
+    """Suite run 1 G5: the closed pipeline_decision registry never surfaced at authoring time."""
+
+    def test_registry_quotes_the_registered_terms_verbatim(self) -> None:
+        from elspeth.web.interpretation_state import REGISTERED_PIPELINE_DECISION_USER_TERMS
+
+        view, _snapshot = _trained_view()
+
+        section = build_planner_authoring_aids(view)["review_registry"]
+        assert section["registered_pipeline_decision_user_terms"] == sorted(REGISTERED_PIPELINE_DECISION_USER_TERMS)
+
+    def test_registry_rules_carry_ownership_economy_override_and_off_vocab_route(self) -> None:
+        view, _snapshot = _trained_view()
+
+        rules = " ".join(build_planner_authoring_aids(view)["review_registry"]["rules"])
+        # Closed-vocabulary + off-vocab route (G5).
+        assert "metadata.description" in rules
+        # Economy-override clause: an explicit user instruction does not waive
+        # a registered demanded review — the row RECORDS the decision.
+        assert "NEVER waived" in rules
+        assert "RECORDS" in rules
+        # Ownership: backend-owned kinds are never hand-authored (G3).
+        assert "auto-stage" in rules
+        assert "llm_prompt_template" in rules
+        assert "llm_model_choice" in rules
+
+
+class TestOwnershipAlignedExemplars:
+    """G3: exemplars must not hand-author backend-auto-staged review rows."""
+
+    def test_exemplar_authors_no_backend_owned_review_rows(self, tmp_path: Path) -> None:
+        view, _snapshot = _profile_view(tmp_path)
+        args = fork_coalesce_exemplar_args(view)
+        assert args is not None
+
+        for node in args["nodes"]:
+            requirements = node.get("options", {}).get("interpretation_requirements", [])
+            assert all(row["kind"] not in {"llm_prompt_template", "llm_model_choice"} for row in requirements), (
+                f"node {node['id']} hand-authors a backend-owned review row"
+            )
+
+
+class TestCoalesceVocabulary:
+    """Suite run 1 G7: policy/merge vocab + the inert-input convention."""
+
+    def test_rules_state_the_closed_policy_and_merge_vocabularies(self, tmp_path: Path) -> None:
+        view, _snapshot = _profile_view(tmp_path)
+
+        rules = " ".join(build_planner_authoring_aids(view)["fork_coalesce"]["rules"])
+        assert "require_all, quorum, best_effort, first" in rules
+        assert "union, nested, select" in rules
+        assert "best_effort" in rules
+
+    def test_exemplar_sets_coalesce_input_to_a_branch_connection(self, tmp_path: Path) -> None:
+        view, _snapshot = _profile_view(tmp_path)
+        args = fork_coalesce_exemplar_args(view)
+        assert args is not None
+
+        coalesce = next(node for node in args["nodes"] if node["node_type"] == "coalesce")
+        assert coalesce["input"] in set(coalesce["branches"].values())
+
+
+class TestNamedButMissingFile:
+    """Suite run 1 singleton: honesty must not lose to fabrication."""
+
+    def test_custody_rules_teach_the_discover_ask_decline_sequence(self) -> None:
+        view, _snapshot = _trained_view()
+
+        rules = " ".join(build_planner_authoring_aids(view)["source_custody"]["rules"])
+        assert "never uploaded" in rules
+        assert "list_blobs" in rules
+        assert "named gap" in rules

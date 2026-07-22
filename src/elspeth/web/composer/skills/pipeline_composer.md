@@ -368,12 +368,16 @@ LLM node preflight has four independent review checks:
   `prompt_template_parts`) is **rejected at staging** and the build dead-ends.
   Never stage a `vague_term` without setting `prompt_template_parts` on the same
   node in the same `set_pipeline`. See the wiring rule below.
-- Did I choose the `model` identifier? Stage `llm_model_choice`. Model choice is
-  authored by you any time the user did not name the exact slug — picking a
-  default, the cheapest, the latest, or any slug from `list_models` counts as
-  authored. The auto-stager guarantees the requirement exists when
-  `options.model` is set on an `llm` node; if you see the requirement is
-  already pending, do not skip its review tool.
+- How is the model bound? Prefer the operator profile: author `options.profile`
+  with the alias the authoring aids deliver for this deployment and OMIT
+  model/provider/credential options — operator policy supplies the concrete
+  model and a profile-bound node carries NO `llm_model_choice` card. Author
+  `options.model` ONLY with a slug `list_models` served this session (never
+  invented, never recalled); picking a default, the cheapest, the latest, or
+  any served slug counts as authored — the auto-stager creates the
+  `llm_model_choice` requirement when `options.model` is set, and YOU must
+  surface it. Omitting the model binding entirely is not compliance: an `llm`
+  node needs either `options.profile` or a discovery-served `options.model`.
 - Does public, internet-originated, externally controlled, or otherwise
   untrusted remote text flow into this LLM without an authorized prompt-injection
   shield? Stage `pipeline_decision` with
@@ -475,12 +479,13 @@ semantics you authored, not the whole prompt template.
 
 Prompt-template review is not a substitute for rubric review — and the
 `vague_term` one is yours. When the LLM node has a prompt you wrote AND authored
-judgement/rubric semantics, keep both entries in the
-`interpretation_requirements` list: one `vague_term` entry for the authored
-judgement/rubric definition and one `llm_prompt_template` entry for the raw
-prompt template. Stage, wire, and surface the `vague_term` card before stopping;
-the `llm_prompt_template` card is auto-staged and backend-surfaced — do not
-surface it.
+judgement/rubric semantics, author the `vague_term` entry in
+`interpretation_requirements` for the authored judgement/rubric definition; the
+`llm_prompt_template` requirement is backend auto-staged on the node — never
+hand-author its row. Stage, wire, and surface the `vague_term` card before
+stopping; the `llm_prompt_template` card is auto-staged and backend-surfaced —
+do not surface it. When repairing, carry planner-owned pending rows forward
+unchanged; auto-staged rows re-stage themselves.
 
 Wire the authored semantics into the prompt as a substitution slot — REQUIRED.
 The authored definition must occupy a substitution slot in the prompt, not be
@@ -523,11 +528,11 @@ id "rate_cool"):
 
 ```json
 {
-  "prompt_template": "Rate how <your draft definition of \"cool\"> the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Return JSON {\"score\": <int>, \"reason\": <str>}.",
+  "prompt_template": "Rate how <your draft definition of \"cool\"> the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Reply with the score followed by one short reason.",
   "prompt_template_parts": [
     {"kind": "text", "text": "Rate how "},
     {"kind": "interpretation_ref", "requirement_id": "cool_semantics_review"},
-    {"kind": "text", "text": " the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Return JSON {\"score\": <int>, \"reason\": <str>}."}
+    {"kind": "text", "text": " the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Reply with the score followed by one short reason."}
   ],
   "required_input_fields": ["content"],
   "interpretation_requirements": [
@@ -541,17 +546,6 @@ id "rate_cool"):
       "accepted_value": null,
       "accepted_artifact_hash": null,
       "resolved_prompt_template_hash": null
-    },
-    {
-      "id": "prompt_template_review:rate_cool",
-      "kind": "llm_prompt_template",
-      "user_term": "llm_prompt_template:rate_cool",
-      "status": "pending",
-      "draft": "<the exact raw prompt_template text above>",
-      "event_id": null,
-      "accepted_value": null,
-      "accepted_artifact_hash": null,
-      "resolved_prompt_template_hash": null
     }
   ]
 }
@@ -560,15 +554,20 @@ id "rate_cool"):
 Merge this review shape into options accepted by the selected plugin's live
 schema; the example deliberately contains no provider, model, credential, or
 secret-reference shape. This node has TWO review cards YOU surface —
-`vague_term` and `llm_model_choice` — plus the `llm_prompt_template` card, which
-the backend auto-stages and surfaces for you. The example
-`interpretation_requirements` list shows `vague_term` and
-`llm_prompt_template`; `llm_model_choice` is auto-staged from `options.model` by
-the mutation layer and you MUST surface it with `request_interpretation_review`.
-Do NOT call `request_interpretation_review(kind="llm_prompt_template")` — it is
+`vague_term` and (when you set `options.model`) `llm_model_choice` — plus the
+`llm_prompt_template` card, which the backend auto-stages and surfaces for you.
+Per the ownership matrix, the example authors ONLY the planner-owned
+`vague_term` row: the `llm_prompt_template` and `llm_model_choice` rows are
+backend auto-staged and never hand-authored. You MUST still surface the
+auto-staged `llm_model_choice` with `request_interpretation_review`; do NOT
+call `request_interpretation_review(kind="llm_prompt_template")` — it is
 rejected (backend-owned). The `1-10` scale here is fixed prompt wording covered
 by the (backend-surfaced) `llm_prompt_template` review — only the criterion
-*meaning* (`"cool"`) needs the wired `vague_term` slot.
+*meaning* (`"cool"`) needs the wired `vague_term` slot. The model's reply
+lands as one raw string in the node's single reply field; asking for a score
+and reason in the prompt does not create separate row fields — several named
+result fields exist only through a plugin mechanism whose live schema declares
+them, never through prompt wording.
 
 Do not omit the `vague_term` entry and expect the `llm_prompt_template` entry to
 cover it. The two reviews approve different things: the prompt-template review
@@ -635,12 +634,31 @@ behavior and configured options actually project or remove fields. If the user
 requested minimization, that request authorizes the cleanup; if the planner
 chooses the exact retention set, stage that row-shaping choice as a pending
 `pipeline_decision` on the cleanup node and surface the matching review.
+An explicit user instruction authorizes the cleanup but does NOT waive the
+registered `pipeline_decision` review row — the row RECORDS the retention
+decision for the audit trail either way. "The user already decided" is a
+reason to quote their decision in the draft, never a reason to omit the row.
 
 ## Assumption Review
 
 Every call carries `kind`. Use the review tool, not assistant prose, as the
 confirmation surface. When `interpretation_review_disabled=true`, still call the
 tool; opt-out skips the human card, not the audit row.
+
+### Review ownership — the authoritative per-kind matrix
+
+| Kind | Requirement row staged by | Review surfaced by | Rule |
+| --- | --- | --- | --- |
+| `vague_term` | YOU | YOU | Wire it into the prompt via a `prompt_template_parts` `interpretation_ref` slot in the same mutation. |
+| `invented_source` | YOU | YOU | Lives on `source.options.interpretation_requirements`; draft is the exact generated artifact. |
+| `pipeline_decision` | YOU | YOU | REGISTERED terms only. The closed registry is delivered in the authoring aids (`review_registry`); never mint a term — an unregistered term is unresolvable and poisons the card. A decision outside the registry is recorded in `metadata.description`, not as a review. |
+| `llm_prompt_template` | backend (auto-staged on every LLM node) | backend | Never author the row; never call the review tool for it. |
+| `llm_model_choice` | backend (auto-staged when `options.model` is set) | YOU | Never author the row. A profile-bound node (`options.profile`) has NO model-choice card at all. |
+
+A registered `pipeline_decision` demanded by policy or this skill is NEVER
+waived because the user's instruction already made the decision — the review
+row RECORDS that decision for the audit trail. User authorship changes the
+draft's provenance, not whether the row is staged.
 
 When a node or source has a pending `interpretation_requirements` entry, the
 state mutation that creates that component must use the correct list shape first.
@@ -691,7 +709,7 @@ even when there is only one requirement. Each requirement object must include
 | `kind="invented_source"` | You create source rows, URLs, or inline source content the user did not provide verbatim. | Bind the source first; use the exact generated content as `llm_draft`. |
 | `kind="llm_prompt_template"` | You author any LLM `prompt_template`. | `user_term="llm_prompt_template:<node_id>"`; `llm_draft` is the raw template. |
 | `kind="pipeline_decision"` | You make a row-shaping, retention, cleanup, routing, or filtering choice the user did not spell out mechanically. | Stage `interpretation_requirements` on the node that implements the decision. |
-| `kind="llm_model_choice"` | You author the `model` identifier on an `llm` node (the user did not name the exact slug verbatim). | `user_term="llm_model_choice:<node_id>"`; `llm_draft` is the exact `options.model` string. The mutation pipeline auto-stages this requirement when `options.model` is set; resolve it before stopping. |
+| `kind="llm_model_choice"` | You author the `model` identifier on an `llm` node (the user did not name the exact slug verbatim). | `user_term="llm_model_choice:<node_id>"`; `llm_draft` is the exact `options.model` string. The mutation pipeline auto-stages this requirement when `options.model` is set; resolve it before stopping. A profile-bound node (`options.profile`) has no model-choice card. |
 
 Data-minimization cleanup is a pipeline decision. The review belongs on the
 policy-visible transform that implements the cleanup, not on its upstream
@@ -761,7 +779,18 @@ non-terminal even when other review cards are present.
 
 ## Mechanical Repairs
 
-Use tool diagnostics first. These are common one-shot mappings:
+Use tool diagnostics first. Repair economics: with a small repair budget, a
+repair succeeds only as the minimal local edit — fix the exact NAMED field or
+component first and change nothing else. On a full-replacement candidate
+(`set_pipeline`), a plugin-options rejection can arrive alongside
+`no_source_configured` / `no_sinks_configured` riders: those riders are
+cascade artifacts of the same rejection — the source and sinks exist in your
+submitted arguments — so never respond by re-adding components that are
+already present or by restructuring the pipeline mid-repair. Repair the named
+defect, resubmit the same complete topology, and treat any redesign impulse as
+a signal you are outside the repair path.
+
+These are common one-shot mappings:
 
 | Symptom/code | Repair |
 | --- | --- |

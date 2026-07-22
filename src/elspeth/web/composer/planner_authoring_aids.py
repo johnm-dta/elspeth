@@ -41,6 +41,7 @@ from elspeth.web.interpretation_state import (
     PROMPT_SHIELD_AVAILABLE_DRAFT,
     PROMPT_SHIELD_USER_TERM,
     PROMPT_SHIELD_WARNING_DRAFT,
+    REGISTERED_PIPELINE_DECISION_USER_TERMS,
 )
 
 # The prompt never models a fabricated identifier — provenance is the lesson.
@@ -55,6 +56,13 @@ _SOURCE_CUSTODY_RULES: Final[tuple[str, ...]] = (
     "inline_blob.content must be the user's data verbatim, exactly as it "
     "appears in their message; custody records it against that message.",
     "Custody owns the storage binding: author schema.mode and on_validation_failure on a blob-bound source, never path or blob_ref.",
+    "A file the user NAMES but never uploaded, whose content is not in the "
+    "conversation, has NO legal binding: source paths must resolve to real "
+    "session-blob storage, so an invented path is always rejected. Discover "
+    "first (list_blobs / list_composer_blobs); if nothing matches, ask one "
+    "narrow upload/selection question — or, on a surface with no question "
+    "channel, decline with a named gap. Never fabricate a path, blob id, or "
+    "stand-in rows.",
 )
 
 _INLINE_EXEMPLAR_FILENAME: Final[str] = "stock_levels.csv"
@@ -76,7 +84,21 @@ _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
     "downstream consumer sets input to the coalesce id. Do not author "
     "on_success on a coalesce unless it routes directly to a sink.",
     "Give each branch transform its own output field (an llm node's response_field) so the union merge carries every branch's result on one row.",
-    "When a branch transform is an llm node, author its interpretation_requirements in the short form {kind, user_term, draft} — user_term is mandatory; a row without it is rejected. Omitting the whole block is also legal (required reviews auto-stage).",
+    "Do not author interpretation_requirements rows for llm_prompt_template "
+    "or llm_model_choice — required LLM reviews auto-stage on every llm "
+    "node. Author rows only for the planner-owned kinds (vague_term wired "
+    "via prompt_template_parts, registered pipeline_decision, "
+    "invented_source), each in the short form {kind, user_term, draft} with "
+    "user_term mandatory.",
+    "Coalesce policy and merge are the engine's closed vocabularies: policy "
+    "is one of require_all, quorum, best_effort, first; merge is one of "
+    "union, nested, select. Use best_effort when some branches may "
+    "legitimately produce no row for an id — it merges whichever branches "
+    "arrive, where require_all would drop the whole row.",
+    "A coalesce consumes ONLY the connections named in its branches values. "
+    "Its input field is required by the schema but is not a consuming "
+    "binding — set it to the first branch's arriving connection by "
+    "convention, never to a name nothing publishes.",
 )
 
 _FORK_EXEMPLAR_CONTENT: Final[str] = "ticket_id,body\nT-1001,Cannot log in since the update\nT-1002,Invoice totals look wrong\n"
@@ -109,6 +131,81 @@ def _prompt_shield_rules(*, shield_available: bool, untrusted_producers: tuple[s
         "prompt-injection exposure decision from the operator's review cards.",
         "Skip the row only when an authorized prompt-injection shield transform is already wired between the fetch step and the llm node.",
     ]
+
+
+def _model_custody_rules(profile_alias: str | None) -> list[str]:
+    """Model-provisioning custody with the sanctioned alternative rendered live.
+
+    Suite run 1 G2 (8/8 problems): the pack's never-invent-a-slug rule had no
+    sanctioned alternative — obeying it (omitting the model binding) was
+    validator-fatal while inventing a literal slug passed. The operator-profile
+    path is that alternative: ``options.profile`` binds the model through
+    operator policy and exempts the ``llm_model_choice`` review
+    (``interpretation_state.materialize_state_for_execution`` derives the
+    exemption from the profile binding). The live alias is rendered here so the
+    rule is actionable offline, not a demand for aliases the deployment does
+    not serve.
+    """
+    rules: list[str] = []
+    if profile_alias is not None:
+        rules.append(
+            f"This deployment serves the llm operator profile alias '{profile_alias}'. "
+            "Author llm nodes with options.profile set to that alias and OMIT "
+            "model/provider/credential options entirely: operator policy supplies "
+            "the concrete model, and a profile-bound node carries NO "
+            "llm_model_choice review card."
+        )
+    else:
+        rules.append(
+            "No llm operator profile is currently usable in this deployment: "
+            "bind a model only through a literal slug that list_models served "
+            "in THIS session."
+        )
+    rules.append(
+        "Author options.model ONLY with a slug served by a list_models call — "
+        "never invented, never recalled from training. A literal slug "
+        "auto-stages the llm_model_choice review, which must be surfaced and "
+        "resolved before the pipeline can run."
+    )
+    rules.append(
+        "Omitting the model binding entirely is not compliance — an llm node "
+        "needs either options.profile or a discovery-served options.model."
+    )
+    return rules
+
+
+_LLM_OUTPUT_CONTRACT_RULES: Final[tuple[str, ...]] = (
+    "An llm node writes the model's reply as ONE raw string into the field "
+    "named by options.response_field (default llm_response). Prompt text that "
+    "asks for JSON or named keys does NOT create row fields — nothing is "
+    "flattened out of the reply.",
+    "Downstream nodes may require only that response field (plus fields "
+    "passed through from the node's input). To obtain several named result "
+    "fields from one llm node, use the plugin's multi_query mechanism — its "
+    "schema declares the per-query output fields, and it is the ONLY blessed "
+    "multi-field shape.",
+    "If a prompt asks for structured JSON anyway, the JSON arrives as one "
+    "string in the response field; wire a schema-proven parser transform "
+    "when downstream nodes need its keys as row fields.",
+)
+
+
+_REVIEW_REGISTRY_RULES: Final[tuple[str, ...]] = (
+    "pipeline_decision user_term values are a CLOSED registry — choose ONLY "
+    "from registered_pipeline_decision_user_terms above. A minted term is "
+    "unresolvable and poisons its review card.",
+    "A decision outside the registry is not reviewable as a "
+    "pipeline_decision: record it in metadata.description instead — never "
+    "invent a new user_term for it.",
+    "A registered pipeline_decision demanded by policy or the pack is NEVER "
+    "waived because the user's instruction already made the decision — the "
+    "row RECORDS that decision for the audit trail. User authorship changes "
+    "the draft's provenance, not whether the row is staged.",
+    "Do not author rows for llm_prompt_template or llm_model_choice — "
+    "required LLM reviews auto-stage on every llm node. The planner-owned "
+    "kinds are vague_term (wired via prompt_template_parts), registered "
+    "pipeline_decision, and invented_source.",
+)
 
 
 def _usable_llm_profile_alias(catalog: PolicyCatalogView) -> str | None:
@@ -325,16 +422,13 @@ def fork_coalesce_exemplar_args(
                 "required_input_fields": ["ticket_id", "body"],
                 "response_field": response_field,
                 "schema": {"mode": "observed"},
-                # The short review-requirement form: id/status are synthesized
-                # at the boundary; user_term is MANDATORY (never author a
-                # requirement row without kind + user_term + draft).
-                "interpretation_requirements": [
-                    {
-                        "kind": "llm_prompt_template",
-                        "user_term": f"llm_prompt_template:{node_id}",
-                        "draft": question,
-                    }
-                ],
+                # Deliberately NO interpretation_requirements: the
+                # llm_prompt_template and llm_model_choice reviews are
+                # backend auto-staged on every llm node (G3 — hand-authoring
+                # them here taught planners the wrong ownership). Planner-owned
+                # kinds (vague_term, registered pipeline_decision,
+                # invented_source) are authored only when the build calls for
+                # them; this exemplar needs none.
             },
         }
 
@@ -429,7 +523,10 @@ def fork_coalesce_exemplar_args(
             {
                 "id": "merge_branches",
                 "node_type": "coalesce",
-                "input": "branches",
+                # input is schema-required but not a consuming binding for a
+                # coalesce (consumption is the branches values) — first
+                # branch's arriving connection, by convention.
+                "input": next(iter(coalesce_branches.values())),
                 "branches": coalesce_branches,
                 "policy": "require_all",
                 "merge": "union",
@@ -519,6 +616,17 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
             "rules": list(_FORK_COALESCE_RULES),
             "set_pipeline_exemplar": fork_coalesce,
         }
+    if "llm" in visible["transform"]:
+        aids["model_custody"] = {
+            "rules": _model_custody_rules(_usable_llm_profile_alias(catalog)),
+        }
+        aids["llm_output_contract"] = {"rules": list(_LLM_OUTPUT_CONTRACT_RULES)}
+    aids["review_registry"] = {
+        # Imported from interpretation_state so the taught vocabulary can
+        # never drift from the resolve-time registry (52322ebe1 discipline).
+        "registered_pipeline_decision_user_terms": sorted(REGISTERED_PIPELINE_DECISION_USER_TERMS),
+        "rules": list(_REVIEW_REGISTRY_RULES),
+    }
     visible_untrusted_producers = tuple(sorted(_UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS & visible["transform"]))
     if visible_untrusted_producers and "llm" in visible["transform"]:
         aids["prompt_shield"] = {

@@ -56,7 +56,10 @@ are the routing contract: a producer's `on_success`, `on_error`, `routes`, or
   its discovered schema declares.
 - [capability-node:gate] A `gate` evaluates `condition` and publishes through
   named `routes`. Conditional filtering and error routing are topology, not
-  assignment-transform emulation.
+  assignment-transform emulation. Condition expressions read row values ONLY
+  by subscripting the row namespace — `row['field']`; a bare field name is
+  not in scope and is rejected. `get_expression_grammar` is the full grammar
+  authority.
 - [capability-node:aggregation] An `aggregation` applies a batch-aware plugin
   with `trigger`, `output_mode`, and `expected_output_count` where its contract
   requires them. Row expansion is supported by an appropriate discovered
@@ -67,7 +70,14 @@ are the routing contract: a producer's `on_success`, `on_error`, `routes`, or
 - [capability-node:coalesce] A `coalesce` rejoins declared `branches` under its
   `policy`/`merge` semantics and publishes its merged rows under its own node
   id — a downstream consumer sets `input` to the coalesce id. Its optional
-  `on_success` may only name a sink (never another node's input).
+  `on_success` may only name a sink (never another node's input). `policy` and
+  `merge` are closed engine vocabularies: `policy` is one of `require_all`,
+  `quorum`, `best_effort`, `first`; `merge` is one of `union`, `nested`,
+  `select`. `best_effort` merges whichever branches arrive, where
+  `require_all` drops the row when any branch is missing. A coalesce consumes
+  ONLY the connections named in its `branches` values; its own `input` field
+  is schema-required but is not a consuming binding — set it to the first
+  branch's arriving connection by convention.
 
 Use `fork_to` for genuine fan-out and named branches for independent paths.
 Preserve multiple sources, multiple outputs, gates, queues, aggregations,
@@ -126,7 +136,12 @@ When downstream cleanup, sinks, mappings, or transforms need model-generated
 data, derive the model node's emitted and pass-through fields only from the
 selected policy-visible plugin's live schema and assistance. Prompt text and
 object-shaped prose do not create pipeline fields. Preserve the schema-proven
-outputs through cleanup rather than inventing keys.
+outputs through cleanup rather than inventing keys. By default a model
+transform lands its reply as one raw string in a single plugin-declared reply
+field and passes its input fields through unchanged; a prompt that requests
+JSON or named keys does not flatten anything out of the reply. Several typed
+named result fields from one model node exist only through a plugin mechanism
+whose live schema declares each output field.
 
 When an upstream plugin feeds a prompt that also needs an original source
 field, require that field only when the upstream schema guarantees it. The final

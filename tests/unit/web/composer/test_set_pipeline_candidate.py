@@ -2307,3 +2307,43 @@ def test_singular_source_prevalidation_carries_plugin_options_invalid(tmp_path: 
     lead = candidate.result.validation.errors[0]
     assert lead.component == "rejected_mutation"
     assert lead.error_code == "plugin_options_invalid"
+
+
+def test_unknown_llm_provider_is_a_coded_rejection_not_an_escape(tmp_path: Path) -> None:
+    # Pack pressure-suite run 2 (grader escape): provider 'anthropic' raised a
+    # RAW ValueError from llm get_config_model THROUGH the profile adapter in
+    # _prevalidate_transform_for_context — before the guarded prevalidation
+    # core whose own idiom catches exactly this ("Config model selection
+    # raised (e.g. unknown LLM provider) — surface it"). Tier-3 input must
+    # never escape the candidate boundary: planner path degraded it to the
+    # unrepairable CANDIDATE_CONSTRUCTION_ERROR; non-planner tool paths 500'd.
+    (tmp_path / "blobs").mkdir(exist_ok=True)
+    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path.write_text("a\n1\n")
+    args = _linear_args(tmp_path)
+    args["source"]["options"]["path"] = str(csv_path)
+    args["nodes"] = [
+        {
+            "id": "summarise",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "rows",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": {
+                "provider": "anthropic",
+                "model": "claude-x",
+                "prompt_template": "hi {{ row.a }}",
+                "schema": {"mode": "observed"},
+            },
+        }
+    ]
+    args["edges"] = []
+
+    candidate = build_set_pipeline_candidate(args, _empty_state(), _trained_context(data_dir=tmp_path))
+
+    assert candidate.acceptable is False
+    lead = candidate.result.validation.errors[0]
+    assert lead.component == "rejected_mutation"
+    assert lead.error_code == "plugin_options_invalid"
+    assert "Unknown LLM provider" in lead.message

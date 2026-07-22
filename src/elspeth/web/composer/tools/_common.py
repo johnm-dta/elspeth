@@ -1932,7 +1932,17 @@ def _prevalidate_transform_for_context(
         metadata=PipelineMetadata(),
         version=1,
     )
-    profile_validation = context.catalog.validate_composition_state(candidate)
+    try:
+        profile_validation = context.catalog.validate_composition_state(candidate)
+    except ValueError as exc:
+        # The profile adapter dispatches provider-specific config models
+        # (llm get_config_model) BEFORE the guarded prevalidation core — a
+        # Tier-3-authored unknown provider raised straight through the
+        # candidate boundary (pack pressure-suite run 2 grader escape;
+        # planner path degraded it to the unrepairable
+        # CANDIDATE_CONSTRUCTION_ERROR, non-planner tool paths 500'd).
+        # Mirror the core's own idiom: surface it as an options message.
+        return f"Invalid options for transform '{plugin_name}': {exc}"
     blocking = tuple(
         finding for finding in profile_validation.policy_findings if finding.stage in {"plugin_enablement", "operator_profile_options"}
     )

@@ -987,6 +987,54 @@ async def test_live_authoring_aids_ride_in_the_reviewed_context_user_message(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("surface", "profile"),
+    [
+        (PlannerSurface.GUIDED_STAGED, "ordinary"),
+        (PlannerSurface.TUTORIAL_PROFILE, "tutorial"),
+    ],
+)
+async def test_authoring_aids_reach_guided_staged_and_tutorial_surfaces(
+    tmp_path: Path,
+    tool_context: ToolContext,
+    surface: PlannerSurface,
+    profile: str,
+) -> None:
+    """The live aids ride in the planner user message on EVERY surface.
+
+    The guided-staged and tutorial planners enter through the same
+    ``_plan_pipeline_inner`` message assembly as freeform (their surface is a
+    ``plan_pipeline`` argument, not a different code path), so the digest and
+    worked exemplars must appear in their sole reviewed-context user message
+    under the guided step skill exactly as they do under the freeform skill —
+    and the payload must stay out of the (hash-pinned) step system text.
+    """
+    completion = _ScriptedCompletion(_response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})))
+
+    await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        surface=surface,
+        profile=profile,
+        rendered_skill=load_step_planner_skill(GuidedStep.STEP_3_TRANSFORMS),
+    )
+
+    request = completion.requests[0]
+    user_messages = [message for message in request["messages"] if message["role"] == "user"]
+    assert len(user_messages) == 1
+    payload = json.loads(user_messages[0]["content"])
+    full_catalog = create_catalog_service()
+    plugin_snapshot = PluginAvailabilitySnapshot.for_trained_operator(full_catalog)
+    expected = build_planner_authoring_aids(PolicyCatalogView.for_trained_operator(full_catalog, plugin_snapshot))
+    assert payload["authoring_aids"] == json.loads(canonical_json(expected))
+    assert "discovery_digest" in payload["authoring_aids"]
+    system_messages = [message for message in request["messages"] if message["role"] == "system"]
+    assert all("set_pipeline_exemplar" not in message["content"] for message in system_messages)
+    assert all('"authoring_aids"' not in message["content"] for message in system_messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("temperature", "seed", "expected"),
     [
         (None, None, {}),

@@ -484,7 +484,7 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     plugin_hint: str | None,
     blob_service: BlobServiceProtocol,
     session_id: UUID,
-) -> SourceResolved | None:
+) -> tuple[SourceResolved | None, SourceInspectionFacts] | None:
     """Build a source resolution from the newest uploaded blob for upload-hint chat.
 
     The frontend upload helper currently appends text like "I've uploaded
@@ -494,6 +494,11 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     bind the newest ready session blob through the same inspection prefill used
     by the visible form. The proposal custody boundary later resolves the
     masked ``blob:<id>`` sentinel authoritatively.
+
+    ``None`` means there is no applicable ready upload. A tuple with a source
+    means the inspected blob matches the selected plugin; a tuple whose source
+    is ``None`` preserves an incompatible ready blob's facts for an explicit
+    type-mismatch response.
     """
     uploaded_filename = _step_1_uploaded_input_filename(message)
     if plugin_hint is None or uploaded_filename is None:
@@ -508,7 +513,11 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     prefilled = build_step_1_source_prefill(plugin_hint, inspection_facts=inspection_facts)
     path = prefilled.get("path")
     if not isinstance(path, str):
-        return None
+        # A ready upload with incompatible inspected content is not the same
+        # thing as no upload. Preserve the facts so the chat boundary can
+        # acknowledge the file and report the type mismatch without asking a
+        # provider to infer whether bytes arrived.
+        return None, inspection_facts
     schema = prefilled.get("schema")
     options: dict[str, Any] = {"path": path}
     if isinstance(schema, Mapping):
@@ -516,13 +525,16 @@ async def _source_from_latest_uploaded_blob_for_step_1_chat(
     on_validation_failure = prefilled.get("on_validation_failure")
     if not isinstance(on_validation_failure, str) or not on_validation_failure:
         on_validation_failure = "discard"
-    return SourceResolved(
-        name="source",
-        plugin=plugin_hint,
-        options=options,
-        observed_columns=tuple(inspection_facts.observed_headers or ()),
-        sample_rows=(),
-        on_validation_failure=on_validation_failure,
+    return (
+        SourceResolved(
+            name="source",
+            plugin=plugin_hint,
+            options=options,
+            observed_columns=tuple(inspection_facts.observed_headers or ()),
+            sample_rows=(),
+            on_validation_failure=on_validation_failure,
+        ),
+        inspection_facts,
     )
 
 

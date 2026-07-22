@@ -546,27 +546,79 @@ async def post_guided_chat_schema8(
                 settings = request.app.state.settings
                 started_at = datetime.now(UTC)
                 async with _cancel_on_client_disconnect(request):
-                    provider_outcome = await provider_runner(
-                        session_id=session_id,
-                        user=user,
-                        step=frozen.guided.step,
-                        guided=frozen.guided,
-                        state=frozen.state,
-                        message=body.message,
-                        settings=settings,
-                        catalog=catalog,
-                        plugin_snapshot=plugin_snapshot,
-                        secret_service=request.app.state.scoped_secret_resolver,
-                        recorder=recorder,
-                        progress=progress_sink,
+                    uploaded_candidate = None
+                    if frozen.guided.step is GuidedStep.STEP_1_SOURCE and TurnType(frozen.current_turn["type"]) is TurnType.SCHEMA_FORM:
+                        uploaded_candidate = await guided_route._source_from_latest_uploaded_blob_for_step_1_chat(
+                            message=body.message,
+                            plugin_hint=guided_route._step_1_plugin_hint(frozen.guided),
+                            blob_service=request.app.state.blob_service,
+                            session_id=session_id,
+                        )
+                    uploaded_mismatch_facts = (
+                        uploaded_candidate[1] if uploaded_candidate is not None and uploaded_candidate[0] is None else None
                     )
-                    chat_result = provider_outcome.chat
-                    source_resolution = provider_outcome.resolution if type(provider_outcome) is Step1SourceResolvedResult else None
-                    sink_resolution = provider_outcome.sink if type(provider_outcome) is Step2SinkResolvedResult else None
-                    deferred_action = provider_outcome.action if type(provider_outcome) is GuidedStepDeferredIntentResult else None
-                    deferred_management_action = (
-                        provider_outcome.action if type(provider_outcome) is GuidedStepDeferredManagementResult else None
-                    )
+
+                    if uploaded_mismatch_facts is not None:
+                        filename = guided_route._step_1_uploaded_input_filename(body.message)
+                        if filename is None:  # pragma: no cover - upload helper contract
+                            raise AuditIntegrityError("uploaded mismatch facts have no upload-helper filename")
+                        source_kind_label = {
+                            "csv": "CSV",
+                            "json": "JSON",
+                            "jsonl": "JSON Lines",
+                            "text": "plain text",
+                            "unknown": "unknown",
+                        }[uploaded_mismatch_facts.source_kind]
+                        plugin_hint = guided_route._step_1_plugin_hint(frozen.guided)
+                        if plugin_hint is None:  # pragma: no cover - upload helper contract
+                            raise AuditIntegrityError("uploaded mismatch facts have no selected Step-1 plugin")
+                        selected_plugin_labels = {
+                            "csv": "CSV",
+                            "json": "JSON",
+                            "text": "Text",
+                        }
+                        selected_plugin_label = (
+                            selected_plugin_labels[plugin_hint]
+                            if plugin_hint in selected_plugin_labels
+                            else plugin_hint.replace("_", " ").title()
+                        )
+                        chat_result = StepChatResult(
+                            assistant_message=(
+                                f'I received "{filename}" and inspected it as {source_kind_label} content, '
+                                f"but the current source type is {selected_plugin_label}. I did not apply it; "
+                                "the file is still uploaded. Use a source configured for "
+                                f"{source_kind_label} content, or upload content that matches {selected_plugin_label}."
+                            ),
+                            status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                            latency_ms=max(0, int((datetime.now(UTC) - started_at).total_seconds() * 1000)),
+                            error_class="UploadedSourceTypeMismatch",
+                        )
+                        source_resolution = None
+                        sink_resolution = None
+                        deferred_action = None
+                        deferred_management_action = None
+                    else:
+                        provider_outcome = await provider_runner(
+                            session_id=session_id,
+                            user=user,
+                            step=frozen.guided.step,
+                            guided=frozen.guided,
+                            state=frozen.state,
+                            message=body.message,
+                            settings=settings,
+                            catalog=catalog,
+                            plugin_snapshot=plugin_snapshot,
+                            secret_service=request.app.state.scoped_secret_resolver,
+                            recorder=recorder,
+                            progress=progress_sink,
+                        )
+                        chat_result = provider_outcome.chat
+                        source_resolution = provider_outcome.resolution if type(provider_outcome) is Step1SourceResolvedResult else None
+                        sink_resolution = provider_outcome.sink if type(provider_outcome) is Step2SinkResolvedResult else None
+                        deferred_action = provider_outcome.action if type(provider_outcome) is GuidedStepDeferredIntentResult else None
+                        deferred_management_action = (
+                            provider_outcome.action if type(provider_outcome) is GuidedStepDeferredManagementResult else None
+                        )
                     if source_resolution is not None and TurnType(frozen.current_turn["type"]) is TurnType.SCHEMA_FORM:
                         source_resolution = None
                         chat_result = StepChatResult(
@@ -767,6 +819,7 @@ async def post_guided_chat_schema8(
                             in {
                                 "StepTransitionRejected",
                                 "InlineSourceNotApplied",
+                                "UploadedSourceTypeMismatch",
                                 "DeferredIntentActionShapeError",
                                 "DeferredIntentManagementActionShapeError",
                                 "DeferredIntentUnknown",
@@ -904,7 +957,11 @@ async def post_guided_chat_schema8(
                         event=ComposerProgressEvent(
                             phase="saving",
                             headline="I'm saving this guided turn.",
-                            evidence=("The provider response passed the guided transition checks.",),
+                            evidence=(
+                                ("The uploaded file was inspected and its source-type mismatch was preserved without provider work.")
+                                if uploaded_mismatch_facts is not None
+                                else "The provider response passed the guided transition checks.",
+                            ),
                             likely_next="ELSPETH will finish the atomic state and audit settlement.",
                         ),
                     )

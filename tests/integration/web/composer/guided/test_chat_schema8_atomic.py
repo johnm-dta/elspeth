@@ -432,6 +432,52 @@ def test_schema_form_source_resolution_is_advisory_without_blob_mutation_and_rep
     delete.assert_not_awaited()
 
 
+def test_schema_form_uploaded_source_type_mismatch_is_acknowledged_without_provider(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    schema_turn = _choose_source(composer_test_client, session_id, initial_turn, plugin="text")["next_turn"]
+    uploaded = asyncio.run(
+        composer_test_client.app.state.blob_service.create_blob(
+            UUID(session_id),
+            "MOCK_DATA.json",
+            b'[{"name":"alice","value":1}]\n',
+            "application/json",
+            created_by="user",
+        )
+    )
+
+    async def provider_must_not_run(**_kwargs: object) -> GuidedChatProviderOutcome:
+        raise AssertionError("uploaded source mismatch called provider")
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", provider_must_not_run, raising=False)
+
+    request_body = _chat_body(
+        schema_turn,
+        message='I\'ve uploaded "MOCK_DATA.json"; please use it as the pipeline input.',
+    )
+    response = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=request_body)
+
+    assert response.status_code == 200, response.json()
+    body = response.json()
+    assert body["assistant_message_kind"] == "synthetic_failure"
+    assert body["guided_session"]["chat_history"][-1]["synthetic_failure_reason"] == "not_applied"
+    assert 'I received "MOCK_DATA.json"' in body["assistant_message"]
+    assert "JSON" in body["assistant_message"]
+    assert "Text" in body["assistant_message"]
+    assert "still uploaded" in body["assistant_message"]
+    assert body["next_turn"]["turn_token"] == schema_turn["turn_token"]
+    assert body["next_turn"]["payload"] == schema_turn["payload"]
+    blobs = asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id)))
+    assert [blob.id for blob in blobs] == [uploaded.id]
+    replay = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=request_body)
+    assert replay.status_code == 200, replay.json()
+    assert replay.json() == body
+    assert _chat_operation_count(composer_test_client, session_id) == 1
+
+
 def test_same_operation_concurrent_callers_join_one_provider_result_outside_compose_lock(
     file_composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

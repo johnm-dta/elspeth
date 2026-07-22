@@ -29,6 +29,7 @@ from elspeth.contracts.types import (
 )
 from elspeth.core.canonical import canonical_json
 from elspeth.core.dag.coalesce_merge import merge_coalesce_schema
+from elspeth.core.dag.guarantees import walk_effective_guarantee_vote
 from elspeth.core.dag.models import (
     _NODE_ID_MAX_LENGTH,
     BranchInfo,
@@ -1055,6 +1056,17 @@ def build_execution_graph(
         # connection's producer.
         branch_to_schema: dict[str, SchemaConfig] = {}
 
+        # Per-branch schemas used SOLELY for the union guaranteed_fields merge.
+        # Unlike branch_to_schema (the branch producer's RAW output schema, used
+        # for typed-field/mode/audit merging), this carries each branch's
+        # PROPAGATION-WALKED effective guarantee so fields a pass-through branch
+        # inherits from upstream (e.g. source columns carried through an LLM)
+        # survive the union. Non-participating branches are skipped, mirroring
+        # the composer preview's _connection_propagation_vote
+        # (web/composer/state.py) so build-time and preview agree
+        # (elspeth-0b14977817).
+        guarantee_branch_schemas: dict[str, SchemaConfig] = {}
+
         coalesce_plan = coalesce_plans[CoalesceName(coal_config.name)]
         for branch_spec in coalesce_plan.branches:
             if branch_spec.branch_name not in coalesce_branch_plans:
@@ -1065,6 +1077,13 @@ def build_execution_graph(
             else:
                 producer_node = branch_plan.gate_node_id
             branch_to_schema[str(branch_plan.branch_name)] = _best_schema_config(producer_node)
+            vote = walk_effective_guarantee_vote(graph, producer_node, {})
+            if vote.participated:
+                guarantee_branch_schemas[str(branch_plan.branch_name)] = SchemaConfig(
+                    mode="observed",
+                    fields=None,
+                    guaranteed_fields=tuple(sorted(vote.fields)),
+                )
 
         # Update branch_info with schema information for runtime tracking of
         # lost branch fields. When a branch is diverted at runtime, the coalesce
@@ -1083,6 +1102,7 @@ def build_execution_graph(
             branch_order=tuple(coal_config.branches.keys()),
             select_branch=coal_config.select_branch,
             coalesce_id=str(coalesce_id),
+            guarantee_branch_schemas=guarantee_branch_schemas or None,
         )
         _assign_schema(coalesce_id, merged_schema)
 

@@ -262,6 +262,39 @@ class TestSourceCustodyExemplar:
             assert variant["source"]["on_validation_failure"]
 
 
+def _assert_operator_ruled_topology(args: dict[str, Any]) -> None:
+    """Structural invariants BOTH exemplar variants must satisfy.
+
+    Gate condition True / routes true,false -> fork / fork_to two branches;
+    one branch transform per fork branch; coalesce branches keyed by FORK
+    BRANCH NAME with values naming each branch's arriving connection;
+    require_all / union; no on_success on the coalesce; downstream consumes
+    the coalesce id and routes to the sink.
+    """
+    nodes = {node["id"]: node for node in args["nodes"]}
+    gates = [node for node in nodes.values() if node["node_type"] == "gate"]
+    coalesces = [node for node in nodes.values() if node["node_type"] == "coalesce"]
+    assert len(gates) == 1 and len(coalesces) == 1
+    gate, coalesce = gates[0], coalesces[0]
+    assert gate["condition"] == "True"
+    assert set(gate["routes"]) == {"true", "false"}
+    assert set(gate["routes"].values()) == {"fork"}
+    assert len(gate["fork_to"]) == 2
+    branch_nodes = [node for node in nodes.values() if node.get("input") in gate["fork_to"]]
+    assert len(branch_nodes) == 2
+    assert {node["input"] for node in branch_nodes} == set(gate["fork_to"])
+    assert all(node["node_type"] == "transform" for node in branch_nodes)
+    assert set(coalesce["branches"]) == set(gate["fork_to"])
+    assert set(coalesce["branches"].values()) == {node["on_success"] for node in branch_nodes}
+    assert coalesce["policy"] == "require_all"
+    assert coalesce["merge"] == "union"
+    assert "on_success" not in coalesce
+    # Downstream cleanup consumes the coalesce's own node id.
+    cleanup = next(node for node in nodes.values() if node.get("input") == coalesce["id"])
+    assert cleanup["node_type"] == "transform"
+    assert cleanup["on_success"] == args["outputs"][0]["sink_name"]
+
+
 class TestForkCoalesceExemplar:
     def test_fork_coalesce_exemplar_validates_under_the_live_profile_posture(self, tmp_path: Path) -> None:
         """The exact fork -> two-llm -> coalesce exemplar bytes must build."""
@@ -283,41 +316,72 @@ class TestForkCoalesceExemplar:
         args = fork_coalesce_exemplar_args(view)
         assert args is not None
 
+        _assert_operator_ruled_topology(args)
         nodes = {node["id"]: node for node in args["nodes"]}
-        gates = [node for node in nodes.values() if node["node_type"] == "gate"]
         llms = [node for node in nodes.values() if node.get("plugin") == "llm"]
-        coalesces = [node for node in nodes.values() if node["node_type"] == "coalesce"]
-
-        assert len(gates) == 1 and len(llms) == 2 and len(coalesces) == 1
-        gate = gates[0]
-        assert gate["condition"] == "True"
-        assert set(gate["routes"]) == {"true", "false"}
-        assert set(gate["routes"].values()) == {"fork"}
-        assert len(gate["fork_to"]) == 2
+        gate = next(node for node in nodes.values() if node["node_type"] == "gate")
+        assert len(llms) == 2
         # One llm per fork branch, each with its own prompt and output field.
         assert {llm["input"] for llm in llms} == set(gate["fork_to"])
         assert len({llm["options"]["prompt_template"] for llm in llms}) == 2
         assert len({llm["options"]["response_field"] for llm in llms}) == 2
         assert all("queries" not in llm["options"] for llm in llms)
-        coalesce = coalesces[0]
-        # Branch keys are the FORK BRANCH NAMES; values name the arriving
-        # connection after each branch's llm transform.
-        assert set(coalesce["branches"]) == set(gate["fork_to"])
-        assert set(coalesce["branches"].values()) == {llm["on_success"] for llm in llms}
-        assert coalesce["policy"] == "require_all"
-        assert coalesce["merge"] == "union"
-        assert "on_success" not in coalesce
-        # Downstream cleanup consumes the coalesce's own node id.
-        cleanup = next(node for node in nodes.values() if node.get("input") == coalesce["id"])
-        assert cleanup["node_type"] == "transform"
-        assert cleanup["on_success"] == args["outputs"][0]["sink_name"]
 
-    def test_fork_coalesce_exemplar_is_omitted_without_a_usable_llm_profile(self) -> None:
-        """No profile alias -> omit rather than render an invented identifier."""
+    def test_topology_exemplar_renders_and_validates_without_a_usable_llm_profile(self, tmp_path: Path) -> None:
+        """No usable llm profile -> the SAME topology with non-LLM branches.
+
+        Fork/gate/coalesce WIRING is pure topology, independent of LLMs — only
+        the branch contents need a profile. Gating the whole section on an llm
+        profile alias (as the module originally did) meant a deployment with no
+        visible LLM profile lost the topology teaching entirely, which is
+        exactly backwards. Branch transforms are drawn deterministically from
+        the policy-visible catalog: first two alphabetically whose only
+        required option is ``schema``.
+        """
+        view, _snapshot = _trained_view()
+        args = fork_coalesce_exemplar_args(view)
+        assert args is not None
+
+        _assert_operator_ruled_topology(args)
+        nodes = args["nodes"]
+        assert all(node.get("plugin") != "llm" for node in nodes)
+        rendered = json.dumps(args)
+        # Nothing llm-flavored may leak into the profile-less variant: no
+        # profile alias, no interpretation review rows (llm-node concern).
+        assert '"profile"' not in rendered
+        assert "interpretation_requirements" not in rendered
+        # Deterministic branch pick, recomputed here from the same posture:
+        # first two alphabetically that are non-LLM, non-batch-aware, and
+        # authorable with only the universal schema option.
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+        batch_aware = {cls.name for cls in get_shared_plugin_manager().get_transforms() if cls.is_batch_aware}
+        renderable = sorted(
+            plugin.name
+            for plugin in view.list_transforms()
+            if plugin.name != "llm"
+            and plugin.name not in batch_aware
+            and {field.name for field in plugin.config_fields if field.required} <= {"schema"}
+        )
+        gate = next(node for node in nodes if node["node_type"] == "gate")
+        branch_plugins = sorted(node["plugin"] for node in nodes if node.get("input") in gate["fork_to"])
+        assert branch_plugins == renderable[:2]
+        # The exact bytes the prompt carries must build under this posture.
+        (tmp_path / "outputs").mkdir(exist_ok=True)
+        content = args["source"]["inline_blob"]["content"]
+        context = _custody_context(tmp_path, content)
+        candidate = build_set_pipeline_candidate(args, _empty_state(), context)
+        rejection = None if candidate.acceptable else (candidate.result.data or {}).get("error")
+        assert candidate.acceptable is True, f"topology exemplar rejected: {rejection}"
+
+    def test_trained_posture_payload_carries_the_topology_exemplar(self) -> None:
+        """The aids payload renders fork_coalesce even with no llm profile."""
         view, _snapshot = _trained_view()
 
-        assert fork_coalesce_exemplar_args(view) is None
-        assert "fork_coalesce" not in build_planner_authoring_aids(view)
+        payload = build_planner_authoring_aids(view)
+
+        section = payload["fork_coalesce"]
+        assert section["set_pipeline_exemplar"] == fork_coalesce_exemplar_args(view)
 
     def test_payload_states_the_per_branch_shape_rule(self, tmp_path: Path) -> None:
         view, _snapshot = _profile_view(tmp_path)

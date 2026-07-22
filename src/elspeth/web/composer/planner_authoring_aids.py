@@ -42,17 +42,17 @@ _INLINE_EXEMPLAR_MIME: Final[str] = "text/csv"
 _INLINE_EXEMPLAR_CONTENT: Final[str] = "region,total\nnorth,412\nsouth,388\n"
 
 _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
-    "When the user asks for separate LLM nodes per branch (one model call per "
-    "aspect, compared side by side), use THIS shape — a gate fanning out to "
-    "one llm transform per branch, rejoined by a coalesce — not a queries map "
-    "on a single llm node.",
+    "When the user asks for separate per-branch processing compared side by "
+    "side (e.g. separate LLM nodes, one model call per aspect), use THIS "
+    "shape — a gate fanning out to one branch transform per branch, rejoined "
+    "by a coalesce — not a queries map on a single llm node.",
     "Key the coalesce branches map by FORK BRANCH NAME; each value names the "
     "connection arriving at the coalesce after that branch's transforms.",
     "A coalesce publishes its merged rows under its own node id — the "
     "downstream consumer sets input to the coalesce id. Do not author "
     "on_success on a coalesce unless it routes directly to a sink.",
-    "Give each branch's llm node its own response_field so the union merge carries both results on one row.",
-    "Author llm-node interpretation_requirements in the short form {kind, user_term, draft} exactly as the exemplar shows — user_term is mandatory; a row without it is rejected. Omitting the whole block is also legal (required reviews auto-stage).",
+    "Give each branch transform its own output field (an llm node's response_field) so the union merge carries every branch's result on one row.",
+    "When a branch transform is an llm node, author its interpretation_requirements in the short form {kind, user_term, draft} — user_term is mandatory; a row without it is rejected. Omitting the whole block is also legal (required reviews auto-stage).",
 )
 
 _FORK_EXEMPLAR_CONTENT: Final[str] = "color_name,hex\ncerulean,#2A52BE\nsaffron,#F4C430\n"
@@ -202,30 +202,61 @@ def source_custody_exemplar_args(
     }
 
 
+def _renderable_branch_plugins(transforms: list[PluginSummary]) -> list[str]:
+    """Non-LLM transforms authorable with only the universal ``schema`` option.
+
+    The profile-less exemplar variant needs branch transforms it can configure
+    generically: a plugin whose required options go beyond ``schema`` would
+    demand invented values, and a batch-aware plugin authored as
+    ``node_type='transform'`` needs the aggregation path (or extra row-mode
+    options) the exemplar cannot generically supply. Sorted so the pick is
+    deterministic per snapshot; plugin classes are static per process, so the
+    batch-aware sweep cannot drift within a memo entry's lifetime.
+    """
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+
+    batch_aware = frozenset(cls.name for cls in get_shared_plugin_manager().get_transforms() if cls.is_batch_aware)
+    return sorted(
+        plugin.name
+        for plugin in transforms
+        if plugin.name != "llm"
+        and plugin.name not in batch_aware
+        and {field.name for field in plugin.config_fields if field.required} <= {"schema"}
+    )
+
+
 def fork_coalesce_exemplar_args(
     catalog: PolicyCatalogView,
     *,
     visible: Mapping[str, frozenset[str]] | None = None,
+    summaries: Mapping[str, list[PluginSummary]] | None = None,
 ) -> dict[str, Any] | None:
-    """Complete ``set_pipeline`` args for the fork -> two-llm -> coalesce shape.
+    """Complete ``set_pipeline`` args for the fork -> branches -> coalesce shape.
 
     The operator-ruled A/B topology: a gate fans identical rows out to two
-    branches, each branch runs its own llm transform (own prompt, own
-    ``response_field``), a coalesce rejoins them under ``require_all``/
-    ``union``, one cleanup transform consumes the coalesce id, and a sink
-    receives the tidied rows. Returns ``None`` when the plugins it names or a
-    usable llm operator profile are not visible — an exemplar must never model
-    an invented identifier.
+    branches, each branch runs its own transform, a coalesce rejoins them
+    under ``require_all``/``union``, one cleanup transform consumes the
+    coalesce id, and a sink receives the tidied rows. The WIRING is pure
+    topology and renders regardless of LLM availability; only the branch
+    contents vary. With a usable llm operator profile the branches are two
+    llm transforms (own prompt, own ``response_field``, short-form
+    interpretation_requirements); without one the SAME topology renders with
+    two policy-visible non-LLM transforms picked deterministically (first two
+    alphabetically whose only required option is ``schema``; a single
+    candidate serves both branches under distinct node ids). Returns ``None``
+    only when the fixed plugins (csv/json/field_mapper) or every branch
+    candidate are policy-hidden — an exemplar must never model an invented
+    identifier.
     """
+    if summaries is None:
+        summaries = _plugin_summaries(catalog)
     if visible is None:
-        visible = _visible_plugin_names(catalog)
+        visible = _visible_plugin_names(catalog, summaries)
     if "csv" not in visible["source"] or "json" not in visible["sink"]:
         return None
-    if not {"llm", "field_mapper"} <= visible["transform"]:
+    if "field_mapper" not in visible["transform"]:
         return None
-    profile_alias = _usable_llm_profile_alias(catalog)
-    if profile_alias is None:
-        return None
+    profile_alias = _usable_llm_profile_alias(catalog) if "llm" in visible["transform"] else None
 
     def _branch_llm(node_id: str, branch: str, response_field: str, question: str) -> dict[str, Any]:
         return {
@@ -252,6 +283,65 @@ def fork_coalesce_exemplar_args(
                     }
                 ],
             },
+        }
+
+    if profile_alias is not None:
+        branch_nodes = [
+            _branch_llm(
+                "assess_tone",
+                "branch_a",
+                "tone",
+                "What is the emotional tone of the colour {{ row.color_name }} ({{ row.hex }})? Reply with one short phrase.",
+            ),
+            _branch_llm(
+                "assess_usage",
+                "branch_b",
+                "usage",
+                "Name one design usage for the colour {{ row.color_name }} ({{ row.hex }}). Reply with one short phrase.",
+            ),
+        ]
+        coalesce_branches = {"branch_a": "tone_done", "branch_b": "usage_done"}
+        tidy_mapping = {
+            "color_name": "color_name",
+            "hex": "hex",
+            "tone": "tone",
+            "usage": "usage",
+        }
+        metadata = {
+            "name": "Per-branch LLM assessment",
+            "description": "Fan rows out to one llm transform per branch, rejoin with a coalesce, tidy, and save.",
+        }
+    else:
+        branch_pool = _renderable_branch_plugins(summaries["transform"])
+        if not branch_pool:
+            return None
+        plugin_a = branch_pool[0]
+        plugin_b = branch_pool[1] if len(branch_pool) > 1 else branch_pool[0]
+        branch_nodes = [
+            {
+                "id": "process_branch_a",
+                "node_type": "transform",
+                "plugin": plugin_a,
+                "input": "branch_a",
+                "on_success": "branch_a_done",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            {
+                "id": "process_branch_b",
+                "node_type": "transform",
+                "plugin": plugin_b,
+                "input": "branch_b",
+                "on_success": "branch_b_done",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+        ]
+        coalesce_branches = {"branch_a": "branch_a_done", "branch_b": "branch_b_done"}
+        tidy_mapping = {"color_name": "color_name", "hex": "hex"}
+        metadata = {
+            "name": "Per-branch fan-out and rejoin",
+            "description": "Fan rows out to one transform per branch, rejoin with a coalesce, tidy, and save.",
         }
 
     return {
@@ -282,23 +372,12 @@ def fork_coalesce_exemplar_args(
                 "routes": {"true": "fork", "false": "fork"},
                 "fork_to": ["branch_a", "branch_b"],
             },
-            _branch_llm(
-                "assess_tone",
-                "branch_a",
-                "tone",
-                "What is the emotional tone of the colour {{ row.color_name }} ({{ row.hex }})? Reply with one short phrase.",
-            ),
-            _branch_llm(
-                "assess_usage",
-                "branch_b",
-                "usage",
-                "Name one design usage for the colour {{ row.color_name }} ({{ row.hex }}). Reply with one short phrase.",
-            ),
+            *branch_nodes,
             {
                 "id": "merge_branches",
                 "node_type": "coalesce",
                 "input": "branches",
-                "branches": {"branch_a": "tone_done", "branch_b": "usage_done"},
+                "branches": coalesce_branches,
                 "policy": "require_all",
                 "merge": "union",
                 "options": {"schema": {"mode": "observed"}},
@@ -312,12 +391,7 @@ def fork_coalesce_exemplar_args(
                 "on_error": "discard",
                 "options": {
                     "schema": {"mode": "observed"},
-                    "mapping": {
-                        "color_name": "color_name",
-                        "hex": "hex",
-                        "tone": "tone",
-                        "usage": "usage",
-                    },
+                    "mapping": tidy_mapping,
                     "select_only": True,
                 },
             },
@@ -337,10 +411,7 @@ def fork_coalesce_exemplar_args(
                 "on_write_failure": "discard",
             }
         ],
-        "metadata": {
-            "name": "Per-branch LLM assessment",
-            "description": "Fan rows out to one llm transform per branch, rejoin with a coalesce, tidy, and save.",
-        },
+        "metadata": metadata,
     }
 
 
@@ -389,7 +460,7 @@ def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
             "set_pipeline_exemplar_inline_blob": custody,
             "existing_blob_source_binding": custody_blob_variant["source"],
         }
-    fork_coalesce = fork_coalesce_exemplar_args(catalog, visible=visible)
+    fork_coalesce = fork_coalesce_exemplar_args(catalog, visible=visible, summaries=summaries)
     if fork_coalesce is not None:
         aids["fork_coalesce"] = {
             "rules": list(_FORK_COALESCE_RULES),

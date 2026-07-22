@@ -589,6 +589,21 @@ class ParityEnv:
                 )
                 if started.status_code != 200:
                     raise AssertionError(f"guided-staged {start_profile} start failed ({started.status_code}): {started.text}")
+            else:
+                # A ROOT INTENT keeps the finish-outputs transition on the
+                # provider planner path: a rootless 1x1 step-3 entry now
+                # server-synthesizes the discarded starting sketch with zero
+                # planner calls, so a rootless walk could never derive a
+                # transform-ful fixture graph from its sole planner call.
+                started = await client.post(
+                    f"/api/sessions/{session_id}/guided/start",
+                    json={
+                        "operation_id": str(uuid4()),
+                        "intent": f"Build the {fixture['class']} pipeline from the reviewed components.",
+                    },
+                )
+                if started.status_code != 200:
+                    raise AssertionError(f"guided-staged intent start failed ({started.status_code}): {started.text}")
 
             # Step 1 — review every source in canonical order.
             for index, (_name, spec) in enumerate(source_items):
@@ -633,6 +648,25 @@ class ParityEnv:
             surface_value = staged["composition_state"]["composer_meta"]["guided_session"]["active_proposal"]
             if surface_value is None:
                 raise AssertionError(f"guided-staged staged no active proposal for {fixture['class']}")
+
+            if start_profile == "tutorial":
+                # The rootless tutorial entry now stages the server-synthesized
+                # starting sketch (zero planner calls); the lesson pipeline
+                # arrives via the frozen-prompt REVISION — the real tutorial
+                # flow. The revision below is therefore the walk's sole
+                # planner call, consuming the scripted completion.
+                staged = await self._staged_respond(
+                    client,
+                    session_id,
+                    proposal_id=proposal["proposal_id"],
+                    draft_hash=proposal["draft_hash"],
+                    edited_values={"revision_instruction": f"Apply the tutorial lesson: build the {fixture['class']} pipeline."},
+                )
+                if staged["next_turn"]["type"] != "propose_pipeline":
+                    raise AssertionError(
+                        f"tutorial revision did not stage a proposal for {fixture['class']} (got {staged['next_turn']['type']!r})"
+                    )
+                proposal = staged["next_turn"]["payload"]
 
             # Step 3 → Step 4 — review wiring, then confirm (the sole commit).
             reviewed = await self._staged_respond(

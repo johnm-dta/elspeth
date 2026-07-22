@@ -573,9 +573,100 @@ class TestStep2IntraStep:
         _respond(client, session_id, chosen=["text"], custom_inputs=[])
         return _finish_review(client, session_id, "output")
 
+    @pytest.mark.parametrize("profile", ("live", "tutorial"))
+    def test_rootless_step_3_entry_synthesizes_the_sketch_without_a_provider_call(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        profile: str,
+    ) -> None:
+        """The discarded starting sketch is server-synthesized, not planned.
+
+        The step-2→3 auto-proposal on a rootless walk (no root intent, no
+        deferred intents, one reviewed source and output) is always the same
+        passthrough sketch, withheld from acceptance (supersedes_draft_hash
+        null) and discarded by design once the transforms instruction lands.
+        Tutorial final3 spent 222s of provider time producing it (op
+        424021cd). It must now seal server-side through the same canonical
+        final gate (prepare_pipeline_plan) with zero provider calls.
+        """
+        app = composer_test_client.app
+        session_id = _create_session(composer_test_client)
+        if profile == "tutorial":
+            started = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/start",
+                json={"profile": "tutorial", "operation_id": str(uuid4())},
+            )
+            assert started.status_code == 200, started.json()
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": _outputs_path(composer_test_client, f"sketch-{profile}.jsonl"),
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+            },
+        )
+        _respond(composer_test_client, session_id, chosen=["text"], custom_inputs=[])
+
+        monkeypatch.setattr(
+            ComposerServiceImpl,
+            "_compute_availability",
+            lambda _self: ComposerAvailability(
+                available=True,
+                provider="test",
+                model="test/guided-planner",
+                reason=None,
+            ),
+        )
+        app.state.composer_service = ComposerServiceImpl(
+            app.state.catalog_service,
+            app.state.settings.model_copy(update={"composer_model": "test/guided-planner"}),
+            sessions_service=app.state.session_service,
+            session_engine=app.state.session_engine,
+            secret_service=app.state.scoped_secret_resolver,
+            plugin_snapshot_factory=lambda user_id: app.state.plugin_snapshot_factory(UserIdentity(user_id=user_id, username=user_id)),
+            operator_profile_registry=app.state.operator_profile_registry,
+        )
+
+        async def poisoned_completion(**_kwargs: Any) -> _PlannerResponse:
+            raise AssertionError("the rootless starting sketch must never call the provider")
+
+        monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", poisoned_completion)
+
+        settled = _post_current_response(
+            composer_test_client,
+            session_id,
+            component_action={"action": "finish", "component_kind": "output"},
+        )
+
+        assert settled.status_code == 200, settled.json()
+        body = settled.json()
+        assert body["next_turn"]["type"] == "propose_pipeline"
+        with app.state.session_engine.connect() as conn:
+            proposal = conn.execute(
+                select(
+                    composition_proposals_table.c.composer_model_identifier,
+                    composition_proposals_table.c.composer_provider,
+                ).where(composition_proposals_table.c.session_id == session_id)
+            ).one()
+        assert proposal.composer_model_identifier == "composer-guided-passthrough-synthesis"
+        assert proposal.composer_provider == "server"
+        audit_messages = asyncio.run(app.state.session_service.get_messages(UUID(session_id), limit=None))
+        llm_audits = [
+            envelope for message in audit_messages for envelope in (message.tool_calls or ()) if envelope.get("_kind") == "llm_call_audit"
+        ]
+        assert llm_audits == []
+
     @pytest.mark.parametrize(
         ("profile", "expected_surface"),
-        (("live", "guided_staged"), ("tutorial", "tutorial_profile")),
+        (("live", "guided_staged"),),
     )
     @pytest.mark.parametrize(
         ("provider_outcome", "expected_status"),
@@ -597,12 +688,18 @@ class TestStep2IntraStep:
         import elspeth.web.composer.pipeline_planner as planner_module
 
         session_id = _create_session(composer_test_client)
-        if profile == "tutorial":
-            started = composer_test_client.post(
-                f"/api/sessions/{session_id}/guided/start",
-                json={"profile": "tutorial", "operation_id": str(uuid4())},
-            )
-            assert started.status_code == 200, started.json()
+        # A ROOT INTENT keeps the step-2→3 entry on the provider planner path:
+        # a rootless walk now server-synthesizes the starting sketch without a
+        # provider call (see test_rootless_step_3_entry_synthesizes_the_sketch),
+        # which would make this provider-outcome matrix unreachable.
+        started = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={
+                "operation_id": str(uuid4()),
+                "intent": "Build a pipeline that annotates each row before saving.",
+            },
+        )
+        assert started.status_code == 200, started.json()
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
         _respond(
@@ -705,6 +802,16 @@ class TestStep2IntraStep:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         session_id = _create_session(composer_test_client)
+        # Root intent keeps the step-2→3 entry on the provider planner path
+        # (rootless walks now server-synthesize the sketch without a call).
+        started = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={
+                "operation_id": str(uuid4()),
+                "intent": "Build a pipeline that annotates each row before saving.",
+            },
+        )
+        assert started.status_code == 200, started.json()
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
         _respond(

@@ -2400,6 +2400,118 @@ class ComposerServiceImpl:
 
         planner_surface = PlannerSurface.TUTORIAL_PROFILE if guided.profile == TUTORIAL_PROFILE else PlannerSurface.GUIDED_STAGED
         planner_profile = "tutorial" if planner_surface is PlannerSurface.TUTORIAL_PROFILE else "ordinary"
+        catalog_ids: Mapping[str, frozenset[str]] = {
+            "source": frozenset(item.name for item in policy_catalog.list_sources()),
+            "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
+            "sink": frozenset(item.name for item in policy_catalog.list_sinks()),
+        }
+        custody_config = PlannerCustodyConfig(
+            data_dir=self._data_dir,
+            session_engine=self._session_engine,
+            max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
+            secret_service=self._secret_service,
+            runtime_preflight=None,
+            write_fence=BlobGuidedOperationWriteFence(
+                session_id=operation_fence.session_id,
+                operation_id=operation_fence.operation_id,
+                lease_token=operation_fence.lease_token,
+                attempt=operation_fence.attempt,
+            ),
+        )
+
+        if (
+            correction_target is None
+            and supersedes_draft_hash is None
+            and guided.root_intent_message_id is None
+            and not guided.deferred_intents
+            and len(guided.source_order) == 1
+            and len(guided.output_order) == 1
+        ):
+            # The rootless step-2→3 starting sketch is ALWAYS the same
+            # pass-through (reviewed source → reviewed output, zero nodes),
+            # withheld from acceptance (supersedes_draft_hash null) and
+            # discarded by design once the transforms instruction arrives —
+            # tutorial final3 spent 222s of provider time producing it (op
+            # 424021cd). Seal it server-side through the same canonical final
+            # gate the recipe router uses: full candidate validation, custody,
+            # and proposal sealing, zero provider calls. Revisions, wire
+            # corrections, rooted intents, deferred-intent coverage, and
+            # plural source/output topologies keep the provider planner.
+            source = guided.reviewed_sources[guided.source_order[0]]
+            reviewed_output = guided.reviewed_outputs[guided.output_order[0]]
+            sketch_pipeline: dict[str, Any] = {
+                "sources": {
+                    source.name: {
+                        "plugin": source.plugin,
+                        "options": deep_thaw(source.options),
+                        "on_success": reviewed_output.name,
+                        "on_validation_failure": source.on_validation_failure,
+                    }
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": reviewed_output.name,
+                        "plugin": reviewed_output.plugin,
+                        "options": deep_thaw(reviewed_output.options),
+                        "on_write_failure": reviewed_output.on_write_failure,
+                    }
+                ],
+                "metadata": {
+                    "name": "Starting sketch",
+                    "description": (
+                        "Direct pass-through: the reviewed source feeds the reviewed output. "
+                        "Send the transforms instruction to shape processing."
+                    ),
+                },
+            }
+            synthesis_contract = canonical_json(
+                {
+                    "schema": "composer.guided-passthrough-synthesis.v1",
+                    "surface": planner_surface.value,
+                }
+            )
+            try:
+                plan = await prepare_pipeline_plan(
+                    pipeline=sketch_pipeline,
+                    current_state=current_state,
+                    reviewed_facts=reviewed_facts,
+                    reviewed_planner_context=reviewed_context,
+                    supersedes_draft_hash=None,
+                    surface=planner_surface,
+                    policy_catalog=policy_catalog,
+                    plugin_snapshot=plugin_snapshot,
+                    originating_message=originating_message,
+                    base=base,
+                    rendered_skill=synthesis_contract,
+                    tool_call_id=(
+                        "server-passthrough-"
+                        + stable_hash(
+                            {
+                                "schema": "composer.guided-passthrough-synthesis.v1",
+                                "session_id": str(operation_fence.session_id),
+                                "operation_id": str(operation_fence.operation_id),
+                            }
+                        )
+                    ),
+                    model_identifier="composer-guided-passthrough-synthesis",
+                    model_version="composer.guided-passthrough-synthesis.v1",
+                    provider="server",
+                    repair_count=0,
+                    timeout_seconds=self._timeout_seconds,
+                    custody_config=custody_config,
+                )
+            except PipelinePlannerError as exc:
+                _log_guided_planner_failure(
+                    exc,
+                    session_id=originating_message.session_id,
+                    operation_id=str(operation_fence.operation_id),
+                    surface=planner_surface.value,
+                )
+                raise
+            return plan, catalog_ids
+
         # Build the coroutine, then await inside a try so a typed planner failure
         # is logged with its code+rejection_codes before it re-raises to the
         # (signed) guided route. An ``async def`` runs nothing until awaited, so
@@ -2441,19 +2553,7 @@ class ComposerServiceImpl:
                 max_completion_tokens=self._settings.composer_planner_max_completion_tokens,
                 max_cumulative_provider_cost=self._settings.composer_planner_max_cumulative_provider_cost,
             ),
-            custody_config=PlannerCustodyConfig(
-                data_dir=self._data_dir,
-                session_engine=self._session_engine,
-                max_storage_per_session=self._settings.max_blob_storage_per_session_bytes,
-                secret_service=self._secret_service,
-                runtime_preflight=None,
-                write_fence=BlobGuidedOperationWriteFence(
-                    session_id=operation_fence.session_id,
-                    operation_id=operation_fence.operation_id,
-                    lease_token=operation_fence.lease_token,
-                    attempt=operation_fence.attempt,
-                ),
-            ),
+            custody_config=custody_config,
             lifecycle=self._planner_request_lifecycle(progress),
             recorder=recorder,
             candidate_finalizer=lambda candidate: bind_guided_reviewed_components(candidate, guided),
@@ -2468,11 +2568,6 @@ class ComposerServiceImpl:
                 surface=planner_surface.value,
             )
             raise
-        catalog_ids: Mapping[str, frozenset[str]] = {
-            "source": frozenset(item.name for item in policy_catalog.list_sources()),
-            "transform": frozenset(item.name for item in policy_catalog.list_transforms()),
-            "sink": frozenset(item.name for item in policy_catalog.list_sinks()),
-        }
         return plan, catalog_ids
 
     async def _persist_pipeline_planner_audit(

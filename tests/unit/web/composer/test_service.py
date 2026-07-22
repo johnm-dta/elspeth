@@ -112,6 +112,10 @@ async def test_guided_service_routes_step3_through_the_planner_only_capability_p
     output_id = "22222222-2222-4222-8222-222222222222"
     guided = GuidedSession(
         step=GuidedStep.STEP_3_TRANSFORMS,
+        # A root intent keeps this on the provider planner path: rootless 1x1
+        # step-3 entries now server-synthesize the starting sketch without a
+        # provider call, and this test asserts the provider prompt rendering.
+        root_intent_message_id="33333333-3333-4333-8333-333333333333",
         profile=profile,
         source_order=(source_id,),
         reviewed_sources={
@@ -202,6 +206,8 @@ async def test_actual_step3_staged_and_tutorial_adapters_render_identical_provid
     output_id = "22222222-2222-4222-8222-222222222222"
     ordinary = GuidedSession(
         step=GuidedStep.STEP_3_TRANSFORMS,
+        # Root intent: keep both adapters on the provider path (see above).
+        root_intent_message_id="33333333-3333-4333-8333-333333333333",
         profile=EMPTY_PROFILE,
         source_order=(source_id,),
         reviewed_sources={

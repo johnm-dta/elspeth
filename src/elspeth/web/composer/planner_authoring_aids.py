@@ -52,6 +52,7 @@ _FORK_COALESCE_RULES: Final[tuple[str, ...]] = (
     "downstream consumer sets input to the coalesce id. Do not author "
     "on_success on a coalesce unless it routes directly to a sink.",
     "Give each branch's llm node its own response_field so the union merge carries both results on one row.",
+    "Author llm-node interpretation_requirements in the short form {kind, user_term, draft} exactly as the exemplar shows — user_term is mandatory; a row without it is rejected. Omitting the whole block is also legal (required reviews auto-stage).",
 )
 
 _FORK_EXEMPLAR_CONTENT: Final[str] = "color_name,hex\ncerulean,#2A52BE\nsaffron,#F4C430\n"
@@ -240,6 +241,16 @@ def fork_coalesce_exemplar_args(
                 "required_input_fields": ["color_name", "hex"],
                 "response_field": response_field,
                 "schema": {"mode": "observed"},
+                # The short review-requirement form: id/status are synthesized
+                # at the boundary; user_term is MANDATORY (never author a
+                # requirement row without kind + user_term + draft).
+                "interpretation_requirements": [
+                    {
+                        "kind": "llm_prompt_template",
+                        "user_term": f"llm_prompt_template:{node_id}",
+                        "draft": question,
+                    }
+                ],
             },
         }
 

@@ -69,6 +69,7 @@ from elspeth.web.composer.tools._dispatch import (
     execute_discovery_tool_with_context,
     get_tool_definitions,
 )
+from elspeth.web.composer.tools.generation import explain_validation_code
 from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_schema
 from elspeth.web.composer.tools.sessions import build_set_pipeline_candidate
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
@@ -535,21 +536,37 @@ def _feedback_error_codes(feedback: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _allowlisted_candidate_feedback(result: ToolResult) -> dict[str, Any]:
-    """Project only structured validation fields already safe for tool output."""
+    """Project only structured validation fields already safe for tool output.
+
+    Raw validation messages are withheld — they can quote plugin names, option
+    values, or row content. Each closed ``error_code`` is enriched with the
+    static ``(explanation, suggested_fix)`` the ``explain_validation_error``
+    tool would return (the single source of truth lives in
+    ``tools.generation``), so the repair turn carries the fix a bare code
+    cannot — e.g. "there is no 'fork' node_type; fork with a gate", or the
+    registered pipeline-decision kinds. The enrichment text is a public
+    constant, never per-request data, so it does not re-open the message
+    boundary this allowlist protects. Codes with no catalogue entry stay bare.
+    """
     validation = result.validation
+    errors: list[dict[str, Any]] = []
+    for entry in validation.errors:
+        code = entry.error_code or "validation_error"
+        projected: dict[str, Any] = {
+            "component": entry.component,
+            "severity": entry.severity,
+            "error_code": code,
+            "error_class": "ValidationError",
+        }
+        guidance = explain_validation_code(code)
+        if guidance is not None:
+            projected["explanation"], projected["suggested_fix"] = guidance
+        errors.append(projected)
     return {
         "success": False,
         "validation": {
             "is_valid": validation.is_valid,
-            "errors": [
-                {
-                    "component": entry.component,
-                    "severity": entry.severity,
-                    "error_code": entry.error_code or "validation_error",
-                    "error_class": "ValidationError",
-                }
-                for entry in validation.errors
-            ],
+            "errors": errors,
         },
     }
 

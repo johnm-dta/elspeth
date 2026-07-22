@@ -516,6 +516,34 @@ def _augment_with_expected_hint(fix: str, error_text: str) -> str:
     return f"{fix} {hint}"
 
 
+def explain_validation_code(code: str) -> tuple[str, str] | None:
+    """Resolve a closed validation ``error_code`` to ``(explanation, suggested_fix)``.
+
+    The one-shot pipeline planner's repair feedback strips raw validation
+    messages before returning a rejection to the model — a redaction boundary,
+    since a raw message can quote plugin names, option values, or row content
+    (see ``pipeline_planner._allowlisted_candidate_feedback``). The closed
+    ``error_code`` is the only signal that survives. The "Closed structural
+    node-shape codes" entries in :data:`_VALIDATION_ERROR_PATTERNS` deliberately
+    embed those codes as regex alternations precisely so the *code alone*
+    resolves to the same guidance the ``explain_validation_error`` tool returns
+    for the full message — this accessor is what lets the planner feedback carry
+    that fix (e.g. "there is no 'fork' node_type; fork with a gate") without
+    re-opening the message boundary.
+
+    Returns ``None`` when no pattern matches, so callers attach nothing rather
+    than a misleading generic. The ``_augment_with_expected_hint`` span is
+    intentionally NOT applied: there is no error_text to mine an ``Expected …``
+    hint from — only the bare code.
+    """
+    if type(code) is not str or not code:
+        return None
+    for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
+        if re.search(pattern, code):
+            return explanation, fix
+    return None
+
+
 def _execute_explain_validation_error(
     args: dict[str, Any],
     state: CompositionState,

@@ -9649,6 +9649,66 @@ class TestExplainValidationError:
         assert "Other noise" not in result.data["suggested_fix"]
 
 
+class TestExplainValidationCode:
+    """``explain_validation_code`` resolves a bare closed code to its guidance.
+
+    The one-shot planner's repair feedback strips validation messages to the
+    closed ``error_code`` (redaction boundary), so the node-shape codes must
+    resolve to the SAME catalogue guidance ``explain_validation_error`` returns
+    for the full message. First-match ordering over message-oriented regexes is
+    load-bearing here — these cases prove each code lands on its intended entry
+    and no earlier pattern eagerly mis-matches.
+    """
+
+    def test_unknown_node_type_teaches_fork_via_gate(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        resolved = explain_validation_code("unknown_node_type")
+        assert resolved is not None
+        explanation, fix = resolved
+        assert "no 'fork' node_type" in explanation
+        assert "GATE" in fix and "fork_to" in fix
+
+    def test_coalesce_on_success_must_be_sink_names_sink(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        resolved = explain_validation_code("coalesce_on_success_must_be_sink")
+        assert resolved is not None
+        explanation, fix = resolved
+        assert "sink" in explanation.lower()
+        assert "sink" in fix.lower()
+
+    def test_coalesce_missing_policy_names_policy_and_merge(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        resolved = explain_validation_code("coalesce_missing_policy")
+        assert resolved is not None
+        _explanation, fix = resolved
+        assert "policy=" in fix and "merge=" in fix
+
+    def test_pipeline_decision_unregistered_lists_registered_kinds(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        resolved = explain_validation_code("pipeline_decision_unregistered")
+        assert resolved is not None
+        _explanation, fix = resolved
+        # Naming the registered vocabulary is the whole point — an invented
+        # decision term can never be reviewed, so the fix must enumerate the
+        # kinds the planner may actually use.
+        assert "drop_raw_html_fields" in fix
+        assert "web_scrape_http_identity" in fix
+        assert "prompt_injection_shield_recommendation" in fix
+
+    def test_unmatched_code_returns_none(self) -> None:
+        from elspeth.web.composer.tools.generation import explain_validation_code
+
+        # The generic fallback code and policy-denial codes carry no catalogue
+        # entry — callers must attach nothing rather than a misleading generic.
+        assert explain_validation_code("validation_error") is None
+        assert explain_validation_code("plugin_policy_denied") is None
+        assert explain_validation_code("") is None
+
+
 # ---------------------------------------------------------------------------
 # list_models tool tests
 # ---------------------------------------------------------------------------

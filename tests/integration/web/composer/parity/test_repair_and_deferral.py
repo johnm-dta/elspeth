@@ -218,7 +218,14 @@ def _assert_allowlisted_feedback_shape(feedback: dict[str, Any], *, error_class:
     assert validation["is_valid"] is False
     assert validation["errors"], "expected at least one structured error"
     for entry in validation["errors"]:
-        assert set(entry) == {"component", "severity", "error_code", "error_class"}, entry
+        # The four structured fields are always present. A closed error_code may
+        # additionally carry the STATIC (explanation, suggested_fix) catalogue
+        # text keyed by the code (tools.generation.explain_validation_code) — a
+        # public constant, never per-request data — so the redaction-safe
+        # allowlist widens by exactly those two paired keys and nothing else.
+        assert {"component", "severity", "error_code", "error_class"} <= set(entry), entry
+        assert set(entry) <= {"component", "severity", "error_code", "error_class", "explanation", "suggested_fix"}, entry
+        assert ("explanation" in entry) == ("suggested_fix" in entry), entry
         assert entry["error_class"] == error_class
     # No provider prose, plugin name, or option value may ride the feedback.
     blob = json.dumps(feedback)

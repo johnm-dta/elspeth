@@ -16,7 +16,8 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -44,12 +45,13 @@ from elspeth.web.composer.pipeline_planner import (
     PlannerModelConfig,
     PlannerOriginatingMessage,
     PlannerRequestLifecycle,
+    _allowlisted_candidate_feedback,
     plan_pipeline,
     planner_tool_definitions,
 )
 from elspeth.web.composer.pipeline_proposal import AbsentBase, PipelineProposal, PlannerSurface
 from elspeth.web.composer.prompts import build_system_prompt
-from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.composer.tools.schema_contract import canonical_set_pipeline_schema
 from elspeth.web.dependencies import create_catalog_service
@@ -930,6 +932,65 @@ async def test_missing_source_candidate_fails_closed_before_full_candidate_is_ac
     assert feedback["validation"]["is_valid"] is False
     assert any(error["component"] == "source" for error in feedback["validation"]["errors"])
     assert all(error["error_class"] == "ValidationError" for error in feedback["validation"]["errors"])
+
+
+def test_allowlisted_candidate_feedback_enriches_node_shape_codes() -> None:
+    """A rejected candidate's bare closed codes carry their fix guidance.
+
+    The repair feedback strips raw validation messages (they can quote plugin
+    names, option values, or row content), so a bare ``unknown_node_type`` gave
+    the planner no way to learn that forking is a gate, not a node_type — it
+    re-emitted ``node_type='fork'`` until its budget exhausted. Each closed code
+    now carries the static catalogue ``explanation``/``suggested_fix``, while the
+    raw message stays withheld and ``error_code`` (the signal
+    ``_feedback_error_codes`` reads) is preserved. A code with no catalogue entry
+    stays bare.
+    """
+    summary = ValidationSummary(
+        is_valid=False,
+        errors=(
+            ValidationEntry(
+                component="node:fork_ab",
+                message="unknown node_type 'fork' RAW_MESSAGE_CANARY quoting plugin/rows",
+                severity="error",
+                error_code="unknown_node_type",
+            ),
+            ValidationEntry(
+                component="node:reconcile",
+                message="RAW_MESSAGE_CANARY",
+                severity="error",
+                error_code="coalesce_on_success_must_be_sink",
+            ),
+            ValidationEntry(
+                component="pipeline",
+                message="RAW_MESSAGE_CANARY",
+                severity="error",
+                error_code=None,
+            ),
+        ),
+    )
+
+    feedback = _allowlisted_candidate_feedback(cast(Any, SimpleNamespace(validation=summary)))
+
+    assert feedback["success"] is False
+    assert feedback["validation"]["is_valid"] is False
+    entries = feedback["validation"]["errors"]
+
+    fork_entry = next(e for e in entries if e["error_code"] == "unknown_node_type")
+    assert "no 'fork' node_type" in fork_entry["explanation"]
+    assert "GATE" in fork_entry["suggested_fix"] and "fork_to" in fork_entry["suggested_fix"]
+
+    coalesce_entry = next(e for e in entries if e["error_code"] == "coalesce_on_success_must_be_sink")
+    assert "sink" in coalesce_entry["suggested_fix"].lower()
+
+    # A code with no catalogue entry falls back to the bare structured shape.
+    bare_entry = next(e for e in entries if e["error_code"] == "validation_error")
+    assert set(bare_entry) == {"component", "severity", "error_code", "error_class"}
+
+    # Raw messages must never ride the redaction-safe feedback, and error_class
+    # / error_code stay intact for downstream consumers.
+    assert "RAW_MESSAGE_CANARY" not in json.dumps(feedback)
+    assert all(e["error_class"] == "ValidationError" for e in entries)
 
 
 @pytest.mark.asyncio

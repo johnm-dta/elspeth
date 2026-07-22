@@ -4,93 +4,81 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## 0.7.1 - 2026-07-14 (Composer reliability and structural queue authoring)
+## 0.7.1 - 2026-07-23 (Recoverable effects and Composer parity)
 
-This release makes complex pipelines easier to author and the web Composer
-safer to operate. Structural queues are now first-class Composer nodes, so
-multiple upstream routes can feed one downstream step without merging their
-records. Guided/freeform transitions, run inspection, and the empty-state
-guidance have also been tightened around the way operators use the Composer in
-practice. It also adds the supported AWS ECS deployment profile for running
-the web service on Fargate with Aurora PostgreSQL, EFS, S3, Bedrock, Cognito,
-CloudWatch, and X-Ray integrations.
+0.7.1 makes both pipeline publication and web authoring recoverable. It adds a
+durable external-effect protocol for built-in sinks and audit exports, closes
+the largest guided/freeform Composer capability gaps for complex DAGs, and adds
+the supported AWS ECS deployment profile. The notes below intentionally cover
+only release-level changes and critical correctness or security fixes.
 
-The 0.7.1 candidate advances `SESSION_SCHEMA_EPOCH` from 26 to 30: the
-account-wide freeform-introduction preference (27), shared SQLite/PostgreSQL
-schema-identity proof (28), guided schema 8 with durable operation fencing
-(29), and the closed `quota_exceeded` terminal failure code used for stable
-HTTP 413 fork replay (30). It advances the Landscape audit schema from
-`SQLITE_SCHEMA_EPOCH` 22 to 28: web plugin-policy evidence (23), run-scoped
-token ownership (24), artifact idempotency (25), durable sink effects (26),
-durable coalesce receipts (27), and per-member failsink-to-primary provenance
-(28). ELSPETH is pre-1.0, so predecessor session and Landscape stores are not
-migrated in place: archive or export required evidence, stop and uninstall the
-old service, recreate stale databases, then reinstall this version. Database
-restore and code downgrade are not supported repair paths across this cutover;
-keep service drained and repair the current release forward. Old code must
-never open recreated epoch-30 session or epoch-28 Landscape stores.
+**Breaking pre-1.0 schema cutover:** `SESSION_SCHEMA_EPOCH` advances from 26
+to 35, guided checkpoints advance from schema 7 to 10, and Landscape
+`SQLITE_SCHEMA_EPOCH` advances from 22 to 29. ELSPETH does not migrate either
+predecessor database in place before 1.0. Archive or export required evidence,
+stop the old service, recreate stale session and Landscape stores, then install
+0.7.1. Do not roll older code back over the recreated databases; keep the
+service drained and repair this release forward.
 
-### Added
+### Major changes
 
-- **First-class structural queues in the Composer** — freeform mutation tools,
-  Composer validation, the graph, and type badges now share one queue contract.
-  A queue accepts records from multiple upstream routes, keeps them separate,
-  and feeds exactly one ordinary downstream node.
-- **A dismissible freeform pipeline primer** — the empty Composer now explains
-  sources, transforms, sinks, gates, forks, coalesces, aggregates, queues, and
-  expands in operator language before asking for an outcome. Dismissal is
-  stored in the user's Composer preferences.
-- **AWS ECS runtime support** — the lean container profile, validate-only
-  startup, deployment doctor, readiness endpoint, PostgreSQL Landscape store,
-  task-role S3 source and sink, Bedrock provider, Cognito authorization-origin
-  handling, and CloudWatch/X-Ray operator telemetry form one documented Fargate
-  deployment path. The [AWS ECS deployment runbook](docs/runbooks/aws-ecs-deployment.md)
-  covers rollout, rollback, evidence capture, and cleanup.
-- **Portable web plugin policy controls** — web catalog, Composer, recipes,
-  imports, validation, execution, and delayed exports now share one
-  principal-bound plugin snapshot. Operator profiles can expose Azure or AWS
-  prompt/content controls without placing private provider configuration in
-  authored pipeline state or audit receipts.
-- **Text pipeline endpoints** — text joins CSV and JSON as a supported source
-  and sink format, including atomic sink publication and rollback-safe output
-  handling.
+- **Durable, replay-safe external effects** — built-in file, object, database,
+  Dataverse, and Chroma sinks now reserve and persist an immutable publication
+  plan before I/O, fence the active worker, and reconcile uncertain outcomes
+  before retrying. Audit exports use the same effect coordinator and sealed
+  snapshots. The protocol prevents a crash or lost response from silently
+  duplicating publication; an unprovable result remains explicitly blocked.
+- **Guided/freeform Composer parity for complex DAGs** — guided authoring can
+  build and revise plural components, structural queues, gates, forks,
+  coalesces, and deferred intent through the same canonical proposal contract
+  used by freeform authoring. A candidate remains separate from committed state
+  until review and wire confirmation, and closed rejection codes feed bounded,
+  auditable repair rather than silent replanning.
+- **Durable Composer operations** — guided planning, start admission, failed
+  operation evidence, fork replay, and proposal confirmation are persisted and
+  fenced. Competing mutations receive a fast conflict, stale responses settle
+  without overwriting newer state, and every planner attempt records its final
+  disposition.
+- **Supported AWS ECS runtime profile** — the release adds a lean Fargate web
+  image, validate-only startup and deployment doctor, Aurora PostgreSQL, EFS,
+  task-role S3 access, Bedrock provider and guardrails, Cognito authorization
+  code with PKCE, plus CloudWatch and X-Ray telemetry. See the
+  [AWS ECS deployment runbook](docs/runbooks/aws-ecs-deployment.md).
+- **Principal-bound web plugin policy** — catalog, Composer, import,
+  validation, execution, and delayed export now use one auditable plugin-policy
+  snapshot. Operator profiles expose approved Azure or AWS model controls
+  without writing private provider bindings into pipeline state.
+- **First-class structural queue and text endpoints** — queues can fan multiple
+  upstream routes into one downstream node without merging records, while text
+  joins CSV and JSON as a supported source and atomic sink format.
 
-### Changed
+### Critical fixes
 
-- **YAML import has a clearer preflight and upload-binding flow** — the import
-  surface checks YAML structure before submission, previews component counts,
-  and lets operators bind file-based source paths to uploaded blobs. Replacing
-  a pipeline preserves the prior version in history, and imported LLM
-  pipelines surface their interpretation reviews before execution.
-- **Guided and freeform mode transitions are explicit and recoverable** — a
-  worked freeform session can start a fresh guided wizard, tutorial exit leads
-  cleanly to freeform, completed guided sessions can be reopened, and guided
-  completion keeps validation visible before a run.
-- **Composer inspection is clearer** — run history uses stable run numbers,
-  timestamps, and statuses; output previews share horizontally scrollable
-  table and structured-JSON components; server-side paths no longer appear as
-  user-facing output labels; and theme controls are available in Composer
-  preferences.
-- **AWS deployments use an explicit compatibility boundary** — the supported
-  profile is one web task at a time. An exact SQLite Landscape epoch 23 is
-  archived and automatically migrated through epoch 24 to epoch 25; an exact
-  epoch-24 database takes the final artifact-index step. PostgreSQL follows the
-  approved schema-owner migration or recreation path. Older unsupported
-  starting epochs retain their historical archive/export and drop/recreate
-  boundary. Mixed-version rollout and rollback to epoch-23 or epoch-24 code
-  after migration remain forbidden.
-
-### Fixed
-
-- **Aborted Composer turns no longer leave zombie work or stale state** — both
-  freeform and guided cancellation now propagate through tool dispatch, wait
-  for the in-flight turn to settle, and resynchronise from durable session
-  state. Generation fences prevent an older poller from overwriting a newer
-  session view.
-- **Composer startup now fails closed until runtime timing is ready** — message
-  submission stays gated until the backend-derived timeout configuration is
-  available, with a bounded stuck-state diagnostic instead of allowing a
-  bootstrap race to strand a turn.
+- **Crash recovery no longer repeats completed sink or export work** — durable
+  effect streams, ordered members, target-side ledgers, remote spooling, and
+  exact reconciliation close the publication gap between external success and
+  local acknowledgement. Failsink members retain the exact primary effect that
+  produced them.
+- **State-engine transitions are atomic at crash and contention seams** —
+  source completion, child scheduling, aggregation continuation, coalesce
+  completion, routing decisions, batch membership, and terminal outcomes now
+  persist with their controlling state transition. Run-scoped ownership and
+  lease fencing prevent cross-run or stale-worker mutation.
+- **Composer cancellation and concurrency cannot wedge a session** — aborted
+  freeform or guided turns settle before durable resynchronisation; startup
+  waits for backend timing; fork quota failures replay as stable HTTP 413; and
+  concurrent guided submissions settle as retryable conflicts instead of
+  queued duplicate work.
+- **DAG contracts propagate through routing and barrier nodes** — nested
+  pass-through fields, pure-routing gates, queue fan-in, fork destinations, and
+  coalesce union guarantees now reach downstream validation in graph order.
+  The fixes prevent valid graphs from being rejected and invalid sink contracts
+  from reaching execution.
+- **Security-sensitive failures remain inside their trust boundary** — provider
+  error text and blob redirect URLs are redacted from audit data, unknown LLM
+  providers return closed rejection codes, remote OTLP endpoints require TLS,
+  malformed ODBC brace syntax fails closed, and auth state compensates when its
+  audit write cannot be persisted.
 
 ## 0.7.0 - 2026-07-09 (LLM-primary guided pipeline creation)
 

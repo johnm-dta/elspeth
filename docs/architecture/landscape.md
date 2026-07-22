@@ -1,11 +1,12 @@
 # Landscape System Architecture
 
-Current as of 2026-07-16 for the 0.7.1 release line.
+Current as of 2026-07-23 for the 0.7.1 release line.
 
 Landscape is ELSPETH's audit database and lineage read model. It records run
 configuration, source rows, DAG nodes and edges, token lineage, node execution
-states, external calls, routing events, terminal outcomes, artifacts, checkpoints,
-and export metadata.
+states, external calls, routing events, terminal outcomes, checkpoints, durable
+sink and coalesce effects, export snapshots, artifacts, and sidecar-journal
+publication.
 
 The maintained system-level overview lives in
 [ARCHITECTURE.md](../../ARCHITECTURE.md). This document focuses on the
@@ -13,15 +14,15 @@ Landscape subsystem.
 
 ## Current Inventory
 
-Measured from this checkout on 2026-07-08:
+Measured from this checkout on 2026-07-23:
 
 | Metric | Value |
 |--------|-------|
-| Python files in `src/elspeth/core/landscape/` | 53 |
-| Python lines in `src/elspeth/core/landscape/` | 22,078 |
-| SQLAlchemy Core tables | 29 |
-| MCP Landscape analysis tools | 27 |
-| Schema epoch | 25 |
+| Python files in `src/elspeth/core/landscape/` | 63 |
+| Python lines in `src/elspeth/core/landscape/` | 32,137 |
+| SQLAlchemy Core tables | 41 |
+| MCP Landscape analysis tools | 29 |
+| Schema epoch | 29 |
 
 The inventory above is intentionally date-stamped. Re-run these checks before
 using the numbers in release material:
@@ -71,6 +72,12 @@ Important consequences:
   participates in composite foreign keys to `node_states(state_id, run_id)` and
   `edges(edge_id, run_id)`, so a stored gate decision cannot accidentally bind
   to a state or edge from another run.
+- Token ancestry and validation-error associations are run-scoped as of epoch
+  29. A token parent or quarantined-row link cannot bind to evidence from a
+  different run.
+- Sink and audit-export publication is represented as a durable effect stream.
+  `UNKNOWN` is a valid blocked recovery result when target evidence cannot prove
+  whether a request committed; it is never coerced into permission to retry.
 
 ## Module Layout
 
@@ -84,7 +91,7 @@ Important consequences:
 | `factory.py` | Composition point for repository instances and plugin audit writer adapters. |
 | `run_lifecycle_repository.py` | Run creation, status, export status, runtime manifest, attribution, run-level metadata, and per-source lifecycle in `run_sources`. |
 | `data_flow_repository.py` | Rows, tokens, token parents, token outcomes, validation errors, and transform errors. Enforces source-row identity invariants on write (`source_row_index` / `ingest_sequence` are non-fabricable). |
-| `execution_repository.py` | Node states, routing events, calls, operations, batches, and artifacts. |
+| `execution_repository.py` | Node states, routing events, calls, operations, batches, artifacts, audit-export snapshots, and the sink-effect repository surface. |
 | `scheduler_repository.py` | Durable token scheduler (`token_work_items`): claim/lease, CAS-gated state transitions, expired-lease recovery, pending-sink handoff. ADR-026 authoritative surface. |
 | `query_repository.py` | Lineage and audit read queries used by explain/MCP/export paths. |
 | `model_loaders.py` | Tier-1 row-to-model validation. |
@@ -99,51 +106,71 @@ that refer to that file are historical snapshots.
 
 ## Table Groups
 
-The current schema defines 30 tables:
+The current schema defines 41 tables:
 
 | Group | Tables |
 |-------|--------|
 | Run metadata | `runs`, `run_attributions`, `auth_events`, `preflight_results`, `secret_resolutions`, `run_web_plugin_policy` |
+| Schema identity | `elspeth_schema_identity` |
 | Multi-source ingestion (ADR-025) | `run_sources` |
 | Static graph | `nodes`, `edges` |
 | Data flow | `rows`, `tokens`, `token_parents`, `token_outcomes` |
 | Durable scheduler (ADR-026) | `token_work_items`, `scheduler_events` |
-| Run coordination (ADR-030) | `run_coordination`, `run_coordination_events`, `run_workers` |
-| Execution | `node_states`, `operations`, `calls`, `routing_events` |
+| Run coordination (ADR-030) | `run_coordination`, `run_coordination_events`, `run_workers`, `coalesce_branch_losses` |
+| Execution and outputs | `node_states`, `operations`, `calls`, `routing_events`, `artifacts` |
 | Batching | `batches`, `batch_members`, `batch_outputs` |
 | Errors | `validation_errors`, `transform_errors` |
-| Recovery and outputs | `checkpoints`, `artifacts`, `coalesce_branch_losses` |
+| Recovery | `checkpoints` |
+| Durable coalesce | `coalesce_effects`, `coalesce_effect_members` |
+| Durable sink effects | `sink_effect_streams`, `sink_effects`, `sink_effect_members`, `sink_effect_attempts`, `sink_effect_export_snapshots` |
+| Audit-export snapshots | `audit_export_snapshots`, `audit_export_snapshot_chunks` |
+| Sidecar journal | `sidecar_journal_outbox` |
 
 ### Artifact logical-effect identity
 
-`artifacts.idempotency_key` is an opaque logical-effect key scoped by
-`run_id`. The canonical sink contract uses
-`{run_id}:{row_id}:{sink_name}`; the repository stores and compares the key
-without parsing it. A partial unique index applies only when the key is
-non-null, so legacy callers that omit it continue to create independent
-artifact rows.
+`artifacts.idempotency_key` is an opaque logical-effect key scoped by `run_id`.
+A non-null key is unique within the run, and an identical registration returns
+the first artifact while a divergent retry raises a Tier-1 integrity error.
 
-Registration is one database-owned insert-or-fetch operation. A retry with
-the same `(run_id, idempotency_key)` must repeat all immutable effect fields:
-`produced_by_state_id`, `sink_node_id`, `artifact_type`, `path_or_uri`,
-`content_hash`, and `size_bytes`. An identical retry returns the first row's
-`artifact_id` and `created_at`; a divergent retry raises a Tier-1 audit
-integrity error without overwriting the durable evidence. `artifact_id` and
-`created_at` are result identity fields, not caller-controlled conflict fields.
+An artifact has exactly one production authority: a historical node state or a
+durable sink effect. Effect-backed artifacts carry a composite reference to
+`sink_effects(effect_id, run_id, sink_node_id)` and are registered from the
+effect's immutable final descriptor. The artifact records whether publication
+was performed and whether its evidence was returned, reconciled, inherited, or
+virtual. Audit identity therefore converges with external-effect identity
+rather than being added as an unrelated row after I/O.
 
-Schema epoch 25 installs this partial unique index. Writable SQLite startup
-migrates an exact epoch-24 predecessor under `BEGIN IMMEDIATE`, refuses any
-existing duplicate non-null `(run_id, idempotency_key)` pair without choosing
-or deleting audit data, and commits the index and epoch stamp atomically. An
-exact epoch-23 database first takes the independently atomic token-ownership
-migration to epoch 24, then this epoch-25 step. Read-only and inspection-only
-opens never migrate. PostgreSQL uses the approved schema-owner path.
+### Durable sink and export effects
 
-This repository contract deduplicates audit registration after an effect is
-described. Production sink execution currently omits the key, and artifact
-registration occurs after `sink.write`; preventing repeated external I/O at
-the crash seam therefore remains a caller/sink protocol concern rather than a
-claim made by this database constraint.
+Every supported sink publication follows one persisted lifecycle:
+
+```text
+RESERVED -> PREPARED -> IN_FLIGHT -> FINALIZED
+```
+
+- `sink_effect_streams` orders effects for one target/role and prevents a
+  successor from overtaking an uncertain predecessor.
+- `sink_effects` stores the immutable target binding and plan, current fenced
+  lease generation, reconciliation result, and final descriptor.
+- `sink_effect_members` binds the ordered pipeline tokens and per-member
+  outcome evidence. Failsink members retain the exact primary effect that
+  produced them.
+- `sink_effect_attempts` records inspect, commit, and reconcile intent before
+  the adapter call, then records returned, response-lost, or error state.
+- `audit_export_snapshots` and `sink_effect_export_snapshots` bind a sealed
+  export snapshot to the effect that publishes it.
+
+After a lost response, the coordinator may publish again only when the adapter
+proves the exact plan was not applied. A proven application finalizes without
+another commit; an `UNKNOWN` result remains blocked. Epochs 26–28 introduced
+the effect ledger, durable coalesce receipts, and per-member failsink
+provenance. Epoch 29 adds run-scoped ancestry/error links, output-contract
+hashes, durable batch-expansion claims, and the transaction-owned sidecar
+journal outbox.
+
+ELSPETH is pre-1.0. An older Landscape database is archived or exported as
+required and recreated at epoch 29; startup and read-only inspection do not
+transform a predecessor store in place.
 
 ### Multi-source ingestion (ADR-025)
 
@@ -162,7 +189,7 @@ contracts are the single source of truth.
 | `config_hash` | `String(64)` NOT NULL | Hash of plugin config at registration. |
 | `schema_json` | `Text` | Declared schema (raw form). |
 | `schema_contract_json` | `Text` | Resolved per-source `SchemaContract` (authoritative for resume). |
-| `schema_contract_hash` | `String(16)` | Short hash of `schema_contract_json` for drift detection. |
+| `schema_contract_hash` | `String(32)` | Canonical hash prefix of `schema_contract_json` for drift detection. |
 | `field_resolution_json` | `Text` | Per-field resolution metadata (original_name, normalised name). |
 | `recorded_at` | `DateTime(tz)` NOT NULL | When the row was persisted. |
 
@@ -272,6 +299,16 @@ row_index"*. See [Plugin Protocol — Source row identity](../contracts/plugin-p
   non-empty `lease_owner` by check constraint; `recover_expired_leases`
   rotates `work_item_id` and `attempt` on lease expiry except for
   `PENDING_SINK` rows where both are preserved (sink work isn't replayed).
+- `token_parents` and `validation_errors` use run-scoped foreign keys; neither
+  lineage nor quarantine evidence can cross a run boundary.
+- `nodes.output_contract_hash` stores the canonical output-contract identity
+  used to detect incompatible graph evolution.
+- Sink effects and coalesce effects finalize their result and controlling
+  state transition atomically. A result cannot become visible without its
+  durable receipt.
+- `sidecar_journal_outbox` is written in the audit transaction and owned by one
+  canonical journal destination. Recovery cannot move or acknowledge a batch
+  through a different sidecar path.
 
 ## Write Surfaces
 
@@ -282,6 +319,9 @@ interfaces rather than raw SQL:
 - Rows, tokens, token outcomes, and errors: `DataFlowRepository`.
 - Node states, routing, calls, operations, batches, and artifacts:
   `ExecutionRepository`.
+- Durable token work and lease recovery: `SchedulerRepository`.
+- Sink-effect reservation, attempts, fencing, and finalization:
+  `ExecutionRepository.sink_effects`.
 - Plugin-facing audit writes: `PluginAuditWriterAdapter` in `plugin_audit_writer.py`,
   constructed by `RecorderFactory.plugin_audit_writer()`.
 
@@ -298,10 +338,10 @@ Preferred read paths:
 - `LandscapeExporter` for complete export/reimport evidence.
 - `elspeth-mcp` for read-only MCP analysis against a Landscape database.
 
-The MCP Landscape server exposes 27 tools from `src/elspeth/mcp/server.py`,
+The MCP Landscape server exposes 29 tools from `src/elspeth/mcp/server.py`,
 including run listing, token explanation, operations, calls, collisions, schema
-description, outcome analysis, performance reports, diagnostics, and contract
-queries.
+description, outcome analysis, sink-effect recovery history, performance
+reports, diagnostics, and contract queries.
 
 ## Operator References
 
@@ -309,6 +349,7 @@ queries.
 - [Database Maintenance](../runbooks/database-maintenance.md)
 - [Backup and Recovery](../runbooks/backup-and-recovery.md)
 - [Scheduler Lease Recovery](../runbooks/scheduler-lease-recovery.md)
+- [Sink Effect Recovery](../runbooks/sink-effect-recovery.md)
 - [Landscape MCP Analysis Server](../guides/landscape-mcp-analysis.md)
 - [Token Outcome Assurance](../contracts/token-outcomes/README.md)
 - [ADR-025: Multi-Source Ingestion](adr/025-multi-source-ingestion.md)

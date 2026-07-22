@@ -31,7 +31,7 @@ and audit model used by YAML-authored pipelines.
 
 - [Why Elspeth Exists](#why-elspeth-exists)
 - [Architecture At A Glance](#architecture-at-a-glance)
-- [What Changed In 0.7.0](#what-changed-in-070)
+- [What Changed In 0.7.1](#what-changed-in-071)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -153,85 +153,45 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ---
 
-## What Changed In 0.7.0
+## What Changed In 0.7.1
 
-0.7.0 makes guided pipeline creation **LLM-primary**. In the Web Composer's
-guided flow, each stage of a pipeline — source, then sink, then transforms,
-then the final wiring — is now driven by a language model through the
-`/guided/chat` endpoint, which applies the model's proposed change to the
-in-progress pipeline in place instead of asking the operator to hand-author
-plugin options. A revise mode reopens a committed stage and amends it against
-its current state, and the flow terminates at a new wiring stage (`STEP_4_WIRE`)
-whose completion is gated by an explicit confirm-wiring contract and an advisor
-sign-off. Current operator-facing guidance lives in
-[the release Composer guide](docs/release/composer-guide.md). Implemented
-design records are no longer part of the active public docs tree; maintainers
-may keep them in a local ignored `docs-archive/`, and git history remains the
-public provenance record.
+0.7.1 focuses on recoverability at the two places where uncertainty is most
+expensive: publishing external effects and accepting LLM-authored pipeline
+changes.
 
-Guided authoring deltas:
+- **External publication is now durable and replay-safe.** Built-in sinks and
+  audit exports persist an immutable effect plan before I/O, fence the active
+  worker, and reconcile a lost response before another publication attempt.
+  An outcome that cannot be proved remains blocked for operator review instead
+  of being guessed or repeated. See the
+  [sink-effect recovery runbook](docs/runbooks/sink-effect-recovery.md).
+- **Guided and freeform Composer authoring now share the same proposal
+  contract.** Guided mode can build and revise plural components, queues,
+  gates, forks, and coalesces; the candidate stays separate from committed
+  state until review and wire confirmation. Durable operations, closed repair
+  codes, and a single-in-flight mutation gate make cancellation, retry, fork,
+  and concurrent submissions recoverable. See the
+  [Composer guide](docs/release/composer-guide.md).
+- **AWS ECS is a supported deployment path.** The release includes a Fargate
+  web profile with Aurora PostgreSQL, EFS, task-role S3, Bedrock and guardrails,
+  Cognito authorization code with PKCE, CloudWatch, X-Ray, validate-only
+  startup, readiness checks, and a deployment doctor. See the
+  [AWS ECS deployment runbook](docs/runbooks/aws-ecs-deployment.md).
+- **Audit and DAG state fail closed at more crash seams.** Source completion,
+  child scheduling, aggregation and coalesce continuations, routing, token
+  ancestry, artifacts, and sidecar-journal publication are run-scoped and
+  persisted with their controlling transitions.
 
-- **Conversational builder with live-graph verification** — the guided surface
-  becomes a docked chat paired with an always-visible verification panel: a
-  plain-language gloss and a validation summary sit above the live pipeline
-  graph so the operator can read what the model built as it is built. Each
-  interpretation decision renders as a read-only summary card that leads with
-  the model's own rationale, carries an `Explain` button backed by grounded
-  advisory context, and gates advancement behind a two-stage View→Approve
-  acknowledgement.
-- **Pending-interpretation gate** — guided sessions surface pending
-  interpretation cards (invented source, pipeline decision, …) at the persist
-  seam and block advancement until they are resolved.
-- **Always-on prompt-shield review** — the previously advisory prompt-shield
-  review is now always-on, with a three-state (A/B/C) shield model wired into
-  the confirm-wiring route.
-- **Passive first-run tutorial recut** — the hello-world tutorial teaches
-  source→transform→sink by having a model rate synthetic government-style pages
-  over a deterministic web-scrape source; it runs as a staged guided walk whose
-  stage is persisted, so a mid-tutorial reload resumes where it left off rather
-  than restarting at the welcome bookend.
-- **ELSPETH design system and marketing website** — a typed React primitive
-  library lands under `src/elspeth/web/frontend/src/components/ui/`, and a
-  standalone static, design-token-based marketing site is added under
-  `website/`, separate from the application frontend.
+**Operational:** 0.7.1 is a pre-1.0 database cutover. The session store moves
+from epoch 26 to 35 (guided schema 7 to 10), and Landscape moves from epoch 22
+to 29. Archive or export evidence as required, stop the old service, recreate
+both stale stores, and install 0.7.1. Do not roll older code back over the
+recreated databases. `data/auth.db` remains separate; recreating the session
+store does not remove local user accounts.
 
-New ingestion plugins:
-
-- **`azure_document_intelligence` enrichment transform** — enriches rows by
-  sending a document to Azure AI Document Intelligence and folding the extracted
-  layout/content back onto the row, declared as an external-call boundary with
-  fail-closed page-count handling and host:port endpoint pinning.
-- **Blob-backed document ingestion transforms** — `blob_fetch` stores an
-  operator-authorised remote document in the run payload store behind the
-  SSRF-safe HTTP boundary, while `blob_csv_expand` expands stored CSV blobs into
-  row data with bounded size, row-count, and schema-contract handling.
-
-Security and boundary hardening:
-
-- **Key Vault `vault_url` is restricted** to the approved `*.vault.azure.net`
-  endpoint class by a host check, with an optional exact-URL pin via
-  `ELSPETH_KEYVAULT_ALLOWED_VAULT_URLS`, closing an SSRF vector where a foreign
-  vault URL could redirect the managed-identity challenge.
-- **Composer blob sink paths are scoped to the owning session**, so one session
-  cannot address another session's blob paths.
-- **Database credentials are scrubbed before audit persistence** —
-  `odbc_connect` connection-string passwords and database-node DSN passwords no
-  longer reach an audit record or a fingerprint.
-- **Output-echoed fields reject environment-variable placeholders**, and audit
-  exports redact raw failing rows by default.
-
-**Operational — the web session database and Landscape audit database both reset
-on upgrade.** `SESSION_SCHEMA_EPOCH` advances to 26 (it was 22 at 0.6.0) and
-`SQLITE_SCHEMA_EPOCH` advances to 22. Before the first start on 0.7.0, stop
-`elspeth-web.service`, archive and remove `data/sessions.db` plus sidecars and
-the configured Landscape audit DB plus sidecars, then restart so both schemas
-are recreated. `data/auth.db` is a SEPARATE file — local user accounts are NOT
-reset.
-
-The 0.6.0 multi-worker deployment shape (`elspeth join`, leader/follower
-coordination over one WAL SQLite audit database) is unchanged; see
-[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md) and
-[CHANGELOG.md](CHANGELOG.md) for the full release-by-release detail.
+See [CHANGELOG.md](CHANGELOG.md) for the complete release-level summary and
+[ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md) for the
+supported multi-worker shape.
 
 ---
 
@@ -918,9 +878,9 @@ elspeth/
 	├── src/elspeth/
 	│   ├── core/               # Config, canonical JSON, rate limiting, retention
 	│   │   ├── dag/            # DAG construction, validation, graph models (NetworkX)
-	│   │   └── landscape/      # Audit trail (recorder, exporter, schema, SQLCipher)
+	│   │   └── landscape/      # Audit repositories, effect ledgers, export, schema
 │   ├── contracts/          # Type contracts, schemas, protocol definitions
-│   ├── engine/             # Orchestrator, processor, retry, DAG navigator
+│   ├── engine/             # Orchestrator, durable scheduler, DAG and effect coordination
 │   │   └── executors/      # Transform, gate, sink, aggregation executors
 │   ├── plugins/            # Sources, transforms, sinks, LLM integrations
 │   ├── mcp/                # Landscape MCP analysis server

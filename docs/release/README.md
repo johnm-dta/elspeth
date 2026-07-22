@@ -1,6 +1,6 @@
 # `docs/release/` — Release Histories and Snapshots
 
-**Last reviewed:** 2026-07-14 (0.7.1)
+**Last reviewed:** 2026-07-23 (0.7.1)
 **Audience:** Anyone navigating to release-level documentation
 **Register:** Lightly technical / directory-index
 

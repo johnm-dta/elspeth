@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, NotRequired, TypedDict, cast
 from uuid import UUID, uuid4
 
+import structlog
 from pydantic import JsonValue
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -40,6 +41,8 @@ from elspeth.web.composer.guided.stage_subjects import (
 from elspeth.web.composer.guided.state_machine import ComponentTarget, DeferredStageIntent, GuidedSession
 from elspeth.web.composer.pipeline_proposal import PipelineProposal
 from elspeth.web.composer.state import CompositionState, NodeSpec
+
+slog = structlog.get_logger()
 
 
 class GuidedBoundSource(TypedDict):
@@ -684,7 +687,13 @@ def _ordered_gate_routes(node: NodeSpec) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_aliases: Mapping[str, str]) -> dict[str, object]:
+def _node_behavior(
+    node: NodeSpec,
+    *,
+    route_aliases: Mapping[str, str],
+    branch_aliases: Mapping[str, str],
+    coalesce_incoming_aliases: Sequence[str] | None = None,
+) -> dict[str, object]:
     if node.node_type == "transform":
         return {"kind": "transform"}
     if node.node_type == "queue":
@@ -706,14 +715,27 @@ def _node_behavior(node: NodeSpec, *, route_aliases: Mapping[str, str], branch_a
             "expected_output_count": (str(node.expected_output_count) if node.expected_output_count is not None else None),
         }
     if node.node_type == "coalesce":
-        branches = node.branches
-        # Alias by branch KEY (the fork branch name), not value: the coalesce's
-        # branch aliases must be the same ordinals the gate_fork minted so each
-        # traces to its authoritative fork origin (see the branch_names comment).
-        names = list(branches.keys()) if isinstance(branches, Mapping) else list(branches or ())
+        # A coalesce's branch aliases must EQUAL, in order, the branch aliases on
+        # its incoming flows (validate_payload, protocol.py). Those incoming edges
+        # are emitted in edge_specs order — the branch-producer node order — which
+        # the planner authors nondeterministically and independently of the
+        # ``branches`` dict key order. Deriving the behavior aliases from the
+        # coalesce's OWN incoming edges (passed in) makes incoming == behavior
+        # true by construction, instead of hoping branches.keys() order happens to
+        # match producer order. Each alias is still a fork-branch-name ordinal, so
+        # the fork-origin trace (line 1810) is unaffected. Fall back to
+        # branches.keys() only when no incoming aliases are supplied (a degenerate
+        # coalesce with no branch producers, which candidate validation rejects
+        # upstream anyway).
+        if coalesce_incoming_aliases is not None:
+            aliases = list(coalesce_incoming_aliases)
+        else:
+            branches = node.branches
+            names = list(branches.keys()) if isinstance(branches, Mapping) else list(branches or ())
+            aliases = [branch_aliases[name] for name in names]
         return {
             "kind": "coalesce",
-            "branch_aliases": [branch_aliases[name] for name in names],
+            "branch_aliases": aliases,
             "policy": node.policy,
             "merge": node.merge,
         }
@@ -952,6 +974,17 @@ def _build_projection(
         }
         for index, (origin, destination, flow) in enumerate(edge_specs)
     ]
+    # Branch aliases carried by each coalesce's incoming edges, in edge_specs
+    # (= wire-edge = validator ``incoming_edges``) order. A coalesce's behavior
+    # branch_aliases is derived from THIS so it equals its incoming flows by
+    # construction, regardless of the planner's authored branch/node ordering.
+    coalesce_stable_ids = {node_ids[node.id] for node in state.nodes if node.node_type == "coalesce"}
+    coalesce_incoming_branch_aliases: dict[str, list[str]] = {}
+    for _edge_origin, edge_destination, edge_flow in edge_specs:
+        destination_id = edge_destination.get("stable_id")
+        branch_alias = edge_flow.get("branch")
+        if destination_id in coalesce_stable_ids and isinstance(branch_alias, str) and branch_alias:
+            coalesce_incoming_branch_aliases.setdefault(destination_id, []).append(branch_alias)
     nodes: list[dict[str, Any]] = [
         {
             "stable_id": node_ids[node.id],
@@ -962,6 +995,9 @@ def _build_projection(
                 node,
                 route_aliases=gate_route_aliases(node) if node.node_type == "gate" else {},
                 branch_aliases=branch_aliases,
+                coalesce_incoming_aliases=(
+                    coalesce_incoming_branch_aliases.get(node_ids[node.id]) if node.node_type == "coalesce" else None
+                ),
             ),
         }
         for index, node in enumerate(state.nodes)
@@ -1007,11 +1043,70 @@ def _build_projection(
             ],
         },
     )
+    # The guided route's terminal-failure slog logs only exc_class, so a
+    # projection AuditIntegrityError (which check of validate_payload fired, for
+    # which node/edge shape) was a blind guess on a live 5xx. Emit the validator
+    # error text plus a STRUCTURAL kind-summary — node ids/types/plugin-names and
+    # edge flow-kinds/branch-aliases only, never options or draft content, which
+    # the closed redacted projection payload does not carry anyway — so the next
+    # unknown projection failure is diagnosable from the log.
     if (error := validate_payload(TurnType.PROPOSE_PIPELINE, payload)) is not None:
+        slog.error(
+            "composer.guided_projection_invalid",
+            proposal_id=str(proposal_id),
+            error=error,
+            **_projection_kind_summary(payload),
+        )
         raise AuditIntegrityError(f"guided proposal projection is invalid: {error}")
     if (error := validate_proposal_catalog_refs(payload, catalog_plugin_ids)) is not None:
+        slog.error(
+            "composer.guided_projection_catalog_binding_failed",
+            proposal_id=str(proposal_id),
+            error=error,
+            **_projection_kind_summary(payload),
+        )
         raise AuditIntegrityError(f"guided proposal catalog binding failed: {error}")
     return payload
+
+
+def _projection_kind_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Structural (Tier-3-safe) node/edge kind summary for projection failure logs.
+
+    The PROPOSE_PIPELINE projection is already the closed, redacted wire shape —
+    it carries no options, prompts, or draft content, only catalog plugin ids,
+    node/flow kinds, and structural aliases. Project just those so a projection
+    failure names the offending shape (e.g. a coalesce whose branch aliases do
+    not match its incoming flow order) without touching private authored values.
+    """
+    nodes = payload["nodes"] if isinstance(payload.get("nodes"), list) else []
+    graph = payload["graph"] if isinstance(payload.get("graph"), Mapping) else {}
+    edges = graph["edges"] if isinstance(graph.get("edges"), list) else []
+    node_kinds = [
+        {
+            "stable_id": node.get("stable_id"),
+            "node_type": node.get("node_type"),
+            "plugin": (node["plugin"].get("id") if isinstance(node.get("plugin"), Mapping) else None),
+            "behavior": node["behavior"].get("kind") if isinstance(node.get("behavior"), Mapping) else None,
+            "branch_aliases": (
+                node["behavior"].get("branch_aliases")
+                if isinstance(node.get("behavior"), Mapping) and node["behavior"].get("kind") == "coalesce"
+                else None
+            ),
+        }
+        for node in nodes
+        if isinstance(node, Mapping)
+    ]
+    edge_flows = [
+        {
+            "from": edge["from_endpoint"].get("kind") if isinstance(edge.get("from_endpoint"), Mapping) else None,
+            "to": edge["to_endpoint"].get("kind") if isinstance(edge.get("to_endpoint"), Mapping) else None,
+            "flow": edge["flow"].get("kind") if isinstance(edge.get("flow"), Mapping) else None,
+            "branch": edge["flow"].get("branch") if isinstance(edge.get("flow"), Mapping) else None,
+        }
+        for edge in edges
+        if isinstance(edge, Mapping)
+    ]
+    return {"node_kinds": node_kinds, "edge_flows": edge_flows}
 
 
 def build_guided_proposal_projection(

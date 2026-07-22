@@ -722,6 +722,130 @@ def test_fork_coalesce_ab_projection_routes_every_branch_output_into_the_coalesc
     assert [edge["flow"]["kind"] for edge in coalesce_outgoing] == ["coalesce_success"]
 
 
+def _ab_coalesce_proposal_ordered(
+    guided: GuidedSession,
+    *,
+    branch_order: tuple[int, int],
+    node_order: tuple[int, int],
+) -> PipelineProposal:
+    """The fork/coalesce A/B with the branch dict and LLM node order permuted."""
+    branches = [("a_rows", "a_out"), ("b_rows", "b_out")]
+    llm_nodes = [
+        {
+            "id": "llm_variant_a",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "a_rows",
+            "on_success": "a_out",
+            "on_error": "discard",
+            "options": {"provider": "openrouter"},
+        },
+        {
+            "id": "llm_variant_b",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "b_rows",
+            "on_success": "b_out",
+            "on_error": "discard",
+            "options": {"provider": "openrouter"},
+        },
+    ]
+    ordered_branches = {branches[i][0]: branches[i][1] for i in branch_order}
+    ordered_llm = [llm_nodes[i] for i in node_order]
+    return PipelineProposal.create(
+        pipeline={
+            "sources": {
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "csv_rows",
+                    "options": {"path": "blob:00000000-0000-0000-0000-000000000001", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                }
+            },
+            "nodes": [
+                {
+                    "id": "fork_gate",
+                    "node_type": "gate",
+                    "plugin": None,
+                    "input": "csv_rows",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "condition": "len(row['color_name']) > 0",
+                    "routes": {"true": "fork", "false": "fork"},
+                    "fork_to": ["a_rows", "b_rows"],
+                },
+                *ordered_llm,
+                {
+                    "id": "reconcile",
+                    "node_type": "coalesce",
+                    "plugin": None,
+                    "input": "a_out",
+                    "on_success": None,
+                    "on_error": None,
+                    "options": {},
+                    "branches": ordered_branches,
+                    "policy": "require_all",
+                    "merge": "union",
+                },
+                {
+                    "id": "cleanup",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "reconcile",
+                    "on_success": "colour_ab_out",
+                    "on_error": "discard",
+                    "options": {},
+                },
+            ],
+            "edges": [],
+            "outputs": [{"name": "colour_ab_out", "plugin": "json", "options": {"path": "out.json"}, "on_write_failure": "discard"}],
+        },
+        base=PresentBase(state_id=CHECKPOINT_ID, composition_content_hash="a" * 64),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+        surface=PlannerSurface.GUIDED_STAGED,
+        repair_count=0,
+        skill_hash=stable_hash("guided planner skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
+    )
+
+
+def test_fork_coalesce_projection_is_invariant_to_branch_and_node_ordering() -> None:
+    """The coalesce projection must validate+verify for every authored order.
+
+    Regression for live guided session 63f0b04a (AuditIntegrityError at
+    validate_payload:1011, "coalesce branch aliases do not match its incoming
+    flows"): the planner authors the coalesce ``branches`` dict and its
+    branch-producer nodes in a nondeterministic order, and the validator requires
+    ``behavior.branch_aliases`` to equal the incoming-flow branch order. Deriving
+    the behavior aliases from the coalesce's own incoming edges makes them agree
+    by construction, so every permutation must project AND re-verify.
+    """
+    guided = _ab_coalesce_guided()
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"llm", "field_mapper"}),
+        "sink": frozenset({"json"}),
+    }
+    for branch_order in permutations((0, 1)):
+        for node_order in permutations((0, 1)):
+            proposal = _ab_coalesce_proposal_ordered(guided, branch_order=branch_order, node_order=node_order)
+            payload = build_guided_proposal_projection(
+                proposal_id=PROPOSAL_ID,
+                proposal=proposal,
+                guided=guided,
+                catalog_plugin_ids=catalog,
+            )
+            verify_guided_proposal_projection(
+                payload=payload,
+                proposal_id=PROPOSAL_ID,
+                proposal=proposal,
+                guided=guided,
+                catalog_plugin_ids=catalog,
+            )
+
+
 def test_projection_rejects_plugins_outside_the_same_catalog_snapshot() -> None:
     guided = _guided()
     with pytest.raises(AuditIntegrityError, match="catalog"):

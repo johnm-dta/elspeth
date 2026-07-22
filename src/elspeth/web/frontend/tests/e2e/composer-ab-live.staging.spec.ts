@@ -121,23 +121,41 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       await expect(failureBanner, "compose surfaced a failure banner").toHaveCount(0);
       await expect(successMsg).toBeVisible();
 
-      // ── Resolve surfaced interpretation reviews ──────────────────────────
-      // Settlement surfaces one pending review event per authored LLM prompt
-      // (and any other review sites). The run gate fails closed until every
-      // event resolves — accept each as drafted via the same endpoint the UI
-      // review card drives.
-      const pendingResp = await ctx.get(`/api/sessions/${sessionId}/interpretations?status=pending`);
-      const pending = (await pendingResp.json()) as { events: { event_id?: string; id?: string }[] };
-      for (const event of pending.events) {
-        const eventId = event.event_id ?? event.id;
-        const resolveResp = await ctx.post(
-          `/api/sessions/${sessionId}/interpretations/${eventId}/resolve`,
-          { data: { choice: "accepted_as_drafted" } },
-        );
-        expect(resolveResp.ok(), `resolve ${eventId} failed: ${await resolveResp.text()}`).toBe(true);
+      // ── Resolve surfaced interpretation reviews (native cards) ───────────
+      // Settlement surfaces one pending review event per authored LLM prompt.
+      // The run gate reads the CLIENT pending-review store, which only the
+      // native Accept cards clear — an out-of-band API resolve leaves the
+      // Run button gated (the server resolves, the SPA never refreshes).
+      // Drive the visible cards exactly as a user would: prompt cards are
+      // two-stage (View prompt reveals, the same button then approves).
+      const gatedRunButton = page.getByRole("button", { name: "Run pipeline" }).first();
+      const ackDeadline = Date.now() + 4 * 60_000;
+      while (Date.now() < ackDeadline && !(await gatedRunButton.isEnabled().catch(() => false))) {
+        // Prompt cards are two-stage: click 1 is "View prompt", after which the
+        // same control's accessible name becomes "Approve the LLM prompt
+        // template" — unanchored matching covers both stages, and the loop's
+        // next pass performs the second click. Non-prompt cards are a single
+        // "Acknowledge".
+        const cardButton = page
+          .getByRole("button", { name: /view prompt|approve|acknowledge/i })
+          .first();
+        if (await cardButton.isVisible().catch(() => false)) {
+          await cardButton.click().catch(() => {});
+          await page.waitForTimeout(250);
+        } else {
+          await page.waitForTimeout(1_000);
+        }
       }
 
       const runButton = page.getByRole("button", { name: "Run pipeline" }).first();
+      // The SPA's run gate can lag the server after card resolutions (the
+      // resolved state is durable — interpretation_resolve versions — but the
+      // client store does not refresh it). A reload is the user-plausible
+      // recovery and re-hydrates everything server-authoritative.
+      if (!(await runButton.isEnabled().catch(() => false))) {
+        await page.reload();
+        await page.waitForLoadState("networkidle");
+      }
       await expect(runButton).toBeEnabled({ timeout: 60_000 });
 
       await runButton.click();

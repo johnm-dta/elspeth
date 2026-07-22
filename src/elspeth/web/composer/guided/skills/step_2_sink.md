@@ -17,12 +17,12 @@ behaviour, or output-schema options from a plugin name or from examples that
 are not attached to this request. Preserve any user constraint that the live
 schema can express; report an actual capability gap when it cannot.
 
-One rule the live schema cannot show you: a file sink that writes to a path
-must state its collision behaviour explicitly. With `mode: write` (the
-default), set `options.collision_policy` to `"auto_increment"` (safe default —
-new runs get numbered files) or `"fail_if_exists"` (strict) — the composer
-rejects a file sink that leaves collision behaviour implicit. Always set
-`options.path` explicitly as well.
+Some requirements are policy-level and do not appear in the option schema:
+always call `get_plugin_assistance` for the sink you picked and treat its
+hints as binding — when a hint says an option is required, must be set
+deliberately, or is rejected when left implicit, set that option explicitly
+in your resolution rather than relying on defaults. Always set the output
+path option explicitly as well.
 
 Pick the sink that matches what the user asked for and configure it yourself from
 what they told you. Don't make them choose from a list, and don't ask them to

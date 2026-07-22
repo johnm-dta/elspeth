@@ -22,7 +22,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 
 import {
   authedContext,
@@ -51,6 +51,61 @@ function fixtureRows(): ColourRow[] {
     const [color_name, hex] = line.split(",");
     return { color_name, hex };
   });
+}
+
+// Minimal committed-state node shape for the topology assertion (mirrors
+// NodeSpec in src/types/index.ts — only the discriminating fields).
+interface CommittedNode {
+  id: string;
+  node_type: string;
+  plugin: string | null;
+  fork_to?: string[] | null;
+}
+
+// OPERATOR RULING (2026-07-22): the two-LLM A/B test exists to exercise
+// fork/coalesce. The committed composition MUST hold a real fork (>=1 gate
+// whose fork_to names 2 branches), EXACTLY 2 separate llm transform nodes
+// ("llm" is a plugin on transform nodes — node_type is never "llm"), and
+// exactly 1 coalesce merging the branches back to one row per colour. A
+// single llm node with a queries map is the forbidden shortcut (live run 15
+// took it and was ruled invalid) — it must fail HERE, before pipeline spend,
+// with the actual node inventory in the failure message.
+async function assertAbForkCoalesceTopology(
+  ctx: APIRequestContext,
+  sessionId: string,
+): Promise<void> {
+  const resp = await ctx.get(`/api/sessions/${sessionId}/state`);
+  expect(
+    resp.ok(),
+    `GET /api/sessions/${sessionId}/state failed (${resp.status()}): ${(await resp.text()).slice(0, 500)}`,
+  ).toBe(true);
+  const state = (await resp.json()) as { nodes: CommittedNode[] };
+  const inventory =
+    state.nodes
+      .map(
+        (n) =>
+          `${n.id}(node_type=${n.node_type}, plugin=${n.plugin ?? "null"}${
+            n.fork_to ? `, fork_to=[${n.fork_to.join(", ")}]` : ""
+          })`,
+      )
+      .join("; ") || "<no nodes>";
+  const forkGates = state.nodes.filter(
+    (n) => n.node_type === "gate" && (n.fork_to?.length ?? 0) === 2,
+  );
+  const llmNodes = state.nodes.filter((n) => n.plugin === "llm");
+  const coalesceNodes = state.nodes.filter((n) => n.node_type === "coalesce");
+  expect(
+    forkGates.length,
+    `A/B topology requires >=1 gate node with a 2-branch fork_to (the fork); committed nodes: ${inventory}`,
+  ).toBeGreaterThanOrEqual(1);
+  expect(
+    llmNodes.length,
+    `A/B topology requires EXACTLY 2 separate llm transform nodes (a single llm node with a queries map is the forbidden shortcut); committed nodes: ${inventory}`,
+  ).toBe(2);
+  expect(
+    coalesceNodes.length,
+    `A/B topology requires exactly 1 coalesce node merging the branches; committed nodes: ${inventory}`,
+  ).toBe(1);
 }
 
 test.describe("composer freeform live — the two-LLM A/B test (staging)", () => {
@@ -87,12 +142,14 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       // ── One outcome-stated request; the planner owns the design ──────────
       const request =
         `I uploaded ${BLOB_FILENAME} (color_name,hex — ${expectedRows.length} rows). ` +
-        `Build an A/B assessment pipeline: read the CSV, then fork each row into TWO separate ` +
-        `LLM assessments with different prompts — variant A: describe the emotional tone of the ` +
-        `colour in one short phrase; variant B: suggest one design usage context for the colour. ` +
-        `Then reconcile the two variants back into a single row per colour holding color_name, ` +
-        `hex, tone (from A) and usage (from B), and write all ${expectedRows.length} reconciled ` +
-        `rows to a JSON file named ${sinkFilename}.`;
+        `Build an A/B assessment pipeline: read the CSV, then fork each row into TWO ` +
+        `separate LLM transform nodes with different prompts — variant A: describe the ` +
+        `emotional tone of the colour in one short phrase; variant B: suggest one design ` +
+        `usage context for the colour. Join the branches with a coalesce that merges both ` +
+        `branches back into a single row per colour holding color_name, hex, tone (from A) ` +
+        `and usage (from B). Do not use a single LLM node with a queries map — the two ` +
+        `assessments must be two separate LLM nodes. Write all ${expectedRows.length} ` +
+        `merged rows to a JSON file named ${sinkFilename}.`;
       const chat = page.getByRole("textbox", { name: "Message input" });
       await expect(chat).toBeEnabled();
       await chat.fill(request);
@@ -164,6 +221,11 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
         }
       }
       await expect(runButton).toBeEnabled({ timeout: 120_000 });
+
+      // ── OPERATOR RULING: committed topology must be fork → 2 llm → coalesce
+      // Fail fast on the forbidden single-llm queries-map shortcut BEFORE
+      // spending pipeline tokens on a run that would be ruled invalid anyway.
+      await assertAbForkCoalesceTopology(ctx, sessionId);
 
       await runButton.click();
       const runDialog = page.getByRole("alertdialog", { name: "Run pipeline?" });

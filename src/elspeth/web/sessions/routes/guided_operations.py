@@ -9,7 +9,8 @@ above those handlers while the pre-release cutover replaces them.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, Never, overload
 from uuid import UUID
@@ -37,6 +38,47 @@ from elspeth.web.sessions.protocol import (
 _ACTOR = "composer_route"
 _LEASE_SECONDS = 300
 _POLL_SECONDS = 0.05
+
+# Ceiling for a NEW guided operation waiting on the per-session admission
+# lock. The admission lock is held across the whole respond settlement —
+# including the in-request pipeline planner, observed at 200s+ live — so an
+# unbounded wait turns a competing different-body request (double-click race,
+# second tab) into a silent multi-minute hang that then dies stale. Same-body
+# retries never wait here: they join or replay via the pre-admission lookup.
+# The ceiling absorbs ordinary quick settlements; a planner-length hold
+# answers fast with the coded conflict below.
+GUIDED_RESPOND_ADMISSION_WAIT_SECONDS: float = 10.0
+
+
+@contextlib.asynccontextmanager
+async def bounded_admission_guard(lock: asyncio.Lock) -> AsyncIterator[None]:
+    """Acquire a per-session admission lock with a hard ceiling.
+
+    On timeout, answer the closed conflict envelope instead of queueing
+    behind a multi-minute settlement. In-process lock, single-instance
+    deployment (one container per org); the DB-level operation reserve
+    remains the cross-process correctness fence — this guard is the
+    fast-answer UX boundary, not the integrity boundary.
+    """
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=GUIDED_RESPOND_ADMISSION_WAIT_SECONDS)
+    except TimeoutError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "guided_operation_conflict",
+                "code": "operation_in_progress",
+                "detail": (
+                    "Another guided operation is still settling for this session. "
+                    "Wait for it to finish, then reload the session state and retry with a new operation id."
+                ),
+            },
+        ) from None
+    try:
+        yield
+    finally:
+        lock.release()
+
 
 _SAFE_FAILURES: dict[str, tuple[int, str]] = {
     "provider_unavailable": (503, "The provider is unavailable. Retry with a new operation id."),

@@ -1429,6 +1429,95 @@ class TestStep2IntraStep:
         assert replay.json() == body
         assert captured == {}
 
+    def test_competing_respond_answers_fast_coded_conflict_during_planner_settlement(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A different-body respond never queues behind an in-flight planner run.
+
+        post_guided_respond holds the session admission lock across the whole
+        settlement, including the in-request planner (200s+ observed live).
+        A genuinely concurrent competing respond (different operation_id —
+        double-click race, second tab) would silently queue for minutes and
+        then die stale. It must instead answer FAST with the coded conflict
+        envelope. Same-body retries are safe by construction: they join or
+        replay via the pre-admission replay lookup and never wait on the
+        admission lock, so the bounded wait cannot corrupt replay semantics.
+        """
+        from elspeth.web.composer.pipeline_planner import PipelinePlannerError
+        from elspeth.web.sessions.routes import guided_operations as guided_ops_module
+
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="admission-conflict.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+
+        planner_entered = asyncio.Event()
+        planner_release = asyncio.Event()
+
+        async def slow_planner(**_kwargs: object) -> object:
+            planner_entered.set()
+            await planner_release.wait()
+            raise PipelinePlannerError(
+                "planner released for teardown",
+                code="REPAIR_EXHAUSTED",
+                detail_codes=(),
+            )
+
+        monkeypatch.setattr(composer_test_client.app.state.composer_service, "plan_guided_pipeline", slow_planner)
+        monkeypatch.setattr(guided_ops_module, "GUIDED_RESPOND_ADMISSION_WAIT_SECONDS", 0.2, raising=False)
+
+        def _revision_body(instruction: str) -> dict[str, object]:
+            return {
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": payload["proposal_id"],
+                "draft_hash": payload["draft_hash"],
+                "edited_values": {"revision_instruction": instruction},
+            }
+
+        async def run() -> tuple[object, float, object]:
+            async with AsyncClient(transport=ASGITransport(app=composer_test_client.app), base_url="http://test") as client:
+                owner_task = asyncio.create_task(
+                    client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json=_revision_body("First revision: add a summarizing transform."),
+                    )
+                )
+                await asyncio.wait_for(planner_entered.wait(), timeout=5)
+
+                loop = asyncio.get_running_loop()
+                started = loop.time()
+                competitor_task = asyncio.create_task(
+                    client.post(
+                        f"/api/sessions/{session_id}/guided/respond",
+                        json=_revision_body("Second revision: rename the output file."),
+                    )
+                )
+                try:
+                    competitor = await asyncio.wait_for(competitor_task, timeout=5)
+                except TimeoutError:
+                    competitor_task.cancel()
+                    competitor = None
+                elapsed = loop.time() - started
+
+                planner_release.set()
+                owner = await asyncio.wait_for(owner_task, timeout=15)
+                return competitor, elapsed, owner
+
+        competitor, elapsed, owner = asyncio.run(run())
+
+        assert competitor is not None, "competing respond queued behind the in-flight planner instead of answering"
+        assert competitor.status_code == 409, competitor.text
+        detail = competitor.json()["detail"]
+        assert detail["error_type"] == "guided_operation_conflict"
+        assert detail["code"] == "operation_in_progress"
+        assert elapsed < 3, f"competing respond took {elapsed:.1f}s; must answer well under the planner runtime"
+        # The in-flight owner is unaffected: it settles through its own path
+        # (coded planner-failure envelope from the stubbed exhaustion).
+        assert owner.status_code == 502, owner.text
+
     def test_prose_revision_planner_exhaustion_is_coded_502_not_500(
         self,
         composer_test_client: TestClient,

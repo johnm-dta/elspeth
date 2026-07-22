@@ -2239,6 +2239,7 @@ async def post_guided_respond(
     from ..guided_operations import (
         GuidedOperationExpired,
         GuidedOperationLease,
+        bounded_admission_guard,
         raise_guided_operation_failure,
         reserve_or_replay_guided_operation,
     )
@@ -2532,7 +2533,13 @@ async def post_guided_respond(
             if not isinstance(pending, GuidedOperationLease):
                 return pending
 
-        attempt_guard = contextlib.nullcontext() if bypass_admission else admission_lock
+        # Bounded admission: this lock is held across the whole settlement
+        # below, INCLUDING the in-request planner (200s+ observed live), so a
+        # competing different-body respond must answer the coded conflict fast
+        # instead of silently queueing for minutes and then dying stale.
+        # Same-body retries never reach this wait — they join or replay via
+        # the pre-admission lookup above.
+        attempt_guard = contextlib.nullcontext() if bypass_admission else bounded_admission_guard(admission_lock)
         async with attempt_guard:
             # A duplicate may have settled while this request waited for local
             # admission. Rejoin outside the state lock: the helper may poll an

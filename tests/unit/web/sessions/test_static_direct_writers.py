@@ -883,6 +883,17 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/composer/test_planner_authoring_aids.py",
+        enclosing_symbol="_session_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "Authoring-aids exemplar tests seed the originating user chat message the "
+            "candidate builder's inline-source custody path anchors to; no production "
+            "sequence allocation is under test in this fixture"
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/composer/test_set_pipeline_candidate.py",
         enclosing_symbol="_session_with_user_message",
         table="chat_messages",

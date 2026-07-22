@@ -2477,21 +2477,41 @@ class _SemanticEdgeContractShadowModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _SchemaContractDetailShadowModel(BaseModel):
+    """Redaction shadow for ``SchemaContractDetail.to_dict()`` (state.py).
+
+    Producer/consumer are pipeline component identifiers (node ids /
+    ``output:<name>`` / source producer ids); the field lists are schema
+    FIELD NAMES from validated contract config. Pipeline-shape metadata the
+    session owner authored — never user row content — so none of it is
+    Sensitive (same judgment as the enclosing validation envelope).
+    """
+
+    producer: str
+    consumer: str
+    missing_fields: list[str] | None = None
+    extra_fields: list[str] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class _ValidationEntryShadowModel(BaseModel):
     """Redaction shadow for ``ValidationEntry.to_dict()`` (state.py).
 
     Mirrors a serialized validation message: ``component`` / ``message`` /
     ``severity`` are all plain strings (``severity`` serializes from the
     ``Severity`` literal alias to its string value); ``error_code`` is the
-    closed machine-readable discriminant, emitted only when set. None
-    carries operator payload — these are composer-authored diagnostics
-    about pipeline shape.
+    closed machine-readable discriminant, emitted only when set, and
+    ``contract`` the structured schema-contract facts, emitted only for the
+    schema-contract family. None carries operator payload — these are
+    composer-authored diagnostics about pipeline shape.
     """
 
     component: str
     message: str
     severity: str
     error_code: str | None = None
+    contract: _SchemaContractDetailShadowModel | None = None
 
     model_config = ConfigDict(extra="forbid")
 

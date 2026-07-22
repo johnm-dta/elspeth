@@ -35,7 +35,7 @@
     "shape": "declarative"
   },
   "get_blob_content": {
-    "hash": "0e89a0241830e230ecb8df4f30a40ad4155f66e7922c60d5bdcdfd76ffc014c2",
+    "hash": "5c8e3056b25942a1576c5545852ca0788b27851cc75b96f47c6955e166c818d0",
     "sensitive_path_count": 2,
     "shape": "type_driven"
   },
@@ -150,7 +150,7 @@
     "shape": "declarative"
   },
   "request_interpretation_review": {
-    "hash": "79f6defa3dfde12dbf94a24bbbc15d6ee4739a27b6f36acaad16bc303269c76f",
+    "hash": "28b1931b8cfe254cf14252f8cdae0b338a0c76a99dd688768b490826eea41521",
     "sensitive_path_count": 6,
     "shape": "type_driven"
   },

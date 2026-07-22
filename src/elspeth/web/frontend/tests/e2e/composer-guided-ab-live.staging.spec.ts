@@ -397,6 +397,14 @@ test.describe("composer guided live — the two-LLM A/B test (staging)", () => {
       const runDialog = page.getByRole("alertdialog", { name: "Run pipeline?" });
       await expect(runDialog).toBeVisible();
       await runDialog.getByRole("button", { name: "Run pipeline" }).click();
+
+      // Fan-out cost guard (428 ExecutionFanoutGuardRequired): the forking
+      // A/B pipeline triggers a second confirm ("Review LLM provider calls");
+      // acknowledging the spend is this spec's point.
+      const fanoutDialog = page.getByRole("alertdialog", { name: "Review LLM provider calls" });
+      if (await fanoutDialog.isVisible({ timeout: 15_000 }).catch(() => false)) {
+        await fanoutDialog.getByRole("button", { name: "Execute" }).click();
+      }
       await shot(page, "run-started");
 
       // ── The A/B contract: every row reconciled with both variants ────────

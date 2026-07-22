@@ -170,6 +170,15 @@ test.describe("composer freeform live — the two-LLM A/B test (staging)", () =>
       await expect(runDialog).toBeVisible();
       await runDialog.getByRole("button", { name: "Run pipeline" }).click();
 
+      // Fan-out cost guard (428 ExecutionFanoutGuardRequired): a forking
+      // pipeline multiplies per-row LLM calls, so a second confirm dialog
+      // ("Review LLM provider calls") interposes with an ack token. Confirm
+      // it when it appears — acknowledging the spend is this spec's point.
+      const fanoutDialog = page.getByRole("alertdialog", { name: "Review LLM provider calls" });
+      if (await fanoutDialog.isVisible({ timeout: 15_000 }).catch(() => false)) {
+        await fanoutDialog.getByRole("button", { name: "Execute" }).click();
+      }
+
       // ── The A/B contract: every row reconciled with both variants ────────
       if (!OUTPUTS_DIR) {
         throw new Error(

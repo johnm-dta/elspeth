@@ -73,6 +73,34 @@ class GuidedBoundPipeline(TypedDict):
     metadata: NotRequired[dict[str, JsonValue] | None]
 
 
+class _ProjectionNodeKindSummary(TypedDict):
+    """Redaction-safe node shape emitted with projection failures."""
+
+    stable_id: object
+    node_type: object
+    plugin: object
+    behavior: object
+    branch_aliases: object
+
+
+_ProjectionEdgeFlowSummary = TypedDict(
+    "_ProjectionEdgeFlowSummary",
+    {
+        "from": object,
+        "to": object,
+        "flow": object,
+        "branch": object,
+    },
+)
+
+
+class _ProjectionKindSummary(TypedDict):
+    """Closed structural diagnostics for a rejected wire projection."""
+
+    node_kinds: list[_ProjectionNodeKindSummary]
+    edge_flows: list[_ProjectionEdgeFlowSummary]
+
+
 @dataclass(frozen=True, slots=True)
 class GuidedCorrectionTarget:
     """One closed public selection plus its authoritative private owner."""
@@ -609,13 +637,13 @@ def bind_guided_reviewed_components(
         # "discard" is the legal drop-route sentinel, not a reference.
         known_targets = set(expected_output_names) | node_ids | connection_names | branch_connection_names | {"discard"}
 
-        def _resolve_dangling(member: dict[str, Any], key: str) -> None:
+        def _resolve_dangling(member: dict[str, JsonValue], key: str) -> None:
             value = member.get(key)
             if type(value) is str and value and value not in known_targets:
                 member[key] = only_output
 
         for member in bound["sources"].values():
-            _resolve_dangling(cast(dict[str, Any], member), "on_success")
+            _resolve_dangling(cast(dict[str, JsonValue], member), "on_success")
         if isinstance(topology_nodes, list):
             for topology_node in topology_nodes:
                 if isinstance(topology_node, dict):
@@ -632,7 +660,7 @@ def bind_guided_reviewed_components(
     return cast(GuidedBoundPipeline, bound)
 
 
-def _canonical_state_from_private_pipeline(raw: dict[str, Any]) -> CompositionState:
+def _canonical_state_from_private_pipeline(raw: dict[str, JsonValue]) -> CompositionState:
     """Canonicalise a planner-authored private pipeline dict into a state.
 
     The set_pipeline tool schema leaves per-node ``plugin``/``on_success``/
@@ -682,13 +710,13 @@ def _canonical_state_from_private_pipeline(raw: dict[str, Any]) -> CompositionSt
     raw.setdefault("metadata", {"name": "Untitled Pipeline", "description": ""})
     raw["version"] = 1
     try:
-        return CompositionState.from_dict(raw)
+        return CompositionState.from_dict(cast(dict[str, Any], raw))
     except (KeyError, TypeError, ValueError) as exc:
         raise AuditIntegrityError("guided proposal private pipeline is not canonical") from exc
 
 
 def _state_from_proposal(proposal: PipelineProposal) -> CompositionState:
-    return _canonical_state_from_private_pipeline(cast(dict[str, Any], deep_thaw(proposal.pipeline)))
+    return _canonical_state_from_private_pipeline(cast(dict[str, JsonValue], deep_thaw(proposal.pipeline)))
 
 
 def guided_candidate_state(proposal: PipelineProposal) -> CompositionState:
@@ -1106,7 +1134,7 @@ def _build_projection(
     return payload
 
 
-def _projection_kind_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _projection_kind_summary(payload: Mapping[str, Any]) -> _ProjectionKindSummary:
     """Structural (Tier-3-safe) node/edge kind summary for projection failure logs.
 
     The PROPOSE_PIPELINE projection is already the closed, redacted wire shape —
@@ -1118,7 +1146,7 @@ def _projection_kind_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
     nodes = payload["nodes"] if isinstance(payload.get("nodes"), list) else []
     graph = payload["graph"] if isinstance(payload.get("graph"), Mapping) else {}
     edges = graph["edges"] if isinstance(graph.get("edges"), list) else []
-    node_kinds = [
+    node_kinds: list[_ProjectionNodeKindSummary] = [
         {
             "stable_id": node.get("stable_id"),
             "node_type": node.get("node_type"),
@@ -1133,7 +1161,7 @@ def _projection_kind_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
         for node in nodes
         if isinstance(node, Mapping)
     ]
-    edge_flows = [
+    edge_flows: list[_ProjectionEdgeFlowSummary] = [
         {
             "from": edge["from_endpoint"].get("kind") if isinstance(edge.get("from_endpoint"), Mapping) else None,
             "to": edge["to_endpoint"].get("kind") if isinstance(edge.get("to_endpoint"), Mapping) else None,

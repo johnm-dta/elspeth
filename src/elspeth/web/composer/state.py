@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
-from typing import Any, Literal, Self, TypedDict
+from typing import Any, Literal, NotRequired, Self, TypedDict
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -362,6 +362,15 @@ class OutputSpec:
 Severity = Literal["high", "medium", "low"]
 
 
+class SchemaContractDetailDict(TypedDict):
+    """JSON representation of :class:`SchemaContractDetail`."""
+
+    producer: str
+    consumer: str
+    missing_fields: NotRequired[list[str]]
+    extra_fields: NotRequired[list[str]]
+
+
 @dataclass(frozen=True, slots=True)
 class SchemaContractDetail:
     """Redaction-safe structural facts for a schema-contract rejection.
@@ -384,14 +393,24 @@ class SchemaContractDetail:
     missing_fields: tuple[str, ...] = ()
     extra_fields: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> SchemaContractDetailDict:
         """Serialize to a plain dict for JSON responses."""
-        result: dict[str, Any] = {"producer": self.producer, "consumer": self.consumer}
+        result = SchemaContractDetailDict(producer=self.producer, consumer=self.consumer)
         if self.missing_fields:
             result["missing_fields"] = list(self.missing_fields)
         if self.extra_fields:
             result["extra_fields"] = list(self.extra_fields)
         return result
+
+
+class ValidationEntryDict(TypedDict):
+    """JSON representation of :class:`ValidationEntry`."""
+
+    component: str
+    message: str
+    severity: Severity
+    error_code: NotRequired[str]
+    contract: NotRequired[SchemaContractDetailDict]
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,9 +427,9 @@ class ValidationEntry:
     error_code: str | None = None
     contract: SchemaContractDetail | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ValidationEntryDict:
         """Serialize to a plain dict for JSON responses."""
-        result: dict[str, Any] = {"component": self.component, "message": self.message, "severity": self.severity}
+        result = ValidationEntryDict(component=self.component, message=self.message, severity=self.severity)
         if self.error_code is not None:
             result["error_code"] = self.error_code
         if self.contract is not None:

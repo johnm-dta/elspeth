@@ -15,6 +15,8 @@ from pathlib import PurePosixPath
 from typing import Any, Final, Literal, cast
 from uuid import UUID
 
+from pydantic import JsonValue
+
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.knob_schema import KnobSchema, validate_knob_schema
@@ -1046,7 +1048,7 @@ def transition_sink_schema_form(
 _SINK_OUTPUT_POOL: Final = "outputs"
 
 
-def canonical_sink_local_paths(options: Mapping[str, Any]) -> dict[str, Any]:
+def canonical_sink_local_paths(options: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Root relative sink path options in the managed outputs pool.
 
     Guided pipelines write to the deployment's managed outputs directory. A
@@ -1064,7 +1066,7 @@ def canonical_sink_local_paths(options: Mapping[str, Any]) -> dict[str, Any]:
     rejected here outright: canonicalizing them would silently rewrite
     intent, and no allowlist can prove them safe pre-resolution.
     """
-    updated = dict(options)
+    updated = cast(dict[str, JsonValue], dict(options))
     for key in SINK_LOCAL_PATH_OPTION_KEYS:
         value = updated.get(key)
         if type(value) is not str or not value or value.startswith(BLOB_REF_PATH_PREFIX):

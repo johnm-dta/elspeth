@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any, Final, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.blobs import ALLOWED_MIME_TYPES
@@ -210,7 +210,7 @@ def _options_with_inline_blob_source_review(
     )
 
 
-def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) -> dict[str, Any]:
+def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Fill the two server-owned interpretation-review fields the skill omits.
 
     The composer skill instructs the planner to stage a ``pipeline_decision``
@@ -241,7 +241,7 @@ def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) 
     """
     nodes = pipeline["nodes"] if "nodes" in pipeline else None
     if not isinstance(nodes, (list, tuple)):
-        return dict(pipeline)
+        return cast(dict[str, JsonValue], dict(pipeline))
     new_nodes: list[Any] = []
     nodes_changed = False
     for node in nodes:
@@ -284,7 +284,7 @@ def canonicalize_authored_node_review_requirements(pipeline: Mapping[str, Any]) 
     normalized = dict(pipeline)
     if nodes_changed:
         normalized["nodes"] = new_nodes
-    return normalized
+    return cast(dict[str, JsonValue], normalized)
 
 
 def authored_node_interpretation_requirement_parse_error(

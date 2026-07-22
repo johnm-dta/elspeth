@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Final
+from typing import Any, Final, NotRequired, Required, TypedDict
 
 from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.catalog.policy_view import PolicyCatalogView
@@ -49,6 +49,130 @@ from elspeth.web.provider_config_policy import WEB_LLM_SEQUENTIAL_MULTI_QUERY_MA
 
 # The prompt never models a fabricated identifier — provenance is the lesson.
 PLACEHOLDER_BLOB_ID: Final[str] = "<blob_id copied verbatim from a list_blobs or create_blob result>"
+
+
+class _PluginDigestEntry(TypedDict):
+    """Closed policy-visible plugin summary rendered into the planner prompt."""
+
+    name: str
+    purpose: str
+    required_options: list[str]
+    composer_hints: list[str]
+    profile_aliases: NotRequired[list[str]]
+
+
+class _DiscoveryDigest(TypedDict):
+    """Closed plugin-kind inventory rendered from one catalog snapshot."""
+
+    sources: list[_PluginDigestEntry]
+    transforms: list[_PluginDigestEntry]
+    sinks: list[_PluginDigestEntry]
+
+
+class _ExemplarSource(TypedDict, total=False):
+    """Source subset used by the worked set-pipeline exemplars."""
+
+    plugin: Required[str]
+    on_success: Required[str]
+    options: Required[dict[str, Any]]
+    on_validation_failure: Required[str]
+    inline_blob: dict[str, str]
+    blob_id: str
+
+
+class _ExemplarNode(TypedDict, total=False):
+    """Union of node fields used by the worked set-pipeline exemplars."""
+
+    id: Required[str]
+    node_type: Required[str]
+    plugin: str
+    input: Required[str]
+    on_success: str
+    on_error: str
+    options: dict[str, Any]
+    condition: str
+    routes: dict[str, str]
+    fork_to: list[str]
+    branches: dict[str, str]
+    policy: str
+    merge: str
+
+
+class _ExemplarEdge(TypedDict):
+    """Optional UI edge shape accepted by set_pipeline exemplars."""
+
+    id: str
+    from_node: str
+    to_node: str
+    edge_type: str
+    label: str | None
+
+
+class _ExemplarOutput(TypedDict):
+    """Sink subset used by the worked set-pipeline exemplars."""
+
+    sink_name: str
+    plugin: str
+    options: dict[str, Any]
+    on_write_failure: str
+
+
+class _ExemplarMetadata(TypedDict):
+    """Metadata carried by each worked set-pipeline exemplar."""
+
+    name: str
+    description: str
+
+
+class _SetPipelineExemplar(TypedDict):
+    """Closed top-level shape for worked set_pipeline arguments."""
+
+    source: _ExemplarSource
+    nodes: list[_ExemplarNode]
+    edges: list[_ExemplarEdge]
+    outputs: list[_ExemplarOutput]
+    metadata: _ExemplarMetadata
+
+
+class _SourceCustodyAid(TypedDict):
+    rules: list[str]
+    set_pipeline_exemplar_inline_blob: _SetPipelineExemplar
+    existing_blob_source_binding: _ExemplarSource
+
+
+class _ForkCoalesceAid(TypedDict):
+    rules: list[str]
+    set_pipeline_exemplar: _SetPipelineExemplar
+
+
+class _RulesAid(TypedDict):
+    rules: list[str]
+
+
+class _ReviewRegistryAid(TypedDict):
+    registered_pipeline_decision_user_terms: list[str]
+    rules: list[str]
+
+
+class _DiscoveryDigestAid(TypedDict):
+    guidance: str
+    plugins: _DiscoveryDigest
+
+
+class _PlannerAuthoringAids(TypedDict, total=False):
+    """Closed section vocabulary for the live planner-authoring payload."""
+
+    purpose: Required[str]
+    source_custody: _SourceCustodyAid
+    fork_coalesce: _ForkCoalesceAid
+    model_custody: _RulesAid
+    llm_output_contract: _RulesAid
+    review_registry: _ReviewRegistryAid
+    prompt_shield: _RulesAid
+    raw_html_cleanup: _RulesAid
+    web_scrape_http_identity: _RulesAid
+    discovery_digest: _DiscoveryDigestAid
+
 
 _SOURCE_CUSTODY_RULES: Final[tuple[str, ...]] = (
     "A blob_id comes ONLY from blob-tool output in this session (list_blobs, "
@@ -355,7 +479,7 @@ def _visible_plugin_names(
     return {kind: frozenset(plugin.name for plugin in plugins) for kind, plugins in summaries.items()}
 
 
-def _digest_entries(plugins: list[PluginSummary]) -> list[dict[str, Any]]:
+def _digest_entries(plugins: list[PluginSummary]) -> list[_PluginDigestEntry]:
     return [
         {
             "name": plugin.name,
@@ -371,7 +495,7 @@ def discovery_digest(
     catalog: PolicyCatalogView,
     *,
     summaries: Mapping[str, list[PluginSummary]] | None = None,
-) -> dict[str, Any]:
+) -> _DiscoveryDigest:
     """Per-plugin digest of the policy-visible catalog for the planner prompt.
 
     Targets ``planner_code=DISCOVERY_CYCLE`` churn: a significant share of
@@ -383,7 +507,7 @@ def discovery_digest(
     """
     if summaries is None:
         summaries = _plugin_summaries(catalog)
-    digest = {
+    digest: _DiscoveryDigest = {
         "sources": _digest_entries(summaries["source"]),
         "transforms": _digest_entries(summaries["transform"]),
         "sinks": _digest_entries(summaries["sink"]),
@@ -420,7 +544,7 @@ def source_custody_exemplar_args(
     *,
     blob_id: str | None = None,
     visible: Mapping[str, frozenset[str]] | None = None,
-) -> dict[str, Any] | None:
+) -> _SetPipelineExemplar | None:
     """Complete ``set_pipeline`` args showing one legal source custody binding.
 
     With ``blob_id=None`` the source binds literal user data via
@@ -435,25 +559,23 @@ def source_custody_exemplar_args(
         visible = _visible_plugin_names(catalog)
     if "csv" not in visible["source"] or "json" not in visible["sink"]:
         return None
+    source: _ExemplarSource = {
+        "plugin": "csv",
+        "on_success": "main",
+        "options": {"schema": {"mode": "observed"}},
+        "on_validation_failure": "discard",
+    }
     if blob_id is None:
-        binding: dict[str, Any] = {
-            "inline_blob": {
-                "filename": _INLINE_EXEMPLAR_FILENAME,
-                "mime_type": _INLINE_EXEMPLAR_MIME,
-                "content": _INLINE_EXEMPLAR_CONTENT,
-                "description": "Literal rows the user pasted into chat",
-            }
+        source["inline_blob"] = {
+            "filename": _INLINE_EXEMPLAR_FILENAME,
+            "mime_type": _INLINE_EXEMPLAR_MIME,
+            "content": _INLINE_EXEMPLAR_CONTENT,
+            "description": "Literal rows the user pasted into chat",
         }
     else:
-        binding = {"blob_id": blob_id}
-    return {
-        "source": {
-            "plugin": "csv",
-            "on_success": "main",
-            "options": {"schema": {"mode": "observed"}},
-            "on_validation_failure": "discard",
-            **binding,
-        },
+        source["blob_id"] = blob_id
+    exemplar: _SetPipelineExemplar = {
+        "source": source,
         "nodes": [],
         "edges": [],
         "outputs": [
@@ -475,6 +597,7 @@ def source_custody_exemplar_args(
             "description": "Bind user-provided rows through blob custody and write them to one JSON output.",
         },
     }
+    return exemplar
 
 
 def _renderable_branch_plugins(transforms: list[PluginSummary]) -> list[str]:
@@ -505,7 +628,7 @@ def fork_coalesce_exemplar_args(
     *,
     visible: Mapping[str, frozenset[str]] | None = None,
     summaries: Mapping[str, list[PluginSummary]] | None = None,
-) -> dict[str, Any] | None:
+) -> _SetPipelineExemplar | None:
     """Complete ``set_pipeline`` args for the fork -> branches -> coalesce shape.
 
     The operator-ruled A/B topology: a gate fans identical rows out to two
@@ -541,7 +664,7 @@ def fork_coalesce_exemplar_args(
         *,
         prompt_template_parts: list[dict[str, Any]] | None = None,
         interpretation_requirements: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> _ExemplarNode:
         options: dict[str, Any] = {
             "profile": profile_alias,
             "prompt_template": question,
@@ -576,8 +699,9 @@ def fork_coalesce_exemplar_args(
         "work continues with a broken feature; routine = a question or cosmetic issue"
     )
 
+    metadata: _ExemplarMetadata
     if profile_alias is not None:
-        branch_nodes = [
+        branch_nodes: list[_ExemplarNode] = [
             _branch_llm(
                 "assess_sentiment",
                 "branch_a",
@@ -651,7 +775,7 @@ def fork_coalesce_exemplar_args(
             "description": "Fan rows out to one transform per branch, rejoin with a coalesce, tidy, and save.",
         }
 
-    return {
+    exemplar: _SetPipelineExemplar = {
         "source": {
             "plugin": "csv",
             "on_success": "rows",
@@ -723,6 +847,7 @@ def fork_coalesce_exemplar_args(
         ],
         "metadata": metadata,
     }
+    return exemplar
 
 
 # Payload memo keyed by plugin-policy snapshot hash. The aids depend only on
@@ -732,11 +857,11 @@ def fork_coalesce_exemplar_args(
 # repeat inside every planner call's wall-clock budget. Bounded so snapshot
 # rotation cannot grow it without limit; callers receive a deep copy so no
 # caller can poison the cached payload.
-_AIDS_MEMO: dict[str, dict[str, Any]] = {}
+_AIDS_MEMO: dict[str, _PlannerAuthoringAids] = {}
 _AIDS_MEMO_MAX: Final[int] = 8
 
 
-def build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
+def build_planner_authoring_aids(catalog: PolicyCatalogView) -> _PlannerAuthoringAids:
     """Assemble the live authoring-aids payload for one planner call.
 
     Rendered from the policy-visible catalog (memoized per snapshot hash), so
@@ -753,10 +878,10 @@ def build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
     return deepcopy(cached)
 
 
-def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> dict[str, Any]:
+def _build_planner_authoring_aids(catalog: PolicyCatalogView) -> _PlannerAuthoringAids:
     summaries = _plugin_summaries(catalog)
     visible = _visible_plugin_names(catalog, summaries)
-    aids: dict[str, Any] = {
+    aids: _PlannerAuthoringAids = {
         "purpose": (
             "Server-rendered worked exemplars and catalog digest from the live "
             "policy-visible catalog. These shapes validate against the current deployment."

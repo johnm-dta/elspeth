@@ -628,7 +628,14 @@ def _canonical_state_from_private_pipeline(raw: dict[str, Any]) -> CompositionSt
             if type(node) is dict:
                 node.setdefault("plugin", None)
                 node.setdefault("on_success", None)
-                node.setdefault("on_error", None)
+                # Mirror build_set_pipeline_candidate's derivation exactly: a
+                # transform/aggregation with on_error omitted or blank derives
+                # the "discard" error flow. The validated candidate state
+                # carried that default, but the proposal seals the raw planner
+                # dict — defaulting to None here drops the node_error edge at
+                # projection and kills a validation-accepted plan at the wire
+                # contract's exact success+error flow check.
+                node["on_error"] = node.get("on_error") or ("discard" if node.get("node_type") in ("transform", "aggregation") else None)
                 node.setdefault("options", {})
     outputs = raw.get("outputs")
     if type(outputs) is list:

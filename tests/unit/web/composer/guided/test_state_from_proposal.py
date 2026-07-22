@@ -96,3 +96,73 @@ def test_source_optional_keys_default_instead_of_failing_canonicalisation() -> N
     raw = _ab_private_pipeline()
     state = _canonical_state_from_private_pipeline(raw)
     assert state.sources["source"].on_validation_failure == "discard"
+
+
+def _linear_private_pipeline_missing_transform_on_error() -> dict[str, object]:
+    """The live-observed shape: linear source→llm→field_mapper→output, no on_error."""
+    return {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"path": "blob:00000000-0000-0000-0000-000000000001"},
+        },
+        "nodes": [
+            {
+                "id": "assess",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "assessed",
+                "options": {"provider": "openrouter"},
+            },
+            {
+                "id": "reshape",
+                "node_type": "transform",
+                "plugin": "field_mapper",
+                "input": "assessed",
+                "on_success": "colour_out",
+                "options": {},
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "colour_out",
+                "plugin": "json",
+                "options": {"path": "out.json"},
+                "on_write_failure": "discard",
+            },
+        ],
+    }
+
+
+def test_transform_on_error_omitted_derives_discard_like_the_candidate_builder() -> None:
+    """An omitted transform on_error must canonicalise to "discard", not None.
+
+    ``build_set_pipeline_candidate`` derives ``on_error or "discard"`` for
+    transform/aggregation nodes, so the plan VALIDATES with the derived error
+    flow — but the proposal seals the raw planner dict without the key. If
+    this adapter defaults to None instead, the projection drops the
+    node_error edge and a validation-accepted plan dies at the wire
+    contract's exact success+error flow check as an integrity 500.
+    """
+    state = _canonical_state_from_private_pipeline(_linear_private_pipeline_missing_transform_on_error())
+    assert [node.on_error for node in state.nodes] == ["discard", "discard"]
+
+
+def test_node_on_error_defaults_follow_the_candidate_builder_by_node_type() -> None:
+    """Only transform/aggregation derive "discard"; gate/coalesce stay None."""
+    raw = _ab_private_pipeline()
+    nodes = raw["nodes"]
+    assert isinstance(nodes, list)
+    for node in nodes:
+        assert isinstance(node, dict)
+        node.pop("on_error", None)
+    state = _canonical_state_from_private_pipeline(raw)
+    assert {node.id: node.on_error for node in state.nodes} == {
+        "fork_gate": None,
+        "llm_tone": "discard",
+        "llm_usage": "discard",
+        "reconcile": None,
+        "cleanup": "discard",
+    }

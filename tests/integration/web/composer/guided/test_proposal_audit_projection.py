@@ -861,6 +861,97 @@ def test_projection_rejects_plugins_outside_the_same_catalog_snapshot() -> None:
         )
 
 
+def _linear_proposal_missing_transform_on_error(guided: GuidedSession) -> PipelineProposal:
+    """A sealed plan whose transform omits on_error — schema-legal and validated.
+
+    The set_pipeline tool schema types node ``on_error`` as ["string","null"]
+    and requires only id/node_type/input, and ``build_set_pipeline_candidate``
+    DERIVES ``on_error or "discard"`` for transform/aggregation nodes — so the
+    plan passes candidate validation. The proposal then seals the raw planner
+    dict (not the candidate state), so the derived key is absent here.
+    """
+    return PipelineProposal.create(
+        pipeline={
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"credentials": {"secret_ref": CANARIES[1]}},
+                    "on_validation_failure": "discard",
+                }
+            },
+            "nodes": [
+                {
+                    "id": "clean",
+                    "node_type": "transform",
+                    "plugin": "normalize",
+                    "input": "rows",
+                    "on_success": "cleaned",
+                    "options": {"rules": [{"column": "name", "operation": "strip"}]},
+                }
+            ],
+            "edges": [],
+            "outputs": [
+                {
+                    "name": "cleaned",
+                    "plugin": "json",
+                    "options": {"path": CANARIES[4]},
+                    "on_write_failure": "discard",
+                }
+            ],
+        },
+        base=PresentBase(state_id=CHECKPOINT_ID, composition_content_hash="a" * 64),
+        reviewed_facts=guided_private_reviewed_facts(guided),
+        surface=PlannerSurface.GUIDED_STAGED,
+        repair_count=0,
+        skill_hash=stable_hash("guided planner skill"),
+        covered_deferred_intent_ids=(),
+        supersedes_draft_hash=None,
+    )
+
+
+def test_transform_with_on_error_omitted_projects_the_derived_discard_error_flow() -> None:
+    """A validation-accepted plan must not die at projection over an omitted on_error.
+
+    Regression for the live guided A/B failure (session 3324b106, slog
+    ``composer.guided_projection_invalid``): the projection adapter defaulted
+    an omitted transform ``on_error`` to None instead of the candidate
+    builder's "discard", dropping the node_error edge and tripping the wire
+    contract's "exact success and error flows" check as an integrity 500.
+    """
+    guided = _guided()
+    proposal = _linear_proposal_missing_transform_on_error(guided)
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"normalize"}),
+        "sink": frozenset({"json"}),
+    }
+
+    payload = build_guided_proposal_projection(
+        proposal_id=PROPOSAL_ID,
+        proposal=proposal,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+
+    # The transform projects exactly one success flow (to the output) and the
+    # derived error flow to the discard endpoint — the wire contract's shape.
+    node_id = payload["nodes"][0]["stable_id"]
+    transform_flows = sorted(
+        (edge["flow"]["kind"], edge["to_endpoint"]["kind"])
+        for edge in payload["graph"]["edges"]
+        if edge["from_endpoint"].get("stable_id") == node_id
+    )
+    assert transform_flows == [("node_error", "discard"), ("node_success", "output")]
+    verify_guided_proposal_projection(
+        payload=payload,
+        proposal_id=PROPOSAL_ID,
+        proposal=proposal,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+
+
 def test_planner_requires_private_provider_safe_and_model_claim_authority() -> None:
     model_signature = inspect.signature(plan_pipeline)
     for name in (

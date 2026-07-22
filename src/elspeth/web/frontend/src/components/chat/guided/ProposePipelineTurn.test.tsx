@@ -418,19 +418,40 @@ describe("ProposePipelineTurn", () => {
     expect(screen.getByRole("button", { name: "Revise node-1" })).toBeDisabled();
   });
 
-  it("renders the same closed proposal passively for tutorials without action controls", () => {
+  it("keeps the live Review wiring primary in tutorials while withholding reject/revise", async () => {
+    // Post-7.1 the tutorial's transforms phase yields a REAL planner proposal
+    // (no canned recipe exhibit exists), so the primary must render and
+    // dispatch — read-only rendering made the tutorial unfinishable. The
+    // off-script affordances (Reject discards the build; Revise re-enters
+    // planner rounds) stay withheld for the passive learner, mirroring
+    // InspectAndConfirmTurn's hidden "Edit columns…".
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
     render(
       <ProposePipelineTurn
         payload={payload()}
         reviewState={activeReview()}
-        onSubmit={vi.fn()}
+        onSubmit={onSubmit}
         isTutorial
       />,
     );
     expect(screen.getByRole("img", { name: /pipeline proposal graph/i })).toBeVisible();
     expect(screen.getByText("source-1 · csv")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.getByText(/press Review wiring to continue/i)).toBeVisible();
     expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Review wiring" }));
+    expect(onSubmit.mock.calls).toEqual([
+      [{
+        chosen: ["review_wiring"],
+        edited_values: null,
+        custom_inputs: null,
+        proposal_id: IDS.proposal,
+        draft_hash: "d".repeat(64),
+        edit_target: null,
+        control_signal: null,
+      }],
+    ]);
   });
 });

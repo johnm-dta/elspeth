@@ -544,7 +544,10 @@ describe("ChatPanel mode discriminator", () => {
     },
   );
 
-  it("renders the same closed proposal as a passive tutorial review", () => {
+  it("keeps the live Review wiring primary on the tutorial proposal review", () => {
+    // The tutorial proposal is a REAL planner proposal (no canned exhibit
+    // exists post-7.1); the learner advances by accepting it, so the primary
+    // must stay live while the off-script reject/revise stay withheld.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -558,8 +561,9 @@ describe("ChatPanel mode discriminator", () => {
 
     expect(screen.getByText("Review pipeline proposal")).toBeVisible();
     expect(screen.getByText("orders-source · csv")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
   });
 
   it("renders guided-active surface (GuidedTurn + ExitToFreeformButton) when guidedSession is active and next turn is present", () => {

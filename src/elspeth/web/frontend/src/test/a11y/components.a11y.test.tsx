@@ -1043,7 +1043,7 @@ describe("ProposePipelineTurn", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("has no axe violations in the passive tutorial render", async () => {
+  it("has no axe violations in the tutorial render (live primary, off-script controls withheld)", async () => {
     const reviewState: GuidedProposalReviewState = {
       status: "active",
       proposal_id: PROPOSAL_ID,
@@ -1052,10 +1052,13 @@ describe("ProposePipelineTurn", () => {
     const { container } = render(
       <ProposePipelineTurn payload={proposalPayload()} reviewState={reviewState} onSubmit={() => {}} isTutorial />,
     );
-    // Non-vacuous: the worked-example note renders and the decision controls
-    // are withheld.
-    screen.getByText(/This worked example is read-only/i);
-    expect(screen.queryByRole("button", { name: "Review wiring" })).toBeNull();
+    // Non-vacuous: the tutorial teaching note renders, the live "Review
+    // wiring" primary stays actionable (the tutorial proposal is a REAL
+    // planner proposal the learner must accept to advance), and the
+    // off-script reject/revise controls are withheld.
+    screen.getByText(/press Review wiring to continue/i);
+    expect(screen.getByRole("button", { name: "Review wiring" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Revise/ })).toBeNull();
     expect(await axe(container)).toHaveNoViolations();
   });

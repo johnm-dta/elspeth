@@ -113,6 +113,10 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   const promptRegions = page.getByRole("region", { name: "Prompt template review" });
   const primaries = [
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
+    // Pipeline proposal turn (propose_pipeline): the transforms phase yields a
+    // REAL planner proposal; accepting it (chosen ["review_wiring"]) is the
+    // only advance into the wire stage. Renders only on the proposal turn.
+    page.getByRole("button", { name: "Review wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
     // Source inspection review (inspect_and_confirm): rendered after the
     // chat-resolved inline source is materialized into a session blob and

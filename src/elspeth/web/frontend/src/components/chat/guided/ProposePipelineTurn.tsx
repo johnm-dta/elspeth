@@ -285,29 +285,44 @@ export function ProposePipelineTurn({
         <WireReviewList items={routeItems} ariaLabel="Proposed pipeline routes" />
       </section>
 
+      {/* Tutorial mode follows the same pattern as the other leaf widgets
+          (InspectAndConfirmTurn keeps "Looks right" and hides "Edit columns…";
+          SchemaFormTurn keeps Continue and hides Edit): keep the PRIMARY
+          advance, hide the off-script affordances. Post-7.1 the tutorial's
+          transforms phase produces a REAL planner proposal — there is no canned
+          recipe exhibit any more (planning.py is the only propose_pipeline
+          producer) — so "Review wiring" must dispatch for the learner to reach
+          the wire stage at all. Reject (destructive, discards the planner
+          build) and Revise (re-enters planner rounds off-script) stay hidden
+          for the passive learner. Tutorial mode therefore PRESUPPOSES the
+          frozen-prompt proposal arrives unblocked: revise — the only in-turn
+          affordance that clears a blocker — is withheld, and the one blocker
+          the tutorial realistically sees (interpretation_required) clears via
+          the Accept cards outside this turn. */}
       {isTutorial ? (
         <p className="guided-proposal__tutorial-note">
-          This worked example is read-only. Review how its sources, processing steps, routes, and outputs fit together.
+          The assistant planned this pipeline from your prompt. Review how its sources, processing steps, routes, and outputs fit together, then press Review wiring to continue.
         </p>
-      ) : (
-        <div className="guided-proposal__controls">
-          <div className="guided-proposal__primary-actions">
-            <button
-              type="button"
-              className="guided-turn-primary"
-              disabled={!actionEnabled({ kind: "review_wiring" }) || payload.blockers.length > 0}
-              onClick={() => onSubmit({
-                chosen: ["review_wiring"],
-                edited_values: null,
-                custom_inputs: null,
-                edit_target: null,
-                control_signal: null,
-                proposal_id: payload.proposal_id,
-                draft_hash: payload.draft_hash,
-              } satisfies GuidedRespondAction)}
-            >
-              Review wiring
-            </button>
+      ) : null}
+      <div className="guided-proposal__controls">
+        <div className="guided-proposal__primary-actions">
+          <button
+            type="button"
+            className="guided-turn-primary"
+            disabled={!actionEnabled({ kind: "review_wiring" }) || payload.blockers.length > 0}
+            onClick={() => onSubmit({
+              chosen: ["review_wiring"],
+              edited_values: null,
+              custom_inputs: null,
+              edit_target: null,
+              control_signal: null,
+              proposal_id: payload.proposal_id,
+              draft_hash: payload.draft_hash,
+            } satisfies GuidedRespondAction)}
+          >
+            Review wiring
+          </button>
+          {!isTutorial && (
             <button
               type="button"
               className="guided-turn-secondary"
@@ -324,7 +339,9 @@ export function ProposePipelineTurn({
             >
               Reject proposal
             </button>
-          </div>
+          )}
+        </div>
+        {!isTutorial && (
           <fieldset className="guided-proposal__revise" disabled={controlsLocked}>
             <legend>Revise a component</legend>
             {payload.edit_targets.map((target) => (
@@ -347,8 +364,8 @@ export function ProposePipelineTurn({
               </button>
             ))}
           </fieldset>
-        </div>
-      )}
+        )}
+      </div>
     </article>
   );
 }

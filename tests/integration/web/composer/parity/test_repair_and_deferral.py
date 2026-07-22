@@ -211,7 +211,12 @@ def _disposition_rows(engine: Any) -> list[Any]:
 
 def _assert_allowlisted_feedback_shape(feedback: dict[str, Any], *, error_class: str) -> None:
     """The repair feedback is the redaction-safe structured projection only."""
-    assert set(feedback) == {"success", "validation"}, feedback
+    # "guidance" rides candidate-rejection feedback only (not the canonical
+    # schema projection) and is a STATIC usage line — never per-request data —
+    # so it does not widen the redaction boundary this allowlist protects.
+    assert {"success", "validation"} <= set(feedback) <= {"success", "validation", "guidance"}, feedback
+    if "guidance" in feedback:
+        assert feedback["guidance"] == ("To expand any code, call explain_validation_error with the exact code string.")
     assert feedback["success"] is False
     validation = feedback["validation"]
     assert set(validation) == {"is_valid", "errors"}, validation

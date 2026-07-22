@@ -277,6 +277,12 @@ class ProposePipelinePayload(TypedDict):
 
     proposal_id: str
     draft_hash: str
+    # Revision discriminator: None for a first (transition auto-planned)
+    # proposal; the superseded proposal's draft hash for a revision re-plan.
+    # The tutorial frontend withholds "Review wiring" until the frozen-prompt
+    # revision arrives (tutorial run 18: the pre-Send auto-proposal is a
+    # source->sink passthrough and must not be acceptable there).
+    supersedes_draft_hash: str | None
     summary: str
     rationale: str
     component_counts: _ProposalComponentCounts
@@ -604,6 +610,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
         {
             "proposal_id",
             "draft_hash",
+            "supersedes_draft_hash",
             "summary",
             "rationale",
             "component_counts",
@@ -1467,6 +1474,11 @@ def _validate_propose_pipeline_payload(payload: Mapping[str, Any]) -> str | None
     draft_hash = payload["draft_hash"]
     if type(draft_hash) is not str or len(draft_hash) != 64 or any(char not in "0123456789abcdef" for char in draft_hash):
         return "payload.draft_hash must be 64 lowercase hexadecimal characters"
+    supersedes = payload["supersedes_draft_hash"]
+    if supersedes is not None and (
+        type(supersedes) is not str or len(supersedes) != 64 or any(char not in "0123456789abcdef" for char in supersedes)
+    ):
+        return "payload.supersedes_draft_hash must be null or 64 lowercase hexadecimal characters"
     if payload["summary"] != PROPOSAL_SUMMARY_TEMPLATE:
         return "payload.summary must be the exact server-owned template id"
     if payload["rationale"] != PROPOSAL_RATIONALE_TEMPLATE:

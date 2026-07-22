@@ -41,6 +41,7 @@ def _payload() -> dict[str, Any]:
     return {
         "proposal_id": PROPOSAL_ID,
         "draft_hash": DRAFT_HASH,
+        "supersedes_draft_hash": None,
         "summary": PROPOSAL_SUMMARY_TEMPLATE,
         "rationale": PROPOSAL_RATIONALE_TEMPLATE,
         "component_counts": {"sources": 1, "nodes": 1, "edges": 5, "outputs": 1},
@@ -310,6 +311,7 @@ def test_propose_pipeline_accepts_the_exact_redacted_projection() -> None:
     assert set(payload) == {
         "proposal_id",
         "draft_hash",
+        "supersedes_draft_hash",
         "summary",
         "rationale",
         "component_counts",
@@ -319,6 +321,24 @@ def test_propose_pipeline_accepts_the_exact_redacted_projection() -> None:
         "outputs",
         "edit_targets",
     }
+
+
+def test_propose_pipeline_supersedes_draft_hash_is_null_or_exact_hash() -> None:
+    """The revision discriminator is closed: null (first proposal) or 64-hex.
+
+    The tutorial's pre-Send auto-proposal carries ``supersedes_draft_hash:
+    None``; a frozen-prompt (or prose) revision proposal carries the draft hash
+    it supersedes. The frontend withholds the tutorial "Review wiring" primary
+    on the former, so the discriminator must survive the closed wire shape.
+    """
+    superseding = _payload()
+    superseding["supersedes_draft_hash"] = "e" * 64
+    assert validate_payload(TurnType.PROPOSE_PIPELINE, superseding) is None
+
+    for bad in ("E" * 64, "e" * 63, "", 7):
+        malformed = _payload()
+        malformed["supersedes_draft_hash"] = bad
+        assert validate_payload(TurnType.PROPOSE_PIPELINE, malformed) is not None
 
 
 @pytest.mark.parametrize(
@@ -351,6 +371,7 @@ def test_propose_pipeline_rejects_extra_keys_at_every_closed_layer(path: tuple[s
     ("path", "key"),
     [
         ((), "summary"),
+        ((), "supersedes_draft_hash"),
         (("component_counts",), "nodes"),
         (("blockers", 0), "code"),
         (("graph",), "edges"),

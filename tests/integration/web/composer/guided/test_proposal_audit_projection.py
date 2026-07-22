@@ -82,7 +82,7 @@ def _guided() -> GuidedSession:
     )
 
 
-def _proposal(guided: GuidedSession) -> PipelineProposal:
+def _proposal(guided: GuidedSession, *, supersedes_draft_hash: str | None = None) -> PipelineProposal:
     return PipelineProposal.create(
         pipeline={
             "sources": {
@@ -120,7 +120,7 @@ def _proposal(guided: GuidedSession) -> PipelineProposal:
         repair_count=0,
         skill_hash=stable_hash("guided planner skill"),
         covered_deferred_intent_ids=(),
-        supersedes_draft_hash=None,
+        supersedes_draft_hash=supersedes_draft_hash,
     )
 
 
@@ -444,6 +444,59 @@ def test_projection_is_closed_redacted_and_reverified_against_private_authority(
                 "transform": frozenset({"normalize"}),
                 "sink": frozenset({"json"}),
             },
+        )
+
+
+def test_projection_carries_the_revision_discriminator() -> None:
+    """``supersedes_draft_hash`` reaches the closed wire payload verbatim.
+
+    The tutorial frontend discriminates the pre-Send auto-proposal
+    (``supersedes_draft_hash`` null — planned from the degenerate transition
+    fallback intent, tutorial run 18) from a prose-revision proposal (carries
+    the superseded draft hash) to decide whether "Review wiring" may be
+    offered. Thread the field through the projection AND its verifier so a
+    tampered discriminator cannot survive re-verification.
+    """
+    guided = _guided()
+    catalog = {
+        "source": frozenset({"csv"}),
+        "transform": frozenset({"normalize"}),
+        "sink": frozenset({"json"}),
+    }
+    first = _proposal(guided)
+    first_payload = build_guided_proposal_projection(
+        proposal_id=PROPOSAL_ID,
+        proposal=first,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+    assert first_payload["supersedes_draft_hash"] is None
+
+    superseding = _proposal(guided, supersedes_draft_hash=first.draft_hash)
+    superseding_payload = build_guided_proposal_projection(
+        proposal_id=PROPOSAL_ID,
+        proposal=superseding,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+    assert superseding_payload["supersedes_draft_hash"] == first.draft_hash
+    verify_guided_proposal_projection(
+        payload=superseding_payload,
+        proposal_id=PROPOSAL_ID,
+        proposal=superseding,
+        guided=guided,
+        catalog_plugin_ids=catalog,
+    )
+
+    tampered = dict(superseding_payload)
+    tampered["supersedes_draft_hash"] = None
+    with pytest.raises(AuditIntegrityError, match="projection"):
+        verify_guided_proposal_projection(
+            payload=tampered,
+            proposal_id=PROPOSAL_ID,
+            proposal=superseding,
+            guided=guided,
+            catalog_plugin_ids=catalog,
         )
 
 

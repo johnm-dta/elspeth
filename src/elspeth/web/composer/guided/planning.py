@@ -1030,6 +1030,7 @@ def _build_projection(
         {
             "proposal_id": str(proposal_id),
             "draft_hash": proposal.draft_hash,
+            "supersedes_draft_hash": proposal.supersedes_draft_hash,
             "summary": PROPOSAL_SUMMARY_TEMPLATE,
             "rationale": PROPOSAL_RATIONALE_TEMPLATE,
             "component_counts": {

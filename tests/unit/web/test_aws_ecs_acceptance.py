@@ -7,14 +7,17 @@ import asyncio
 import base64
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import sqlite3
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from queue import Empty
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -5282,6 +5285,143 @@ def _terraform_receipt(*, kind: str = "terraform-plan", deletes: int = 0) -> dic
             "has_replace": False,
         },
     }
+
+
+def _store_receipt_in_process(
+    manifest_path: str,
+    receipt_path: str,
+    scenario_id: str,
+    subject_id: str,
+    ready_queue: Any,
+    start_event: Any,
+    result_queue: Any,
+) -> None:
+    ready_queue.put(scenario_id)
+    if not start_event.wait(timeout=10):
+        result_queue.put(("error", scenario_id, "start_timeout"))
+        return
+    try:
+        receipt_hash = acceptance.receipt_store(
+            Path(manifest_path),
+            scenario_id=scenario_id,
+            kind="terraform-plan",
+            subject_id=subject_id,
+            receipt_file=Path(receipt_path),
+        )
+    except BaseException as exc:
+        result_queue.put(("error", scenario_id, type(exc).__name__))
+    else:
+        result_queue.put(("ok", scenario_id, receipt_hash))
+
+
+def test_receipt_store_serializes_processes_and_preserves_both_updates(tmp_path: Path) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    proc_locks = Path("/proc/locks")
+    if not proc_locks.exists():
+        pytest.skip("requires Linux /proc/locks waiter visibility")
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_resolved=False, prepare_apply_evidence=False)
+    receipt_path = tmp_path / "terraform-receipt.json"
+    receipt_path.write_text(json.dumps(_terraform_receipt()))
+    os.chmod(receipt_path, 0o600)
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+
+    context = multiprocessing.get_context("spawn")
+    ready_queue = context.Queue()
+    result_queue = context.Queue()
+    start_event = context.Event()
+    processes = [
+        context.Process(
+            target=_store_receipt_in_process,
+            args=(
+                str(manifest_path),
+                str(receipt_path),
+                scenario_id,
+                subject_id,
+                ready_queue,
+                start_event,
+                result_queue,
+            ),
+        )
+        for scenario_id, subject_id in (("A", "a" * 64), ("B", "b" * 64))
+    ]
+    try:
+        for process in processes:
+            process.start()
+        assert {ready_queue.get(timeout=20) for _ in processes} == {"A", "B"}
+        start_event.set()
+        process_ids = {process.pid for process in processes}
+        assert None not in process_ids
+        lock_inode = lock_path.stat().st_ino
+        deadline = time.monotonic() + 10
+        waiting_process_ids: set[int] = set()
+        while time.monotonic() < deadline:
+            waiting_process_ids = {
+                int(match.group("pid"))
+                for line in proc_locks.read_text().splitlines()
+                if (
+                    match := re.match(
+                        r"^\d+:\s+->\s+FLOCK\s+ADVISORY\s+WRITE\s+(?P<pid>\d+)\s+\S+:(?P<inode>\d+)\s+",
+                        line,
+                    )
+                )
+                and int(match.group("inode")) == lock_inode
+            }
+            if process_ids <= waiting_process_ids:
+                break
+            if any(process.exitcode is not None for process in processes):
+                break
+            time.sleep(0.01)
+        assert process_ids <= waiting_process_ids
+        with pytest.raises(Empty):
+            result_queue.get_nowait()
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+        for process in processes:
+            if process.pid is None:
+                continue
+            process.join(timeout=20)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+    for process in processes:
+        assert process.exitcode == 0
+    outcomes = [result_queue.get(timeout=5) for _ in processes]
+    assert {(status, scenario_id) for status, scenario_id, _detail in outcomes} == {("ok", "A"), ("ok", "B")}
+    receipts = json.loads(manifest_path.read_text())["evidence"]["receipts"]
+    assert {(receipt["scenario_id"], receipt["subject_sha256"]) for receipt in receipts} == {
+        ("A", hashlib.sha256(("a" * 64).encode()).hexdigest()),
+        ("B", hashlib.sha256(("b" * 64).encode()).hexdigest()),
+    }
+
+
+def test_receipt_store_creates_lock_with_exact_mode_under_restrictive_umask(tmp_path: Path) -> None:
+    pytest.importorskip("fcntl")
+    manifest_path = tmp_path / "control.json"
+    _init_control_manifest(manifest_path, bind_resolved=False, prepare_apply_evidence=False)
+    receipt_path = tmp_path / "terraform-receipt.json"
+    receipt_path.write_text(json.dumps(_terraform_receipt()))
+    os.chmod(receipt_path, 0o600)
+
+    previous_umask = os.umask(0o777)
+    try:
+        with acceptance._receipt_manifest_write_lock(manifest_path, check="receipt_store_write"):
+            pass
+    finally:
+        os.umask(previous_umask)
+
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    assert lock_path.stat().st_mode & 0o777 == 0o600
+    acceptance.receipt_store(
+        manifest_path,
+        scenario_id="A",
+        kind="terraform-plan",
+        subject_id="a" * 64,
+        receipt_file=receipt_path,
+    )
 
 
 def test_receipt_store_persists_only_canonical_sanitized_content_and_checkpoints_manifest(tmp_path: Path) -> None:

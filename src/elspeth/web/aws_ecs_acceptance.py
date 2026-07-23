@@ -13,6 +13,7 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -93,6 +94,12 @@ from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
 from elspeth.web.plugin_policy.models import PluginId
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.sessions.models import SESSION_SCHEMA_EPOCH
+
+_fcntl: Any
+if os.name == "posix" and importlib.util.find_spec("fcntl") is not None:
+    import fcntl as _fcntl
+else:
+    _fcntl = None
 
 _METRIC_NAME = "operator.acceptance.sentinel"
 _TRACE_NAMES = ("RunStarted", "RunFinished")
@@ -3984,6 +3991,80 @@ def _read_protected_document(path: Path, *, check: str) -> dict[str, object]:
     if not isinstance(decoded, dict):
         raise AcceptanceCheckError(check)
     return decoded
+
+
+def _open_receipt_manifest_lock(lock_path: Path, *, check: str) -> int:
+    """Open an existing exact-0600 lock, or atomically publish a new one."""
+
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        return os.open(lock_path, flags)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise AcceptanceCheckError(check) from None
+    temporary_path: str | None = None
+    temporary_descriptor: int | None = None
+    try:
+        temporary_descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{lock_path.name}.",
+            suffix=".tmp",
+            dir=lock_path.parent,
+        )
+        os.fchmod(temporary_descriptor, 0o600)
+        try:
+            os.link(temporary_path, lock_path, follow_symlinks=False)
+        except FileExistsError:
+            os.close(temporary_descriptor)
+            temporary_descriptor = None
+            return os.open(lock_path, flags)
+        os.unlink(temporary_path)
+        temporary_path = None
+        descriptor = temporary_descriptor
+        temporary_descriptor = None
+        return descriptor
+    except OSError:
+        raise AcceptanceCheckError(check) from None
+    finally:
+        if temporary_descriptor is not None:
+            os.close(temporary_descriptor)
+        if temporary_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_path)
+
+
+@contextlib.contextmanager
+def _receipt_manifest_write_lock(path: Path, *, check: str) -> Iterator[None]:
+    """Exclude cross-process receipt writers with one crash-released sidecar."""
+
+    _validate_control_parent(path, check=check)
+    if _fcntl is None:
+        raise AcceptanceCheckError(check)
+    lock_path = path.with_name(f".{path.name}.lock")
+    descriptor = _open_receipt_manifest_lock(lock_path, check=check)
+    try:
+        try:
+            opened = os.fstat(descriptor)
+            linked = lock_path.lstat()
+        except OSError:
+            raise AcceptanceCheckError(check) from None
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or (opened.st_dev, opened.st_ino) != (linked.st_dev, linked.st_ino)
+        ):
+            raise AcceptanceCheckError(check)
+        try:
+            _fcntl.flock(descriptor, _fcntl.LOCK_EX)
+        except OSError:
+            raise AcceptanceCheckError(check) from None
+        try:
+            yield
+        finally:
+            _fcntl.flock(descriptor, _fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 def _write_protected_document(
@@ -8048,7 +8129,31 @@ def receipt_store(
     receipt_bytes: bytes | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> str:
-    """Persist one bounded sanitized receipt and atomically bind its hash."""
+    """Persist one receipt while serializing its manifest state transition."""
+
+    with _receipt_manifest_write_lock(manifest_path, check="receipt_store_write"):
+        return _receipt_store_locked(
+            manifest_path,
+            scenario_id=scenario_id,
+            kind=kind,
+            subject_id=subject_id,
+            receipt_file=receipt_file,
+            receipt_bytes=receipt_bytes,
+            now=now,
+        )
+
+
+def _receipt_store_locked(
+    manifest_path: Path,
+    *,
+    scenario_id: str,
+    kind: str,
+    subject_id: str,
+    receipt_file: Path | None = None,
+    receipt_bytes: bytes | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> str:
+    """Persist one bounded sanitized receipt while the manifest lock is held."""
 
     if (
         scenario_id not in _INFRASTRUCTURE_APPROVAL_SCOPES

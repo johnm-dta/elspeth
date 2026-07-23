@@ -77,6 +77,11 @@ def test_authoring_describes_current_staged_and_structural_capabilities() -> Non
     assert "source → transforms → sink → wire" not in html
     assert "LLM-primary" in html
     assert "candidate remains separate" in html.lower()
+    assert "cross-sink write-failure fallback" in html
+    assert "require-all coalesce" in html
+    assert "freeform and guided-full" in html
+    assert "In the bundled" not in html
+    assert "38ac0f55" not in html and "098ec06d" not in html
     for capability in ("structural queue", "fork", "coalesce", "text source", "text sink"):
         assert capability in html.lower()
 

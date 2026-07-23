@@ -82,6 +82,7 @@
           <li><i data-lucide="check"></i> Blob-backed sources and wired <code>{secret_ref: NAME}</code> references</li>
           <li><i data-lucide="check"></i> Background runs streamed over WebSocket, safely cancellable</li>
         </ul>
+        <p><strong>Current guided-staged limits:</strong> it cannot author cross-sink write-failure fallback or require-all coalesce shapes. Use freeform and guided-full for those pipelines.</p>
       </div>
     </div>
   </div>
@@ -97,7 +98,7 @@
       <p>In 0.7.1, proposal and candidate handling is durable: a candidate remains separate until review and wiring are confirmed. This preserves a clear path from an authoring suggestion to the validated pipeline it changes.</p>
     </div>
     <div class="features">
-      <div class="feature"><span class="fi"><i data-lucide="component"></i></span><h3>Components for the graph</h3><p>Compose plural components: sources, transforms, sinks, gates, structural queues, fork, and coalesce nodes.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="component"></i></span><h3>Components for the graph</h3><p>Across the authoring paths, proposals can include plural sources, transforms, sinks, gates, structural queues, fork, and coalesce nodes.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="file-text"></i></span><h3>Text in and out</h3><p>Use a text source to introduce text into a pipeline and a text sink to write a text result.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="git-merge"></i></span><h3>Structural queue</h3><p>A structural queue fans multiple upstream routes into one downstream node without merging rows or schemas. It is not a human review queue or a message broker.</p></div>
     </div>
@@ -129,14 +130,14 @@
       <div class="sda-step">
         <span class="k k-act">Act</span>
         <h3>Sinks</h3>
-        <p>Route rows to outputs — files, database rows, review queues, alerts.</p>
+        <p>Write rows to built-in file, object-storage, database, Dataverse, and Chroma destinations.</p>
       </div>
     </div>
     <div class="types">
       <div class="type-item"><span class="type-badge type-badge-source">Source</span><p>Ingest external data at a zero-trust boundary.</p></div>
       <div class="type-item"><span class="type-badge type-badge-transform">Transform</span><p>Row-level mapping, coercion, LLM and safety steps.</p></div>
       <div class="type-item"><span class="type-badge type-badge-gate">Gate</span><p>Pure-config routing by named expression.</p></div>
-      <div class="type-item"><span class="type-badge type-badge-sink">Sink</span><p>Write outputs and route to review.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-sink">Sink</span><p>Write to a declared built-in or custom destination.</p></div>
       <div class="type-item"><span class="type-badge type-badge-aggregation">Aggregation</span><p>Batch-aware, audit-attributable analytics.</p></div>
       <div class="type-item"><span class="type-badge type-badge-coalesce">Coalesce</span><p>Join branches back into a single stream.</p></div>
     </div>
@@ -170,7 +171,7 @@
       <div class="fork-arrow">→</div>
       <div class="fork-node"><span class="fn-k">Sink</span><span class="fn-v">output</span></div>
     </div>
-    <p class="fork-caption">Each branch token carries the same <code>fork_group_id</code>, so the trail knows the two are siblings of one row. When the coalesce node merges them, the merged token's lineage names <em>both</em> parent branch tokens by id — so the joined row can still answer “which branch produced which part of this result?” In the bundled <code>examples/fork_coalesce</code> run, the coalesced token lists <code>Parent Tokens</code> <code>38ac0f55…</code> (path_a) and <code>098ec06d…</code> (path_b). Branching execution; reconstructable provenance.</p>
+    <p class="fork-caption">This diagram is illustrative; the <code>require_all</code> shape must be authored through freeform or guided-full rather than guided-staged. Each branch token carries the same <code>fork_group_id</code>, so the trail knows the two are siblings of one row. When the coalesce node merges them, its lineage names <em>both</em> parent branch token ids, preserving which branch produced each part of the joined result.</p>
   </div>
 </section>
 

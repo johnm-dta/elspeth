@@ -6,12 +6,14 @@ and validation. The SQLite database is created at db_path on first use.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
+import stat
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -35,6 +37,10 @@ _PENDING_REGISTRATION_RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 class LocalAuthRegistrationConflict(ValueError):
     """A requested local registration conflicts with an existing account."""
+
+
+class LocalAuthStorageSecurityError(RuntimeError):
+    """The local credential store failed its owner-only file admission."""
 
 
 def _required_visible_string_claim(payload: dict[str, object], claim_name: str) -> str:
@@ -133,6 +139,40 @@ def _append_email_verification_record(outbox_path: Path, record: Mapping[str, ob
             os.close(fd)
 
 
+def _open_owner_only_database(path: Path) -> int:
+    """Open or atomically create ``path`` without following a final symlink."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise LocalAuthStorageSecurityError("Local auth storage requires no-follow file admission")
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NONBLOCK | nofollow
+    created = False
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise LocalAuthStorageSecurityError("Local auth database must be a regular owner-only file, not a symlink") from exc
+        raise
+
+    try:
+        if created:
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        identity = os.fstat(descriptor)
+        mode = stat.S_IMODE(identity.st_mode)
+        if not stat.S_ISREG(identity.st_mode) or identity.st_uid != os.geteuid() or identity.st_nlink != 1 or mode != 0o600:
+            raise LocalAuthStorageSecurityError("Local auth database must be a regular owner-only file with mode 0600")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 class LocalAuthProvider:
     """Authenticates users against a local SQLite database with bcrypt + JWT."""
 
@@ -161,8 +201,26 @@ class LocalAuthProvider:
             self._reap_stale_pending_registrations(conn, now=int(time.time()))
 
     def _get_conn(self) -> sqlite3.Connection:
-        """Open a connection to the SQLite database."""
-        return sqlite3.connect(str(self._db_path))
+        """Open SQLite through a validated, no-follow database descriptor."""
+        descriptor = _open_owner_only_database(self._db_path)
+        try:
+            identity = os.fstat(descriptor)
+            descriptor_root = Path("/proc/self/fd")
+            if not descriptor_root.is_dir():
+                descriptor_root = Path("/dev/fd")
+            if not descriptor_root.is_dir():
+                raise LocalAuthStorageSecurityError("Local auth storage requires a descriptor-backed filesystem path")
+            conn = sqlite3.connect(str(descriptor_root / str(descriptor)))
+            try:
+                current = os.stat(self._db_path, follow_symlinks=False)
+                if not stat.S_ISREG(current.st_mode) or current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
+                    raise LocalAuthStorageSecurityError("Local auth database path changed during secure open")
+            except BaseException:
+                conn.close()
+                raise
+            return conn
+        finally:
+            os.close(descriptor)
 
     @contextmanager
     def _connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

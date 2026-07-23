@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +66,47 @@ class TestCreateUser:
     def test_create_user_empty_display_name_raises(self, provider) -> None:
         with pytest.raises(ValueError, match="display_name must not be empty"):
             provider.create_user("alice", "password123", display_name="")
+
+    def test_auth_database_is_created_owner_only_under_permissive_umask(self, tmp_path) -> None:
+        db_path = tmp_path / "auth.db"
+        script = """
+import os
+import stat
+import sys
+from pathlib import Path
+from elspeth.web.auth.local import LocalAuthProvider
+
+os.umask(0)
+path = Path(sys.argv[1])
+LocalAuthProvider(db_path=path, secret_key="subprocess-test-key")
+print(oct(stat.S_IMODE(path.stat().st_mode)))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(db_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.stdout.strip() == "0o600"
+
+    def test_auth_database_rejects_unsafe_existing_mode(self, tmp_path) -> None:
+        db_path = tmp_path / "auth.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE existing (value INTEGER)")
+        db_path.chmod(0o644)
+
+        with pytest.raises(RuntimeError, match="owner-only"):
+            LocalAuthProvider(db_path=db_path, secret_key="test-key")
+
+    def test_auth_database_rejects_symlink(self, tmp_path) -> None:
+        target = tmp_path / "target.db"
+        LocalAuthProvider(db_path=target, secret_key="test-key")
+        db_path = tmp_path / "auth.db"
+        db_path.symlink_to(target)
+
+        with pytest.raises(RuntimeError, match="regular owner-only file"):
+            LocalAuthProvider(db_path=db_path, secret_key="test-key")
 
     @pytest.mark.asyncio
     async def test_unverified_user_cannot_login_until_email_token_is_verified(self, provider) -> None:

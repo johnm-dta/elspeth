@@ -800,6 +800,44 @@ def transition_source_plugin_selection(
     return replace(session, source_order=source_order, pending_source_intents=pending)
 
 
+def transition_source_plugin_reselection(
+    session: GuidedSession,
+    *,
+    target_id: str,
+    turn: AnsweredTurn,
+    plugin: str,
+    permitted_plugins: Sequence[str],
+    inspection_facts: SourceInspectionFacts | None,
+) -> GuidedSession:
+    """Replace one pending source plugin while retaining its stable identity."""
+    _require_active_turn(
+        session,
+        turn,
+        expected_step=GuidedStep.STEP_1_SOURCE,
+        expected_turn_type=TurnType.SCHEMA_FORM,
+    )
+    stable_id, intent = _require_source_intent(session, target_id, "plugin_options")
+    selected = _selected_plugin(PluginSelectionResponse(chosen=(plugin,)), permitted_plugins)
+    if selected == intent.plugin:
+        raise ValueError("source plugin reselection must change the server-held plugin")
+    facts = _validated_inspection_facts(inspection_facts) if inspection_facts is not None else None
+    if facts is not None:
+        if facts.source_kind not in _SOURCE_KIND_PLUGIN:
+            raise ValueError("source plugin reselection cannot attach inspection facts of an unknown source kind")
+        _require_inspection_plugin_match(selected, facts)
+    pending = dict(session.pending_source_intents)
+    pending[stable_id] = SourceIntent(
+        name=intent.name,
+        phase="plugin_options",
+        plugin=selected,
+        options=None,
+        inspection_facts=facts,
+        observed_columns=(),
+        sample_rows=(),
+    )
+    return replace(session, pending_source_intents=pending)
+
+
 def transition_source_schema_form(
     session: GuidedSession,
     *,
@@ -1169,6 +1207,7 @@ __all__ = [
     "transition_sink_plugin_selection",
     "transition_sink_schema_form",
     "transition_source_inspection_review",
+    "transition_source_plugin_reselection",
     "transition_source_plugin_selection",
     "transition_source_schema_form",
 ]

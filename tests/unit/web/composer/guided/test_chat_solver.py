@@ -61,11 +61,11 @@ from elspeth.web.sessions.routes.composer.guided_chat_intent_management import (
 
 
 def test_solver_wrapper_and_atomic_provider_channels_are_closed_discriminated_unions() -> None:
-    assert len(get_args(chat_solver.Step1SourceChatOutcome.__value__)) == 5
+    assert len(get_args(chat_solver.Step1SourceChatOutcome.__value__)) == 6
     assert len(get_args(chat_solver.Step2SinkChatOutcome.__value__)) == 5
-    assert len(get_args(guided_step_chat_module.Step1SourceChatResult.__value__)) == 5
+    assert len(get_args(guided_step_chat_module.Step1SourceChatResult.__value__)) == 6
     assert len(get_args(guided_step_chat_module.Step2SinkChatResult.__value__)) == 5
-    assert len(get_args(guided_chat_atomic_module.GuidedChatProviderOutcome.__value__)) == 5
+    assert len(get_args(guided_chat_atomic_module.GuidedChatProviderOutcome.__value__)) == 6
 
 
 @pytest.mark.parametrize(
@@ -74,11 +74,13 @@ def test_solver_wrapper_and_atomic_provider_channels_are_closed_discriminated_un
         (chat_solver, "GuidedChatProseOutcome", {"assistant_message"}),
         (chat_solver, "GuidedChatDeferredIntentOutcome", {"action"}),
         (chat_solver, "GuidedChatDeferredManagementOutcome", {"action"}),
+        (chat_solver, "Step1SourcePluginReselectedOutcome", {"plugin", "assistant_message"}),
         (chat_solver, "Step1SourceResolvedOutcome", {"resolution"}),
         (chat_solver, "Step2SinkResolvedOutcome", {"sink", "assistant_message"}),
         (guided_step_chat_module, "GuidedStepChatOnlyResult", {"chat"}),
         (guided_step_chat_module, "GuidedStepDeferredIntentResult", {"chat", "action"}),
         (guided_step_chat_module, "GuidedStepDeferredManagementResult", {"chat", "action"}),
+        (guided_step_chat_module, "Step1SourcePluginReselectedResult", {"chat", "plugin"}),
         (guided_step_chat_module, "Step1SourceResolvedResult", {"chat", "resolution"}),
         (guided_step_chat_module, "Step2SinkResolvedResult", {"chat", "sink"}),
     ],
@@ -359,6 +361,129 @@ async def test_step_1_solver_returns_only_the_closed_deferred_intent_action(monk
         "redacted_summary",
         "constraints",
     }
+
+
+@pytest.mark.asyncio
+async def test_step_1_solver_exposes_explicit_pending_plugin_reselection(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="reselect_source_plugin",
+                arguments=json.dumps(
+                    {
+                        "plugin": "json",
+                        "assistant_message": "I changed the source type to JSON and kept the uploaded file ready.",
+                    }
+                ),
+            ),
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+    reviewed_source = SourceResolved(
+        name="source",
+        plugin="csv",
+        options={"path": "/data/reviewed.csv"},
+        observed_columns=("id",),
+        sample_rows=(),
+        on_validation_failure="discard",
+    )
+
+    result = await resolve_step_1_source_chat_with_auto_drop(
+        site="test",
+        session_id="session",
+        user_id="user",
+        model="test/model",
+        user_message="This is JSON, not text. Change the source type.",
+        plugin_hint="text",
+        current_source=reviewed_source,
+        available_source_plugins=("csv", "json", "text"),
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+        allow_plugin_reselection=True,
+    )
+
+    assert type(result) is guided_step_chat_module.Step1SourcePluginReselectedResult
+    assert result.plugin == "json"
+    assert result.chat.assistant_message == "I changed the source type to JSON and kept the uploaded file ready."
+    tools = {tool["function"]["name"]: tool for tool in captured["tools"]}
+    assert list(tools) == [
+        "resolve_source",
+        "reselect_source_plugin",
+        "retain_deferred_intent",
+        "manage_deferred_intent",
+    ]
+    assert tools["reselect_source_plugin"]["function"]["parameters"]["properties"]["plugin"]["enum"] == ["csv", "json"]
+    dynamic_prompt = captured["messages"][1]["content"]
+    assert "a separate pending source form" in dynamic_prompt
+    assert "is a REVISION instruction" not in dynamic_prompt
+
+
+@pytest.mark.asyncio
+async def test_step_1_solver_rejects_unoffered_plugin_reselection(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        call = SimpleNamespace(
+            function=SimpleNamespace(
+                name="reselect_source_plugin",
+                arguments=json.dumps(
+                    {
+                        "plugin": "json",
+                        "assistant_message": "I changed the source type to JSON.",
+                    }
+                ),
+            ),
+        )
+        return _FakeLLMResponse(choices=[_FakeChoice(message=_FakeMessage(content=None, tool_calls=[call]))])
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    result = await resolve_step_1_source_chat_with_auto_drop(
+        site="test",
+        session_id="session",
+        user_id="user",
+        model="test/model",
+        user_message="Change the source type to JSON.",
+        plugin_hint="text",
+        current_source=None,
+        available_source_plugins=("csv", "json", "text"),
+        temperature=None,
+        seed=None,
+        timeout_seconds=30.0,
+        allow_plugin_reselection=False,
+    )
+
+    assert type(result) is guided_step_chat_module.GuidedStepChatEmptyResult
+    assert [tool["function"]["name"] for tool in captured["tools"]] == [
+        "resolve_source",
+        "retain_deferred_intent",
+        "manage_deferred_intent",
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        17,
+        "[]",
+        json.dumps({"plugin": "text", "assistant_message": "No change."}),
+        json.dumps({"plugin": "blocked", "assistant_message": "Use a blocked plugin."}),
+        json.dumps({"plugin": "json", "assistant_message": "Change it.", "unexpected": True}),
+    ],
+)
+def test_step_1_source_plugin_reselection_parser_rejects_non_actions(arguments: object) -> None:
+    with pytest.raises(chat_solver.GuidedToolArgumentShapeError):
+        chat_solver._parse_step_1_source_plugin_reselection_tool_arguments(
+            arguments,
+            plugin_hint="text",
+            available_source_plugins=("csv", "json", "text"),
+        )
 
 
 @pytest.mark.asyncio

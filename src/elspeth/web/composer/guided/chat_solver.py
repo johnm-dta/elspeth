@@ -351,11 +351,24 @@ class Step1SourceResolvedOutcome:
             raise TypeError("Step1SourceResolvedOutcome.resolution must be exact")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Step1SourcePluginReselectedOutcome:
+    plugin: str
+    assistant_message: str
+
+    def __post_init__(self) -> None:
+        if type(self.plugin) is not str or not self.plugin:
+            raise TypeError("Step1SourcePluginReselectedOutcome.plugin must be a non-empty exact string")
+        if type(self.assistant_message) is not str or not self.assistant_message:
+            raise TypeError("Step1SourcePluginReselectedOutcome.assistant_message must be a non-empty exact string")
+
+
 type Step1SourceChatOutcome = (
     GuidedChatEmptyOutcome
     | GuidedChatProseOutcome
     | GuidedChatDeferredIntentOutcome
     | GuidedChatDeferredManagementOutcome
+    | Step1SourcePluginReselectedOutcome
     | Step1SourceResolvedOutcome
 )
 type DeferredIntentManagementChatOutcome = GuidedChatProseOutcome | GuidedChatDeferredManagementOutcome
@@ -423,6 +436,39 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+def _step_1_source_plugin_reselection_tool(
+    *,
+    plugin_hint: str | None,
+    available_source_plugins: tuple[str, ...],
+) -> Mapping[str, Any] | None:
+    """Build the policy-bounded action for replacing one pending plugin."""
+    if plugin_hint is None:
+        return None
+    alternatives = [plugin for plugin in available_source_plugins if plugin != plugin_hint]
+    if not alternatives:
+        return None
+    return {
+        "type": "function",
+        "function": {
+            "name": "reselect_source_plugin",
+            "description": (
+                "Use only when Step 1 already has a pending source type selected, but the user's "
+                "source data or explicit correction requires a different policy-visible source plugin. "
+                "This changes the pending type and rebuilds its form; it does not apply source options."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["plugin", "assistant_message"],
+                "properties": {
+                    "plugin": {"type": "string", "enum": alternatives},
+                    "assistant_message": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    }
 
 
 _DEFERRED_SUBJECT_SCHEMA: dict[str, Any] = {
@@ -661,6 +707,7 @@ def _build_step_1_source_dynamic_block(
     plugin_hint: str | None,
     current_source: SourceResolved | None,
     available_source_plugins: tuple[str, ...],
+    allow_plugin_reselection: bool = False,
 ) -> str:
     """Compose the DYNAMIC Step-1 source block (hint + revise context + tool instructions).
 
@@ -674,6 +721,8 @@ def _build_step_1_source_dynamic_block(
         raise TypeError("available_source_plugins must be an exact tuple of non-empty strings")
     if len(set(available_source_plugins)) != len(available_source_plugins):
         raise ValueError("available_source_plugins must not contain duplicates")
+    if type(allow_plugin_reselection) is not bool:
+        raise TypeError("allow_plugin_reselection must be an exact bool")
     hint = (
         f"The current source plugin selected in the wizard is {plugin_hint!r}."
         if plugin_hint is not None
@@ -681,12 +730,27 @@ def _build_step_1_source_dynamic_block(
     )
     revise_block = ""
     if current_source is not None:
-        revise_block = (
-            "\n## Current applied source (revise relative to this)\n\n"
-            "A source has already been applied to this phase. The user's message "
-            "is a REVISION instruction against it — re-emit the COMPLETE updated "
-            "source (not a diff). Current source:\n"
-            f"{json.dumps(_source_revision_context_for_llm(current_source), sort_keys=True)}\n"
+        if allow_plugin_reselection:
+            revise_block = (
+                "An already applied source exists, but the current selected plugin belongs to "
+                "a separate pending source form. Treat corrections to that selected plugin as "
+                "changes to the pending form, not revisions of the applied source.\n"
+            )
+        else:
+            revise_block = (
+                "\n## Current applied source (revise relative to this)\n\n"
+                "A source has already been applied to this phase. The user's message "
+                "is a REVISION instruction against it — re-emit the COMPLETE updated "
+                "source (not a diff). Current source:\n"
+                f"{json.dumps(_source_revision_context_for_llm(current_source), sort_keys=True)}\n"
+            )
+    reselection_block = ""
+    if allow_plugin_reselection and plugin_hint is not None and any(plugin != plugin_hint for plugin in available_source_plugins):
+        reselection_block = (
+            "If a source plugin is already selected but the user's data or explicit correction "
+            "requires a different policy-visible source plugin, call `reselect_source_plugin` "
+            "instead of `resolve_source`; reselection rebuilds the correct wizard form without "
+            "discarding a ready upload. "
         )
     return (
         "## Step 1 Source/Data Schema Tool\n\n"
@@ -712,6 +776,7 @@ def _build_step_1_source_dynamic_block(
         "construction, or the name of a quarantine sink for production data whose invalid "
         "rows must be kept for inspection. If the message is only a "
         "question or lacks enough source detail, reply in prose and do not call a tool. "
+        f"{reselection_block}"
         "If the user instead gives a concrete instruction for a LATER guided stage, call "
         "`retain_deferred_intent` with only structural constraints and a redacted summary; "
         "do not copy the user's raw wording into the summary. Never call it for the current "
@@ -985,6 +1050,54 @@ def _shape_safe_keys(mapping: Mapping[str, Any]) -> list[str]:
     return [str(key)[:40] for key in sorted(mapping, key=str)[:12]]
 
 
+def _parse_step_1_source_plugin_reselection_tool_arguments(
+    arguments: object,
+    *,
+    plugin_hint: str | None,
+    available_source_plugins: tuple[str, ...],
+) -> Step1SourcePluginReselectedOutcome:
+    """Validate one explicit pending-source plugin replacement action."""
+    if type(arguments) is not str:
+        raise GuidedToolArgumentShapeError(
+            f"reselect_source_plugin function.arguments must be an exact JSON string; got {type(arguments).__name__}"
+        )
+    try:
+        argument_bytes = len(arguments.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin arguments must be valid UTF-8 text") from exc
+    if argument_bytes > GUIDED_JSON_MAX_TOTAL_UTF8_BYTES:
+        raise GuidedToolArgumentShapeError(
+            f"reselect_source_plugin arguments exceed the {GUIDED_JSON_MAX_TOTAL_UTF8_BYTES}-byte guided JSON limit"
+        )
+    try:
+        data = json.loads(arguments)
+    except (RecursionError, ValueError) as exc:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin arguments are not valid bounded JSON") from exc
+    if type(data) is not dict:
+        raise GuidedToolArgumentShapeError(f"reselect_source_plugin arguments must decode to an object; got {type(data).__name__}")
+    if set(data) != {"plugin", "assistant_message"}:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin arguments must contain exactly plugin and assistant_message")
+    plugin = data["plugin"]
+    if type(plugin) is not str or not plugin:
+        raise GuidedToolArgumentShapeError(f"reselect_source_plugin plugin must be a non-empty exact string; got {type(plugin).__name__}")
+    if plugin_hint is None:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin requires a current pending Step 1 plugin")
+    if plugin == plugin_hint:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin plugin must differ from the current Step 1 plugin")
+    if plugin not in available_source_plugins:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin plugin is not policy-visible for this request")
+    try:
+        assistant_message = _require_prose_assistant_message(
+            data["assistant_message"],
+            tool="reselect_source_plugin",
+        )
+    except AssistantScaffoldLeakError:
+        raise
+    except ValueError as exc:
+        raise GuidedToolArgumentShapeError("reselect_source_plugin assistant_message is malformed") from exc
+    return Step1SourcePluginReselectedOutcome(plugin=plugin, assistant_message=assistant_message)
+
+
 @trust_boundary(
     tier=3,
     source="LLM-emitted resolve_source tool-call arguments (untrusted model output JSON)",
@@ -1132,6 +1245,7 @@ async def maybe_resolve_step_1_source_chat(
     recorder: BufferingRecorder | None = None,
     timeout_seconds: float,
     context_block: str | None = None,
+    allow_plugin_reselection: bool = False,
 ) -> Step1SourceChatOutcome:
     """Try to resolve a Step-1 schema-form chat message into source data.
 
@@ -1174,6 +1288,7 @@ async def maybe_resolve_step_1_source_chat(
                     plugin_hint=plugin_hint,
                     current_source=current_source,
                     available_source_plugins=available_source_plugins,
+                    allow_plugin_reselection=allow_plugin_reselection,
                 ),
             },
         ]
@@ -1182,7 +1297,15 @@ async def maybe_resolve_step_1_source_chat(
         if retry_addendum is not None:
             messages.append({"role": "system", "content": retry_addendum})
         messages.append({"role": "user", "content": user_message})
-        tools = [_STEP_1_SOURCE_TOOL, _DEFERRED_INTENT_TOOL, _DEFERRED_INTENT_MANAGEMENT_TOOL]
+        tools = [_STEP_1_SOURCE_TOOL]
+        reselection_tool = _step_1_source_plugin_reselection_tool(
+            plugin_hint=plugin_hint if allow_plugin_reselection else None,
+            available_source_plugins=available_source_plugins,
+        )
+        if reselection_tool is not None:
+            tools.append(dict(reselection_tool))
+        tools.extend((_DEFERRED_INTENT_TOOL, _DEFERRED_INTENT_MANAGEMENT_TOOL))
+        terminal_action_names = frozenset(tool["function"]["name"] for tool in tools)
         # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
         # the audit record (messages / tools below, read in the finally block).
         # Gated on THIS call's model.
@@ -1211,10 +1334,7 @@ async def maybe_resolve_step_1_source_chat(
             message = response.choices[0].message
             tool_calls = message.tool_calls or ()
             terminal_calls = [
-                tool_call
-                for tool_call in tool_calls
-                if tool_call.function is not None
-                and tool_call.function.name in {"resolve_source", "retain_deferred_intent", "manage_deferred_intent"}
+                tool_call for tool_call in tool_calls if tool_call.function is not None and tool_call.function.name in terminal_action_names
             ]
             if terminal_calls:
                 if len(terminal_calls) != 1 or len(tool_calls) != 1:
@@ -1239,6 +1359,16 @@ async def maybe_resolve_step_1_source_chat(
                     management = _parse_deferred_intent_management_tool_arguments(arguments)
                     status = ComposerLLMCallStatus.SUCCESS
                     return GuidedChatDeferredManagementOutcome(action=management)
+                if function.name == "reselect_source_plugin":
+                    if reselection_tool is None:  # pragma: no cover - excluded by the offered-name filter above
+                        raise GuidedSolverResponseShapeError("step-1 chat returned an unoffered source plugin reselection")
+                    reselection = _parse_step_1_source_plugin_reselection_tool_arguments(
+                        arguments,
+                        plugin_hint=plugin_hint,
+                        available_source_plugins=available_source_plugins,
+                    )
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return reselection
                 if not isinstance(arguments, str):
                     raise GuidedSolverResponseShapeError(
                         f"{function.name} function.arguments must be a JSON string; got {type(arguments).__name__}"

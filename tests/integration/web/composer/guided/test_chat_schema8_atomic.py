@@ -26,6 +26,7 @@ from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolve
 from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.sessions._guided_step_chat import (
     GuidedStepChatOnlyResult,
+    Step1SourcePluginReselectedResult,
     Step1SourceResolvedResult,
     Step2SinkResolvedResult,
     StepChatResult,
@@ -171,6 +172,18 @@ async def _resolved_source_provider(**_kwargs: object) -> GuidedChatProviderOutc
             error_class=None,
         ),
         resolution=resolution,
+    )
+
+
+async def _reselected_json_source_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
+    return Step1SourcePluginReselectedResult(
+        chat=StepChatResult(
+            assistant_message="I changed the source type to JSON and kept the uploaded file ready.",
+            status=ComposerChatTurnStatus.SUCCESS,
+            latency_ms=1,
+            error_class=None,
+        ),
+        plugin="json",
     )
 
 
@@ -476,6 +489,87 @@ def test_schema_form_uploaded_source_type_mismatch_is_acknowledged_without_provi
     assert replay.status_code == 200, replay.json()
     assert replay.json() == body
     assert _chat_operation_count(composer_test_client, session_id) == 1
+
+
+def test_schema_form_source_plugin_reselection_rebuilds_form_and_preserves_ready_upload(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    initial_turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    chosen = _choose_source(composer_test_client, session_id, initial_turn, plugin="text")
+    schema_turn = chosen["next_turn"]
+    record_before = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert record_before is not None
+    pending_before = record_before.composer_meta["guided_session"]["pending_source_intents"]
+    assert len(pending_before) == 1
+    stable_id = next(iter(pending_before))
+    uploaded = asyncio.run(
+        composer_test_client.app.state.blob_service.create_blob(
+            UUID(session_id),
+            "MOCK_DATA.json",
+            b'[{"name":"alice","value":1}]\n',
+            "application/json",
+            created_by="user",
+        )
+    )
+    newer_mismatched_upload = asyncio.run(
+        composer_test_client.app.state.blob_service.create_blob(
+            UUID(session_id),
+            "NEWER_DATA.csv",
+            b"name,value\nbob,2\n",
+            "text/csv",
+            created_by="user",
+        )
+    )
+    provider_calls = 0
+
+    async def provider(**kwargs: object) -> GuidedChatProviderOutcome:
+        nonlocal provider_calls
+        provider_calls += 1
+        return await _reselected_json_source_provider(**kwargs)
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", provider, raising=False)
+    request_body = _chat_body(
+        schema_turn,
+        message="This uploaded source is JSON, not text. Change the source type and keep the file.",
+    )
+
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=request_body)
+
+    assert first.status_code == 200, first.json()
+    body = first.json()
+    assert body["assistant_message_kind"] == "assistant"
+    assert body["assistant_message"] == "I changed the source type to JSON and kept the uploaded file ready."
+    next_turn = body["next_turn"]
+    assert next_turn["type"] == "schema_form"
+    assert next_turn["turn_token"] != schema_turn["turn_token"]
+    assert next_turn["payload"]["plugin"] == "json"
+    assert next_turn["payload"]["prefilled"]["path"] == f"blob:{uploaded.id}"
+    record_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert record_after is not None
+    pending_after = record_after.composer_meta["guided_session"]["pending_source_intents"]
+    assert list(pending_after) == [stable_id]
+    assert pending_after[stable_id]["phase"] == "plugin_options"
+    assert pending_after[stable_id]["plugin"] == "json"
+    assert pending_after[stable_id]["inspection_facts"]["redacted_identity"]["blob_id"] == str(uploaded.id)
+    assert body["guided_session"]["history"][-2]["response_hash"] is not None
+    assert body["guided_session"]["history"][-2]["summary"] == "Pending source plugin reselected through guided chat."
+    assert body["guided_session"]["history"][-1]["response_hash"] is None
+    blobs = asyncio.run(composer_test_client.app.state.blob_service.list_blobs(UUID(session_id)))
+    assert [blob.id for blob in blobs] == [newer_mismatched_upload.id, uploaded.id]
+    assert provider_calls == 1
+
+    monkeypatch.setattr(
+        guided_route,
+        "_run_guided_chat_provider_attempt",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("replay called provider")),
+        raising=False,
+    )
+    replay = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=request_body)
+    assert replay.status_code == 200, replay.json()
+    assert replay.json() == body
+    assert provider_calls == 1
 
 
 def test_same_operation_concurrent_callers_join_one_provider_result_outside_compose_lock(

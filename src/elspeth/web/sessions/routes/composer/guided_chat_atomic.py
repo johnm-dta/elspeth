@@ -21,6 +21,7 @@ from elspeth.web.composer.guided.emitters import _inspection_matches_source_plug
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import ControlSignal, GuidedStep, Turn, TurnType
 from elspeth.web.composer.guided.resolved import SinkResolved
+from elspeth.web.composer.guided.stage_transitions import AnsweredTurn, transition_source_plugin_reselection
 from elspeth.web.composer.pipeline_proposal import composition_content_hash
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.sessions._guided_step_chat import (
@@ -28,6 +29,7 @@ from elspeth.web.sessions._guided_step_chat import (
     GuidedStepChatOnlyResult,
     GuidedStepDeferredIntentResult,
     GuidedStepDeferredManagementResult,
+    Step1SourcePluginReselectedResult,
     Step1SourceResolvedResult,
     Step2SinkResolvedResult,
     StepChatResult,
@@ -56,6 +58,7 @@ from elspeth.web.sessions.protocol import (
     GuidedStateOperationCommand,
     PreparedGuidedJsonPayload,
     SessionServiceProtocol,
+    guided_json_payload_id,
 )
 from elspeth.web.sessions.schemas import GuidedChatRequest, GuidedChatResponse, GuidedRespondRequest
 
@@ -110,6 +113,7 @@ type GuidedChatProviderOutcome = (
     GuidedStepChatOnlyResult
     | GuidedStepDeferredIntentResult
     | GuidedStepDeferredManagementResult
+    | Step1SourcePluginReselectedResult
     | Step1SourceResolvedResult
     | Step2SinkResolvedResult
 )
@@ -181,6 +185,7 @@ async def run_guided_chat_provider_attempt(
     )
     if step is GuidedStep.STEP_1_SOURCE:
         plugin_hint = None
+        allow_plugin_reselection = False
         target = guided.active_edit_target
         if target is not None and target.kind == "source":
             plugin_hint = guided.reviewed_sources[target.stable_id].plugin
@@ -190,6 +195,7 @@ async def run_guided_chat_provider_attempt(
                 None,
             )
             plugin_hint = pending.plugin if pending is not None else None
+            allow_plugin_reselection = pending is not None and pending.phase == "plugin_options"
         source_outcome = await resolve_step_1_source_chat_with_auto_drop(
             site="post_guided_chat",
             session_id=str(session_id),
@@ -204,6 +210,7 @@ async def run_guided_chat_provider_attempt(
             recorder=recorder,
             timeout_seconds=settings.composer_timeout_seconds,
             context_block=context_block,
+            allow_plugin_reselection=allow_plugin_reselection,
         )
         if not isinstance(source_outcome, GuidedStepChatEmptyResult):
             return source_outcome
@@ -317,6 +324,56 @@ def _transition_request(
                 payload["control_signal"] = ControlSignal.PASSTHROUGH.value
             return GuidedRespondRequest.model_validate(payload, strict=True)
     return None
+
+
+def _prepare_step_1_source_plugin_reselection(
+    *,
+    guided_route: Any,
+    current_state: CompositionState,
+    prospective: Any,
+    plugin: str,
+    inspection_facts: SourceInspectionFacts | None,
+    catalog: Any,
+    shield_available: bool,
+    payload_store: Any,
+) -> tuple[CompositionState, PreparedGuidedJsonPayload, Turn, PreparedGuidedJsonPayload]:
+    """Answer the old form and emit a new one for an explicit plugin change."""
+    if prospective.step is not GuidedStep.STEP_1_SOURCE:
+        raise AuditIntegrityError("source plugin reselection escaped Step 1")
+    target_id, _held_plugin = guided_route._schema8_form_target(prospective, source=True)
+    updated = transition_source_plugin_reselection(
+        prospective,
+        target_id=target_id,
+        turn=AnsweredTurn(history_index=len(prospective.history) - 1),
+        plugin=plugin,
+        permitted_plugins=tuple(item.name for item in catalog.list_sources()),
+        inspection_facts=inspection_facts,
+    )
+    response_payload = {"action": "reselect_source_plugin", "plugin": plugin}
+    response_id = guided_json_payload_id("turn_response", response_payload)
+    answered = _replace(
+        updated.history[-1],
+        response_hash=response_id,
+        summary="Pending source plugin reselected through guided chat.",
+    )
+    updated = _replace(updated, history=(*updated.history[:-1], answered))
+    updated_state = _replace(current_state, guided_session=updated)
+    next_turn = guided_route._build_get_guided_turn(updated_state, updated, catalog=catalog)
+    if next_turn is None or TurnType(next_turn["type"]) is not TurnType.SCHEMA_FORM:
+        raise AuditIntegrityError("source plugin reselection did not rebuild a schema form")
+    next_turn = guided_route._finalize_guided_turn(next_turn, shield_available=shield_available)
+    updated, _record, _turn_type, prepared_next = guided_route._prepare_server_turn_occurrence(
+        updated,
+        current_step=GuidedStep.STEP_1_SOURCE,
+        turn=next_turn,
+        payload_store=payload_store,
+    )
+    return (
+        _replace(current_state, guided_session=updated),
+        PreparedGuidedJsonPayload(payload_id=response_id, purpose="turn_response", payload=response_payload),
+        next_turn,
+        prepared_next,
+    )
 
 
 async def _step_1_inline_source_inspection_facts(
@@ -594,6 +651,7 @@ async def post_guided_chat_schema8(
                             error_class="UploadedSourceTypeMismatch",
                         )
                         source_resolution = None
+                        source_plugin_reselection = None
                         sink_resolution = None
                         deferred_action = None
                         deferred_management_action = None
@@ -614,6 +672,9 @@ async def post_guided_chat_schema8(
                         )
                         chat_result = provider_outcome.chat
                         source_resolution = provider_outcome.resolution if type(provider_outcome) is Step1SourceResolvedResult else None
+                        source_plugin_reselection = (
+                            provider_outcome.plugin if type(provider_outcome) is Step1SourcePluginReselectedResult else None
+                        )
                         sink_resolution = provider_outcome.sink if type(provider_outcome) is Step2SinkResolvedResult else None
                         deferred_action = provider_outcome.action if type(provider_outcome) is GuidedStepDeferredIntentResult else None
                         deferred_management_action = (
@@ -715,6 +776,13 @@ async def post_guided_chat_schema8(
                                 latency_ms=chat_result.latency_ms,
                                 error_class="InlineSourceNotApplied",
                             )
+                    source_reselection_facts: SourceInspectionFacts | None = None
+                    if source_plugin_reselection is not None:
+                        source_reselection_facts = await _inspect_latest_ready_session_blob(
+                            request.app.state.blob_service,
+                            session_id,
+                            source_plugin=source_plugin_reselection,
+                        )
                     sink_prefill_options: dict[str, Any] | None = None
                     if (
                         sink_resolution is not None
@@ -756,6 +824,19 @@ async def post_guided_chat_schema8(
                         next_turn = rewind.next_turn
                         prepared_next = rewind.next_payload
                         invalidated_pending_proposal = rewind.invalidated_proposal
+                        transition_succeeded = True
+                        rewound = True
+                    elif source_plugin_reselection is not None:
+                        resulting_state, planned_response, next_turn, prepared_next = _prepare_step_1_source_plugin_reselection(
+                            guided_route=guided_route,
+                            current_state=current_state,
+                            prospective=prospective,
+                            plugin=source_plugin_reselection,
+                            inspection_facts=source_reselection_facts,
+                            catalog=catalog,
+                            shield_available=shield_available,
+                            payload_store=payload_store,
+                        )
                         transition_succeeded = True
                         rewound = True
                     elif transition_body is not None:

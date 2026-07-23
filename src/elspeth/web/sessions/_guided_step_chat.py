@@ -29,6 +29,7 @@ from elspeth.web.composer.guided.chat_solver import (
     GuidedChatProseOutcome,
     GuidedToolArgumentShapeError,
     Step1SourceChatResolution,
+    Step1SourcePluginReselectedOutcome,
     Step1SourceResolvedOutcome,
     Step2SinkResolvedOutcome,
     maybe_manage_deferred_intent_chat,
@@ -155,6 +156,18 @@ class Step1SourceResolvedResult:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Step1SourcePluginReselectedResult:
+    chat: StepChatResult
+    plugin: str
+
+    def __post_init__(self) -> None:
+        if type(self.chat) is not StepChatResult:
+            raise TypeError("Step1SourcePluginReselectedResult.chat must be exact")
+        if type(self.plugin) is not str or not self.plugin:
+            raise TypeError("Step1SourcePluginReselectedResult.plugin must be a non-empty exact string")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Step2SinkResolvedResult:
     chat: StepChatResult
     sink: SinkResolved
@@ -171,6 +184,7 @@ type Step1SourceChatResult = (
     | GuidedStepChatOnlyResult
     | GuidedStepDeferredIntentResult
     | GuidedStepDeferredManagementResult
+    | Step1SourcePluginReselectedResult
     | Step1SourceResolvedResult
 )
 
@@ -376,6 +390,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
     recorder: BufferingRecorder | None = None,
     timeout_seconds: float,
     context_block: str | None = None,
+    allow_plugin_reselection: bool = False,
 ) -> Step1SourceChatResult:
     """Wrap Step-1 ``resolve_source`` chat with the guided-chat fallback contract.
 
@@ -398,6 +413,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
             recorder=recorder,
             timeout_seconds=timeout_seconds,
             context_block=context_block,
+            allow_plugin_reselection=allow_plugin_reselection,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         if type(outcome) is Step1SourceResolvedOutcome:
@@ -409,6 +425,16 @@ async def resolve_step_1_source_chat_with_auto_drop(
                     error_class=None,
                 ),
                 resolution=outcome.resolution,
+            )
+        if type(outcome) is Step1SourcePluginReselectedOutcome:
+            return Step1SourcePluginReselectedResult(
+                chat=StepChatResult(
+                    assistant_message=outcome.assistant_message,
+                    status=ComposerChatTurnStatus.SUCCESS,
+                    latency_ms=latency_ms,
+                    error_class=None,
+                ),
+                plugin=outcome.plugin,
             )
         if type(outcome) is GuidedChatDeferredIntentOutcome:
             return GuidedStepDeferredIntentResult(

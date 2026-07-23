@@ -31,6 +31,7 @@ from elspeth.web.composer.guided.stage_transitions import (
     transition_sink_plugin_selection,
     transition_sink_schema_form,
     transition_source_inspection_review,
+    transition_source_plugin_reselection,
     transition_source_plugin_selection,
     transition_source_schema_form,
 )
@@ -297,6 +298,74 @@ def test_source_selection_reuses_target_and_preserves_multi_source_order() -> No
     assert result.source_order == (SOURCE_A, SOURCE_B)
     assert result.pending_source_intents[SOURCE_B].name == "source_2"
     assert result.reviewed_sources[SOURCE_A] == session.reviewed_sources[SOURCE_A]
+
+
+def test_source_plugin_reselection_preserves_stable_identity_and_rebinds_matching_inspection() -> None:
+    session, turn = _source_options_session(facts=None)
+    facts = replace(
+        _inspection(),
+        source_kind="json",
+        redacted_identity={
+            "filename": "input.json",
+            "mime_type": "application/json",
+            "blob_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        },
+    )
+
+    result = transition_source_plugin_reselection(
+        session,
+        target_id=SOURCE_A,
+        turn=turn,
+        plugin="json",
+        permitted_plugins=("csv", "json"),
+        inspection_facts=facts,
+    )
+
+    assert result.source_order == (SOURCE_A,)
+    assert list(result.pending_source_intents) == [SOURCE_A]
+    intent = result.pending_source_intents[SOURCE_A]
+    assert (intent.name, intent.phase, intent.plugin) == ("source", "plugin_options", "json")
+    assert facts_to_dict(intent.inspection_facts) == facts_to_dict(facts)  # type: ignore[arg-type]
+
+
+def test_source_plugin_reselection_rejects_noop_unpermitted_and_mismatched_facts() -> None:
+    session, turn = _source_options_session(facts=None)
+    with pytest.raises(ValueError):
+        transition_source_plugin_reselection(
+            session,
+            target_id=SOURCE_A,
+            turn=turn,
+            plugin="csv",
+            permitted_plugins=("csv", "json"),
+            inspection_facts=None,
+        )
+    with pytest.raises(ValueError):
+        transition_source_plugin_reselection(
+            session,
+            target_id=SOURCE_A,
+            turn=turn,
+            plugin="blocked",
+            permitted_plugins=("csv", "json"),
+            inspection_facts=None,
+        )
+    with pytest.raises(ValueError, match="inspection"):
+        transition_source_plugin_reselection(
+            session,
+            target_id=SOURCE_A,
+            turn=turn,
+            plugin="json",
+            permitted_plugins=("csv", "json"),
+            inspection_facts=_inspection(),
+        )
+    with pytest.raises(ValueError, match="inspection"):
+        transition_source_plugin_reselection(
+            session,
+            target_id=SOURCE_A,
+            turn=turn,
+            plugin="json",
+            permitted_plugins=("csv", "json"),
+            inspection_facts=replace(_inspection(), source_kind="unknown"),
+        )
 
 
 @pytest.mark.parametrize("chosen", [(), ("csv", "json"), ("blocked",)])

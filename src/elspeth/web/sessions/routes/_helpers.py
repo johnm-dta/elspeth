@@ -68,6 +68,7 @@ from elspeth.web.composer.guided.audit import (
 )
 from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_1_source_chat
 from elspeth.web.composer.guided.emitters import (
+    _inspection_matches_source_plugin,
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
@@ -2528,6 +2529,7 @@ async def _inspect_latest_ready_session_blob(
     session_id: UUID,
     *,
     filename: str | None = None,
+    source_plugin: str | None = None,
 ) -> SourceInspectionFacts | None:
     """Inspect the newest matching ready blob for Step-1 schema prefill.
 
@@ -2535,7 +2537,9 @@ async def _inspect_latest_ready_session_blob(
     validation/coercion point. If the session has no ready blob, the caller
     falls back to the existing observed-schema prefill. When ``filename`` is
     provided, only ready blobs whose stored filename exactly matches it are
-    eligible.
+    eligible. When ``source_plugin`` is provided, inspection continues past
+    newer ready blobs of other source kinds and returns the newest ready blob
+    whose inspected content safely prefills that plugin.
     """
     records = await blob_service.list_blobs(session_id, limit=None)
     for record in records:
@@ -2544,13 +2548,16 @@ async def _inspect_latest_ready_session_blob(
         if filename is not None and record.filename != filename:
             continue
         content = await blob_service.read_blob_content(record.id)
-        return inspect_blob_content(
+        facts = inspect_blob_content(
             content=content,
             filename=record.filename,
             mime_type=record.mime_type,
             blob_id=record.id,
             content_hash=record.content_hash,
         )
+        if source_plugin is not None and not _inspection_matches_source_plugin(source_plugin, facts):
+            continue
+        return facts
     return None
 
 

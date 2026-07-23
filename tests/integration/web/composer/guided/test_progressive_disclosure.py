@@ -29,6 +29,7 @@ from uuid import UUID
 import pytest
 import structlog
 from fastapi import FastAPI
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.auth.middleware import get_current_user
@@ -284,6 +285,29 @@ def _recompose(client: TestClient, session_id: str) -> dict:
     return resp.json()
 
 
+def _inject_one_assistant_insert_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail the next assistant insert after any preceding state write."""
+    service: SessionServiceImpl = client.app.state.session_service
+    original_insert = service._insert_chat_message  # type: ignore[attr-defined]
+    failed = False
+
+    def _fail_once(*args, **kwargs):
+        nonlocal failed
+        if kwargs.get("role") == "assistant" and not failed:
+            failed = True
+            raise IntegrityError(
+                "INSERT chat_messages",
+                {},
+                RuntimeError("injected transition assistant failure"),
+            )
+        return original_insert(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_insert_chat_message", _fail_once)
+
+
 # ---------------------------------------------------------------------------
 # Test: first freeform turn after exit uses transition prompt
 # ---------------------------------------------------------------------------
@@ -371,6 +395,43 @@ class TestSecondFreeformTurnAfterTransition:
         # Second call: transition prompt absent
         second_system = next(m for m in all_captured_messages[1] if m["role"] == "system")
         assert "## Mode Transition" not in second_system["content"], "Second turn should NOT contain the transition header"
+
+    def test_send_message_assistant_failure_rolls_back_transition_consumption(
+        self,
+        composer_freeform_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The transition prompt remains available when its response cannot persist."""
+        session_id = _create_session(composer_freeform_client)
+        _seed_terminal_guided_session(
+            composer_freeform_client,
+            session_id,
+            TerminalState(
+                kind=TerminalKind.EXITED_TO_FREEFORM,
+                reason=TerminalReason.USER_PRESSED_EXIT,
+                pipeline_yaml=None,
+            ),
+        )
+        captured_messages: list[list[dict]] = []
+
+        async def _fake_acompletion(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _fake_chat_response("durable transition response")
+
+        _inject_one_assistant_insert_failure(composer_freeform_client, monkeypatch)
+        with patch("elspeth.web.composer.service._litellm_acompletion", side_effect=_fake_acompletion):
+            with pytest.raises(IntegrityError, match="injected transition assistant failure"):
+                composer_freeform_client.post(
+                    f"/api/sessions/{session_id}/messages",
+                    json={"content": "leave guided mode"},
+                )
+
+            assert _get_current_guided_session(composer_freeform_client, session_id).get("transition_consumed") is False
+            body = _send_message(composer_freeform_client, session_id, "retry the transition")
+        assert body["message"]["content"] == "durable transition response"
+        assert _get_current_guided_session(composer_freeform_client, session_id).get("transition_consumed") is True
+        assert len(captured_messages) == 2
+        assert all("## Mode Transition" in next(m for m in turn if m["role"] == "system")["content"] for turn in captured_messages)
 
 
 class TestTransitionPromptAfterCompletedTerminal:
@@ -501,3 +562,38 @@ class TestRecomposeTransitionPrompt:
         gs_dict = _get_current_guided_session(composer_freeform_client, session_id)
         assert gs_dict, "guided_session must be present in composer_meta after recompose"
         assert "terminal" in gs_dict, "guided_session must retain terminal after recompose"
+
+    def test_recompose_assistant_failure_rolls_back_transition_consumption(
+        self,
+        composer_freeform_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recompose retries the transition prompt when its response write fails."""
+        session_id = _create_session(composer_freeform_client)
+        _seed_terminal_guided_session(
+            composer_freeform_client,
+            session_id,
+            TerminalState(
+                kind=TerminalKind.EXITED_TO_FREEFORM,
+                reason=TerminalReason.USER_PRESSED_EXIT,
+                pipeline_yaml=None,
+            ),
+        )
+        _seed_user_message(composer_freeform_client, session_id, "retry after exit")
+        captured_messages: list[list[dict]] = []
+
+        async def _fake_acompletion(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _fake_chat_response("durable recompose transition")
+
+        _inject_one_assistant_insert_failure(composer_freeform_client, monkeypatch)
+        with patch("elspeth.web.composer.service._litellm_acompletion", side_effect=_fake_acompletion):
+            with pytest.raises(IntegrityError, match="injected transition assistant failure"):
+                composer_freeform_client.post(f"/api/sessions/{session_id}/recompose")
+
+            assert _get_current_guided_session(composer_freeform_client, session_id).get("transition_consumed") is False
+            body = _recompose(composer_freeform_client, session_id)
+        assert body["message"]["content"] == "durable recompose transition"
+        assert _get_current_guided_session(composer_freeform_client, session_id).get("transition_consumed") is True
+        assert len(captured_messages) == 2
+        assert all("## Mode Transition" in next(m for m in turn if m["role"] == "system")["content"] for turn in captured_messages)

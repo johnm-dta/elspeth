@@ -85,6 +85,7 @@ from elspeth.web.sessions.protocol import (
     CompositionStateData,
     CompositionStateRecord,
     SessionRecord,
+    TransitionResponseSettlement,
 )
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -466,6 +467,33 @@ class _ProgressRouteSessionService:
         )
         self.current_state = record
         return record
+
+    async def commit_transition_response(
+        self,
+        *,
+        session_id: uuid.UUID,
+        expected_current_state_id: uuid.UUID | None,
+        state: CompositionStateData,
+        assistant_content: str,
+        raw_content: str | None,
+    ) -> TransitionResponseSettlement:
+        current_id = self.current_state.id if self.current_state is not None else None
+        if current_id != expected_current_state_id:
+            raise AssertionError("progress-route stub received stale transition state")
+        record = await self.save_composition_state(
+            session_id,
+            state,
+            provenance="post_compose",
+        )
+        message = await self.add_message(
+            session_id,
+            "assistant",
+            assistant_content,
+            raw_content=raw_content,
+            composition_state_id=record.id,
+            writer_principal="compose_loop",
+        )
+        return TransitionResponseSettlement(state=record, message=message)
 
     async def list_composition_proposals(
         self,

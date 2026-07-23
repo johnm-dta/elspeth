@@ -157,6 +157,7 @@ from elspeth.web.sessions.protocol import (
     RunRecord,
     SessionRecord,
     SessionServiceProtocol,
+    TransitionAssistantDraft,
 )
 from elspeth.web.sessions.schemas import (
     AcceptProposalRequest,
@@ -2708,6 +2709,7 @@ __all__ = [
     "TerminalReason",
     "TerminalState",
     "TerminalStateResponse",
+    "TransitionAssistantDraft",
     "TurnPayloadResponse",
     "TurnRecord",
     "TurnRecordResponse",

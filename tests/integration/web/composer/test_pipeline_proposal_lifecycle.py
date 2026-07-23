@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 import structlog
 from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
@@ -18,6 +19,7 @@ from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_plugin_crash, finish_success
+from elspeth.web.composer.guided.state_machine import GuidedSession
 from elspeth.web.composer.pipeline_commit import (
     PipelineCommitConfig,
     PipelineCommitError,
@@ -40,7 +42,7 @@ from elspeth.web.sessions.models import (
     proposal_events_table,
     sessions_table,
 )
-from elspeth.web.sessions.protocol import CompositionStateData, StaleComposeStateError
+from elspeth.web.sessions.protocol import CompositionStateData, StaleComposeStateError, TransitionAssistantDraft
 from elspeth.web.sessions.routes._helpers import _persist_tool_invocations
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -333,6 +335,86 @@ async def test_atomic_pipeline_settlement_inserts_state_terminal_event_and_row_t
     }
     assert terminal["schema"] == "pipeline_proposal_accepted.v1"
     assert terminal["dispatch"] == binding.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_transition_assistant_failure_rolls_back_pipeline_settlement(
+    service: SessionServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transition-bearing proposal publishes state and response together."""
+    session_id = uuid4()
+    _insert_session(service, session_id)
+    plan = _plan()
+    row = await _create(service, session_id, plan)
+    binding = await _persist_dispatch(service, session_id)
+    transition_meta = {
+        "guided_session": replace(
+            GuidedSession.initial(),
+            transition_consumed=True,
+        ).to_dict()
+    }
+    state = _state_data(composer_meta=transition_meta)
+    original_insert = service._insert_chat_message  # type: ignore[attr-defined]
+    failed = False
+
+    def _fail_once(*args, **kwargs):
+        nonlocal failed
+        if kwargs.get("role") == "assistant" and not failed:
+            failed = True
+            raise IntegrityError(
+                "INSERT chat_messages",
+                {},
+                RuntimeError("injected proposal transition assistant failure"),
+            )
+        return original_insert(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_insert_chat_message", _fail_once)
+    kwargs = {
+        "session_id": session_id,
+        "proposal_id": row.id,
+        "draft_hash": plan.proposal.draft_hash,
+        "reviewed_facts": {},
+        "state": state,
+        "candidate_content_hash": _state_content_hash(state),
+        "executor_content_hash": _state_content_hash(state),
+        "final_composer_metadata": transition_meta,
+        "dispatch": binding,
+        "actor": "user:alice",
+        "transition_assistant": TransitionAssistantDraft(
+            content="transition response",
+            raw_content=None,
+        ),
+    }
+
+    with pytest.raises(IntegrityError, match="injected proposal transition assistant failure"):
+        await service.settle_pipeline_composition_proposal(**kwargs)
+
+    with service._engine.connect() as conn:
+        assert conn.execute(select(composition_proposals_table.c.status)).scalar_one() == "pending"
+        assert conn.execute(select(func.count()).select_from(composition_states_table)).scalar_one() == 0
+        assert (
+            conn.execute(
+                select(func.count()).select_from(proposal_events_table).where(proposal_events_table.c.event_type == "proposal.accepted")
+            ).scalar_one()
+            == 0
+        )
+
+    settled = await service.settle_pipeline_composition_proposal(**kwargs)
+    assert settled.proposal.status == "committed"
+    assert settled.transition_message is not None
+    assert settled.transition_message.content == "transition response"
+    assert settled.transition_message.composition_state_id == settled.state.id
+
+    retried = await service.settle_pipeline_composition_proposal(**kwargs)
+    assert retried == settled
+    with service._engine.connect() as conn:
+        assert (
+            conn.execute(
+                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.role == "assistant")
+            ).scalar_one()
+            == 1
+        )
 
 
 @pytest.mark.asyncio

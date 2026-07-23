@@ -201,6 +201,8 @@ from elspeth.web.sessions.protocol import (
     StagedForkSession,
     StaleComposeStateError,
     ToolCallIDMismatchError,
+    TransitionAssistantDraft,
+    TransitionResponseSettlement,
 )
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE, _validate_accepted_value_content
@@ -4566,6 +4568,41 @@ class SessionServiceImpl:
         )
         return msg_id
 
+    def _insert_transition_assistant(
+        self,
+        conn: Connection,
+        *,
+        session_id: str,
+        state_id: str,
+        content: str,
+        raw_content: str | None,
+        created_at: datetime,
+    ) -> ChatMessageRecord:
+        """Insert one transition response under the caller's transaction."""
+        self._assert_session_write_lock_held(
+            conn,
+            session_id,
+            caller="_insert_transition_assistant",
+        )
+        sequence_no = self._reserve_sequence_range(conn, session_id, count=1)
+        message_id = self._insert_chat_message(
+            conn,
+            session_id=session_id,
+            role="assistant",
+            content=content,
+            raw_content=raw_content,
+            tool_calls=None,
+            sequence_no=sequence_no,
+            writer_principal="compose_loop",
+            composition_state_id=state_id,
+            tool_call_id=None,
+            parent_assistant_id=None,
+            created_at=created_at,
+        )
+        conn.execute(update(sessions_table).where(sessions_table.c.id == session_id).values(updated_at=created_at))
+        message_row = conn.execute(select(chat_messages_table).where(chat_messages_table.c.id == message_id)).one()
+        return self._row_to_chat_message_record(message_row)
+
     def _insert_composition_state(
         self,
         conn: Connection,
@@ -5692,6 +5729,7 @@ class SessionServiceImpl:
         final_composer_metadata: Mapping[str, Any] | None,
         dispatch: PipelineDispatchAuditBinding,
         actor: str,
+        transition_assistant: TransitionAssistantDraft | None = None,
     ) -> PipelineProposalSettlementResult:
         """Atomically publish state and settle a verified pipeline proposal."""
         if type(dispatch) is not PipelineDispatchAuditBinding:
@@ -5700,6 +5738,13 @@ class SessionServiceImpl:
         if candidate_content_hash != executor_content_hash or candidate_content_hash != state_content_hash:
             raise AuditIntegrityError("pipeline candidate/executor/state content hash mismatch")
         settled_state = replace(state, composer_meta=final_composer_metadata)
+        if transition_assistant is not None:
+            if type(transition_assistant) is not TransitionAssistantDraft:
+                raise TypeError("transition_assistant must be an exact TransitionAssistantDraft")
+            composer_meta = deep_thaw(settled_state.composer_meta)
+            guided_session = composer_meta.get("guided_session") if type(composer_meta) is dict else None
+            if type(guided_session) is not dict or guided_session.get("transition_consumed") is not True:
+                raise AuditIntegrityError("transition assistant requires guided_session.transition_consumed=true")
         sid = str(session_id)
         pid = str(proposal_id)
         now = self._now()
@@ -5772,10 +5817,39 @@ class SessionServiceImpl:
                     )
                     if terminal_rows[0].payload != expected_terminal:
                         raise AuditIntegrityError("pipeline exact retry terminal binding mismatch")
+                    transition_message = None
+                    if transition_assistant is not None:
+                        message_rows = conn.execute(
+                            select(chat_messages_table)
+                            .where(chat_messages_table.c.session_id == sid)
+                            .where(chat_messages_table.c.role == "assistant")
+                            .where(chat_messages_table.c.composition_state_id == str(committed_record.id))
+                            .where(chat_messages_table.c.writer_principal == "compose_loop")
+                        ).fetchall()
+                        matching_messages = [
+                            self._row_to_chat_message_record(message_row)
+                            for message_row in message_rows
+                            if message_row.content == transition_assistant.content
+                            and message_row.raw_content == transition_assistant.raw_content
+                        ]
+                        if len(matching_messages) > 1:
+                            raise AuditIntegrityError("committed transition assistant exact retry is ambiguous")
+                        if matching_messages:
+                            transition_message = matching_messages[0]
+                        else:
+                            transition_message = self._insert_transition_assistant(
+                                conn,
+                                session_id=sid,
+                                state_id=str(committed_record.id),
+                                content=transition_assistant.content,
+                                raw_content=transition_assistant.raw_content,
+                                created_at=now,
+                            )
                     return (
                         PipelineProposalSettlementResult(
                             proposal=replace(authority.row, pipeline_metadata=_pipeline_public_metadata(authority)),
                             state=committed_record,
+                            transition_message=transition_message,
                         ),
                         False,
                     )
@@ -5853,6 +5927,16 @@ class SessionServiceImpl:
                     .where(composition_states_table.c.session_id == sid)
                     .where(composition_states_table.c.id == state_id)
                 ).one()
+                transition_message = None
+                if transition_assistant is not None:
+                    transition_message = self._insert_transition_assistant(
+                        conn,
+                        session_id=sid,
+                        state_id=state_id,
+                        content=transition_assistant.content,
+                        raw_content=transition_assistant.raw_content,
+                        created_at=now,
+                    )
                 return (
                     PipelineProposalSettlementResult(
                         proposal=replace(
@@ -5860,6 +5944,7 @@ class SessionServiceImpl:
                             pipeline_metadata=_pipeline_public_metadata(authority),
                         ),
                         state=self._row_to_state_record(state_row),
+                        transition_message=transition_message,
                     ),
                     True,
                 )
@@ -7799,6 +7884,68 @@ class SessionServiceImpl:
             derived_from_state_id=None,
             composer_meta=state.composer_meta,
         )
+
+    async def commit_transition_response(
+        self,
+        *,
+        session_id: UUID,
+        expected_current_state_id: UUID | None,
+        state: CompositionStateData,
+        assistant_content: str,
+        raw_content: str | None,
+    ) -> TransitionResponseSettlement:
+        """Persist transition consumption and its assistant response atomically."""
+        composer_meta = deep_thaw(state.composer_meta)
+        guided_session = composer_meta.get("guided_session") if type(composer_meta) is dict else None
+        if type(guided_session) is not dict or guided_session.get("transition_consumed") is not True:
+            raise AuditIntegrityError("commit_transition_response requires guided_session.transition_consumed=true")
+
+        sid = str(session_id)
+        expected_state_id = str(expected_current_state_id) if expected_current_state_id is not None else None
+        now = self._now()
+
+        def _sync() -> tuple[CompositionStateRecord, ChatMessageRecord]:
+            with self._session_process_locked_begin(sid) as conn, self._session_write_lock(conn, sid):
+                current_state_id = conn.execute(
+                    select(composition_states_table.c.id)
+                    .where(composition_states_table.c.session_id == sid)
+                    .order_by(desc(composition_states_table.c.version))
+                    .limit(1)
+                ).scalar_one_or_none()
+                if current_state_id != expected_state_id:
+                    raise StaleComposeStateError(
+                        "commit_transition_response: current composition state changed "
+                        f"for session_id={sid!r}; expected={expected_state_id!r}, "
+                        f"actual={current_state_id!r}"
+                    )
+
+                state_id = self._insert_composition_state(
+                    conn,
+                    session_id=sid,
+                    payload=StatePayload(data=state),
+                    provenance="post_compose",
+                    created_at=now,
+                )
+                message_record = self._insert_transition_assistant(
+                    conn,
+                    session_id=sid,
+                    state_id=state_id,
+                    content=assistant_content,
+                    raw_content=raw_content,
+                    created_at=now,
+                )
+                state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.session_id == sid)
+                    .where(composition_states_table.c.id == state_id)
+                ).one()
+                return self._row_to_state_record(state_row), message_record
+
+        state_record, message_record = cast(
+            tuple[CompositionStateRecord, ChatMessageRecord],
+            await self._run_sync(_sync),
+        )
+        return TransitionResponseSettlement(state=state_record, message=message_record)
 
     async def get_current_state(
         self,

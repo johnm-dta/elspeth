@@ -25,6 +25,7 @@ from elspeth.web.sessions.protocol import (
     CompositionProposalRecord,
     PipelineProposalRejectionReason,
     PipelineProposalSettlementResult,
+    TransitionAssistantDraft,
 )
 
 from .._helpers import (
@@ -147,6 +148,7 @@ async def settle_pipeline_proposal_under_compose_lock(
     draft_hash: str,
     composer_meta: Mapping[str, object] | None = None,
     telemetry_source: Literal["compose", "recompose"] = "compose",
+    transition_assistant: TransitionAssistantDraft | None = None,
 ) -> PipelineRouteSettlement:
     """Settle one exact canonical proposal while the caller holds the lock."""
     service: SessionServiceProtocol = request.app.state.session_service
@@ -316,6 +318,7 @@ async def settle_pipeline_proposal_under_compose_lock(
                 final_composer_metadata=state_data.composer_meta,
                 dispatch=bindings[0],
                 actor=f"user:{user.user_id}",
+                transition_assistant=transition_assistant,
             ),
             state=cancellation_state,
         )

@@ -552,12 +552,28 @@ class AuthoritativeCompositionProposal:
     pipeline: AuthoritativePipelineProposal | None
 
 
+@final
+@dataclass(frozen=True, slots=True)
+class TransitionAssistantDraft:
+    """Assistant content that must commit with transition consumption."""
+
+    content: str
+    raw_content: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.content) is not str:
+            raise AuditIntegrityError("TransitionAssistantDraft.content must be an exact string")
+        if self.raw_content is not None and type(self.raw_content) is not str:
+            raise AuditIntegrityError("TransitionAssistantDraft.raw_content must be an exact string or None")
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineProposalSettlementResult:
-    """Atomic accepted proposal + committed immutable state."""
+    """Atomic accepted proposal, immutable state, and optional response."""
 
     proposal: CompositionProposalRecord
     state: CompositionStateRecord
+    transition_message: ChatMessageRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +734,25 @@ class CompositionStateRecord:
             non_none.append("composer_meta")
         if non_none:
             freeze_fields(self, *non_none)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class TransitionResponseSettlement:
+    """One transition-consumption state and its visible response."""
+
+    state: CompositionStateRecord
+    message: ChatMessageRecord
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not CompositionStateRecord:
+            raise AuditIntegrityError("TransitionResponseSettlement.state must be exact")
+        if type(self.message) is not ChatMessageRecord:
+            raise AuditIntegrityError("TransitionResponseSettlement.message must be exact")
+        if self.state.session_id != self.message.session_id:
+            raise AuditIntegrityError("TransitionResponseSettlement rows must belong to the same session")
+        if self.message.role != "assistant" or self.message.composition_state_id != self.state.id:
+            raise AuditIntegrityError("TransitionResponseSettlement message must be an assistant bound to its state")
 
 
 @final
@@ -2379,6 +2414,7 @@ class SessionServiceProtocol(Protocol):
         final_composer_metadata: Mapping[str, Any] | None,
         dispatch: PipelineDispatchAuditBinding,
         actor: str,
+        transition_assistant: TransitionAssistantDraft | None = None,
     ) -> PipelineProposalSettlementResult: ...
 
     async def get_pipeline_dispatch_recovery(
@@ -2652,6 +2688,22 @@ class SessionServiceProtocol(Protocol):
         MUST persist the value verbatim — no defaulting, no coercion: a
         confident wrong attribution is evidence-tampering-class harm under
         the auditability standard.
+        """
+        ...
+
+    async def commit_transition_response(
+        self,
+        *,
+        session_id: UUID,
+        expected_current_state_id: UUID | None,
+        state: CompositionStateData,
+        assistant_content: str,
+        raw_content: str | None,
+    ) -> TransitionResponseSettlement:
+        """Atomically consume one guided transition and persist its response.
+
+        The state must carry ``guided_session.transition_consumed=true``.
+        Implementations must commit both rows or neither row.
         """
         ...
 

@@ -9,6 +9,7 @@ from ._helpers import (
     Any,
     APIRouter,
     AuditIntegrityError,
+    ChatMessageRecord,
     ChatMessageResponse,
     ComposerConvergenceError,
     ComposerPluginCrashError,
@@ -29,6 +30,7 @@ from ._helpers import (
     Request,
     SendMessageRequest,
     SessionServiceProtocol,
+    TransitionAssistantDraft,
     UserIdentity,
     _BadRequestLLMError,
     _cancel_on_client_disconnect,
@@ -665,6 +667,7 @@ def register_message_routes(router: APIRouter) -> None:
 
                 state_response: CompositionStateResponse | None = None
                 post_compose_state_id: UUID | None = compose_base_state_id
+                assistant_msg: ChatMessageRecord | None = None
                 if result.pipeline_commit_intent is not None:
                     authority = await service.get_authoritative_pipeline_proposal(
                         session_id=session.id,
@@ -678,12 +681,19 @@ def register_message_routes(router: APIRouter) -> None:
                         draft_hash=result.pipeline_commit_intent.draft_hash,
                         composer_meta=_post_compose_meta,
                         telemetry_source="compose",
+                        transition_assistant=TransitionAssistantDraft(
+                            content=result.message,
+                            raw_content=result.raw_assistant_content,
+                        )
+                        if _guided_terminal_for_compose is not None
+                        else None,
                     )
                     state_response = _state_response(
                         route_settlement.settlement.state,
                         live_validation=route_settlement.validation,
                     )
                     post_compose_state_id = route_settlement.settlement.state.id
+                    assistant_msg = route_settlement.settlement.transition_message
                 elif result.state.version != state.version:
                     await _publish_progress(
                         progress_registry,
@@ -763,13 +773,24 @@ def register_message_routes(router: APIRouter) -> None:
                             likely_next="The assistant response will appear after the save completes.",
                         ),
                     )
-                    new_state_record = await service.save_composition_state(
-                        session.id,
-                        state_data,
-                        # Successful send-message state advance after the LLM
-                        # composer returns a newer state version.
-                        provenance="post_compose",
-                    )
+                    if _guided_terminal_for_compose is not None:
+                        transition_settlement = await service.commit_transition_response(
+                            session_id=session.id,
+                            expected_current_state_id=compose_base_state_id,
+                            state=state_data,
+                            assistant_content=result.message,
+                            raw_content=result.raw_assistant_content,
+                        )
+                        new_state_record = transition_settlement.state
+                        assistant_msg = transition_settlement.message
+                    else:
+                        new_state_record = await service.save_composition_state(
+                            session.id,
+                            state_data,
+                            # Successful send-message state advance after the LLM
+                            # composer returns a newer state version.
+                            provenance="post_compose",
+                        )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
                 elif _guided_terminal_for_compose is not None and _post_compose_guided is not None:
@@ -792,27 +813,28 @@ def register_message_routes(router: APIRouter) -> None:
                         ),
                         composer_meta=_post_compose_meta,
                     )
-                    _transition_record = await service.save_composition_state(
-                        session.id,
-                        _transition_state_data,
-                        # Metadata-only post-compose advance: the LLM result
-                        # did not change graph version, but the guided-session
-                        # transition was consumed and must be audited separately
-                        # from session seeding.
-                        provenance="post_compose",
+                    transition_settlement = await service.commit_transition_response(
+                        session_id=session.id,
+                        expected_current_state_id=compose_base_state_id,
+                        state=_transition_state_data,
+                        assistant_content=result.message,
+                        raw_content=result.raw_assistant_content,
                     )
+                    _transition_record = transition_settlement.state
+                    assistant_msg = transition_settlement.message
                     post_compose_state_id = _transition_record.id
                     state_response = _state_response(_transition_record)
 
                 # 6. Persist assistant message with post-compose provenance
-                assistant_msg = await service.add_message(
-                    session.id,
-                    "assistant",
-                    result.message,
-                    composition_state_id=post_compose_state_id,
-                    raw_content=result.raw_assistant_content,
-                    writer_principal="compose_loop",
-                )
+                if assistant_msg is None:
+                    assistant_msg = await service.add_message(
+                        session.id,
+                        "assistant",
+                        result.message,
+                        composition_state_id=post_compose_state_id,
+                        raw_content=result.raw_assistant_content,
+                        writer_principal="compose_loop",
+                    )
                 # 6b. Persist per-tool-call audit trail. Each ComposerToolInvocation
                 # lands as one role=tool chat message linked to the post-compose
                 # state id (when version advanced) so the audit trail records

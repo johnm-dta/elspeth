@@ -4,10 +4,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="ELSPETH is an open-source, high-assurance pipeline substrate for consequential workflows." />
 <title>ELSPETH — High-assurance pipelines for consequential work</title>
 <script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
@@ -18,7 +20,7 @@
     <div class="nav-left">
       <a class="brand" href="index.html">ELSPETH</a>
       <nav class="nav-links">
-        <a href="index.html" class="active">Home</a>
+        <a href="index.html" class="active" aria-current="page">Home</a>
         <a href="authoring.html">Authoring</a>
         <a href="assurance.html">Assurance</a>
         <a href="use-cases.html">Use cases</a>
@@ -29,7 +31,7 @@
       <details class="nav-menu">
         <summary class="iconbtn" aria-label="Open navigation menu"><i data-lucide="menu"></i></summary>
         <div class="nav-menu-panel">
-          <a href="index.html">Home</a>
+          <a href="index.html" class="active" aria-current="page">Home</a>
           <a href="authoring.html">Authoring</a>
           <a href="assurance.html">Assurance</a>
           <a href="use-cases.html">Use cases</a>
@@ -69,11 +71,18 @@
 <span class="ok">✓</span> <span class="mut">secret references resolved · preflight passed</span>
 
 <span class="pr">$</span> <span class="cmd">elspeth run --settings pipeline.yaml --execute</span>
-<span class="mut">240 rows · 228 approved · 12 → review · 0 failed</span>
 <span class="ok">completed</span> <span class="mut">— audit trail written to Landscape</span></div>
     </div>
   </div>
 </div>
+
+<section class="release-strip" aria-label="Current ELSPETH release">
+  <div class="wrap">
+    <p><strong>Current version: 0.7.1</strong> · 23 July 2026 · <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Read the changelog</a></p>
+    <p>0.7.0 introduced the LLM-primary, staged Composer. 0.7.1 adds recoverable publication, shared proposal and validation work, queue and text components, and a supported AWS ECS profile.</p>
+    <p>Pre-1.0 APIs and schemas may change without backward-compatibility guarantees. Some upgrades require operators to recreate incompatible session and Landscape stores. This is a pre-1.0 release. Implemented controls support defensible workflows, not whole-platform certification.</p>
+  </div>
+</section>
 
 <hr class="divider" />
 

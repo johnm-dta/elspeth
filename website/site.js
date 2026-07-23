@@ -19,6 +19,7 @@
   function setIcon() {
     var dark = document.documentElement.getAttribute("data-theme") !== "light";
     t.innerHTML = '<i data-lucide="' + (dark ? "moon" : "sun") + '"></i>';
+    if (window.lucide) window.lucide.createIcons();
     // Reflect the action the control performs, for screen readers (A11y).
     t.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
   }

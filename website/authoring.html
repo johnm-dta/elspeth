@@ -4,10 +4,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Author ELSPETH pipelines in reviewable YAML or the staged, LLM-primary Web Composer." />
 <title>Authoring — ELSPETH</title>
 <script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
@@ -19,7 +21,7 @@
       <a class="brand" href="index.html">ELSPETH</a>
       <nav class="nav-links">
         <a href="index.html">Home</a>
-        <a href="authoring.html" class="active">Authoring</a>
+        <a href="authoring.html" class="active" aria-current="page">Authoring</a>
         <a href="assurance.html">Assurance</a>
         <a href="use-cases.html">Use cases</a>
         <a href="get-started.html">Get started</a>
@@ -30,7 +32,7 @@
         <summary class="iconbtn" aria-label="Open navigation menu"><i data-lucide="menu"></i></summary>
         <div class="nav-menu-panel">
           <a href="index.html">Home</a>
-          <a href="authoring.html">Authoring</a>
+          <a href="authoring.html" class="active" aria-current="page">Authoring</a>
           <a href="assurance.html">Assurance</a>
           <a href="use-cases.html">Use cases</a>
           <a href="get-started.html">Get started</a>
@@ -72,15 +74,33 @@
       <div class="surface-card">
         <span class="ic"><i data-lucide="messages-square"></i></span>
         <h3>Web Composer</h3>
-        <p>For knowledge workers building document QA, classification, routing, or review workflows. An LLM tool loop mutates pipeline state through audited tools and contracts — never free-form config text. Two modes share the same tools, contracts, and audit trail:</p>
+        <p>For knowledge workers building document QA, classification, routing, or review workflows. Since 0.7.0, Guided Composer has been LLM-primary and staged: it makes the graph, validation, and review visible before a pipeline is wired. Guided and freeform authoring use different interactions, but both commit through the same canonical proposal + validation path.</p>
         <ul>
-          <li><i data-lucide="check"></i> Guided — default-on for a first pipeline: a stepped walk through source → transforms → sink → wire, prompting one stage at a time</li>
+          <li><i data-lucide="check"></i> Guided — default-on for a first pipeline: a stepped walk through source → sink → transforms → wiring, prompting one stage at a time</li>
           <li><i data-lucide="check"></i> Freeform — one open conversation for a fluent operator who drives the whole pipeline at once, no rails</li>
-          <li><i data-lucide="check"></i> Preview validation, graph, spec, YAML, and repair hints</li>
+          <li><i data-lucide="check"></i> Visible graph, preview validation, review, spec, YAML, and repair hints</li>
           <li><i data-lucide="check"></i> Blob-backed sources and wired <code>{secret_ref: NAME}</code> references</li>
           <li><i data-lucide="check"></i> Background runs streamed over WebSocket, safely cancellable</li>
         </ul>
+        <p><strong>Current guided-staged limits:</strong> it cannot author cross-sink write-failure fallback or require-all coalesce shapes. Use freeform and guided-full for those pipelines.</p>
       </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Propose, validate, then wire</span>
+      <h2>Make a durable change without collapsing review.</h2>
+      <p>In 0.7.1, proposal and candidate handling is durable: a candidate remains separate until review and wiring are confirmed. This preserves a clear path from an authoring suggestion to the validated pipeline it changes.</p>
+    </div>
+    <div class="features">
+      <div class="feature"><span class="fi"><i data-lucide="component"></i></span><h3>Components for the graph</h3><p>Across the authoring paths, proposals can include plural sources, transforms, sinks, gates, structural queues, fork, and coalesce nodes.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="file-text"></i></span><h3>Text in and out</h3><p>Use a text source to introduce text into a pipeline and a text sink to write a text result.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="git-merge"></i></span><h3>Structural queue</h3><p>A structural queue fans multiple upstream routes into one downstream node without merging rows or schemas. It is not a human review queue or a message broker.</p></div>
     </div>
   </div>
 </section>
@@ -110,14 +130,14 @@
       <div class="sda-step">
         <span class="k k-act">Act</span>
         <h3>Sinks</h3>
-        <p>Route rows to outputs — files, database rows, review queues, alerts.</p>
+        <p>Write rows to built-in file, object-storage, database, Dataverse, and Chroma destinations.</p>
       </div>
     </div>
     <div class="types">
       <div class="type-item"><span class="type-badge type-badge-source">Source</span><p>Ingest external data at a zero-trust boundary.</p></div>
       <div class="type-item"><span class="type-badge type-badge-transform">Transform</span><p>Row-level mapping, coercion, LLM and safety steps.</p></div>
       <div class="type-item"><span class="type-badge type-badge-gate">Gate</span><p>Pure-config routing by named expression.</p></div>
-      <div class="type-item"><span class="type-badge type-badge-sink">Sink</span><p>Write outputs and route to review.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-sink">Sink</span><p>Write to a declared built-in or custom destination.</p></div>
       <div class="type-item"><span class="type-badge type-badge-aggregation">Aggregation</span><p>Batch-aware, audit-attributable analytics.</p></div>
       <div class="type-item"><span class="type-badge type-badge-coalesce">Coalesce</span><p>Join branches back into a single stream.</p></div>
     </div>
@@ -151,7 +171,7 @@
       <div class="fork-arrow">→</div>
       <div class="fork-node"><span class="fn-k">Sink</span><span class="fn-v">output</span></div>
     </div>
-    <p class="fork-caption">Each branch token carries the same <code>fork_group_id</code>, so the trail knows the two are siblings of one row. When the coalesce node merges them, the merged token's lineage names <em>both</em> parent branch tokens by id — so the joined row can still answer “which branch produced which part of this result?” In the bundled <code>examples/fork_coalesce</code> run, the coalesced token lists <code>Parent Tokens</code> <code>38ac0f55…</code> (path_a) and <code>098ec06d…</code> (path_b). Branching execution; reconstructable provenance.</p>
+    <p class="fork-caption">This diagram is illustrative; the <code>require_all</code> shape must be authored through freeform or guided-full rather than guided-staged. Each branch token carries the same <code>fork_group_id</code>, so the trail knows the two are siblings of one row. When the coalesce node merges them, its lineage names <em>both</em> parent branch token ids, preserving which branch produced each part of the joined result.</p>
   </div>
 </section>
 

@@ -4,7 +4,7 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## 0.7.1 - 2026-07-23 (Recoverable effects and Composer parity)
+## 0.7.1 - 2026-07-23 (Recoverable effects and Composer proposal-validation coverage)
 
 0.7.1 makes both pipeline publication and web authoring recoverable. It adds a
 durable external-effect protocol for built-in sinks and audit exports, closes
@@ -24,16 +24,22 @@ service drained and repair this release forward.
 
 - **Durable, replay-safe external effects** — built-in file, object, database,
   Dataverse, and Chroma sinks now reserve and persist an immutable publication
-  plan before I/O, fence the active worker, and reconcile uncertain outcomes
-  before retrying. Audit exports use the same effect coordinator and sealed
-  snapshots. The protocol prevents a crash or lost response from silently
-  duplicating publication; an unprovable result remains explicitly blocked.
-- **Guided/freeform Composer parity for complex DAGs** — guided authoring can
-  build and revise plural components, structural queues, gates, forks,
-  coalesces, and deferred intent through the same canonical proposal contract
-  used by freeform authoring. A candidate remains separate from committed state
-  until review and wire confirmation, and closed rejection codes feed bounded,
-  auditable repair rather than silent replanning.
+  plan before external publication, fence the active worker, and reconcile
+  uncertain outcomes before retrying. Audit exports use the same effect
+  coordinator and sealed snapshots. The protocol prevents a crash or lost
+  response from silently duplicating publication; an unprovable result remains
+  explicitly blocked. Operators resume a recovered export with
+  `elspeth export-resume <run-id> --execute`; see the
+  [sink-effect recovery runbook](docs/runbooks/sink-effect-recovery.md).
+- **Shared Composer proposal and validation contract** — guided-staged
+  authoring covers seven of nine maintained parity fixtures through the
+  shared proposal and validation contract used by freeform and guided-full
+  authoring.
+  The current code-proven limitations are cross-sink write-failure fallback and
+  require-all coalesce; freeform and guided-full can author those shapes. A
+  candidate remains separate from committed state until review and wire
+  confirmation, and closed rejection codes feed bounded, auditable repair
+  rather than silent replanning.
 - **Durable Composer operations** — guided planning, start admission, failed
   operation evidence, fork replay, and proposal confirmation are persisted and
   fenced. Competing mutations receive a fast conflict, stale responses settle

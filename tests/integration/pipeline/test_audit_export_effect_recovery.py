@@ -908,6 +908,101 @@ def test_resume_audit_export_recovers_lost_publication_response_end_to_end(
         db.close()
 
 
+@pytest.mark.parametrize("mutation", ("path", "bucket", "key", "options", "format"))
+def test_resume_audit_export_refuses_a_different_persisted_target_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """A lost publication response may only reconcile the original target."""
+    from elspeth.contracts import ExportStatus
+    from elspeth.engine.orchestrator.export import resume_audit_export
+    from elspeth.plugins.sinks import _local_file_effects
+
+    monkeypatch.chdir(tmp_path)
+    db = LandscapeDB(f"sqlite:///{tmp_path / f'resume-target-{mutation}.db'}")
+    store = _MemoryContentStore()
+    resolver = AuditExportContentStoreResolver()
+    resolver.register(store)
+    try:
+        _insert_terminal_run(db)
+        _set_export_status_row(db, "run-export", "pending")
+        original_output = tmp_path / "audit-original.jsonl"
+        original_options: dict[str, object] = {
+            "path": str(original_output),
+            "format": "jsonl",
+            "mode": "write",
+            "schema": {"mode": "observed"},
+        }
+
+        monkeypatch.setattr(
+            _local_file_effects,
+            "_after_replace",
+            lambda _target: (_ for _ in ()).throw(RuntimeError("publication response lost")),
+        )
+        with pytest.raises(RuntimeError, match="publication response lost"):
+            resume_audit_export(
+                db,
+                "run-export",
+                _resume_settings_bundle(original_options, _config()),
+                _json_sink_factory(original_options),
+                payload_store=object(),
+                audit_export_content_store=store,
+                audit_export_content_store_resolver=resolver,
+                worker_id="audit-export-original-worker",
+            )
+
+        with db.engine.begin() as connection:
+            connection.execute(
+                sink_effects_table.update().values(
+                    lease_expires_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    lease_heartbeat_at=datetime(2020, 1, 1, tzinfo=UTC),
+                )
+            )
+
+        changed_output = tmp_path / "audit-changed.jsonl"
+        changed_options = dict(original_options)
+        changed_config = _config()
+        if mutation == "path":
+            changed_options["path"] = str(changed_output)
+        elif mutation == "bucket":
+            changed_options["bucket"] = "different-bucket"
+        elif mutation == "key":
+            changed_options["key"] = "different/audit.jsonl"
+        elif mutation == "options":
+            changed_options["schema"] = {"mode": "strict"}
+        else:
+            changed_config = _config(format="csv")
+
+        def unexpected_sink_factory(_sink_name: str):  # type: ignore[no-untyped-def]
+            raise AssertionError("target mismatch must be refused before sink construction")
+
+        monkeypatch.setattr(_local_file_effects, "_after_replace", lambda _target: None)
+        with pytest.raises(ValueError, match="target identity"):
+            resume_audit_export(
+                db,
+                "run-export",
+                _resume_settings_bundle(changed_options, changed_config),
+                unexpected_sink_factory,
+                payload_store=object(),
+                audit_export_content_store=store,
+                audit_export_content_store_resolver=resolver,
+                worker_id="audit-export-changed-worker",
+            )
+
+        run = RecorderFactory(db).run_lifecycle.get_run("run-export")
+        assert run is not None
+        assert run.export_status is ExportStatus.FAILED
+        assert run.export_format == "json"
+        assert run.export_sink == "output"
+        assert original_output.exists()
+        assert not changed_output.exists()
+        with db.read_only_connection() as connection:
+            assert connection.scalar(select(func.count()).select_from(sink_effects_table)) == 1
+    finally:
+        db.close()
+
+
 def test_resume_audit_export_refuses_ineligible_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

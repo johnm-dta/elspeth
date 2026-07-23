@@ -120,6 +120,11 @@ def _credential_free_hash(tag: str, value: Mapping[str, object], field_name: str
     return _labeled_hash(tag, closed)
 
 
+def compute_sink_effect_target_hash(target_config: Mapping[str, object]) -> str:
+    """Return the credential-free identity hash for one publication target."""
+    return _credential_free_hash("sink-effect-target-v1", target_config, "target_config")
+
+
 def _labeled_hash(tag: str, payload: object) -> str:
     return sha256(canonical_json({"payload": payload, "schema": tag}).encode("utf-8")).hexdigest()
 
@@ -285,7 +290,7 @@ def compute_pipeline_effect_identity(
     if [member.ordinal for member in member_tuple] != list(range(len(member_tuple))):
         raise ValueError("pipeline members must be dense and ordered")
     config_hash = _credential_free_hash("sink-effect-config-v1", sink_config, "sink_config")
-    requested_target_hash = _credential_free_hash("sink-effect-target-v1", target_config, "target_config")
+    requested_target_hash = compute_sink_effect_target_hash(target_config)
     membership = [
         {
             "ingest_sequence": member.ingest_sequence,
@@ -368,7 +373,7 @@ def compute_audit_export_effect_identity(
     )
     if descriptor.record_chain_algorithm != expected_chain:
         raise ValueError("signed manifest record-chain algorithm does not match snapshot signing mode")
-    target_config_hash = _credential_free_hash("sink-effect-target-v1", target_config, "target_config")
+    target_config_hash = compute_sink_effect_target_hash(target_config)
     manifest_component = final_manifest_identity_payload(descriptor)
     final_manifest_hash = hash_final_manifest_identity_payload(manifest_component)
     effect_payload: dict[str, ClosedAuditExportJSON] = {
@@ -424,5 +429,6 @@ __all__ = [
     "compute_audit_export_effect_identity",
     "compute_effect_identity",
     "compute_pipeline_effect_identity",
+    "compute_sink_effect_target_hash",
     "resolve_sink_effect_members",
 ]

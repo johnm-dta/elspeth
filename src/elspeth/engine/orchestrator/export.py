@@ -19,11 +19,12 @@ LandscapeDB is typed but imported conditionally to avoid circular imports.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol
+    from elspeth.contracts.audit import Run, SinkEffect
     from elspeth.contracts.audit_export import AuditExportContentStore, AuditExportContentStoreResolver
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.sink_effects import SinkEffectRuntimeBinding
@@ -283,6 +284,35 @@ def audit_export_resume_refusal(run: object | None, run_id: str) -> str | None:
     return None
 
 
+def _audit_export_resume_target_refusal(
+    run: Run,
+    settings: ElspethSettings,
+    effects: Sequence[SinkEffect],
+) -> str | None:
+    """Refuse a resume whose settings diverge from its durable target identity."""
+    from elspeth.contracts.sink_effects import SinkEffectInputKind
+    from elspeth.core.landscape.execution.sink_effect_identity import compute_sink_effect_target_hash
+
+    export_config = settings.landscape.export
+    if run.export_format is not None and run.export_format != export_config.format:
+        return "audit export target identity differs from the persisted export format"
+    if run.export_sink is not None and run.export_sink != export_config.sink:
+        return "audit export target identity differs from the persisted export sink"
+    sink_name = export_config.sink
+    if sink_name is None:
+        return None
+    target_hash = compute_sink_effect_target_hash(dict(settings.sinks[sink_name].options))
+    audit_effects = tuple(effect for effect in effects if effect.input_kind is SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT)
+    if not audit_effects:
+        return None
+    if len(audit_effects) != 1:
+        return "audit export target identity is ambiguous because multiple durable export effects exist for the run"
+    effect = audit_effects[0]
+    if effect.sink_node_id != f"export:{sink_name}" or effect.config_hash != target_hash:
+        return "audit export target identity differs from the existing durable effect"
+    return None
+
+
 def resume_audit_export(
     db: LandscapeDB,
     run_id: str,
@@ -324,6 +354,14 @@ def resume_audit_export(
     factory = RecorderFactory(db, payload_store=payload_store)
     run = factory.run_lifecycle.get_run(run_id)
     refusal = audit_export_resume_refusal(run, run_id)
+    if refusal is not None:
+        raise ValueError(refusal)
+    assert run is not None
+    refusal = _audit_export_resume_target_refusal(
+        run,
+        settings,
+        factory.execution.sink_effects.get_effects_for_run(run_id),
+    )
     if refusal is not None:
         raise ValueError(refusal)
 

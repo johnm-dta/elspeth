@@ -322,6 +322,40 @@ def test_export_reservation_is_zero_member_and_idempotent(db_factory: tuple[Land
         assert conn.scalar(select(func.count()).select_from(sink_effect_export_snapshots_table)) == 1
 
 
+def test_export_reservation_rejects_a_different_target_identity_for_the_same_run(
+    db_factory: tuple[LandscapeDB, RecorderFactory],
+) -> None:
+    db, factory = db_factory
+    run_id, sink_id, _members = _pipeline_members(factory, 1)
+    snapshot_id = _insert_snapshot(db, run_id)
+    original = SinkEffectReservationRequest(
+        run_id=run_id,
+        sink_node_id=sink_id,
+        role=SinkEffectRole.PRIMARY,
+        input_kind=SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT,
+        requested_target_hash="c" * 64,
+        members=(),
+        audit_export_snapshot_id=snapshot_id,
+        config_hash="c" * 64,
+        replacing_target=False,
+        primary_effect_id=None,
+    )
+    factory.execution.sink_effects.reserve(original)
+
+    with pytest.raises(ValueError, match="target identity"):
+        factory.execution.sink_effects.reserve(
+            replace(
+                original,
+                requested_target_hash="d" * 64,
+                config_hash="d" * 64,
+            )
+        )
+
+    with db.read_only_connection() as conn:
+        assert conn.scalar(select(func.count()).select_from(sink_effects_table)) == 1
+        assert conn.scalar(select(func.count()).select_from(sink_effect_export_snapshots_table)) == 1
+
+
 def test_concurrent_export_reservation_reuses_one_effect_and_association(
     db_factory: tuple[LandscapeDB, RecorderFactory],
 ) -> None:

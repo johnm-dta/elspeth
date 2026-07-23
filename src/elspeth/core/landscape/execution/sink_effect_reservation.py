@@ -35,6 +35,7 @@ from elspeth.core.landscape.schema import (
     node_states_table,
     operations_table,
     rows_table,
+    runs_table,
     sink_effect_export_snapshots_table,
     sink_effect_members_table,
     sink_effect_streams_table,
@@ -478,6 +479,11 @@ class SinkEffectReservation:
         optimistic_values = dict(optimistic._mapping)
 
         with self._db.write_connection() as conn:
+            locked_run = conn.execute(
+                select(runs_table.c.run_id).where(runs_table.c.run_id == request.run_id).with_for_update(of=runs_table)
+            ).fetchone()
+            if locked_run is None:
+                raise ValueError("audit export source run does not exist")
             snapshot = conn.execute(
                 select(audit_export_snapshots_table).where(audit_export_snapshots_table.c.snapshot_id == request.audit_export_snapshot_id)
             ).fetchone()
@@ -485,6 +491,14 @@ class SinkEffectReservation:
                 raise ValueError("audit export snapshot registry winner is divergent")
             self._validate_export_snapshot(request, snapshot)
             identity = _export_identity(request, snapshot)
+            existing_effects = conn.execute(
+                select(sink_effects_table.c.effect_id).where(
+                    sink_effects_table.c.run_id == request.run_id,
+                    sink_effects_table.c.input_kind == SinkEffectInputKind.AUDIT_EXPORT_SNAPSHOT.value,
+                )
+            ).fetchall()
+            if any(effect.effect_id != identity.effect_id for effect in existing_effects):
+                raise ValueError("audit export target identity differs from the existing durable effect for this run")
             stream = self._lock_stream(
                 conn,
                 request,

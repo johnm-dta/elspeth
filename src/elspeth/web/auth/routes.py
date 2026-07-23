@@ -10,23 +10,19 @@ GET /me returns the full UserProfile for any auth provider.
 
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
 from typing import cast
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from elspeth.contracts.auth import AuthProviderType
-from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MAX_LENGTH
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
-from elspeth.web.auth.local import LocalAuthProvider
+from elspeth.web.auth.local import LocalAuthProvider, LocalAuthRegistrationConflict
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider, CredentialAuthProvider
@@ -190,33 +186,6 @@ def _email_verification_origin(settings: WebSettings, request: Request) -> str:
     return f"http://{host}:{settings.port}"
 
 
-def _write_email_verification_outbox(
-    outbox_path: Path,
-    *,
-    origin: str,
-    user_id: str,
-    email: str,
-    token: str,
-) -> None:
-    outbox_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "user_id": user_id,
-        "email": email,
-        "token": token,
-        "verification_url": f"{origin}/?{urlencode({'verify_token': token})}",
-    }
-    fd = os.open(outbox_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as fp:
-            fd = -1
-            fp.write(json.dumps(record, sort_keys=True))
-            fp.write("\n")
-    finally:
-        if fd != -1:
-            os.close(fd)
-
-
 def create_auth_router() -> APIRouter:
     """Create the auth router with /api/auth prefix."""
     router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -296,60 +265,50 @@ def create_auth_router() -> APIRouter:
             )
 
         provider: LocalAuthProvider = request.app.state.auth_provider
-        try:
-            await run_sync_in_worker(
-                provider.create_user,
-                body.username,
-                body.password,
-                body.display_name,
-                body.email,
-                email_verified=settings.registration_mode != "email_verified",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
         if settings.registration_mode == "email_verified":
             assert body.email is not None
             outbox_path = settings.data_dir / "email-verifications.jsonl"
             origin = _email_verification_origin(settings, request)
             try:
-                token = await run_sync_in_worker(
-                    provider.create_email_verification_token,
-                    body.username,
-                )
                 await run_sync_in_worker(
-                    _write_email_verification_outbox,
-                    outbox_path,
-                    origin=origin,
-                    user_id=body.username,
+                    provider.register_email_verified_user,
+                    body.username,
+                    body.password,
+                    body.display_name,
                     email=body.email,
-                    token=token,
+                    verification_origin=origin,
+                    outbox_path=outbox_path,
                 )
-            except ValueError as exc:
-                await run_sync_in_worker(provider.delete_user, body.username)
+            except LocalAuthRegistrationConflict as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             except OSError as exc:
-                await run_sync_in_worker(provider.delete_user, body.username)
                 raise HTTPException(status_code=500, detail="Email verification outbox could not be written") from exc
             response.status_code = 202
             return RegistrationPendingResponse(email=body.email)
 
-        token = await provider.login(body.username, body.password)
         recorder = _auth_audit_recorder(request)
-        try:
+
+        def record_registration_token(access_token: str) -> None:
             recorder.record_token_issued(
                 request,
                 provider=settings.auth_provider,
                 user_id=body.username,
                 username=body.username,
-                access_token=token,
+                access_token=access_token,
                 issuance_path="register",
             )
-        except Exception as audit_exc:
-            deleted = await run_sync_in_worker(provider.delete_user, body.username)
-            if not deleted:
-                raise AuditIntegrityError("Registration audit failed and user creation could not be compensated") from audit_exc
-            raise
+
+        try:
+            token = await run_sync_in_worker(
+                provider.register_open_user_with_audit,
+                body.username,
+                body.password,
+                body.display_name,
+                body.email,
+                record_token_issued=record_registration_token,
+            )
+        except LocalAuthRegistrationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
@@ -366,31 +325,26 @@ def create_auth_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="Not found")
 
         provider: LocalAuthProvider = request.app.state.auth_provider
-        try:
-            identity = await run_sync_in_worker(provider.verify_email_token, body.token)
-        except AuthenticationError as exc:
-            raise HTTPException(status_code=401, detail=exc.detail) from exc
-
-        token = provider.issue_token_for_user(identity.user_id, identity.username)
         recorder = _auth_audit_recorder(request)
-        try:
+
+        def record_verification_token(identity: UserIdentity, access_token: str) -> None:
             recorder.record_token_issued(
                 request,
                 provider=settings.auth_provider,
                 user_id=identity.user_id,
                 username=identity.username,
-                access_token=token,
+                access_token=access_token,
                 issuance_path="email_verification",
             )
-        except Exception as audit_exc:
-            restored = await run_sync_in_worker(
-                provider.restore_email_verification_token,
+
+        try:
+            token = await run_sync_in_worker(
+                provider.verify_email_and_issue_token,
                 body.token,
-                identity.user_id,
+                record_token_issued=record_verification_token,
             )
-            if not restored:
-                raise AuditIntegrityError("Email verification audit failed and verification state could not be compensated") from audit_exc
-            raise
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=exc.detail) from exc
         _mark_sensitive_auth_response_uncacheable(response)
         return TokenResponse(access_token=token)
 

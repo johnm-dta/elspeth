@@ -1000,6 +1000,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             db_path=settings.data_dir / "auth.db",
             secret_key=settings.secret_key,
         )
+        auth_provider.publish_pending_email_verifications(settings.data_dir / "email-verifications.jsonl")
     elif settings.auth_provider == "oidc":
         from elspeth.web.auth.oidc import OIDCAuthProvider
 

@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from typing import Any
 
 import jwt as pyjwt
 import pytest
 
+from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.auth import local as auth_local
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
 
@@ -73,13 +79,19 @@ class TestCreateUser:
         with pytest.raises(AuthenticationError, match="Email verification required"):
             await provider.login("alice", "password123")
 
-        identity = provider.verify_email_token(token)
-        assert identity == UserIdentity(user_id="alice", username="alice")
+        verified_token = provider.verify_email_and_issue_token(
+            token,
+            record_token_issued=lambda _identity, _access_token: None,
+        )
+        assert len(verified_token.split(".")) == 3
         login_token = await provider.login("alice", "password123")
         assert len(login_token.split(".")) == 3
 
         with pytest.raises(AuthenticationError, match="already used"):
-            provider.verify_email_token(token)
+            provider.verify_email_and_issue_token(
+                token,
+                record_token_issued=lambda _identity, _access_token: None,
+            )
 
     @pytest.mark.asyncio
     async def test_delete_user_removes_account_and_invalidates_tokens(self, provider) -> None:
@@ -91,6 +103,269 @@ class TestCreateUser:
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await provider.authenticate(token)
+
+    def test_open_registration_is_invisible_until_required_audit_commits(self, provider) -> None:
+        audit_entered = threading.Event()
+        release_audit = threading.Event()
+
+        def fail_required_audit(_token: str) -> None:
+            audit_entered.set()
+            assert release_audit.wait(timeout=2)
+            raise OSError("Landscape unavailable")
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                provider.register_open_user_with_audit,
+                "alice",
+                "password123",
+                "Alice",
+                None,
+                record_token_issued=fail_required_audit,
+            )
+            assert audit_entered.wait(timeout=2)
+            with pytest.raises(AuthenticationError, match="Invalid credentials"):
+                provider._login_sync("alice", "password123")
+            release_audit.set()
+            with pytest.raises(OSError, match="Landscape unavailable"):
+                future.result(timeout=2)
+
+        with pytest.raises(AuthenticationError, match="Invalid credentials"):
+            provider._login_sync("alice", "password123")
+
+    @pytest.mark.asyncio
+    async def test_cancelled_open_registration_finishes_audit_and_state_together(self, provider) -> None:
+        audit_entered = threading.Event()
+        release_audit = threading.Event()
+        audit_finished = threading.Event()
+
+        def record_required_audit(_token: str) -> None:
+            audit_entered.set()
+            assert release_audit.wait(timeout=2)
+            audit_finished.set()
+
+        task = asyncio.create_task(
+            run_sync_in_worker(
+                provider.register_open_user_with_audit,
+                "alice",
+                "password123",
+                "Alice",
+                None,
+                record_token_issued=record_required_audit,
+            )
+        )
+        assert await asyncio.to_thread(audit_entered.wait, 2)
+        task.cancel()
+        release_audit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(audit_finished.wait, 2)
+
+        token = await provider.login("alice", "password123")
+        assert len(token.split(".")) == 3
+
+    def test_email_verification_token_has_exactly_one_concurrent_consumer(self, provider) -> None:
+        provider.create_user(
+            "alice",
+            "password123",
+            display_name="Alice",
+            email="alice@example.com",
+            email_verified=False,
+        )
+        token = provider.create_email_verification_token("alice")
+
+        def consume() -> str:
+            return provider.verify_email_and_issue_token(
+                token,
+                record_token_issued=lambda _identity, _access_token: None,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(consume) for _ in range(2)]
+        outcomes: list[str] = []
+        failures: list[BaseException] = []
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except BaseException as exc:
+                failures.append(exc)
+
+        assert len(outcomes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], AuthenticationError)
+
+    def test_verification_audit_failure_restores_bounded_retry_lifetime(self, provider, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = [1_000]
+        monkeypatch.setattr(auth_local.time, "time", lambda: now[0])
+        provider.create_user(
+            "alice",
+            "password123",
+            display_name="Alice",
+            email="alice@example.com",
+            email_verified=False,
+        )
+        token = provider.create_email_verification_token("alice", ttl_seconds=1)
+
+        def fail_required_audit(_identity: UserIdentity, _access_token: str) -> None:
+            now[0] = 1_001
+            raise OSError("Landscape unavailable")
+
+        with pytest.raises(OSError, match="Landscape unavailable"):
+            provider.verify_email_and_issue_token(token, record_token_issued=fail_required_audit)
+
+        now[0] = 1_002
+        access_token = provider.verify_email_and_issue_token(
+            token,
+            record_token_issued=lambda _identity, _access_token: None,
+        )
+        assert len(access_token.split(".")) == 3
+
+    def test_email_registration_outbox_recovers_after_publish_failure_and_restart(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        outbox_path = tmp_path / "email-verifications.jsonl"
+        real_append = auth_local._append_email_verification_record
+
+        def fail_publish(*args, **kwargs) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(auth_local, "_append_email_verification_record", fail_publish)
+        with pytest.raises(OSError, match="disk full"):
+            provider.register_email_verified_user(
+                "alice",
+                "password123",
+                "Alice",
+                "alice@example.com",
+                verification_origin="https://composer.example.test",
+                outbox_path=outbox_path,
+            )
+
+        with pytest.raises(AuthenticationError, match="Email verification required"):
+            provider._login_sync("alice", "password123")
+
+        monkeypatch.setattr(auth_local, "_append_email_verification_record", real_append)
+        restarted = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        restarted.publish_pending_email_verifications(outbox_path)
+
+        records = [json.loads(line) for line in outbox_path.read_text(encoding="utf-8").splitlines()]
+        assert len(records) == 1
+        assert records[0]["delivery_id"]
+        assert records[0]["user_id"] == "alice"
+
+    def test_email_outbox_partial_append_is_truncated_before_retry(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        outbox_path = tmp_path / "email-verifications.jsonl"
+        record = {
+            "delivery_id": "delivery-1",
+            "user_id": "alice",
+            "email": "alice@example.com",
+            "token": "verification-token",
+            "verification_url": "https://composer.example.test/?verify_token=verification-token",
+        }
+        real_write = auth_local.os.write
+
+        def short_write(fd: int, payload: bytes) -> int:
+            return real_write(fd, payload[: len(payload) // 2])
+
+        monkeypatch.setattr(auth_local.os, "write", short_write)
+        with pytest.raises(OSError, match="incomplete"):
+            auth_local._append_email_verification_record(outbox_path, record)
+        assert outbox_path.read_bytes() == b""
+
+        monkeypatch.setattr(auth_local.os, "write", real_write)
+        auth_local._append_email_verification_record(outbox_path, record)
+        assert [json.loads(line) for line in outbox_path.read_text().splitlines()] == [record]
+
+    def test_email_outbox_repairs_partial_crash_tail_before_republication(self, tmp_path) -> None:
+        outbox_path = tmp_path / "email-verifications.jsonl"
+        outbox_path.write_bytes(b'{"delivery_id":"crashed"')
+        record = {
+            "delivery_id": "delivery-1",
+            "user_id": "alice",
+            "email": "alice@example.com",
+            "token": "verification-token",
+            "verification_url": "https://composer.example.test/?verify_token=verification-token",
+        }
+
+        auth_local._append_email_verification_record(outbox_path, record)
+
+        assert [json.loads(line) for line in outbox_path.read_text().splitlines()] == [record]
+
+    def test_retry_after_expiry_rotates_pending_registration_delivery(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = [1_000]
+        monkeypatch.setattr(auth_local.time, "time", lambda: now[0])
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        outbox_path = tmp_path / "email-verifications.jsonl"
+        kwargs = {
+            "verification_origin": "https://composer.example.test",
+            "outbox_path": outbox_path,
+        }
+        provider.register_email_verified_user(
+            "alice",
+            "password123",
+            "Alice",
+            "alice@example.com",
+            **kwargs,
+        )
+        first = json.loads(outbox_path.read_text().splitlines()[0])
+
+        now[0] += auth_local._EMAIL_VERIFICATION_TOKEN_TTL_SECONDS + 1
+        provider.register_email_verified_user(
+            "alice",
+            "password123",
+            "Alice",
+            "alice@example.com",
+            **kwargs,
+        )
+        records = [json.loads(line) for line in outbox_path.read_text().splitlines()]
+
+        assert len(records) == 2
+        assert records[1]["delivery_id"] != first["delivery_id"]
+        assert records[1]["token"] != first["token"]
+
+    def test_publish_retry_deduplicates_append_before_ack_crash(self, tmp_path) -> None:
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        outbox_path = tmp_path / "email-verifications.jsonl"
+        provider.register_email_verified_user(
+            "alice",
+            "password123",
+            "Alice",
+            "alice@example.com",
+            verification_origin="https://composer.example.test",
+            outbox_path=outbox_path,
+        )
+        with provider._connect() as conn:
+            conn.execute("UPDATE email_verification_outbox SET published_at = NULL")
+
+        provider.publish_pending_email_verifications(outbox_path)
+
+        records = [json.loads(line) for line in outbox_path.read_text().splitlines()]
+        assert len(records) == 1
+
+    def test_startup_reclaims_pending_registration_after_retention_window(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = [1_000]
+        monkeypatch.setattr(auth_local.time, "time", lambda: now[0])
+        provider = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        provider.register_email_verified_user(
+            "alice",
+            "password123",
+            "Alice",
+            "alice@example.com",
+            verification_origin="https://composer.example.test",
+            outbox_path=tmp_path / "email-verifications.jsonl",
+        )
+
+        now[0] += auth_local._EMAIL_VERIFICATION_TOKEN_TTL_SECONDS + auth_local._PENDING_REGISTRATION_RETENTION_SECONDS + 1
+        restarted = LocalAuthProvider(db_path=tmp_path / "auth.db", secret_key="test-key")
+        restarted.create_user("alice", "replacement-password", display_name="Replacement")
+
+        token = restarted._login_sync("alice", "replacement-password")
+        assert len(token.split(".")) == 3
 
 
 class TestLogin:

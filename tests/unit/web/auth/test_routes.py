@@ -17,6 +17,7 @@ from elspeth.core.landscape.auth_audit_repository import AUTH_AUDIT_PRINCIPAL_MA
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import auth_events_table
+from elspeth.web.auth import local as auth_local
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
@@ -671,7 +672,7 @@ class TestRegisterEndpoint:
         record = json.loads(outbox.read_text(encoding="utf-8").splitlines()[0])
         assert record["verification_url"].startswith("http://127.0.0.1:5174/?verify_token=")
 
-    async def test_register_email_verified_mode_outbox_failure_removes_pending_user(
+    async def test_register_email_verified_mode_outbox_failure_keeps_resumable_intent(
         self,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
@@ -685,7 +686,8 @@ class TestRegisterEndpoint:
         def fail_outbox(*args, **kwargs) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr("elspeth.web.auth.routes._write_email_verification_outbox", fail_outbox)
+        real_append = auth_local._append_email_verification_record
+        monkeypatch.setattr(auth_local, "_append_email_verification_record", fail_outbox)
 
         async with _client_for(app) as client:
             response = await client.post(
@@ -699,7 +701,25 @@ class TestRegisterEndpoint:
             )
 
         assert response.status_code == 500
-        assert provider.delete_user("bob") is False
+        with pytest.raises(AuthenticationError, match="Email verification required"):
+            await provider.login("bob", "pw123")
+
+        monkeypatch.setattr(auth_local, "_append_email_verification_record", real_append)
+        async with _client_for(app) as client:
+            retry = await client.post(
+                "/api/auth/register",
+                json={
+                    "username": "bob",
+                    "password": "pw123",
+                    "display_name": "Bob",
+                    "email": "bob@example.com",
+                },
+            )
+
+        assert retry.status_code == 202
+        records = [json.loads(line) for line in (tmp_path / "email-verifications.jsonl").read_text().splitlines()]
+        assert len(records) == 1
+        assert records[0]["delivery_id"]
 
     async def test_register_non_local_provider_returns_404(self) -> None:
         provider = _FakeAuthProvider()

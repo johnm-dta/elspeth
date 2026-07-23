@@ -6,24 +6,35 @@ and validation. The SQLite database is created at db_path on first use.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import json
+import os
 import secrets
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 import bcrypt
 import jwt
 from jwt.exceptions import PyJWTError
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
 from elspeth.web.validation import has_visible_content
 
 _EMAIL_VERIFICATION_TOKEN_BYTES = 32
 _EMAIL_VERIFICATION_TOKEN_TTL_SECONDS = 24 * 60 * 60
+_EMAIL_VERIFICATION_AUDIT_RETRY_SECONDS = 5 * 60
+_PENDING_REGISTRATION_RETENTION_SECONDS = 7 * 24 * 60 * 60
+
+
+class LocalAuthRegistrationConflict(ValueError):
+    """A requested local registration conflicts with an existing account."""
 
 
 def _required_visible_string_claim(payload: dict[str, object], claim_name: str) -> str:
@@ -39,6 +50,87 @@ def _required_visible_string_claim(payload: dict[str, object], claim_name: str) 
 
 def _verification_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _read_jsonl_delivery_ids(fd: int) -> set[str]:
+    """Validate a locked verification outbox and repair only a partial tail."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while chunk := os.read(fd, 64 * 1024):
+        chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content:
+        return set()
+
+    complete = content
+    if not content.endswith(b"\n"):
+        tail_start = content.rfind(b"\n") + 1
+        tail = content[tail_start:]
+        try:
+            decoded_tail = json.loads(tail)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            os.ftruncate(fd, tail_start)
+            os.fsync(fd)
+            complete = content[:tail_start]
+        else:
+            if type(decoded_tail) is not dict:
+                raise AuditIntegrityError("Email verification outbox tail must be a JSON object")
+            os.lseek(fd, 0, os.SEEK_END)
+            if os.write(fd, b"\n") != 1:
+                raise OSError("Email verification outbox newline repair was incomplete")
+            os.fsync(fd)
+            complete = content + b"\n"
+
+    delivery_ids: set[str] = set()
+    for line_number, raw_line in enumerate(complete.splitlines(), start=1):
+        try:
+            record = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise AuditIntegrityError(f"Email verification outbox line {line_number} is malformed") from exc
+        if type(record) is not dict:
+            raise AuditIntegrityError(f"Email verification outbox line {line_number} must be a JSON object")
+        delivery_id = record.get("delivery_id")
+        if delivery_id is not None:
+            if type(delivery_id) is not str or not delivery_id:
+                raise AuditIntegrityError(f"Email verification outbox line {line_number} has an invalid delivery_id")
+            delivery_ids.add(delivery_id)
+    return delivery_ids
+
+
+def _append_email_verification_record(outbox_path: Path, record: Mapping[str, object]) -> None:
+    """Idempotently append one durable verification delivery record.
+
+    The stable ``delivery_id`` bridges the SQLite outbox intent and JSONL
+    publication. A crash after append but before acknowledgement is recovered
+    by scanning the locked file and acknowledging the already-present ID.
+    """
+    delivery_id = record.get("delivery_id")
+    if type(delivery_id) is not str or not delivery_id:
+        raise AuditIntegrityError("Email verification delivery_id must be a non-empty string")
+    payload = (json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    outbox_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(outbox_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        published_ids = _read_jsonl_delivery_ids(fd)
+        if delivery_id in published_ids:
+            return
+        original_size = os.lseek(fd, 0, os.SEEK_END)
+        try:
+            written = os.write(fd, payload)
+            if written != len(payload):
+                raise OSError("Email verification outbox append was incomplete")
+            os.fsync(fd)
+        except BaseException:
+            os.ftruncate(fd, original_size)
+            os.fsync(fd)
+            raise
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class LocalAuthProvider:
@@ -65,18 +157,32 @@ class LocalAuthProvider:
         self._token_expiry_hours = token_expiry_hours
         self._max_refresh_chain_hours = max_refresh_chain_hours
         self._ensure_schema()
+        with self._connect(immediate=True) as conn:
+            self._reap_stale_pending_registrations(conn, now=int(time.time()))
 
     def _get_conn(self) -> sqlite3.Connection:
         """Open a connection to the SQLite database."""
         return sqlite3.connect(str(self._db_path))
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        """Open a transaction-scoped SQLite connection and always close it."""
+    def _connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        """Open a transaction-scoped SQLite connection and always close it.
+
+        ``immediate=True`` acquires SQLite's write reservation before the
+        first read. Consistency-sensitive auth workflows use it so validation,
+        mutation, required audit, and commit form one serialized unit.
+        """
         conn = self._get_conn()
         try:
-            with conn:
+            if immediate:
+                conn.execute("BEGIN IMMEDIATE")
+            try:
                 yield conn
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
         finally:
             conn.close()
 
@@ -109,6 +215,24 @@ class LocalAuthProvider:
                 )
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_email_verification_tokens_user_id ON email_verification_tokens (user_id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS email_verification_outbox (
+                    delivery_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    published_at INTEGER,
+                    FOREIGN KEY (token_hash) REFERENCES email_verification_tokens(token_hash),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_email_verification_outbox_pending ON email_verification_outbox (published_at, created_at)"
+            )
 
     def create_user(
         self,
@@ -140,11 +264,46 @@ class LocalAuthProvider:
                     ),
                 )
             except sqlite3.IntegrityError as exc:
-                raise ValueError(f"User already exists: {user_id}") from exc
+                raise LocalAuthRegistrationConflict(f"User already exists: {user_id}") from exc
+
+    def register_open_user_with_audit(
+        self,
+        user_id: str,
+        password: str,
+        display_name: str,
+        email: str | None,
+        *,
+        record_token_issued: Callable[[str], None],
+    ) -> str:
+        """Create, audit, and activate an open-registration user atomically.
+
+        The Landscape callback runs while the new user remains uncommitted in
+        auth.db. A failed audit rolls the insertion back; a cancelled async
+        caller may abandon the worker future, but the synchronous critical
+        section itself continues through audit and commit or rollback.
+        """
+        if not display_name:
+            raise ValueError("display_name must not be empty")
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        with self._connect(immediate=True) as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO users (user_id, password_hash, display_name, email, email_verified) VALUES (?, ?, ?, ?, 1)",
+                    (user_id, password_hash, display_name, email),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LocalAuthRegistrationConflict(f"User already exists: {user_id}") from exc
+            access_token = self._issue_token(user_id, user_id)
+            record_token_issued(access_token)
+        return access_token
 
     def delete_user(self, user_id: str) -> bool:
         """Delete a local auth user and any pending verification tokens."""
         with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM email_verification_outbox WHERE user_id = ?",
+                (user_id,),
+            )
             conn.execute(
                 "DELETE FROM email_verification_tokens WHERE user_id = ?",
                 (user_id,),
@@ -188,83 +347,237 @@ class LocalAuthProvider:
             )
         return token
 
-    def verify_email_token(self, token: str) -> UserIdentity:
-        """Consume a verification token and activate the corresponding user."""
+    def _insert_verification_delivery(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        user_id: str,
+        email: str,
+        verification_origin: str,
+        now: int,
+    ) -> None:
+        token = secrets.token_urlsafe(_EMAIL_VERIFICATION_TOKEN_BYTES)
+        token_hash = _verification_token_hash(token)
+        delivery_id = secrets.token_urlsafe(18)
+        record = {
+            "delivery_id": delivery_id,
+            "user_id": user_id,
+            "email": email,
+            "token": token,
+            "verification_url": f"{verification_origin}/?{urlencode({'verify_token': token})}",
+        }
+        conn.execute(
+            """
+            INSERT INTO email_verification_tokens
+                (token_hash, user_id, created_at, expires_at, used_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (token_hash, user_id, now, now + _EMAIL_VERIFICATION_TOKEN_TTL_SECONDS),
+        )
+        conn.execute(
+            """
+            INSERT INTO email_verification_outbox
+                (delivery_id, token_hash, user_id, payload_json, created_at, published_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (delivery_id, token_hash, user_id, json.dumps(record, sort_keys=True), now),
+        )
+
+    def _reap_stale_pending_registrations(self, conn: sqlite3.Connection, *, now: int) -> None:
+        cutoff = now - _PENDING_REGISTRATION_RETENTION_SECONDS
+        stale_users = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT users.user_id
+                FROM users
+                WHERE users.email_verified = 0
+                  AND EXISTS (
+                      SELECT 1 FROM email_verification_tokens AS tokens
+                      WHERE tokens.user_id = users.user_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM email_verification_tokens AS tokens
+                      WHERE tokens.user_id = users.user_id
+                        AND tokens.expires_at >= ?
+                  )
+                """,
+                (cutoff,),
+            ).fetchall()
+        ]
+        for stale_user_id in stale_users:
+            conn.execute("DELETE FROM email_verification_outbox WHERE user_id = ?", (stale_user_id,))
+            conn.execute("DELETE FROM email_verification_tokens WHERE user_id = ?", (stale_user_id,))
+            conn.execute("DELETE FROM users WHERE user_id = ? AND email_verified = 0", (stale_user_id,))
+
+    def register_email_verified_user(
+        self,
+        user_id: str,
+        password: str,
+        display_name: str,
+        email: str,
+        *,
+        verification_origin: str,
+        outbox_path: Path,
+    ) -> None:
+        """Persist a resumable pending registration and publish its delivery.
+
+        User, one-use token, and stable outbox intent commit in one SQLite
+        transaction. Publication is idempotent by ``delivery_id``; a retry or
+        process restart can therefore finish an append whose acknowledgement
+        was interrupted without duplicating the message.
+        """
+        if not display_name:
+            raise ValueError("display_name must not be empty")
+        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        now = int(time.time())
+        with self._connect(immediate=True) as conn:
+            self._reap_stale_pending_registrations(conn, now=now)
+            existing = conn.execute(
+                "SELECT password_hash, display_name, email, email_verified FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO users (user_id, password_hash, display_name, email, email_verified) VALUES (?, ?, ?, ?, 0)",
+                    (user_id, password_hash, display_name, email),
+                )
+            else:
+                existing_hash, existing_name, existing_email, email_verified = existing
+                matches_pending_registration = (
+                    not email_verified
+                    and existing_name == display_name
+                    and existing_email == email
+                    and bcrypt.checkpw(password.encode(), existing_hash.encode())
+                )
+                if not matches_pending_registration:
+                    raise LocalAuthRegistrationConflict(f"User already exists: {user_id}")
+
+            active_delivery = conn.execute(
+                """
+                SELECT 1
+                FROM email_verification_tokens AS tokens
+                JOIN email_verification_outbox AS outbox ON outbox.token_hash = tokens.token_hash
+                WHERE tokens.user_id = ? AND tokens.used_at IS NULL AND tokens.expires_at >= ?
+                LIMIT 1
+                """,
+                (user_id, now),
+            ).fetchone()
+            if active_delivery is None:
+                conn.execute("DELETE FROM email_verification_outbox WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM email_verification_tokens WHERE user_id = ? AND used_at IS NULL", (user_id,))
+                self._insert_verification_delivery(
+                    conn,
+                    user_id=user_id,
+                    email=email,
+                    verification_origin=verification_origin,
+                    now=now,
+                )
+        self.publish_pending_email_verifications(outbox_path)
+
+    def publish_pending_email_verifications(self, outbox_path: Path) -> None:
+        """Publish and acknowledge every durable verification intent."""
+        with self._connect() as conn:
+            pending = conn.execute(
+                """
+                SELECT delivery_id, payload_json
+                FROM email_verification_outbox
+                WHERE published_at IS NULL
+                ORDER BY created_at, delivery_id
+                """
+            ).fetchall()
+        for delivery_id, payload_json in pending:
+            try:
+                record = json.loads(payload_json)
+            except json.JSONDecodeError as exc:
+                raise AuditIntegrityError("Stored email verification outbox payload is malformed") from exc
+            if type(record) is not dict or record.get("delivery_id") != delivery_id:
+                raise AuditIntegrityError("Stored email verification outbox binding is malformed")
+            _append_email_verification_record(outbox_path, record)
+            with self._connect(immediate=True) as conn:
+                conn.execute(
+                    "UPDATE email_verification_outbox SET published_at = ? WHERE delivery_id = ? AND published_at IS NULL",
+                    (int(time.time()), delivery_id),
+                )
+
+    def verify_email_and_issue_token(
+        self,
+        token: str,
+        *,
+        record_token_issued: Callable[[UserIdentity, str], None],
+    ) -> str:
+        """Consume, activate, audit, and issue under one SQLite write fence.
+
+        Exactly one caller can claim the one-use token. The required Landscape
+        write happens before auth.db commits. If that write fails, the same
+        transaction restores the unverified state and grants a bounded retry
+        window before the original exception propagates.
+        """
         token_hash = _verification_token_hash(token)
         now = int(time.time())
-        with self._connect() as conn:
+        audit_error: BaseException | None = None
+        access_token: str | None = None
+        with self._connect(immediate=True) as conn:
             row = conn.execute(
                 """
-                SELECT user_id, expires_at, used_at
-                FROM email_verification_tokens
-                WHERE token_hash = ?
+                SELECT tokens.user_id, tokens.expires_at, tokens.used_at, users.email_verified
+                FROM email_verification_tokens AS tokens
+                JOIN users ON users.user_id = tokens.user_id
+                WHERE tokens.token_hash = ?
                 """,
                 (token_hash,),
             ).fetchone()
             if row is None:
                 raise AuthenticationError("Invalid email verification token")
-            user_id, expires_at, used_at = row
+            user_id, expires_at, used_at, email_verified = row
             if used_at is not None:
                 raise AuthenticationError("Email verification token already used")
             if expires_at < now:
                 raise AuthenticationError("Email verification token expired")
-            user_row = conn.execute(
-                "SELECT 1 FROM users WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if user_row is None:
-                raise AuthenticationError("User not found")
-            conn.execute(
-                "UPDATE users SET email_verified = 1 WHERE user_id = ?",
-                (user_id,),
-            )
-            conn.execute(
-                "UPDATE email_verification_tokens SET used_at = ? WHERE token_hash = ?",
-                (now, token_hash),
-            )
-        return UserIdentity(user_id=user_id, username=user_id)
-
-    def restore_email_verification_token(self, token: str, user_id: str) -> bool:
-        """Compensate a just-completed verification when required audit fails.
-
-        The token and user activation are restored together, guarded by the
-        exact token/user relationship and the consumed marker observed in the
-        same transaction. A successful return makes the original request safe
-        to retry.
-        """
-        token_hash = _verification_token_hash(token)
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT tokens.used_at, users.email_verified
-                FROM email_verification_tokens AS tokens
-                JOIN users ON users.user_id = tokens.user_id
-                WHERE tokens.token_hash = ? AND tokens.user_id = ?
-                """,
-                (token_hash, user_id),
-            ).fetchone()
-            if row is None or row[0] is None or not row[1]:
-                return False
-            used_at = row[0]
-            user_result = conn.execute(
-                "UPDATE users SET email_verified = 0 WHERE user_id = ? AND email_verified = 1",
-                (user_id,),
-            )
+            if email_verified:
+                raise AuthenticationError("Email already verified")
             token_result = conn.execute(
                 """
                 UPDATE email_verification_tokens
-                SET used_at = NULL
-                WHERE token_hash = ? AND user_id = ? AND used_at = ?
+                SET used_at = ?
+                WHERE token_hash = ? AND used_at IS NULL AND expires_at >= ?
                 """,
-                (token_hash, user_id, used_at),
+                (now, token_hash, now),
             )
-            if user_result.rowcount != 1 or token_result.rowcount != 1:
-                raise RuntimeError("Email verification compensation lost its state precondition")
-        return True
+            user_result = conn.execute(
+                "UPDATE users SET email_verified = 1 WHERE user_id = ? AND email_verified = 0",
+                (user_id,),
+            )
+            if token_result.rowcount != 1 or user_result.rowcount != 1:
+                raise AuditIntegrityError("Email verification claim lost its transaction precondition")
 
-    def issue_token_for_user(self, user_id: str, username: str) -> str:
-        """Issue a local JWT for an already-authorized user."""
-        return self._issue_token(user_id, username)
+            identity = UserIdentity(user_id=user_id, username=user_id)
+            access_token = self._issue_token(user_id, user_id)
+            try:
+                record_token_issued(identity, access_token)
+            except BaseException as exc:
+                audit_error = exc
+                retry_deadline = int(time.time()) + _EMAIL_VERIFICATION_AUDIT_RETRY_SECONDS
+                restored_user = conn.execute(
+                    "UPDATE users SET email_verified = 0 WHERE user_id = ? AND email_verified = 1",
+                    (user_id,),
+                )
+                restored_token = conn.execute(
+                    """
+                    UPDATE email_verification_tokens
+                    SET used_at = NULL, expires_at = MAX(expires_at, ?)
+                    WHERE token_hash = ? AND user_id = ? AND used_at = ?
+                    """,
+                    (retry_deadline, token_hash, user_id, now),
+                )
+                if restored_user.rowcount != 1 or restored_token.rowcount != 1:
+                    raise AuditIntegrityError("Email verification audit failure could not restore retryable state") from exc
+
+        if audit_error is not None:
+            raise audit_error
+        if access_token is None:
+            raise AuditIntegrityError("Email verification committed without an access token")
+        return access_token
 
     async def login(self, username: str, password: str) -> str:
         """Authenticate with username/password and return a JWT.

@@ -11,8 +11,11 @@ Security boundaries tested:
 from __future__ import annotations
 
 import io
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
+import pytest
 import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
@@ -24,6 +27,7 @@ from elspeth.web.blobs.routes import create_blobs_router
 from elspeth.web.blobs.service import BlobServiceImpl
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.engine import create_session_engine
+from elspeth.web.sessions.models import guided_operations_table, sessions_table
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
@@ -109,6 +113,51 @@ def _upload_blob(
     assert resp.status_code == 201
     body: dict[str, Any] = resp.json()
     return body
+
+
+def _insert_session_fork_operation(blob_service: BlobServiceImpl, session_id: str, *, status: str) -> str:
+    """Persist one valid session-fork operation for a REST retention test."""
+    operation_id = str(uuid4())
+    now = datetime.now(UTC)
+    values: dict[str, Any] = {
+        "session_id": session_id,
+        "operation_id": operation_id,
+        "kind": "session_fork",
+        "status": status,
+        "request_hash": "f" * 64,
+        "attempt": 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if status == "in_progress":
+        values.update(lease_token="fork-lease", lease_expires_at=now + timedelta(hours=1))
+    elif status == "failed":
+        values.update(settled_at=now, failure_code="operation_failed")
+    elif status == "completed":
+        target_session_id = str(uuid4())
+        with blob_service._engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=target_session_id,
+                    user_id="alice",
+                    auth_provider_type="local",
+                    title="Fork child",
+                    forked_from_session_id=session_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        values.update(
+            settled_at=now,
+            result_kind="session",
+            result_session_id=target_session_id,
+            response_hash="e" * 64,
+        )
+    else:
+        raise AssertionError(f"unsupported test fork status {status!r}")
+    with blob_service._engine.begin() as conn:
+        conn.execute(guided_operations_table.insert().values(**values))
+    return operation_id
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +342,26 @@ class TestPreviewBlob:
 
 
 class TestDeleteBlob:
+    @pytest.mark.parametrize(
+        ("fork_status", "expected_status"),
+        [("in_progress", 409), ("completed", 204), ("failed", 204)],
+    )
+    def test_session_fork_retention_lifecycle(self, tmp_path, fork_status: str, expected_status: int) -> None:
+        app, _, blob_service = _make_app(tmp_path)
+        client = TestClient(app)
+        session_id = _create_session(client)
+        blob = _upload_blob(client, session_id)
+        operation_id = _insert_session_fork_operation(blob_service, session_id, status=fork_status)
+
+        response = client.delete(f"/api/sessions/{session_id}/blobs/{blob['id']}")
+
+        assert response.status_code == expected_status
+        if fork_status == "in_progress":
+            assert operation_id in response.json()["detail"]
+            assert client.get(f"/api/sessions/{session_id}/blobs/{blob['id']}/content").status_code == 200
+        else:
+            assert client.get(f"/api/sessions/{session_id}/blobs/{blob['id']}/content").status_code == 404
+
     def test_pending_proposal_conflict_returns_409(self, tmp_path, monkeypatch) -> None:
         app, _, blob_service = _make_app(tmp_path)
         client = TestClient(app)

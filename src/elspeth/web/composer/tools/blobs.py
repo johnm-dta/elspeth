@@ -10,7 +10,7 @@ Hosts:
   ``_sync_get_blob`` / ``_sync_list_blobs`` / ``_check_blob_quota``).
 - Blob DTOs (``BlobToolRecord`` / ``BlobCreatePayload`` / ``_PreparedBlobCreate``)
   and in-transaction signal exceptions (``_BlobQuotaExceededInTxn`` /
-  ``_BlobUpdateBlockedByActiveRun``).
+  ``_BlobUpdateBlockedByRetentionGuard``).
 - Tool-classification name sets and predicates live in
   ``elspeth.web.composer.tools.discovery``; the trailing comment in this file
   points to that module.
@@ -52,6 +52,7 @@ from elspeth.web.blobs.service import (
     _active_run_pipeline_dict,
     _composition_references_blob,
     _guard_blob_row_literals,
+    _in_progress_session_fork_operation_id,
     _lock_session_for_blob_quota,
     _persist_blob_content,
     _remove_blob_temp_artifacts,
@@ -1193,23 +1194,21 @@ class _BlobQuotaExceededInTxn(Exception):
         self.user_message = message
 
 
-class _BlobUpdateBlockedByActiveRun(Exception):
+class _BlobUpdateBlockedByRetentionGuard(Exception):
     """Internal sentinel raised inside the blob-update DB transaction.
 
-    The active-run guard fires INSIDE ``session_engine.begin()`` so it
-    shares SQLite's writer lock with concurrent run-creation attempts
-    (see ``_execute_locked``) — any new run row that would reference
-    this blob serialises behind the update transaction's guard check.
-    When the guard trips, we must (a) roll the DB transaction back so
-    no partial mutation leaks out, and (b) surface a tool-failure
-    result rather than an exception so the compose loop treats the
-    rejection as recoverable.
+    Session-fork and active-run retention guards fire inside
+    ``locked_session_transaction`` so they share the canonical same-session
+    lock with concurrent fork/run creation. When either guard trips, we must
+    (a) roll the DB transaction back so no partial mutation leaks out, and
+    (b) surface a tool-failure result rather than an exception so the compose
+    loop treats the rejection as recoverable.
 
     Raising a distinct sentinel lets the outer handler distinguish
     three exit paths cleanly:
 
-    * ``except _BlobUpdateBlockedByActiveRun`` — returns
-      ``_failure_result`` (caller retries after the active run
+    * ``except _BlobUpdateBlockedByRetentionGuard`` — returns
+      ``_failure_result`` (caller retries after the retaining operation
       completes).
     * ``except _BlobQuotaExceededInTxn`` — returns a quota-specific
       ``_failure_result``.
@@ -1344,7 +1343,13 @@ def _execute_update_blob(
                 tmp_file.write(content_bytes)
 
             try:
-                with session_engine.begin() as conn:
+                with locked_session_transaction(session_engine, session_id) as conn:
+                    fork_operation_id = _in_progress_session_fork_operation_id(conn, session_id)
+                    if fork_operation_id is not None:
+                        raise _BlobUpdateBlockedByRetentionGuard(
+                            f"Blob '{blob_id}' is frozen by in-progress session fork '{fork_operation_id}' and cannot be updated."
+                        )
+
                     # Active-run guard (two checks — mirror of the
                     # pattern in ``_execute_delete_blob``).  Lives
                     # INSIDE the transaction so SQLite's writer lock
@@ -1362,7 +1367,7 @@ def _execute_update_blob(
                         .where(runs_table.c.status.in_(["pending", "running"]))
                     ).first()
                     if active_link is not None:
-                        raise _BlobUpdateBlockedByActiveRun(
+                        raise _BlobUpdateBlockedByRetentionGuard(
                             f"Blob '{blob_id}' is linked to active run '{active_link.run_id}' and cannot be updated."
                         )
 
@@ -1388,7 +1393,7 @@ def _execute_update_blob(
                         blob_id,
                         str(storage_path),
                     ):
-                        raise _BlobUpdateBlockedByActiveRun(
+                        raise _BlobUpdateBlockedByRetentionGuard(
                             f"Blob '{blob_id}' cannot be updated while active run '{active_run.run_id}' references it."
                         )
 
@@ -1461,7 +1466,7 @@ def _execute_update_blob(
                     # failed).
                     os.replace(tmp_path, storage_path)
                     replaced = True
-            except _BlobUpdateBlockedByActiveRun as blocked:
+            except _BlobUpdateBlockedByRetentionGuard as blocked:
                 # Guard rejected the update BEFORE ``os.replace`` ran;
                 # DB transaction has rolled back, tempfile awaits
                 # cleanup in the outer finally, storage_path is
@@ -1604,6 +1609,12 @@ def _execute_delete_blob(
                 return _failure_result(state, f"Blob '{blob_id}' not found.")
             blob = _blob_row_to_tool_dict(locked_row)
             storage_path = Path(blob["storage_path"])
+            fork_operation_id = _in_progress_session_fork_operation_id(conn, session_id)
+            if fork_operation_id is not None:
+                return _failure_result(
+                    state,
+                    f"Blob '{blob_id}' is frozen by in-progress session fork '{fork_operation_id}' and cannot be deleted.",
+                )
             retaining_proposal_id = pending_proposal_reference_id(
                 conn,
                 session_id=session_id,

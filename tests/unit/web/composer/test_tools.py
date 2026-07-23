@@ -666,6 +666,55 @@ def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[s
     }
 
 
+def _insert_session_fork_operation(engine: Any, session_id: str, *, status: str) -> str:
+    """Persist one valid session-fork operation in the requested lifecycle state."""
+    from datetime import UTC, datetime, timedelta
+
+    from elspeth.web.sessions.models import guided_operations_table
+
+    operation_id = str(uuid4())
+    now = datetime.now(UTC)
+    values: dict[str, Any] = {
+        "session_id": session_id,
+        "operation_id": operation_id,
+        "kind": "session_fork",
+        "status": status,
+        "request_hash": "f" * 64,
+        "attempt": 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if status == "in_progress":
+        values.update(lease_token="fork-lease", lease_expires_at=now + timedelta(hours=1))
+    elif status == "failed":
+        values.update(settled_at=now, failure_code="operation_failed")
+    elif status == "completed":
+        target_session_id = str(uuid4())
+        with engine.begin() as conn:
+            conn.execute(
+                sessions_table.insert().values(
+                    id=target_session_id,
+                    user_id="test-user",
+                    auth_provider_type="local",
+                    title="Fork child",
+                    forked_from_session_id=session_id,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        values.update(
+            settled_at=now,
+            result_kind="session",
+            result_session_id=target_session_id,
+            response_hash="e" * 64,
+        )
+    else:
+        raise AssertionError(f"unsupported test fork status {status!r}")
+    with engine.begin() as conn:
+        conn.execute(guided_operations_table.insert().values(**values))
+    return operation_id
+
+
 def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> None:
     engine, session_id = _session_engine_with_session()
     result = execute_tool(
@@ -4876,6 +4925,39 @@ class TestDeleteBlobActiveRunGuard:
             session_engine=self.engine,
             session_id=self.session_id,
         )
+        assert result.success is True
+        assert not self.storage_path.exists()
+
+    def test_delete_rejected_while_session_fork_is_in_progress(self) -> None:
+        operation_id = _insert_session_fork_operation(self.engine, self.session_id, status="in_progress")
+
+        result = execute_tool(
+            "delete_blob",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert operation_id in result.data["error"]
+        assert "session fork" in result.data["error"].lower()
+        assert self.storage_path.read_bytes() == b"a,b\n1,2"
+
+    @pytest.mark.parametrize("fork_status", ["completed", "failed"])
+    def test_delete_allowed_after_session_fork_is_terminal(self, fork_status: str) -> None:
+        _insert_session_fork_operation(self.engine, self.session_id, status=fork_status)
+
+        result = execute_tool(
+            "delete_blob",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
         assert result.success is True
         assert not self.storage_path.exists()
 
@@ -12040,6 +12122,41 @@ class TestUpdateBlobActiveRunGuard:
             session_id=self.session_id,
             **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
         )
+        assert result.success is True
+        assert self.storage_path.read_bytes() == b"new,content\n9,9"
+
+    def test_update_rejected_while_session_fork_is_in_progress(self) -> None:
+        operation_id = _insert_session_fork_operation(self.engine, self.session_id, status="in_progress")
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
+        )
+
+        assert result.success is False
+        assert operation_id in result.data["error"]
+        assert "session fork" in result.data["error"].lower()
+        assert self.storage_path.read_bytes() == self.original_content
+
+    @pytest.mark.parametrize("fork_status", ["completed", "failed"])
+    def test_update_allowed_after_session_fork_is_terminal(self, fork_status: str) -> None:
+        _insert_session_fork_operation(self.engine, self.session_id, status=fork_status)
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
+        )
+
         assert result.success is True
         assert self.storage_path.read_bytes() == b"new,content\n9,9"
 

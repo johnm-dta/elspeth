@@ -2760,35 +2760,51 @@ class TestCopyBlobsForFork:
         assert late.id not in copied
 
     @pytest.mark.asyncio
-    async def test_delete_rejects_blob_frozen_by_in_progress_session_fork(
+    @pytest.mark.parametrize("fork_status", ["in_progress", "completed", "failed"])
+    async def test_delete_enforces_session_fork_retention_lifecycle(
         self,
         blob_service: BlobServiceImpl,
         db_engine,
         session_id: UUID,
+        target_session_id: UUID,
+        fork_status: str,
     ) -> None:
         source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
         now = datetime.now(UTC)
         operation_id = str(uuid4())
-        with db_engine.begin() as conn:
-            conn.execute(
-                guided_operations_table.insert().values(
-                    session_id=str(session_id),
-                    operation_id=operation_id,
-                    kind="session_fork",
-                    status="in_progress",
-                    request_hash="a" * 64,
-                    lease_token="lease",
-                    lease_expires_at=now.replace(year=now.year + 1),
-                    attempt=1,
-                    created_at=now,
-                    updated_at=now,
-                )
+        values: dict[str, object] = {
+            "session_id": str(session_id),
+            "operation_id": operation_id,
+            "kind": "session_fork",
+            "status": fork_status,
+            "request_hash": "a" * 64,
+            "attempt": 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if fork_status == "in_progress":
+            values.update(lease_token="lease", lease_expires_at=now + timedelta(hours=1))
+        elif fork_status == "completed":
+            values.update(
+                settled_at=now,
+                result_kind="session",
+                result_session_id=str(target_session_id),
+                response_hash="b" * 64,
             )
+        else:
+            values.update(settled_at=now, failure_code="operation_failed")
+        with db_engine.begin() as conn:
+            conn.execute(guided_operations_table.insert().values(**values))
 
-        with pytest.raises(BlobInProgressForkError, match=operation_id):
+        if fork_status == "in_progress":
+            with pytest.raises(BlobInProgressForkError, match=operation_id):
+                await blob_service.delete_blob(source.id)
+
+            assert await blob_service.read_blob_content(source.id) == b"source"
+        else:
             await blob_service.delete_blob(source.id)
-
-        assert await blob_service.read_blob_content(source.id) == b"source"
+            with pytest.raises(BlobNotFoundError):
+                await blob_service.read_blob_content(source.id)
 
     @pytest.mark.asyncio
     async def test_partial_prior_success_resumes_without_duplicate(

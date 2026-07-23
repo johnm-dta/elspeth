@@ -1015,6 +1015,19 @@ def _row_to_blob_record(row: Any) -> BlobRecord:
     )
 
 
+def _in_progress_session_fork_operation_id(conn: Connection, session_id: str) -> str | None:
+    """Return the operation retaining every blob in a session, if any."""
+    return conn.execute(
+        select(guided_operations_table.c.operation_id)
+        .where(
+            guided_operations_table.c.session_id == session_id,
+            guided_operations_table.c.kind == "session_fork",
+            guided_operations_table.c.status == "in_progress",
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 class BlobServiceImpl:
     """Filesystem-backed blob service.
 
@@ -1340,15 +1353,7 @@ class BlobServiceImpl:
         blob_id_str: str,
     ) -> None:
         """Delete a locked, already-custody-checked blob row and its file."""
-        fork_operation_id = conn.execute(
-            select(guided_operations_table.c.operation_id)
-            .where(
-                guided_operations_table.c.session_id == row.session_id,
-                guided_operations_table.c.kind == "session_fork",
-                guided_operations_table.c.status == "in_progress",
-            )
-            .limit(1)
-        ).scalar_one_or_none()
+        fork_operation_id = _in_progress_session_fork_operation_id(conn, row.session_id)
         if fork_operation_id is not None:
             raise BlobInProgressForkError(blob_id_str, operation_id=fork_operation_id)
 

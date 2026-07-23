@@ -1259,10 +1259,15 @@ class TestExecutionFanoutGuard:
 
         run_id = uuid4()
         mock_session_service.create_run.return_value = _run_record_stub(id=run_id)
-        await service.execute(
-            session_id=session_id,
-            fanout_ack_token=raised.value.guard.ack_token,
-        )
+        # This test isolates fanout acknowledgement. Direct source ->
+        # line_explode now correctly fails the independent UNKNOWN semantic
+        # contract gate, so keep that sibling gate stubbed on the accepted
+        # retry just as it is on the initial guard-producing call above.
+        with patch("elspeth.web.execution.service.validate_semantic_contracts", return_value=((), ())):
+            await service.execute(
+                session_id=session_id,
+                fanout_ack_token=raised.value.guard.ack_token,
+            )
 
         create_call = mock_session_service.create_run.await_args_list[-1]
         persisted_yaml = create_call.kwargs["pipeline_yaml"]

@@ -110,9 +110,10 @@ def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
     """Construct a producer transform/source instance to read its facts."""
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
-    if producer.plugin_name is None or producer.producer_id == "source":
-        # Sources don't expose output_semantics() in Phase 1 — return None.
-        # Phase 2 (post-Wardline) can extend BaseSource the same way.
+    if producer.plugin_name is None or is_source_producer_id(producer.producer_id):
+        # Sources do not expose output_semantics(), so their facts are unknown.
+        # Recognize both the legacy "source" ID and named "source:<name>"
+        # IDs; named sources must never be mis-probed as transforms.
         return None
     return cast(
         "BaseTransform",
@@ -250,14 +251,6 @@ def validate_semantic_contracts(
                             "semantic_contract_violation",
                         )
                     )
-            continue
-
-        # SOURCE → TRANSFORM edges are out of scope for Phase 1.
-        # BaseSource has no output_semantics() API yet; treating source
-        # producers as UNKNOWN under FAIL would break every working
-        # csv → line_explode pipeline. Skip these edges entirely;
-        # extending BaseSource is a separate plan.
-        if is_source_producer_id(upstream_producer.producer_id):
             continue
 
         producer_decl = _safe_output_semantics(upstream_producer)

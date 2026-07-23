@@ -153,11 +153,9 @@ class TestValidateSemanticContracts:
         assert contracts[0].outcome is SemanticOutcome.SATISFIED
         assert contracts[0].producer_facts.content_kind is ContentKind.MARKDOWN
 
-    def test_source_fed_consumer_emits_no_semantic_contract(self):
-        # Phase 1 design: source -> transform edges are out of scope.
-        # The validator skips them entirely (no contract, no error).
-        # If this test fails, Phase 1 has accidentally re-enabled
-        # source-fed semantic checking.
+    def test_source_fed_fail_policy_consumer_emits_unknown_contract_and_error(self):
+        # Sources do not yet declare output semantics, so their facts are
+        # UNKNOWN. A consumer with UnknownSemanticPolicy.FAIL must block.
         state = CompositionState(
             metadata=PipelineMetadata(name="t"),
             version=1,
@@ -207,12 +205,22 @@ class TestValidateSemanticContracts:
             ),
         )
         errors, contracts = validate_semantic_contracts(state)
-        assert errors == ()
-        assert contracts == ()
+        assert len(errors) == 1
+        assert errors[0].component == "node:explode"
+        assert "source" in errors[0].message
+        assert "csv" in errors[0].message
+        assert "declares no semantic facts" in errors[0].message
 
-    def test_named_source_fed_consumer_emits_no_semantic_contract(self):
-        # Named multi-source roots use producer ids such as source:orders.
-        # They carry the same Phase 1 skip semantics as the legacy source id.
+        assert len(contracts) == 1
+        assert contracts[0].from_id == "source"
+        assert contracts[0].to_id == "explode"
+        assert contracts[0].producer_plugin == "csv"
+        assert contracts[0].producer_facts is None
+        assert contracts[0].outcome is SemanticOutcome.UNKNOWN
+
+    def test_named_source_fed_fail_policy_consumer_emits_unknown_contract_and_error(self):
+        # Named multi-source roots use stable producer IDs such as
+        # source:orders and must receive the same UNKNOWN/FAIL treatment.
         state = CompositionState(
             metadata=PipelineMetadata(name="t"),
             version=1,
@@ -265,8 +273,18 @@ class TestValidateSemanticContracts:
             ),
         )
         errors, contracts = validate_semantic_contracts(state)
-        assert errors == ()
-        assert contracts == ()
+        assert len(errors) == 1
+        assert errors[0].component == "node:explode"
+        assert "source:orders" in errors[0].message
+        assert "csv" in errors[0].message
+        assert "declares no semantic facts" in errors[0].message
+
+        assert len(contracts) == 1
+        assert contracts[0].from_id == "source:orders"
+        assert contracts[0].to_id == "explode"
+        assert contracts[0].producer_plugin == "csv"
+        assert contracts[0].producer_facts is None
+        assert contracts[0].outcome is SemanticOutcome.UNKNOWN
 
     def test_undeclared_transform_producer_with_fail_policy_emits_error(self):
         # Real registered transform that does NOT declare output_semantics:

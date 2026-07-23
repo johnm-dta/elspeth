@@ -218,6 +218,11 @@ follower auto-promotion.
 
 ### Negative Consequences
 
+- An `IO_WRITE` or `EXTERNAL_CALL` transform can finish external work after
+  the hard item-stall budget has authorized takeover. The old result and
+  scheduler disposition are fenced, but the external operation is not:
+  transform execution is at-least-once across takeover and requires
+  plugin/provider idempotency or reconciliation.
 - At-least-once external sink emission across leader suspension remains,
   bounded to one in-flight batch, ledger-refused and audit-attributed — the
   irreducible residue of fencing non-transactional side effects with a

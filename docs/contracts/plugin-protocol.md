@@ -1639,8 +1639,13 @@ class Determinism(StrEnum):
 - `DETERMINISTIC`: Safe to replay; verify can recompute and compare
 - `SEEDED`: Capture and replay with same seed
 - `IO_READ`: Capture what was read (inputs/metadata) for replay/verify
-- `IO_WRITE`: Side effects; replay requires care and idempotency
-- `EXTERNAL_CALL`: Record request/response for replay; verify can diff responses
+- `IO_WRITE`: Side effects; replay requires care and idempotency. An item-lease
+  takeover can repeat a call after the old claimant crossed the hard stall
+  budget; the engine fences the old scheduler disposition, not its external
+  effect.
+- `EXTERNAL_CALL`: Record request/response for replay; verify can diff
+  responses. Use provider/application idempotency or reconciliation when the
+  call changes external state, because takeover execution is at-least-once.
 - `NON_DETERMINISTIC`: Record outputs; verify cannot recompute deterministically
 
 ---

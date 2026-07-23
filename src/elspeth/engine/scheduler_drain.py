@@ -315,9 +315,10 @@ class SchedulerDrainCoordinator:
         # ``claim_ready``/``claim_pending_sink`` and the terminal ``mark_*``.
         # ``_process_single_token`` calls the processor's
         # ``_heartbeat_active_claim`` delegate on each node-iteration
-        # boundary so an alive-but-slow worker's lease does not expire under
-        # a peer reaper. The drain is single-threaded per row, so this
-        # instance state has no concurrent access.
+        # boundary; the drain also validates once after traversal returns or
+        # raises so a terminal plugin cannot reach a stale disposition. The
+        # drain is single-threaded per row, so this instance state has no
+        # concurrent access.
         self._active_claim_work_item_id: str | None = None
         self._last_heartbeat_at: datetime | None = None
         self._scheduler_drains_since_maintenance = 0
@@ -582,15 +583,30 @@ class SchedulerDrainCoordinator:
             self._last_heartbeat_at = self._clock.now_utc()
             try:
                 try:
-                    result, child_items = self._processor._process_single_token(
-                        token=item.token,
-                        ctx=ctx,
-                        current_node_id=item.current_node_id,
-                        coalesce_node_id=item.coalesce_node_id,
-                        coalesce_name=item.coalesce_name,
-                        on_success_sink=item.on_success_sink,
-                        attempt_offset=max(claimed.attempt - 1, 0),
-                    )
+                    try:
+                        result, child_items = self._processor._process_single_token(
+                            token=item.token,
+                            ctx=ctx,
+                            current_node_id=item.current_node_id,
+                            coalesce_node_id=item.coalesce_node_id,
+                            coalesce_name=item.coalesce_name,
+                            on_success_sink=item.on_success_sink,
+                            attempt_offset=max(claimed.attempt - 1, 0),
+                        )
+                    except (SchedulerLeaseLostError, RunWorkerEvictedError):
+                        # A traversal-boundary heartbeat already classified
+                        # the claim loss. Do not issue a duplicate heartbeat.
+                        raise
+                    except Exception:
+                        # A plugin exception may arrive after recovery rotated
+                        # the claim. Validate before failure bookkeeping.
+                        self.heartbeat_active_claim()
+                        raise
+                    else:
+                        # A terminal plugin has no following node boundary at
+                        # which traversal can observe lease loss. Validate
+                        # before its result or disposition becomes visible.
+                        self.heartbeat_active_claim()
                 except SchedulerLeaseLostError as exc:
                     # The lease was reaped by a peer mid-processing. The
                     # original ``work_item_id`` no longer exists (peer rewrote
@@ -972,10 +988,12 @@ class SchedulerDrainCoordinator:
         """Refresh the active scheduler lease if heartbeat interval has elapsed.
 
         Called (via the processor's ``_heartbeat_active_claim`` delegate) from
-        ``_process_single_token`` on every node-iteration boundary
-        (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6). The actual
-        DB write fires at most once per ``scheduler_heartbeat_seconds`` so
-        fast plugin chains do not incur a write per node.
+        ``_process_single_token`` on every node-iteration boundary and by the
+        drain immediately after traversal returns or raises (ADR-026 RC6
+        multi-worker, filigree elspeth-ddde8144b6 and elspeth-51a4b5c771).
+        The actual DB write fires at most once per
+        ``scheduler_heartbeat_seconds`` so fast plugin chains do not incur a
+        write per node.
 
         No-op when no claim is active or the interval has not yet elapsed.
 
@@ -991,14 +1009,16 @@ class SchedulerDrainCoordinator:
                 active run member. The existing eviction path propagates this
                 clean-abandon signal without a scheduler disposition mutation.
 
-        **Single-plugin-call limitation.** This heartbeat fires *between*
-        plugin calls, not *during* a single plugin call. If one plugin call
-        exceeds ``scheduler_lease_seconds`` on its own, the lease still
-        expires while that call is in-flight. The operator must size
-        ``scheduler_lease_seconds`` to bracket the longest expected
-        single-plugin call. Sub-call-level protection (option b watchdog or
-        thread-based heartbeat) is a separate concern and not in scope for
-        the ticket's option (a).
+        **Single-plugin-call limitation.** This heartbeat fires *between* and
+        *after* plugin calls, not *during* a single synchronous call. If one
+        call exceeds ``scheduler_lease_seconds`` plus the hard stall budget,
+        a leader may rotate the attempt while it is in flight. The post-call
+        heartbeat then observes lease loss and abandons the old result or
+        failure before any stale scheduler disposition. It cannot roll back an
+        external effect the plugin performed; such calls have an at-least-once
+        replay contract and must supply external idempotency or reconciliation.
+        Sub-call lease renewal requires a watchdog/background heartbeat and is
+        a separate policy choice.
         """
         if self._active_claim_work_item_id is None:
             return

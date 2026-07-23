@@ -92,6 +92,27 @@ In N>1, `recover_expired_leases` is **leader-only and epoch-fenced**
 every attempt rotation a single attributable author and avoids an
 O(workers²) sweep storm.
 
+#### Long plugin calls and the external replay boundary
+
+The hard stall budget is an intentional takeover boundary, even when the old
+worker's process heartbeat remains live. If a synchronous transform call is
+still running when the leader rotates its item, a replacement worker may run
+the same logical transform attempt. When the old call later returns or raises,
+the drain performs a post-call item heartbeat: the missing/reassigned attempt
+records `lease_lost` and the old worker abandons both its result and scheduler
+disposition. Exactly one claimant can therefore commit the internal
+`mark_*` transition.
+
+That fence does not transact with work the plugin already performed outside
+the Landscape database. `IO_WRITE` and `EXTERNAL_CALL` transforms are
+**at-least-once across item takeover**: one rotation can produce one call from
+the old claimant and one replay by its replacement, and repeated stalls can
+produce further attempts. Such plugins must use a provider/application
+idempotency key, reconcile an already-applied effect, or move publication to a
+supported durable sink-effect boundary. `worker_stalled` plus `lease_lost`
+explains the internal winner/loser sequence; neither event proves that an
+external effect happened only once.
+
 **Two design notes that bite operators in incidents:**
 
 - `attempt` is bumped on lease expiry (ADR-026 §Decision 5). A row at

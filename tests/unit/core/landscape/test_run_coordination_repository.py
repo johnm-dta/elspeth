@@ -556,6 +556,89 @@ class TestReleaseSeatAndLiveLeader:
 
         assert _events(engine) == events_after_first
 
+    def test_release_with_stale_epoch_is_zero_mutation(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
+        _seed_run(engine)
+        token = repo.register_run_leader(run_id=RUN_ID, worker_id=mint_worker_id(RUN_ID), now=NOW, window_seconds=WINDOW)
+        seat_before = _seat_row(engine)
+        worker_before = _worker_row(engine, token.worker_id)
+        events_before = _events(engine)
+
+        repo.release_seat(
+            token=CoordinationToken(run_id=RUN_ID, worker_id=token.worker_id, leader_epoch=token.leader_epoch + 1),
+            now=NOW + timedelta(seconds=1),
+        )
+
+        assert _seat_row(engine) == seat_before
+        assert _worker_row(engine, token.worker_id) == worker_before
+        assert _events(engine) == events_before
+
+    def test_release_with_foreign_worker_is_zero_mutation(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
+        foreign_run_id = "run-coord-foreign"
+        _seed_run(engine)
+        _seed_run(engine, run_id=foreign_run_id)
+        token = repo.register_run_leader(run_id=RUN_ID, worker_id=mint_worker_id(RUN_ID), now=NOW, window_seconds=WINDOW)
+        foreign = repo.register_run_leader(
+            run_id=foreign_run_id,
+            worker_id=mint_worker_id(foreign_run_id),
+            now=NOW,
+            window_seconds=WINDOW,
+        )
+        seat_before = {RUN_ID: _seat_row(engine), foreign_run_id: _seat_row(engine, foreign_run_id)}
+        workers_before = {
+            token.worker_id: _worker_row(engine, token.worker_id),
+            foreign.worker_id: _worker_row(engine, foreign.worker_id),
+        }
+        events_before = {RUN_ID: _events(engine), foreign_run_id: _events(engine, foreign_run_id)}
+
+        repo.release_seat(
+            token=CoordinationToken(run_id=RUN_ID, worker_id=foreign.worker_id, leader_epoch=token.leader_epoch),
+            now=NOW + timedelta(seconds=1),
+        )
+
+        assert {RUN_ID: _seat_row(engine), foreign_run_id: _seat_row(engine, foreign_run_id)} == seat_before
+        assert {
+            token.worker_id: _worker_row(engine, token.worker_id),
+            foreign.worker_id: _worker_row(engine, foreign.worker_id),
+        } == workers_before
+        assert {RUN_ID: _events(engine), foreign_run_id: _events(engine, foreign_run_id)} == events_before
+
+    def test_release_requires_active_membership_in_token_run(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
+        """A seat identity cannot authorize departure of membership owned by another run."""
+        foreign_run_id = "run-coord-foreign-membership"
+        _seed_run(engine)
+        _seed_run(engine, run_id=foreign_run_id)
+        original = repo.register_run_leader(run_id=RUN_ID, worker_id=mint_worker_id(RUN_ID), now=NOW, window_seconds=WINDOW)
+        foreign = repo.register_run_leader(
+            run_id=foreign_run_id,
+            worker_id=mint_worker_id(foreign_run_id),
+            now=NOW,
+            window_seconds=WINDOW,
+        )
+        # Construct the inconsistent durable image the repository predicate
+        # must fail closed against: RUN_ID's seat names another run's worker.
+        with engine.begin() as conn:
+            conn.execute(
+                update(run_coordination_table).where(run_coordination_table.c.run_id == RUN_ID).values(leader_worker_id=foreign.worker_id)
+            )
+        seat_before = {RUN_ID: _seat_row(engine), foreign_run_id: _seat_row(engine, foreign_run_id)}
+        workers_before = {
+            original.worker_id: _worker_row(engine, original.worker_id),
+            foreign.worker_id: _worker_row(engine, foreign.worker_id),
+        }
+        events_before = {RUN_ID: _events(engine), foreign_run_id: _events(engine, foreign_run_id)}
+
+        repo.release_seat(
+            token=CoordinationToken(run_id=RUN_ID, worker_id=foreign.worker_id, leader_epoch=original.leader_epoch),
+            now=NOW + timedelta(seconds=1),
+        )
+
+        assert {RUN_ID: _seat_row(engine), foreign_run_id: _seat_row(engine, foreign_run_id)} == seat_before
+        assert {
+            original.worker_id: _worker_row(engine, original.worker_id),
+            foreign.worker_id: _worker_row(engine, foreign.worker_id),
+        } == workers_before
+        assert {RUN_ID: _events(engine), foreign_run_id: _events(engine, foreign_run_id)} == events_before
+
     def test_vacant_seat_is_acquirable_at_next_epoch(self, engine: Tier1Engine, repo: RunCoordinationRepository) -> None:
         """The CAS's vacant-seat arm: release then re-acquire without waiting for expiry."""
         _seed_run(engine, status="failed")

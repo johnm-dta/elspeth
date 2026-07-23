@@ -109,6 +109,10 @@ _IMMUTABLE_SUCCESS_RUN_STATUSES = (
 )
 
 
+class _ReleaseMembershipMiss(Exception):
+    """Internal rollback signal for a seat without matching active membership."""
+
+
 def _utc(value: datetime) -> datetime:
     """Attach UTC to a naive datetime read back from SQLite (storage is UTC)."""
     if value.tzinfo is None:
@@ -588,27 +592,34 @@ class RunCoordinationRepository:
 
         Rowcount 0 on the seat CAS (already released, or deposed) is a
         silent no-op — release is best-effort hygiene on teardown/ceremony
-        paths, never a fence.
+        paths, never a fence. A missing run-scoped active membership rolls the
+        seat CAS back, so the seat clear, membership departure, and evidence
+        insert are one atomic transition.
         """
-        with begin_write(self._engine) as conn:
-            released = conn.execute(
-                update(run_coordination_table)
-                .where(
-                    run_coordination_table.c.run_id == token.run_id,
-                    run_coordination_table.c.leader_worker_id == token.worker_id,
-                    run_coordination_table.c.leader_epoch == token.leader_epoch,
+        try:
+            with begin_write(self._engine) as conn:
+                released = conn.execute(
+                    update(run_coordination_table)
+                    .where(
+                        run_coordination_table.c.run_id == token.run_id,
+                        run_coordination_table.c.leader_worker_id == token.worker_id,
+                        run_coordination_table.c.leader_epoch == token.leader_epoch,
+                    )
+                    .values(leader_worker_id=None, leader_heartbeat_expires_at=None, updated_at=now)
                 )
-                .values(leader_worker_id=None, leader_heartbeat_expires_at=None, updated_at=now)
-            )
-            departed = conn.execute(
-                update(run_workers_table)
-                .where(
-                    run_workers_table.c.worker_id == token.worker_id,
-                    run_workers_table.c.status == "active",
+                if released.rowcount != 1:
+                    return
+                departed = conn.execute(
+                    update(run_workers_table)
+                    .where(
+                        run_workers_table.c.run_id == token.run_id,
+                        run_workers_table.c.worker_id == token.worker_id,
+                        run_workers_table.c.status == "active",
+                    )
+                    .values(status="departed", departed_at=now)
                 )
-                .values(status="departed", departed_at=now)
-            )
-            if released.rowcount == 1:
+                if departed.rowcount != 1:
+                    raise _ReleaseMembershipMiss
                 record_coordination_event(
                     conn,
                     run_id=token.run_id,
@@ -616,8 +627,10 @@ class RunCoordinationRepository:
                     worker_id=token.worker_id,
                     leader_epoch=token.leader_epoch,
                     recorded_at=now,
-                    context={"worker_row_departed": bool(departed.rowcount)},
+                    context={"worker_row_departed": True},
                 )
+        except _ReleaseMembershipMiss:
+            return
 
     def live_leader(self, *, run_id: str, now: datetime) -> LeaderInfo | None:
         """Read-only seat read (§B.3). Implemented now; WIRED into the entry guard in slice 4.

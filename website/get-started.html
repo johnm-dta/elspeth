@@ -4,10 +4,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Install ELSPETH from source, run a validated example, or set up the local Web Composer." />
 <title>Get started — ELSPETH</title>
 <script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
@@ -22,7 +24,7 @@
         <a href="authoring.html">Authoring</a>
         <a href="assurance.html">Assurance</a>
         <a href="use-cases.html">Use cases</a>
-        <a href="get-started.html" class="active">Get started</a>
+        <a href="get-started.html" class="active" aria-current="page">Get started</a>
       </nav>
     </div>
     <div class="nav-right">
@@ -33,7 +35,7 @@
           <a href="authoring.html">Authoring</a>
           <a href="assurance.html">Assurance</a>
           <a href="use-cases.html">Use cases</a>
-          <a href="get-started.html">Get started</a>
+          <a href="get-started.html" class="active" aria-current="page">Get started</a>
           <hr />
           <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
         </div>
@@ -51,7 +53,7 @@
   <div class="wrap">
     <span class="eyebrow">Reviewable by design</span>
     <h1>From install to a validated run.</h1>
-    <p>Install the CLI, declare a pipeline, and validate it before it runs. What you read is what runs — and what the audit trail records.</p>
+    <p>Choose the CLI for a reviewable source checkout, or set up the Web Composer for a local, staged authoring experience. Both validate before they run.</p>
   </div>
 </div>
 
@@ -62,8 +64,8 @@
       <div class="step">
         <span class="num">1</span>
         <div>
-          <h3>Install</h3>
-          <p>Python 3.12+. Clone and install with <code>uv</code>.</p>
+          <h3>Install from a current source checkout</h3>
+          <p>Python 3.12+. Clone the repository and use an editable install with <code>uv</code>. This tracks your current source checkout; it is not an immutable 0.7.1 artifact.</p>
           <pre class="copyable"><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
 <span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
 <span class="pr">$</span> uv pip install -e ".[dev]"</pre>
@@ -72,27 +74,21 @@
       <div class="step">
         <span class="num">2</span>
         <div>
-          <h3>Validate before you run</h3>
-          <p>Preflight checks graph structure, route targets, schema compatibility, and secret references.</p>
-          <pre><span class="pr">$</span> elspeth validate --settings pipeline.yaml
-<span class="ok">✅ Pipeline configuration valid!</span>
-<span class="mut">  Sources: submissions=csv
-  Transforms: 1
-  Aggregations: 0
-  Sinks: approved, review
-  Graph: 5 nodes, 4 edges</span></pre>
+          <h3>Validate a tracked example</h3>
+          <p>Start with the repository's <a href="https://github.com/johnm-dta/elspeth/blob/main/examples/threshold_gate/settings.yaml"><code>examples/threshold_gate/settings.yaml</code></a>. Preflight checks graph structure, route targets, schema compatibility, and secret references.</p>
+          <pre><span class="pr">$</span> elspeth validate --settings examples/threshold_gate/settings.yaml</pre>
         </div>
       </div>
       <div class="step">
         <span class="num">3</span>
         <div>
           <h3>Run &amp; explain</h3>
-          <p>Execute the pipeline, then explore why any row reached its destination.</p>
-          <pre><span class="pr">$</span> elspeth run --settings pipeline.yaml --execute   <span class="cm"># → status: completed</span>
+          <p>Execute the example, then explore why any row reached its destination.</p>
+          <pre><span class="pr">$</span> elspeth run --settings examples/threshold_gate/settings.yaml --execute
 <span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;
 <span class="mut">Outcome:</span>   <span class="ok">SUCCESS</span>
 <span class="mut">Path:</span>      <span class="ok">GATE_ROUTED</span>
-<span class="mut">Sink:</span>      approved</pre>
+<span class="mut">Sink:</span>      output</pre>
         </div>
       </div>
     </div>
@@ -103,48 +99,11 @@
 
 <section class="dotgrid">
   <div class="wrap">
-    <div class="codewrap">
-      <div class="section-head" style="max-width:38ch">
-        <span class="eyebrow">A pipeline is just declared primitives</span>
-        <h2>pipeline.yaml</h2>
-        <p>Every edge is named; every gate is pure config. Prefer not to write YAML? The Web Composer lets you describe the workflow in conversation instead — it builds the same artifact.</p>
-      </div>
-<pre class="code copyable"><span class="cm"># pipeline.yaml — passes: elspeth validate --settings pipeline.yaml</span>
-<span class="key">sources</span>:
-  submissions:
-    plugin: <span class="str">csv</span>
-    on_success: validated
-    options:
-      path: <span class="str">data/submissions.csv</span>
-      schema: { mode: <span class="str">observed</span> }   <span class="cm"># infer types from the data</span>
-      on_validation_failure: discard      <span class="cm"># no silent defaults — declare it</span>
-
-<span class="key">transforms</span>:
-- name: classify
-  plugin: <span class="str">llm</span>
-  input: validated
-  on_success: classified
-  on_error: discard
-  options:
-    provider: <span class="str">openrouter</span>
-    model: <span class="str">anthropic/claude-sonnet-4.6</span>
-    api_key: <span class="str">${OPENROUTER_API_KEY}</span>   <span class="cm"># from the OPENROUTER_API_KEY env var</span>
-    prompt_template: <span class="str">"Score risk 0-1: {{ row }}"</span>
-    schema: { mode: <span class="str">observed</span> }
-
-<span class="key">gates</span>:
-- name: safety_gate
-  input: classified
-  condition: <span class="str">"row['risk_score'] > 0.8"</span>
-  routes: { <span class="str">"true"</span>: review, <span class="str">"false"</span>: approved }
-
-<span class="key">sinks</span>:
-  <span class="cm"># "review" is a destination role, not a plugin type — route it to a real sink</span>
-  approved: { plugin: <span class="str">csv</span>, on_write_failure: discard, options: { path: <span class="str">data/approved.csv</span>, schema: { mode: <span class="str">observed</span> } } }
-  review:   { plugin: <span class="str">csv</span>, on_write_failure: discard, options: { path: <span class="str">data/needs_review.csv</span>, schema: { mode: <span class="str">observed</span> } } }
-
-<span class="key">landscape</span>:
-  url: <span class="str">sqlite:///./audit.db</span></pre>
+    <div class="section-head" style="max-width:70ch">
+      <span class="eyebrow">Important upgrade posture</span>
+      <h2>Pre-1.0 databases are recreated, not migrated.</h2>
+      <p>APIs, interfaces, and schemas are unstable before 1.0; ELSPETH makes no backward-compatibility promise. From 0.7.0 to 0.7.1, <code>SESSION_SCHEMA_EPOCH</code> changes 26 → 35, the guided schema changes 7 → 10, and Landscape <code>SQLITE_SCHEMA_EPOCH</code> changes 22 → 29.</p>
+      <p>Archive or export needed evidence, stop the old service, and recreate incompatible session and Landscape stores. Do not run older code over recreated databases: there is no in-place migration. The separate <code>auth.db</code> is not the session or Landscape store.</p>
     </div>
   </div>
 </section>
@@ -154,20 +113,39 @@
 <section id="composer">
   <div class="wrap">
     <div class="section-head">
-      <span class="eyebrow">Prefer not to write YAML?</span>
-      <h2>Launch the Web Composer.</h2>
-      <p>The Web Composer ships with ELSPETH. Start the local web app, then build a pipeline in conversation — it targets the same engine, contracts, and Landscape audit trail as the CLI.</p>
+      <span class="eyebrow">Web Composer setup</span>
+      <h2>Build the local Web Composer.</h2>
+      <p>The Web Composer is a separate local setup path. Build its frontend, configure a secret, create a user, then start the web service.</p>
     </div>
     <div class="steps" style="margin-top:28px">
       <div class="step">
         <span class="num"><i data-lucide="arrow-right" style="width:16px;height:16px"></i></span>
         <div>
-          <h3>Run the local server</h3>
-          <p>Starts a FastAPI app bound to your machine. Open the printed address in a browser to start composing.</p>
-          <pre class="copyable"><span class="pr">$</span> elspeth web
-<span class="cm"># Composer served at http://127.0.0.1:8451</span></pre>
+          <h3>Install, build, and run</h3>
+          <p>Install the web extras, build the frontend, then set a local secret before creating the first user.</p>
+          <pre class="copyable"><span class="pr">$</span> uv pip install -e ".[webui,dev]"
+<span class="pr">$</span> cd src/elspeth/web/frontend
+<span class="pr">$</span> npm install
+<span class="pr">$</span> npm run build
+<span class="pr">$</span> cd ../../../..
+<span class="pr">$</span> export ELSPETH_WEB__SECRET_KEY="$(openssl rand -base64 32)"
+<span class="pr">$</span> elspeth composer users add demo --password "choose-a-strong-password" --display-name "Demo User" --email "demo@example.com"
+<span class="pr">$</span> elspeth web --host 127.0.0.1 --port 8451</pre>
         </div>
       </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section>
+  <div class="wrap">
+    <div class="section-head" style="max-width:70ch">
+      <span class="eyebrow">Supported deployment profile</span>
+      <h2>Operate one web task on AWS ECS.</h2>
+      <p>The supported profile is one ECS Fargate web task with Aurora PostgreSQL, EFS, task-role S3 and Bedrock access, Cognito/OIDC, and CloudWatch/X-Ray. Deployments use planned downtime and zero overlap.</p>
+      <p>Follow the <a href="https://github.com/johnm-dta/elspeth/blob/main/docs/runbooks/aws-ecs-deployment.md"><code>docs/runbooks/aws-ecs-deployment.md</code> runbook</a> for the current operational contract. The current code and runbook are the source of truth.</p>
     </div>
   </div>
 </section>

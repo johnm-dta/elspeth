@@ -38,6 +38,7 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, dispatch_with_audit
+from elspeth.web.composer.bounded_json import JsonBoundaryError, bounded_json_loads, require_bounded_text
 from elspeth.web.composer.capability_skill import (
     PLANNER_DISCOVERY_TOOL_NAMES,
     PLANNER_TERMINAL_TOOL_NAME,
@@ -519,30 +520,35 @@ def _provider_field(value: Any, name: str) -> Any:
 def _parse_json_object(raw: object, *, label: str) -> Mapping[str, Any]:
     if type(raw) is not str or not raw.strip():
         raise PipelinePlannerError(f"{label} must be a non-empty JSON string", code="MALFORMED_RESPONSE")
-
-    def reject_constant(_value: str) -> Any:
-        raise ValueError("non-finite JSON number")
-
     try:
-        parsed = json.loads(raw, parse_constant=reject_constant)
-    except (json.JSONDecodeError, ValueError) as exc:
+        parsed = bounded_json_loads(raw, label=label)
+    except (json.JSONDecodeError, JsonBoundaryError, TypeError, ValueError) as exc:
         raise PipelinePlannerError(f"{label} is not strict JSON", code="MALFORMED_RESPONSE") from exc
     if type(parsed) is not dict:
         raise PipelinePlannerError(f"{label} must decode to an object", code="MALFORMED_RESPONSE")
     return cast(Mapping[str, Any], parsed)
 
 
-def _parse_response_tool_calls(response: Any, *, allow_text: bool = False) -> tuple[Any, tuple[_ParsedToolCall, ...]]:
+def _parse_response_tool_calls(
+    response: Any,
+    *,
+    max_tool_calls: int,
+    allow_text: bool = False,
+) -> tuple[Any, tuple[_ParsedToolCall, ...]]:
     choices = _provider_field(response, "choices")
-    if not isinstance(choices, list | tuple) or len(choices) != 1:
+    if type(choices) not in {list, tuple} or len(choices) != 1:
         raise PipelinePlannerError("planner response must contain exactly one choice", code="MALFORMED_RESPONSE")
     message = _provider_field(choices[0], "message")
     if message is None:
         raise PipelinePlannerError("planner response choice is missing its message", code="MALFORMED_RESPONSE")
     raw_calls = _provider_field(message, "tool_calls")
-    if not isinstance(raw_calls, list | tuple) or not raw_calls:
+    if type(raw_calls) not in {list, tuple} or not raw_calls:
         content = _provider_field(message, "content")
         if allow_text and type(content) is str and content.strip():
+            try:
+                require_bounded_text(content, label="planner text response")
+            except JsonBoundaryError as exc:
+                raise PipelinePlannerError("planner text response exceeds local bounds", code="MALFORMED_RESPONSE") from exc
             return message, ()
         # The no-tool-call class (prose thinking-aloud or an empty reply)
         # gets its own code so the loop can nudge-retry it — mid-plan prose
@@ -550,6 +556,8 @@ def _parse_response_tool_calls(response: Any, *, allow_text: bool = False) -> tu
         # converts it back to terminal MALFORMED_RESPONSE once the nudge
         # budget is spent; the code never escapes the planner.
         raise PipelinePlannerError("planner response must call a declared tool", code="PROSE_REPLY")
+    if len(raw_calls) > max_tool_calls:
+        raise PipelinePlannerError("planner response exceeds the per-turn tool call limit", code="MALFORMED_RESPONSE")
     parsed: list[_ParsedToolCall] = []
     for raw_call in raw_calls:
         call_id = _provider_field(raw_call, "id")
@@ -1482,7 +1490,21 @@ async def _plan_pipeline_inner(
             if call.provider_cost is None:
                 recorder.record_llm_call(call)
                 raise PipelinePlannerError("planner provider cost metadata is missing or malformed", code="COST_UNAVAILABLE")
-            if call.completion_tokens is not None and call.completion_tokens > budget_policy.max_completion_tokens:
+            if call.completion_tokens is None:
+                malformed_usage = PipelinePlannerError(
+                    "planner completion token metadata is missing or malformed",
+                    code="MALFORMED_RESPONSE",
+                )
+                recorder.record_llm_call(
+                    replace(
+                        call,
+                        status=ComposerLLMCallStatus.MALFORMED_RESPONSE,
+                        error_class=type(malformed_usage).__name__,
+                        error_message=malformed_usage.code,
+                    )
+                )
+                raise malformed_usage
+            if call.completion_tokens > budget_policy.max_completion_tokens:
                 recorder.record_llm_call(call)
                 raise PipelinePlannerError(
                     "planner provider reported a completion token limit overage",
@@ -1493,7 +1515,11 @@ async def _plan_pipeline_inner(
                 recorder.record_llm_call(call)
                 raise PipelinePlannerError("planner provider cost continuation cap exceeded", code="COST_CAP_EXCEEDED")
             try:
-                parsed_response = _parse_response_tool_calls(response, allow_text=allow_text_reply)
+                parsed_response = _parse_response_tool_calls(
+                    response,
+                    max_tool_calls=model_config.max_tool_calls_per_turn,
+                    allow_text=allow_text_reply,
+                )
             except PipelinePlannerError as exc:
                 if exc.code not in ("MALFORMED_RESPONSE", "PROSE_REPLY"):
                     raise

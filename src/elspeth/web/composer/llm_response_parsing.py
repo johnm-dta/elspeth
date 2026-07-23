@@ -45,6 +45,12 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.token_usage import TokenUsage
 from elspeth.core.canonical import stable_hash
+from elspeth.web.composer.bounded_json import (
+    PROVIDER_ARTIFACT_UNAVAILABLE,
+    JsonBoundaryError,
+    JsonTraversalBudget,
+    require_bounded_text,
+)
 
 if TYPE_CHECKING:
     from elspeth.web.composer.audit import BufferingRecorder
@@ -121,16 +127,6 @@ def _provider_field(value: Any, field: str) -> Any:
     if fields is None or field not in fields:
         return None
     return fields[field]
-
-
-def _provider_method(value: Any, method_name: str) -> Any | None:
-    try:
-        method = object.__getattribute__(value, method_name)
-    except AttributeError:
-        return None
-    if callable(method):
-        return method
-    return None
 
 
 def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping[str, Any] | None:
@@ -302,28 +298,106 @@ def _first_response_message(response: Any | None) -> Any | None:
     return _response_field(choices[0], "message")
 
 
-def _json_safe_provider_artifact(value: Any) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
+def _provider_artifact_owned_fields(value: Any) -> Mapping[str, Any] | None:
+    """Return data-only object fields without invoking provider serializers."""
+    try:
+        raw_fields = object.__getattribute__(value, "__dict__")
+    except (AttributeError, TypeError):
+        return None
+    if type(raw_fields) is not dict:
+        return None
+    fields = dict(raw_fields)
+    return fields or None
+
+
+def _normalize_provider_artifact(
+    value: Any,
+    *,
+    budget: JsonTraversalBudget,
+    depth: int,
+    active_container_ids: set[int],
+) -> Any:
+    label = "provider artifact"
+    budget.check_depth(depth, label=label)
+    if value is None or type(value) in {bool, int}:
         return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe_provider_artifact(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
-        return [_json_safe_provider_artifact(item) for item in value]
-    if isinstance(value, set | frozenset):
-        return [_json_safe_provider_artifact(item) for item in value]
-    model_dump = _provider_method(value, "model_dump")
-    if callable(model_dump):
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise JsonBoundaryError("provider artifact contains a non-finite number")
+        return value
+    if type(value) is str:
+        budget.consume_text(value, label=label)
+        return value
+    if type(value) is dict:
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise JsonBoundaryError("provider artifact contains a recursive mapping")
+        budget.consume_items(len(value), label=label)
+        active_container_ids.add(container_id)
         try:
-            return _json_safe_provider_artifact(model_dump(mode="json"))
-        except TypeError:
-            return _json_safe_provider_artifact(model_dump())
-    to_dict = _provider_method(value, "to_dict")
-    if callable(to_dict):
-        return _json_safe_provider_artifact(to_dict())
-    dict_method = _provider_method(value, "dict")
-    if callable(dict_method):
-        return _json_safe_provider_artifact(dict_method())
-    return repr(value)
+            normalized: dict[str, Any] = {}
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise JsonBoundaryError("provider artifact contains a non-string key")
+                budget.consume_text(key, label=label)
+                normalized[key] = _normalize_provider_artifact(
+                    item,
+                    budget=budget,
+                    depth=depth + 1,
+                    active_container_ids=active_container_ids,
+                )
+            return normalized
+        finally:
+            active_container_ids.remove(container_id)
+    if type(value) in {list, tuple}:
+        container_id = id(value)
+        if container_id in active_container_ids:
+            raise JsonBoundaryError("provider artifact contains a recursive sequence")
+        budget.consume_items(len(value), label=label)
+        active_container_ids.add(container_id)
+        try:
+            return [
+                _normalize_provider_artifact(
+                    item,
+                    budget=budget,
+                    depth=depth + 1,
+                    active_container_ids=active_container_ids,
+                )
+                for item in value
+            ]
+        finally:
+            active_container_ids.remove(container_id)
+
+    fields = _provider_artifact_owned_fields(value)
+    if fields is None:
+        raise JsonBoundaryError("provider artifact has no data-only JSON representation")
+    container_id = id(value)
+    if container_id in active_container_ids:
+        raise JsonBoundaryError("provider artifact contains a recursive object")
+    active_container_ids.add(container_id)
+    try:
+        return _normalize_provider_artifact(
+            fields,
+            budget=budget,
+            depth=depth,
+            active_container_ids=active_container_ids,
+        )
+    finally:
+        active_container_ids.remove(container_id)
+
+
+def _json_safe_provider_artifact(value: Any) -> Any:
+    try:
+        return _normalize_provider_artifact(
+            value,
+            budget=JsonTraversalBudget(),
+            depth=0,
+            active_container_ids=set(),
+        )
+    except Exception:
+        # The sentinel is closed and value-free. Provider-controlled methods,
+        # reprs, keys, and exception text never enter the audit record.
+        return PROVIDER_ARTIFACT_UNAVAILABLE
 
 
 def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadata:
@@ -335,10 +409,15 @@ def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadat
             "thinking_blocks": None,
         }
     reasoning_content = _response_field(message, "reasoning")
-    if not isinstance(reasoning_content, str):
+    if type(reasoning_content) is not str:
         reasoning_content = _response_field(message, "reasoning_content")
-    if not isinstance(reasoning_content, str):
+    if type(reasoning_content) is not str:
         reasoning_content = None
+    else:
+        try:
+            reasoning_content = require_bounded_text(reasoning_content, label="provider reasoning content")
+        except JsonBoundaryError:
+            reasoning_content = PROVIDER_ARTIFACT_UNAVAILABLE
 
     reasoning_details = _response_field(message, "reasoning_details")
     if reasoning_details is None:

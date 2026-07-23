@@ -46,6 +46,7 @@ from elspeth.web.composer.pipeline_planner import (
     PlannerOriginatingMessage,
     PlannerRequestLifecycle,
     _allowlisted_candidate_feedback,
+    _parse_response_tool_calls,
     plan_pipeline,
     planner_tool_definitions,
 )
@@ -108,6 +109,10 @@ class _ScriptedCompletion:
         return response
 
 
+def _planner_usage(*, cost: object = 0.01) -> dict[str, object]:
+    return {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": cost}
+
+
 def _response(*calls: tuple[str, object], cost: object = 0.01) -> _Response:
     tool_calls = [
         _ToolCall(id=f"call-{index}", function=_Function(name=name, arguments=json.dumps(arguments)))
@@ -115,7 +120,7 @@ def _response(*calls: tuple[str, object], cost: object = 0.01) -> _Response:
     ]
     return _Response(
         choices=[_Choice(message=_Message(content=None, tool_calls=tool_calls))],
-        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": cost},
+        usage=_planner_usage(cost=cost),
     )
 
 
@@ -1530,6 +1535,72 @@ async def test_reported_completion_token_overage_is_audited_then_rejected(
 
 
 @pytest.mark.asyncio
+async def test_missing_completion_token_metadata_is_audited_then_rejected(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    completion = _ScriptedCompletion(
+        _response_with_usage(
+            ("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)}),
+            completion_tokens=None,
+        )
+    )
+    recorder = BufferingRecorder()
+
+    with pytest.raises(PipelinePlannerError) as caught:
+        await _plan(tmp_path=tmp_path, tool_context=tool_context, completion=completion, recorder=recorder)
+
+    assert caught.value.code == "MALFORMED_RESPONSE"
+    assert len(recorder.llm_calls) == 1
+    assert recorder.llm_calls[0].status is ComposerLLMCallStatus.MALFORMED_RESPONSE
+    assert recorder.llm_calls[0].completion_tokens is None
+
+
+@pytest.mark.parametrize(
+    "raw_arguments",
+    [
+        pytest.param("[" * 2_000 + "0" + "]" * 2_000, id="depth"),
+        pytest.param('{"value":"' + "x" * 1_048_577 + '"}', id="bytes"),
+    ],
+)
+def test_planner_rejects_over_budget_tool_json_as_malformed_response(raw_arguments: str) -> None:
+    response = _Response(
+        choices=[
+            _Choice(
+                message=_Message(
+                    content=None,
+                    tool_calls=[
+                        _ToolCall(
+                            id="deep",
+                            function=_Function("list_sources", raw_arguments),
+                        )
+                    ],
+                )
+            )
+        ],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.01},
+    )
+
+    with pytest.raises(PipelinePlannerError) as caught:
+        _parse_response_tool_calls(response, max_tool_calls=3)
+
+    assert caught.value.code == "MALFORMED_RESPONSE"
+
+
+def test_planner_rejects_excessive_tool_call_container_before_argument_parsing() -> None:
+    calls = [_ToolCall(id=f"call-{index}", function=_Function("list_sources", "[" * 2_000 + "0" + "]" * 2_000)) for index in range(4)]
+    response = _Response(
+        choices=[_Choice(message=_Message(content=None, tool_calls=calls))],
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.01},
+    )
+
+    with pytest.raises(PipelinePlannerError, match="tool call") as caught:
+        _parse_response_tool_calls(response, max_tool_calls=3)
+
+    assert caught.value.code == "MALFORMED_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_exhausted_provider_error_is_wrapped_class_only_after_audit(
     tmp_path: Path,
     tool_context: ToolContext,
@@ -2184,31 +2255,31 @@ async def test_settlement_failure_after_success_fails_the_request(
 @pytest.mark.parametrize(
     "response",
     [
-        _Response(choices=[], usage={"cost": 0.01}),
-        _Response(choices=[_Choice(message=None)], usage={"cost": 0.01}),  # type: ignore[arg-type]
+        _Response(choices=[], usage=_planner_usage()),
+        _Response(choices=[_Choice(message=None)], usage=_planner_usage()),  # type: ignore[arg-type]
         # NOTE: the no-tool-call shape (content=None, tool_calls=None) left
         # this matrix when the loop gained the bounded prose nudge — see
         # test_prose_reply_gets_bounded_nudge_then_converges and
         # test_prose_replies_exhaust_nudge_budget_then_terminate_malformed.
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=None)]))],
-            usage={"cost": 0.01},
+            usage=_planner_usage(),
         ),
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=_Function("", "{}"))]))],
-            usage={"cost": 0.01},
+            usage=_planner_usage(),
         ),
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=_Function("list_sources", 3))]))],
-            usage={"cost": 0.01},
+            usage=_planner_usage(),
         ),
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=_Function("list_sources", "{"))]))],
-            usage={"cost": 0.01},
+            usage=_planner_usage(),
         ),
         _Response(
             choices=[_Choice(message=_Message(content=None, tool_calls=[_ToolCall(id="x", function=_Function("list_sources", "[]"))]))],
-            usage={"cost": 0.01},
+            usage=_planner_usage(),
         ),
         _response(("emit_pipeline_proposal", {"pipeline": {}}), ("emit_pipeline_proposal", {"pipeline": {}})),
         _response(("emit_pipeline_proposal", {"pipeline": {}}), ("list_sources", {})),

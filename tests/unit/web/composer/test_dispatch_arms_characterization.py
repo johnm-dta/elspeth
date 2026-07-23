@@ -180,6 +180,23 @@ async def test_arm_json_decode_failure_records_arg_error(
 
 
 @pytest.mark.asyncio
+async def test_deep_json_arguments_record_one_bounded_arg_error(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """A recursive decoder failure stays inside the ordinary ARG_ERROR arm."""
+    raw_arguments = "[" * 2_000 + "0" + "]" * 2_000
+    llm = _raw_tool_call_llm(name="get_pipeline_state", raw_arguments=raw_arguments)
+
+    result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
+
+    assert len(result.tool_invocations) == 1
+    assert result.tool_invocations[0].status is ComposerToolStatus.ARG_ERROR
+    assert len(result.tool_outcomes) == 1
+    assert result.tool_outcomes[0].error_class == "JsonBoundaryError"
+
+
+@pytest.mark.asyncio
 async def test_arm_non_dict_arguments_records_arg_error(
     fake_composer_service: ComposerServiceImpl,
     result_session_id: str,

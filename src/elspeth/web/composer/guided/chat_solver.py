@@ -32,6 +32,7 @@ from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.bounded_json import JsonBoundaryError, bounded_json_loads
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
 from elspeth.web.composer.guided.deferred_intents import (
     DeferredIntentAction,
@@ -1116,8 +1117,14 @@ def _parse_step_1_source_plugin_reselection_tool_arguments(
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
     """Validate the resolve_source tool arguments from a LiteLLM response."""
     try:
-        data = json.loads(arguments)
+        data = bounded_json_loads(arguments, label="resolve_source arguments")
+    except JsonBoundaryError as exc:
+        raise GuidedToolArgumentShapeError("resolve_source arguments are malformed") from exc
     except json.JSONDecodeError as exc:
+        raise GuidedToolArgumentShapeError("resolve_source arguments are not valid JSON") from exc
+    except ValueError as exc:
+        raise GuidedToolArgumentShapeError("resolve_source arguments are malformed") from exc
+    except TypeError as exc:
         raise GuidedToolArgumentShapeError("resolve_source arguments are not valid JSON") from exc
     if not isinstance(data, Mapping):
         raise GuidedToolArgumentShapeError(f"resolve_source arguments must decode to an object; got {type(data).__name__}")
@@ -1556,8 +1563,14 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
 def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
     """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""
     try:
-        data = json.loads(arguments)
+        data = bounded_json_loads(arguments, label="resolve_sink arguments")
+    except JsonBoundaryError as exc:
+        raise GuidedToolArgumentShapeError("resolve_sink arguments are malformed") from exc
     except json.JSONDecodeError as exc:
+        raise GuidedToolArgumentShapeError("resolve_sink arguments are not valid JSON") from exc
+    except ValueError as exc:
+        raise GuidedToolArgumentShapeError("resolve_sink arguments are malformed") from exc
+    except TypeError as exc:
         raise GuidedToolArgumentShapeError("resolve_sink arguments are not valid JSON") from exc
     if not isinstance(data, Mapping):
         raise GuidedToolArgumentShapeError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")

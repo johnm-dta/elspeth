@@ -1257,6 +1257,23 @@ def test_parse_step_1_source_rejects_deep_snapshot_before_route_side_effects() -
         _parse_step_1_source_tool_arguments(_source_tool_args(options=deep), plugin_hint="json")
 
 
+@pytest.mark.parametrize(
+    ("parser", "tool_name"),
+    [
+        (lambda raw: _parse_step_1_source_tool_arguments(raw, plugin_hint="json"), "resolve_source"),
+        (_parse_step_2_sink_tool_arguments, "resolve_sink"),
+    ],
+)
+def test_terminal_tool_decoders_translate_recursive_json_before_model_validation(
+    parser: Any,
+    tool_name: str,
+) -> None:
+    raw = "[" * 2_000 + "0" + "]" * 2_000
+
+    with pytest.raises(chat_solver.GuidedToolArgumentShapeError, match=tool_name):
+        parser(raw)
+
+
 def test_parse_rejects_tool_scaffolding_in_assistant_message() -> None:
     """A model that leaks its agentic scratchpad into assistant_message is rejected.
 

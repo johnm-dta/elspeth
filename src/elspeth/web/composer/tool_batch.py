@@ -48,6 +48,7 @@ from elspeth.web.composer.audit import (
     finish_success,
     rebind_dispatch_arguments,
 )
+from elspeth.web.composer.bounded_json import JsonBoundaryError, bounded_json_loads
 from elspeth.web.composer.discovery_cache import (
     CachedDiscoveryPayload as _CachedDiscoveryPayload,
 )
@@ -378,8 +379,8 @@ async def run_tool_batch(
             )
 
         try:
-            decoded_arguments = json.loads(tool_call.function.arguments)
-        except (json.JSONDecodeError, TypeError) as exc:
+            decoded_arguments = bounded_json_loads(tool_call.function.arguments, label=f"{tool_name} arguments")
+        except (json.JSONDecodeError, JsonBoundaryError, TypeError, ValueError) as exc:
             # Track budget class even when args are unparseable.
             if is_discovery_tool(tool_name):
                 turn_has_discovery = True

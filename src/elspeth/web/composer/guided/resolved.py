@@ -5,17 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from elspeth.contracts.freeze import FrozenJsonArray, deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json
+from elspeth.web.composer.bounded_json import (
+    JSON_MAX_DEPTH,
+    JSON_MAX_ITEMS,
+    JSON_MAX_STRING_CHARS,
+    JSON_MAX_TOTAL_TEXT_CHARS,
+    JSON_MAX_TOTAL_UTF8_BYTES,
+)
 from elspeth.web.composer.guided.errors import InvariantError
 
-GUIDED_JSON_MAX_DEPTH = 64
-GUIDED_JSON_MAX_ITEMS = 10_000
-GUIDED_JSON_MAX_STRING_CHARS = 65_536
-GUIDED_JSON_MAX_TOTAL_TEXT_CHARS = 1_048_576
-GUIDED_JSON_MAX_TOTAL_UTF8_BYTES = 1_048_576
+GUIDED_JSON_MAX_DEPTH: Final[int] = JSON_MAX_DEPTH
+GUIDED_JSON_MAX_ITEMS: Final[int] = JSON_MAX_ITEMS
+GUIDED_JSON_MAX_STRING_CHARS: Final[int] = JSON_MAX_STRING_CHARS
+GUIDED_JSON_MAX_TOTAL_TEXT_CHARS: Final[int] = JSON_MAX_TOTAL_TEXT_CHARS
+GUIDED_JSON_MAX_TOTAL_UTF8_BYTES: Final[int] = JSON_MAX_TOTAL_UTF8_BYTES
 
 
 @dataclass(slots=True)

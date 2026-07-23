@@ -180,6 +180,56 @@ def test_pipeline_proposal_is_recursively_immutable_and_detached() -> None:
     assert proposal.pipeline["nodes"][0]["options"]["rules"][0]["column"] == "name"
 
 
+def _nested_json_mapping(depth: int) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for _ in range(depth):
+        value = {"child": value}
+    return value
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        pytest.param(_nested_json_mapping(65), id="depth"),
+        pytest.param({"values": [None] * 10_000}, id="nodes"),
+        pytest.param({"values": ["x" * 61_700] * 17}, id="bytes"),
+    ],
+)
+def test_create_rejects_over_budget_json_with_audit_integrity_error(pipeline: dict[str, Any]) -> None:
+    with pytest.raises(AuditIntegrityError, match="pipeline"):
+        _create_proposal(pipeline=pipeline)
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        pytest.param(_nested_json_mapping(63), id="depth"),
+        pytest.param({"values": [None] * 9_984}, id="nodes"),
+        pytest.param({"values": ["x" * 65_400] * 16}, id="bytes"),
+    ],
+)
+def test_create_and_restore_accept_json_just_below_budgets(pipeline: dict[str, Any]) -> None:
+    proposal = _create_proposal(pipeline=pipeline)
+
+    assert PipelineProposal.from_dict(proposal.to_dict(), reviewed_facts=_reviewed_facts()) == proposal
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        pytest.param(_nested_json_mapping(65), id="depth"),
+        pytest.param({"values": [None] * 10_000}, id="nodes"),
+        pytest.param({"values": ["x" * 61_700] * 17}, id="bytes"),
+    ],
+)
+def test_restore_rejects_over_budget_json_with_audit_integrity_error(pipeline: dict[str, Any]) -> None:
+    payload = _create_proposal().to_dict()
+    payload["pipeline"] = pipeline
+
+    with pytest.raises(AuditIntegrityError, match="pipeline proposal payload"):
+        PipelineProposal.from_dict(payload, reviewed_facts=_reviewed_facts())
+
+
 def test_pipeline_proposal_rejects_plain_tuple_inside_mapping_proxy() -> None:
     with pytest.raises(AuditIntegrityError, match="got tuple"):
         _create_proposal(pipeline=MappingProxyType({"value": (1, 2)}))

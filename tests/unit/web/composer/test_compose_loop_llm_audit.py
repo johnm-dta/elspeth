@@ -229,6 +229,109 @@ def test_token_usage_reads_real_litellm_pydantic_extra_fields() -> None:
     assert record.provider_cost == 0.0123
 
 
+def _record_with_reasoning_artifact(artifact: object) -> ComposerLLMCall:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(reasoning_details=artifact, thinking_blocks=None))],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+    return build_llm_call_record(
+        model_requested="provider/model",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        status=ComposerLLMCallStatus.SUCCESS,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=response,
+    )
+
+
+def test_provider_reasoning_cycle_degrades_to_fixed_sentinel() -> None:
+    artifact: dict[str, object] = {}
+    artifact["self"] = artifact
+
+    record = _record_with_reasoning_artifact(artifact)
+
+    assert record.reasoning_details == "<provider-artifact-unavailable>"
+
+
+def _nested_json_lists(depth: int) -> object:
+    value: object = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        pytest.param({"deep": _nested_json_lists(65)}, id="deep"),
+        pytest.param({"wide": [None] * 10_001}, id="wide"),
+        pytest.param({"oversized": ["x" * 65_500] * 17}, id="oversized"),
+    ],
+)
+def test_provider_reasoning_artifact_budgets_degrade_to_fixed_sentinel(artifact: object) -> None:
+    record = _record_with_reasoning_artifact(artifact)
+
+    assert record.reasoning_details == "<provider-artifact-unavailable>"
+
+
+def test_provider_reasoning_does_not_invoke_serializer_methods() -> None:
+    calls: list[str] = []
+
+    class _ThrowingSerializer:
+        __slots__ = ()
+
+        def model_dump(self, **_kwargs: object) -> object:
+            calls.append("model_dump")
+            raise RuntimeError("provider-controlled serializer ran")
+
+    record = _record_with_reasoning_artifact(_ThrowingSerializer())
+
+    assert record.reasoning_details == "<provider-artifact-unavailable>"
+    assert calls == []
+
+
+def test_provider_reasoning_does_not_invoke_provider_descriptors() -> None:
+    calls: list[str] = []
+
+    class _ThrowingDescriptor:
+        def __init__(self) -> None:
+            self.safe = "value"
+
+        @property
+        def __pydantic_extra__(self) -> object:
+            calls.append("descriptor")
+            raise RuntimeError("provider-controlled descriptor ran")
+
+    record = _record_with_reasoning_artifact(_ThrowingDescriptor())
+
+    assert record.reasoning_details == {"safe": "value"}
+    assert calls == []
+
+
+def test_provider_reasoning_content_degrades_when_oversized() -> None:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(reasoning="x" * 65_537))],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
+
+    record = build_llm_call_record(
+        model_requested="provider/model",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        status=ComposerLLMCallStatus.SUCCESS,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=response,
+    )
+
+    assert record.reasoning_content == "<provider-artifact-unavailable>"
+
+
 def test_llm_call_record_redacts_raw_provider_error_detail() -> None:
     openai_key = "sk-" + ("A" * 48)
     bearer_token = "Bearer " + ("x" * 32)

@@ -21,6 +21,12 @@ from uuid import UUID
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import FrozenJsonArray, deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.web.composer.bounded_json import (
+    JSON_MAX_ITEMS,
+    JSON_MAX_TOTAL_UTF8_BYTES,
+    JsonBoundaryError,
+    JsonTraversalBudget,
+)
 
 if TYPE_CHECKING:
     from elspeth.web.composer.state import CompositionState
@@ -132,9 +138,12 @@ def _validate_and_freeze_strict_json_value(
     field_name: str,
     *,
     path: str,
+    depth: int,
+    budget: JsonTraversalBudget,
     active_container_ids: set[int],
 ) -> Any:
     """Validate and detach one strict JSON value in a single recursive pass."""
+    budget.check_depth(depth, label=field_name)
     if type(value) in {dict, MappingProxyType}:
         mapping_value = cast(Mapping[object, object], value)
         container_id = id(value)
@@ -143,13 +152,17 @@ def _validate_and_freeze_strict_json_value(
         active_container_ids.add(container_id)
         try:
             frozen_children: dict[str, Any] = {}
+            budget.consume_items(len(mapping_value), label=field_name)
             for key, child in mapping_value.items():
                 if type(key) is not str:
                     raise AuditIntegrityError(f"{field_name} key at {path} must be an exact str")
+                budget.consume_text(key, label=field_name)
                 frozen_children[key] = _validate_and_freeze_strict_json_value(
                     child,
                     field_name,
                     path=f"{path}.{key}",
+                    depth=depth + 1,
+                    budget=budget,
                     active_container_ids=active_container_ids,
                 )
         finally:
@@ -163,11 +176,14 @@ def _validate_and_freeze_strict_json_value(
             raise AuditIntegrityError(f"{field_name} contains a recursive list at {path}")
         active_container_ids.add(container_id)
         try:
+            budget.consume_items(len(sequence_value), label=field_name)
             frozen_items = FrozenJsonArray(
                 _validate_and_freeze_strict_json_value(
                     child,
                     field_name,
                     path=f"{path}[{index}]",
+                    depth=depth + 1,
+                    budget=budget,
                     active_container_ids=active_container_ids,
                 )
                 for index, child in enumerate(sequence_value)
@@ -177,6 +193,8 @@ def _validate_and_freeze_strict_json_value(
         return frozen_items
 
     if value is None or type(value) in {bool, str, int, float}:
+        if type(value) is str:
+            budget.consume_text(value, label=field_name)
         return value
 
     raise AuditIntegrityError(
@@ -187,17 +205,32 @@ def _validate_and_freeze_strict_json_value(
 def _validate_and_freeze_canonical_mapping(value: Mapping[str, Any], field_name: str) -> Mapping[str, Any]:
     """Snapshot an arbitrary Mapping once, then validate exact JSON containers."""
     try:
-        snapshot = dict(value.items())
+        snapshot: dict[object, object] = {}
+        for index, item in enumerate(value.items()):
+            if index >= JSON_MAX_ITEMS:
+                raise JsonBoundaryError(f"{field_name} exceeds the {JSON_MAX_ITEMS}-item JSON limit")
+            key, child = item
+            snapshot[key] = child
+    except JsonBoundaryError as exc:
+        raise AuditIntegrityError(f"{field_name} violates bounded JSON: {exc}") from exc
     except (AttributeError, TypeError, ValueError) as exc:
         raise AuditIntegrityError(f"{field_name} must be a mapping") from exc
-    frozen = _validate_and_freeze_strict_json_value(
-        snapshot,
-        field_name,
-        path="$",
-        active_container_ids=set(),
-    )
     try:
-        canonical_json(frozen)
+        frozen = _validate_and_freeze_strict_json_value(
+            snapshot,
+            field_name,
+            path="$",
+            depth=0,
+            budget=JsonTraversalBudget(),
+            active_container_ids=set(),
+        )
+        canonical = canonical_json(frozen)
+        if len(canonical.encode("utf-8")) > JSON_MAX_TOTAL_UTF8_BYTES:
+            raise JsonBoundaryError(f"{field_name} exceeds the {JSON_MAX_TOTAL_UTF8_BYTES}-byte canonical JSON limit")
+    except JsonBoundaryError as exc:
+        raise AuditIntegrityError(f"{field_name} violates bounded JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise AuditIntegrityError(f"{field_name} exceeds bounded JSON recursion") from exc
     except (TypeError, ValueError) as exc:
         raise AuditIntegrityError(f"{field_name} contains a number outside the RFC 8785 JSON domain") from exc
     return cast(Mapping[str, Any], frozen)

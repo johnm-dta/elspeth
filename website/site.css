@@ -47,7 +47,8 @@ a { color: inherit; text-decoration: none; }
 .nav-links { display: flex; gap: 22px; }
 .nav-links a { font-size: 14px; color: var(--color-text-secondary); padding: 4px 0; border-bottom: 2px solid transparent; }
 .nav-links a:hover { color: var(--color-text); }
-.nav-links a.active { color: var(--color-text); border-bottom-color: var(--color-accent); }
+.nav-links a.active,
+.nav-links a[aria-current="page"] { color: var(--color-text); border-bottom-color: var(--color-accent); }
 .nav-right { display: flex; align-items: center; gap: 10px; }
 .iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-elevated); color: var(--color-text); cursor: pointer; }
 .iconbtn:hover { border-color: var(--color-border-strong); }
@@ -63,6 +64,14 @@ a { color: inherit; text-decoration: none; }
 .hero .sub { font-size: 19px; line-height: 1.55; color: var(--color-text-secondary); max-width: 56ch; margin: 22px 0 0; }
 .cta-row { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
 .hero-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 48px; align-items: center; }
+
+/* Compact release/maturity band: current version first, context second. */
+.release-strip { padding: 14px 0; background: var(--color-surface-nav); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.release-strip .wrap { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px 28px; }
+.release-strip p { margin: 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.5; }
+.release-strip strong { color: var(--color-text); font-family: var(--font-mono); font-size: 12px; letter-spacing: .02em; }
+.release-strip a { color: var(--color-link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.release-strip a:hover { color: var(--color-text); }
 
 /* Terminal card */
 .term { background: var(--color-surface-nav); border: 1px solid var(--color-border-strong); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,0.35); }
@@ -104,10 +113,8 @@ section { padding: 60px 0; }
 .sda { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 14px; margin-top: 36px; }
 .sda-step { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 22px; }
 .sda-step .k { font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; font-weight: 700; }
-/* "Act" (sink) label: theme-aware so it clears WCAG AA on both surfaces — the
-   token passes in light (#ad502d, 5.3:1); a lighter tint is needed in dark. */
+/* "Act" (sink) label uses the theme-aware badge token. */
 .sda-step .k.k-act { color: var(--color-badge-sink); }
-[data-theme="dark"] .sda-step .k.k-act { color: #f0926a; }
 .sda-step h3 { font-size: 17px; margin: 8px 0 0; font-weight: 650; }
 .sda-step p { font-size: 14px; color: var(--color-text-muted); margin: 6px 0 0; line-height: 1.5; }
 .sda-arrow { align-self: center; color: var(--color-border-strong); font-size: 22px; }
@@ -119,6 +126,7 @@ section { padding: 60px 0; }
 
 /* Assurance grid */
 .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 40px; }
+.features-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .feature { padding: 22px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .feature .fi { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-md); background: var(--color-accent-muted); color: var(--color-success); }
 .feature h3 { font-size: 16px; margin: 14px 0 0; font-weight: 650; }
@@ -134,6 +142,7 @@ section { padding: 60px 0; }
 
 /* Use cases — semantic tables (real <table>, horizontal-scroll wrapper on narrow viewports) */
 .table-scroll { margin-top: 36px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow-x: auto; }
+.table-scroll:focus-visible { outline: 3px solid var(--color-focus-ring); outline-offset: 3px; }
 .cases { width: 100%; border-collapse: collapse; min-width: 640px; }
 .cases th, .cases td { text-align: left; padding: 16px 20px; border-bottom: 1px solid var(--color-border); vertical-align: baseline; }
 .cases tr:last-child th, .cases tr:last-child td { border-bottom: 0; }
@@ -171,7 +180,8 @@ pre.code .cm { color: var(--color-text-muted); }
 .proof .term-body .sec { color: var(--color-text-secondary); }
 .proof-notes { display: flex; flex-direction: column; gap: 18px; }
 .proof-note { border-left: 2px solid var(--color-accent); padding-left: 14px; }
-.proof-note h4 { font-size: 14px; margin: 0; font-weight: 650; }
+.proof-note h4,
+.proof-note .proof-note-title { font-size: 14px; margin: 0; font-weight: 650; }
 .proof-note p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.55; margin: 6px 0 0; }
 .proof-note code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text); }
 .proof-src { margin-top: 18px; font-size: 13px; color: var(--color-text-muted); }
@@ -218,6 +228,8 @@ footer { padding: 56px 0 40px; }
 }
 .nav-menu-panel a { padding: 10px 12px; font-size: 15px; color: var(--color-text-secondary); border-radius: var(--radius-sm); }
 .nav-menu-panel a:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.nav-menu-panel a.active,
+.nav-menu-panel a[aria-current="page"] { background: var(--color-accent-muted); color: var(--color-text); }
 .nav-menu-panel hr { border: 0; border-top: 1px solid var(--color-border); margin: 6px 4px; }
 
 /* Copy-to-clipboard button on command/config blocks (added by site.js; the
@@ -238,6 +250,7 @@ pre.copyable:hover .copy-btn, .copy-btn:hover, .copy-btn:focus-visible { opacity
 @media (max-width: 900px) {
   .hero-grid, .codewrap, .proof, .foot { grid-template-columns: 1fr; }
   .surfaces, .types, .features, .props, .tiers { grid-template-columns: 1fr; }
+  .release-strip .wrap { grid-template-columns: 1fr; gap: 5px; }
   .sda { grid-template-columns: 1fr; }
   .sda-arrow, .fork-arrow { display: none; }
   .forkflow { flex-direction: column; align-items: stretch; }

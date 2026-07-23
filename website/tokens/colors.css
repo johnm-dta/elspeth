@@ -83,7 +83,7 @@
   --color-badge-source:      #4db89a;   /* SENSE  — aqua-green */
   --color-badge-transform:   #e8a030;   /* DECIDE — amber */
   --color-badge-gate:        #c390f9;   /* DECIDE — purple */
-  --color-badge-sink:        #e07040;   /* ACT    — orange-red */
+  --color-badge-sink:        #f0926a;   /* ACT    — orange-red */
   --color-badge-aggregation: #61daff;   /* DECIDE — cyan */
   --color-badge-coalesce:    #18c2c0;   /* join   — cyan-teal */
 
@@ -189,12 +189,12 @@
   --color-bubble-assistant-border: rgba(15, 45, 53, 0.15);
   --color-bubble-system:           rgba(15, 45, 53, 0.03);
 
-  --color-badge-source:      #257963;
-  --color-badge-transform:   #926414;
-  --color-badge-gate:        #8356b6;
-  --color-badge-sink:        #ad502d;
-  --color-badge-aggregation: #207595;
-  --color-badge-coalesce:    #0e8090;
+  --color-badge-source:      #1f6b57;
+  --color-badge-transform:   #7d540f;
+  --color-badge-gate:        #70469c;
+  --color-badge-sink:        #934324;
+  --color-badge-aggregation: #1c6682;
+  --color-badge-coalesce:    #096875;
 
   --color-badge-source-bg:      #dcebe9;
   --color-badge-transform-bg:   #ece9de;

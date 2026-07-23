@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">ELSPETH</title>
+  <rect width="64" height="64" rx="14" fill="#0a1d2e"/>
+  <path d="M18 16h30v8H27v8h17v8H27v8h21v8H18z" fill="#dff0ee"/>
+  <path d="M18 16h8v40h-8z" fill="#16bab8"/>
+</svg>

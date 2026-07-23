@@ -80,6 +80,20 @@ const checks = [
   ["light muted → terminal", light["--color-text-muted"], light["--color-surface-nav"]],
 ];
 
+// Component badges render each foreground token directly on its matching
+// background token (see tokens/primitives.css). They are normal-size text, so
+// every one must clear AA in both themes.
+const badgeKinds = ["source", "transform", "gate", "sink", "aggregation", "coalesce"];
+for (const [theme, vars] of [["dark", dark], ["light", light]]) {
+  for (const kind of badgeKinds) {
+    checks.push([
+      `${theme} badge ${kind}`,
+      vars[`--color-badge-${kind}`],
+      vars[`--color-badge-${kind}-bg`],
+    ]);
+  }
+}
+
 let failed = 0;
 for (const [label, fg, bg] of checks) {
   if (!fg || !bg) {

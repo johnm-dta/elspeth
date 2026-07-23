@@ -94,6 +94,22 @@ AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
 )
 
 
+def source_component_id(source_name: str) -> str:
+    """Return the audit-visible component id for one composition source key."""
+    return SOURCE_COMPONENT_ID if source_name == SOURCE_COMPONENT_ID else f"{SOURCE_COMPONENT_ID}:{source_name}"
+
+
+def source_name_from_component_id(component_id: str) -> str | None:
+    """Resolve an audit-visible source component id back to its map key."""
+    if component_id == SOURCE_COMPONENT_ID:
+        return SOURCE_COMPONENT_ID
+    prefix = f"{SOURCE_COMPONENT_ID}:"
+    if component_id.startswith(prefix):
+        source_name = component_id.removeprefix(prefix)
+        return source_name or None
+    return None
+
+
 class InterpretationRequirement(TypedDict):
     id: str
     kind: str
@@ -598,15 +614,8 @@ def interpretation_sites(
     """
 
     sites: list[InterpretationReviewSite] = []
-    # Source-level interpretation review is keyed to the default source
-    # component (SOURCE_COMPONENT_ID). _pending_source_sites and the
-    # resolution path (resolve_interpretation_event / invented_source) both
-    # hardcode that component id, so only the default named source carries a
-    # resolvable review site; named non-default sources are not reviewable
-    # through this subsystem.
-    default_source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
-    if default_source is not None:
-        sites.extend(_pending_source_sites(default_source))
+    for source_name, source in state.sources.items():
+        sites.extend(_pending_source_sites(source, component_id=source_component_id(source_name)))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
@@ -686,15 +695,11 @@ def materialize_state_for_execution(
         return InterpretationReviewPending(sites=pending_sites)
 
     changed = False
-    # Mirror interpretation_sites' scope: only the default source component
-    # carries reviewable composer-authored metadata, so materialization (which
-    # enforces the reviewed-content-hash drift check) operates on it alone.
     materialized_sources = dict(state.sources)
-    default_source = materialized_sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in materialized_sources else None
-    if default_source is not None:
-        materialized_default = _materialize_source_for_execution(default_source)
-        if materialized_default is not default_source:
-            materialized_sources[SOURCE_COMPONENT_ID] = materialized_default
+    for source_name, source in state.sources.items():
+        materialized_source = _materialize_source_for_execution(source)
+        if materialized_source is not source:
+            materialized_sources[source_name] = materialized_source
             changed = True
     materialized_nodes: list[NodeSpec] = []
     for node in state.nodes:
@@ -789,7 +794,7 @@ def _ensure_prompt_template_hash(node: NodeSpec) -> NodeSpec:
     return _replace_prompt_if_changed(node, prompt_template, include_hash=True)
 
 
-def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite, ...]:
+def _pending_source_sites(source: SourceSpec, *, component_id: str) -> tuple[InterpretationReviewSite, ...]:
     metadata = _source_authoring_metadata(source.options)
     if metadata is None or not _is_llm_authored_modality(metadata["modality"]):
         return ()
@@ -798,7 +803,7 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
     if requirement is None:
         return (
             InterpretationReviewSite(
-                component_id=SOURCE_COMPONENT_ID,
+                component_id=component_id,
                 component_type="source",
                 user_term="llm_generated_source",
                 kind=InterpretationKind.INVENTED_SOURCE,
@@ -815,7 +820,7 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
         return ()
     return (
         InterpretationReviewSite(
-            component_id=SOURCE_COMPONENT_ID,
+            component_id=component_id,
             component_type="source",
             user_term=requirement["user_term"].strip(),
             kind=InterpretationKind.INVENTED_SOURCE,
@@ -1801,7 +1806,7 @@ def reconcile_authoritative_reviews(
             options=_reconcile_source_options(
                 previous_sources[source_name] if source_name in previous_sources else None,
                 source,
-                component_id=source_name,
+                component_id=source_component_id(source_name),
             ),
         )
         for source_name, source in proposed.sources.items()

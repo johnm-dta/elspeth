@@ -69,7 +69,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata, source_component_id
 from elspeth.web.provider_config_policy import web_aws_s3_endpoint_url_policy_error
 from elspeth.web.sessions.models import blobs_table
 
@@ -307,7 +307,7 @@ def _reject_manual_source_authoring(
 
 def _source_component_id(source_name: str) -> str:
     """Return the legacy/default or named source component identifier."""
-    return "source" if source_name == "source" else f"source:{source_name}"
+    return source_component_id(source_name)
 
 
 def _validate_source_name_argument(source_name: str) -> None:

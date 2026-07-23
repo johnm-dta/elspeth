@@ -74,6 +74,7 @@ from elspeth.web.interpretation_state import (
     model_choice_artifact_hash,
     pipeline_decision_artifact_hash,
     prompt_structure_hash_from_options,
+    source_name_from_component_id,
     validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
@@ -2929,20 +2930,19 @@ def _resolve_invented_source(
     llm_draft: str,
     accepted_value: str,
 ) -> tuple[Mapping[str, Mapping[str, Any]], list[Mapping[str, Any]], None]:
-    if affected_node_id != SOURCE_COMPONENT_ID:
+    source_name = source_name_from_component_id(affected_node_id)
+    if source_name is None:
         raise InterpretationNodeMissingError(
-            f"resolve_interpretation_event: invented_source must target affected_node_id {SOURCE_COMPONENT_ID!r}"
+            "resolve_interpretation_event: invented_source must target a source component "
+            f"({SOURCE_COMPONENT_ID!r} or {SOURCE_COMPONENT_ID!r}:<name>)"
         )
-    # Multi-source: the default source under review lives in the ``sources`` map
-    # keyed by ``SOURCE_COMPONENT_ID`` (interpretation review is scoped to the
-    # default component). The legacy singular ``source`` column is dead.
     sources_map = _require_mapping(
         state_record.sources,
         message="resolve_interpretation_event: invented_source requires a persisted sources mapping",
     )
     source = _require_mapping(
-        sources_map[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in sources_map else None,
-        message=f"resolve_interpretation_event: invented_source requires a persisted {SOURCE_COMPONENT_ID!r} source mapping",
+        sources_map[source_name] if source_name in sources_map else None,
+        message=f"resolve_interpretation_event: invented_source requires persisted source {source_name!r}",
     )
     options = _require_mapping(
         source["options"] if "options" in source else None,
@@ -2983,11 +2983,10 @@ def _resolve_invented_source(
     patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
     patched_source = dict(source)
     patched_source["options"] = patched_options
-    # Splice the patched default source back into the sources map so the patch
-    # is persisted (the caller writes the returned map to ``sources``). Other
-    # named sources, if any, are carried forward untouched.
+    # Splice only the reviewed source back into the sources map. Every sibling
+    # source carries its own independent review authority and is left untouched.
     patched_sources = dict(sources_map)
-    patched_sources[SOURCE_COMPONENT_ID] = patched_source
+    patched_sources[source_name] = patched_source
     return patched_sources, list(state_record.nodes or ()), None
 
 
@@ -6296,24 +6295,17 @@ class SessionServiceImpl:
                         f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
                     )
                 nodes = self._unwrap_envelope(state_row.nodes)
-                # Multi-source: the legacy singular ``source`` column is dead
-                # (``_insert_composition_state`` always writes it NULL). The
-                # default source under review lives in the ``sources`` map keyed
-                # by ``SOURCE_COMPONENT_ID``. Interpretation review is scoped to
-                # that default component, so the invented-source writer-boundary
-                # validation below reads it from the map. A missing/malformed
-                # default source leaves ``source`` None and the existing
-                # ``isinstance`` guard raises the same clear error as before.
                 sources = self._unwrap_envelope(state_row.sources)
-                source = sources[SOURCE_COMPONENT_ID] if isinstance(sources, Mapping) and SOURCE_COMPONENT_ID in sources else None
                 if kind is InterpretationKind.INVENTED_SOURCE:
-                    if affected_node_id != SOURCE_COMPONENT_ID:
+                    source_name = source_name_from_component_id(affected_node_id)
+                    if source_name is None:
                         raise ValueError(
-                            f"create_pending_interpretation_event: invented_source must target affected_node_id "
-                            f"{SOURCE_COMPONENT_ID!r}, got {affected_node_id!r}"
+                            "create_pending_interpretation_event: invented_source must target a source component "
+                            f"({SOURCE_COMPONENT_ID!r} or {SOURCE_COMPONENT_ID!r}:<name>), got {affected_node_id!r}"
                         )
+                    source = sources[source_name] if isinstance(sources, Mapping) and source_name in sources else None
                     if not isinstance(source, Mapping):
-                        raise ValueError("create_pending_interpretation_event: invented_source requires a persisted source mapping")
+                        raise ValueError(f"create_pending_interpretation_event: invented_source requires persisted source {source_name!r}")
                     source_options = source["options"] if "options" in source else None
                     if not isinstance(source_options, Mapping) or SOURCE_AUTHORING_KEY not in source_options:
                         raise ValueError(

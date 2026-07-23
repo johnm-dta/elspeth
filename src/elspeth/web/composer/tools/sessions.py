@@ -112,11 +112,11 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     RAW_HTML_CLEANUP_DRAFT_MALFORMED_PREFIX,
     SOURCE_AUTHORING_KEY,
-    SOURCE_COMPONENT_ID,
     composition_review_contract_error,
     interpretation_sites,
     parse_interpretation_requirements,
     reconcile_authoritative_reviews,
+    source_name_from_component_id,
     transform_vague_term_site_tuples,
     vague_term_wiring_count,
     validate_pipeline_decision_node_semantics,
@@ -1636,7 +1636,7 @@ def _assert_affected_component(
 
     Raises :class:`ToolArgumentError` with an actionable message when:
 
-    * ``invented_source`` does not target the source component, or the
+    * ``invented_source`` does not target an existing source component, or the
       source lacks composer-authored source metadata;
     * prompt and vague-term kinds do not target an existing LLM node;
     * pipeline decisions do not target an existing node with matching review
@@ -1649,13 +1649,14 @@ def _assert_affected_component(
     call. Term matching remains strict after stripping surrounding whitespace.
     """
     if kind is InterpretationKind.INVENTED_SOURCE:
-        if affected_node_id != SOURCE_COMPONENT_ID:
+        source_name = source_name_from_component_id(affected_node_id)
+        if source_name is None:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected="'source' for invented_source",
+                expected="'source' for invented_source or 'source:<name>' for a named source",
                 actual_type="node id",
             )
-        source = state.sources.get(SOURCE_COMPONENT_ID)
+        source = state.sources.get(source_name)
         if source is None or SOURCE_AUTHORING_KEY not in source.options:
             raise ToolArgumentError(
                 argument="affected_node_id",

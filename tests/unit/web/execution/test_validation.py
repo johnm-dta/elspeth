@@ -1557,6 +1557,47 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         assert result.readiness.blockers[0].component_type == "source"
         mock_yaml_gen.generate_yaml.assert_not_called()
 
+    def test_pending_named_invented_source_review_returns_named_source_readiness(self) -> None:
+        options = {
+            SOURCE_AUTHORING_KEY: {
+                "modality": "llm_generated",
+                "content_hash": "a" * 64,
+                "review_event_id": None,
+                "resolved_kind": None,
+            },
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "source-rows",
+                    "kind": "invented_source",
+                    "user_term": "inline_source_data",
+                    "status": "pending",
+                    "draft": "generated rows",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        }
+        state = CompositionState(
+            sources={"orders": _make_source(options)},
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+
+        result = validate_pipeline_for_trained_operator(state, _make_settings(), mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code == "interpretation_review_pending"
+        assert result.errors[0].component_id == "source:orders"
+        assert result.errors[0].component_type == "source"
+        assert result.readiness.blockers[0].component_id == "source:orders"
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
     def test_resolved_invented_source_drift_returns_source_readiness(self) -> None:
         """elspeth-5a94855935: a RESOLVED invented_source whose
         accepted_artifact_hash drifted from the current source content_hash is a

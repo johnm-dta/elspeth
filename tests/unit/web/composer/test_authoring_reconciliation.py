@@ -685,6 +685,79 @@ def test_invented_source_review_rehydrates_only_for_the_same_content_identity() 
     assert source_options[SOURCE_AUTHORING_KEY] == source_authoring
 
 
+def test_named_invented_source_review_rebinds_only_to_the_same_named_content() -> None:
+    content_hash = "a" * 64
+    authoring = {
+        "modality": "llm_generated",
+        "content_hash": content_hash,
+        "review_event_id": "event-1",
+        "resolved_kind": InterpretationKind.INVENTED_SOURCE.value,
+    }
+    resolved = _requirement(
+        requirement_id="source_review:inline_source_data",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        user_term="inline_source_data",
+        status="resolved",
+        draft="generated rows",
+        accepted_value="approved",
+        accepted_artifact_hash=content_hash,
+    )
+    shell = _requirement(
+        requirement_id="source_review:inline_source_data",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        user_term="inline_source_data",
+        draft="generated rows",
+    )
+    previous_source = SourceSpec(
+        plugin="csv",
+        on_success="orders_rows",
+        options={SOURCE_AUTHORING_KEY: authoring, INTERPRETATION_REQUIREMENTS_KEY: [resolved]},
+        on_validation_failure="discard",
+    )
+    previous = CompositionState(
+        sources={"orders": previous_source},
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    proposed = replace(
+        previous,
+        sources={
+            "orders": replace(
+                previous_source,
+                options={
+                    SOURCE_AUTHORING_KEY: {**authoring, "review_event_id": None, "resolved_kind": None},
+                    INTERPRETATION_REQUIREMENTS_KEY: [shell],
+                },
+            )
+        },
+        version=2,
+    )
+
+    rebound = reconcile_authoritative_reviews(previous, proposed)
+
+    assert rebound.sources["orders"].options[INTERPRETATION_REQUIREMENTS_KEY][0]["status"] == "resolved"
+    amended = replace(
+        proposed,
+        sources={
+            "orders": replace(
+                proposed.sources["orders"],
+                options={
+                    **proposed.sources["orders"].options,
+                    SOURCE_AUTHORING_KEY: {
+                        **proposed.sources["orders"].options[SOURCE_AUTHORING_KEY],
+                        "content_hash": "b" * 64,
+                    },
+                },
+            )
+        },
+    )
+    reopened = reconcile_authoritative_reviews(previous, amended)
+    assert reopened.sources["orders"].options[INTERPRETATION_REQUIREMENTS_KEY][0]["status"] == "pending"
+
+
 def test_stale_accepted_hash_is_rejected_instead_of_silently_reopened() -> None:
     resolved = _requirement(
         requirement_id="model_choice_review:model",

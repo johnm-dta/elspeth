@@ -893,6 +893,41 @@ async def test_request_interpretation_review_accepts_source_component_for_invent
 
 
 @pytest.mark.asyncio
+async def test_request_interpretation_review_accepts_named_source_component_for_invented_source() -> None:
+    state = CompositionState(
+        sources={"orders": _llm_generated_source()},
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    result = await _handle_request_interpretation_review(
+        {
+            "affected_node_id": "source:orders",
+            "kind": "invented_source",
+            "user_term": "inline_source_url_list",
+            "llm_draft": "https://example.gov.au",
+        },
+        state,
+        session_id=uuid4(),
+        composition_state_id=uuid4(),
+        tool_call_id="call_named_source_review",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=_fake_create_pending_interpretation_event,
+        list_interpretation_events=_empty_list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+
+    assert result.success is True
+    assert result.data["affected_node_id"] == "source:orders"
+    assert result.data["kind"] == "invented_source"
+
+
+@pytest.mark.asyncio
 async def test_request_interpretation_review_accepts_multiline_source_artifact_with_real_service(
     service: SessionServiceImpl,
 ) -> None:

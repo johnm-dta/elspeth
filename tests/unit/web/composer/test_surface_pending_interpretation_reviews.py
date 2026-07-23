@@ -487,16 +487,13 @@ def _llm_authored_source() -> SourceSpec:
 
 
 @pytest.mark.asyncio
-async def test_surfacer_surfaces_invented_source(tmp_path, sessions_service) -> None:
-    # An LLM-authored default source carrying a staged invented_source
-    # requirement surfaces a resolvable pending event at the source-commit
-    # writer boundary. The default source lives in sources[SOURCE_COMPONENT_ID];
-    # the writer reads source.options.source_authoring.content_hash and the
-    # single pending INVENTED_SOURCE requirement.
+async def test_surfacer_surfaces_every_named_invented_source(tmp_path, sessions_service) -> None:
+    # Every LLM-authored named source carrying a staged invented_source
+    # requirement surfaces its own resolvable pending event.
     composer = _composer(tmp_path, sessions_service)
     state = CompositionState(
         source=None,
-        sources={SOURCE_COMPONENT_ID: _llm_authored_source()},
+        sources={SOURCE_COMPONENT_ID: _llm_authored_source(), "orders": _llm_authored_source()},
         nodes=(),
         edges=(),
         outputs=(),
@@ -506,8 +503,8 @@ async def test_surfacer_surfaces_invented_source(tmp_path, sessions_service) -> 
     session_id, state_id = await _persist(sessions_service, state)
     await composer.surface_pending_interpretation_reviews(state, session_id=str(session_id), current_state_id=str(state_id))
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
-    kinds = {e.kind for e in events}
-    assert InterpretationKind.INVENTED_SOURCE in kinds
+    invented_source_events = [event for event in events if event.kind is InterpretationKind.INVENTED_SOURCE]
+    assert {event.affected_node_id for event in invented_source_events} == {"source", "source:orders"}
 
 
 def _field_mapper_pipeline_decision_node(

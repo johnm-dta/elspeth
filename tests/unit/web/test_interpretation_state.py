@@ -453,6 +453,61 @@ def test_pending_invented_source_requirement_blocks_execution() -> None:
     assert result.sites[0].component_type == "source"
 
 
+def test_every_named_llm_authored_source_has_an_independent_review_site() -> None:
+    def _source(*, content_hash: str, accepted_hash: str | None) -> SourceSpec:
+        status = "resolved" if accepted_hash is not None else "pending"
+        event_id = "event-1" if accepted_hash is not None else None
+        return SourceSpec(
+            plugin="json",
+            on_success="rows",
+            on_validation_failure="fail",
+            options={
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": content_hash,
+                    "review_event_id": event_id,
+                    "resolved_kind": "invented_source" if event_id is not None else None,
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-review",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_data",
+                        "status": status,
+                        "draft": "generated rows",
+                        "event_id": event_id,
+                        "accepted_value": "accepted" if event_id is not None else None,
+                        "accepted_artifact_hash": accepted_hash,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+        )
+
+    state = CompositionState(
+        sources={
+            "source": _source(content_hash="a" * 64, accepted_hash="a" * 64),
+            "orders": _source(content_hash="b" * 64, accepted_hash=None),
+            "refunds": _source(content_hash="c" * 64, accepted_hash="d" * 64),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+    sites = interpretation_sites(state)
+
+    assert [(site.component_id, site.user_term) for site in sites] == [
+        ("source:orders", "inline_source_data"),
+        ("source:refunds", "inline_source_data"),
+    ]
+    result = materialize_state_for_execution(state)
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites == sites
+
+
 def test_pending_llm_prompt_template_requirement_blocks_execution() -> None:
     state = _state_with_llm(
         {

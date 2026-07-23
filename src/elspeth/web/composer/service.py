@@ -178,9 +178,9 @@ from elspeth.web.interpretation_state import (
     RAW_HTML_CLEANUP_REVIEW_DRAFT,
     RAW_HTML_CLEANUP_USER_TERM,
     SOURCE_AUTHORING_KEY,
-    SOURCE_COMPONENT_ID,
     InterpretationReviewSite,
     interpretation_sites,
+    source_name_from_component_id,
     vague_term_wiring_count,
 )
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
@@ -992,7 +992,10 @@ def _backend_surface_args_for_site(
     """
 
     if site.kind is InterpretationKind.INVENTED_SOURCE:
-        source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
+        source_name = source_name_from_component_id(site.component_id)
+        if source_name is None:
+            return None
+        source = state.sources[source_name] if source_name in state.sources else None
         if source is None:
             return None
         options = source.options if isinstance(source.options, Mapping) else {}
@@ -1001,7 +1004,7 @@ def _backend_surface_args_for_site(
         draft = ComposerServiceImpl._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
         if draft is None:
             return None
-        return (SOURCE_COMPONENT_ID, site.user_term, draft)
+        return (site.component_id, site.user_term, draft)
 
     node = next((candidate for candidate in state.nodes if candidate.id == site.component_id), None)
     if node is None:

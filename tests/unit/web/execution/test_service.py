@@ -6282,6 +6282,57 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         mock_session_service.create_run.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_execute_rejects_pending_named_invented_source_before_creating_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+        from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.sources = {
+            "orders": {
+                "plugin": "json",
+                "on_success": "rows",
+                "on_validation_failure": "discard",
+                "options": {
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": "llm_generated",
+                        "content_hash": "a" * 64,
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "source-review",
+                            "kind": "invented_source",
+                            "user_term": "inline_source_data",
+                            "status": "pending",
+                            "draft": "generated rows",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+            }
+        }
+        state.nodes = []
+        state.edges = []
+        state.outputs = []
+
+        with patch.object(service, "_run_pipeline"), pytest.raises(UnresolvedInterpretationPlaceholderError) as excinfo:
+            await service.execute(session_id=uuid4())
+
+        assert [(site.component_id, site.kind.value) for site in excinfo.value.sites] == [("source:orders", "invented_source")]
+        mock_session_service.create_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_execute_emits_telemetry_per_unresolved_site(
         self,
         service: ExecutionServiceImpl,

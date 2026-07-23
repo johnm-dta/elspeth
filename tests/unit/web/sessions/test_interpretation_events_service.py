@@ -1366,6 +1366,90 @@ async def test_resolve_invented_source_updates_authoring_metadata_without_mutati
 
 
 @pytest.mark.asyncio
+async def test_named_invented_source_reviews_resolve_independently_and_survive_reload(service) -> None:
+    """Each named source binds its event and accepted hash to its own map entry."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    orders_hash = stable_hash({"orders": [1]})
+    refunds_hash = stable_hash({"refunds": [2]})
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            sources={
+                "orders": _llm_generated_source(content_hash=orders_hash),
+                "refunds": _llm_generated_source(content_hash=refunds_hash),
+            },
+            nodes=[],
+            metadata_={"name": "Named source review", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    orders_event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="source:orders",
+        tool_call_id="call_orders_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    refunds_event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="source:refunds",
+        tool_call_id="call_refunds_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match=r"invented_source.*amendment|amended"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=orders_event.id,
+            choice=InterpretationChoice.AMENDED,
+            amended_value="changed orders",
+            actor="user:alice",
+        )
+
+    _, orders_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=orders_event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+    assert orders_state.sources is not None
+    assert orders_state.sources["orders"]["options"][SOURCE_AUTHORING_KEY]["review_event_id"] == str(orders_event.id)
+    assert orders_state.sources["orders"]["options"][INTERPRETATION_REQUIREMENTS_KEY][0]["accepted_artifact_hash"] == orders_hash
+    assert orders_state.sources["refunds"]["options"][INTERPRETATION_REQUIREMENTS_KEY][0]["status"] == "pending"
+
+    await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=refunds_event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+    reloaded_record = await service.get_current_state(session_id)
+    assert reloaded_record is not None
+    reloaded = state_from_record(reloaded_record)
+    assert materialize_state_for_execution(reloaded) == reloaded
+    assert reloaded.sources["orders"].options[INTERPRETATION_REQUIREMENTS_KEY][0]["accepted_artifact_hash"] == orders_hash
+    assert reloaded.sources["refunds"].options[INTERPRETATION_REQUIREMENTS_KEY][0]["accepted_artifact_hash"] == refunds_hash
+
+
+@pytest.mark.asyncio
 async def test_resolve_invented_source_rejects_amended(service) -> None:
     """Invented-source amendments are deferred until source payload editing exists."""
     session_id = uuid4()

@@ -295,6 +295,80 @@ def _node_input_streams(node: NodeSpec) -> tuple[str, ...]:
     return (node.input,) if node.input else ()
 
 
+def _translate_protected_fields_through_mapper(
+    node: NodeSpec,
+    protected_fields: frozenset[str],
+    *,
+    direction: Literal["upstream", "downstream"],
+) -> frozenset[str] | None:
+    """Translate protected field names across an exact field-mapper node.
+
+    ``None`` means the mapper configuration or resulting field lineage is
+    unprovable, so required-control coverage must fail closed on that path.
+    """
+    if node.plugin != "field_mapper":
+        return protected_fields
+
+    configured_mapping = node.options.get("mapping", {})
+    select_only = node.options.get("select_only", False)
+    if not isinstance(configured_mapping, Mapping) or not isinstance(select_only, bool):
+        return None
+
+    mapping: dict[str, str] = {}
+    for source, target in configured_mapping.items():
+        if not isinstance(source, str) or not source.strip() or not isinstance(target, str) or not target.strip():
+            return None
+        mapping[source] = target
+
+    targets = tuple(mapping.values())
+    sources = frozenset(mapping)
+    if len(frozenset(targets)) != len(targets):
+        return None
+    if any(source != target and target in sources for source, target in mapping.items()):
+        return None
+
+    translated: set[str] = set()
+    if direction == "upstream":
+        source_by_target = {target: source for source, target in mapping.items()}
+        for field in protected_fields:
+            if field in source_by_target:
+                source = source_by_target[field]
+                if "." in source:
+                    # FieldMapper resolves dotted sources by nested traversal,
+                    # while controls scan exact top-level row keys.
+                    return None
+                translated.add(source)
+            elif field in sources:
+                if "." in field and not select_only:
+                    # Nested extraction does not remove a same-named literal
+                    # top-level key from the passthrough row.
+                    translated.add(field)
+                else:
+                    return None
+            elif select_only:
+                return None
+            else:
+                translated.add(field)
+    else:
+        target_fields = frozenset(targets)
+        for field in protected_fields:
+            if field in mapping:
+                target = mapping[field]
+                if "." in field:
+                    translated.add(target)
+                    if not select_only:
+                        # Exact dotted keys are copied to the target but are
+                        # not deleted from a passthrough row.
+                        translated.add(field)
+                else:
+                    translated.add(target)
+            elif field in target_fields or select_only:
+                return None
+            else:
+                translated.add(field)
+    return frozenset(translated)
+
+
 def _stream_proves_input_control(
     stream: str | None,
     graph: OutputStreamGraph,
@@ -359,12 +433,19 @@ def _producer_proves_input_control(
         return False
     if plugin_cls.determinism is Determinism.EXTERNAL_CALL:
         return False
+    translated_fields = _translate_protected_fields_through_mapper(
+        producer,
+        protected_fields,
+        direction="upstream",
+    )
+    if translated_fields is None:
+        return False
     return _stream_proves_input_control(
         producer.input,
         graph,
         source_streams=source_streams,
         visited=visited,
-        protected_fields=protected_fields,
+        protected_fields=translated_fields,
     )
 
 
@@ -413,6 +494,13 @@ def _consumer_proves_output_control(
         protected_fields=protected_fields,
     ):
         return True
+    translated_fields = _translate_protected_fields_through_mapper(
+        consumer,
+        protected_fields,
+        direction="downstream",
+    )
+    if translated_fields is None:
+        return False
     outputs = _node_output_streams(consumer)
     return bool(outputs) and all(
         _stream_proves_output_control(
@@ -420,7 +508,7 @@ def _consumer_proves_output_control(
             graph,
             sink_streams=sink_streams,
             visited=visited,
-            protected_fields=protected_fields,
+            protected_fields=translated_fields,
         )
         for stream in outputs
     )

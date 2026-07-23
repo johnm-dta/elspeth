@@ -8,7 +8,11 @@ import pytest
 
 from elspeth.contracts.plugin_capabilities import PluginCapability
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
-from elspeth.web.plugin_policy.coverage import build_output_stream_graph, control_coverage_findings
+from elspeth.web.plugin_policy.coverage import (
+    _translate_protected_fields_through_mapper,
+    build_output_stream_graph,
+    control_coverage_findings,
+)
 
 
 def _node(
@@ -125,6 +129,23 @@ def _safety(
     )
 
 
+def _mapper(
+    node_id: str,
+    input_stream: str,
+    on_success: str,
+    mapping: object,
+    *,
+    select_only: object = False,
+) -> NodeSpec:
+    return _node(
+        node_id,
+        "field_mapper",
+        input_stream,
+        on_success,
+        options={"mapping": mapping, "select_only": select_only},
+    )
+
+
 @pytest.mark.parametrize(
     ("state", "covered"),
     [
@@ -183,6 +204,165 @@ def test_prompt_shield_input_coverage_uses_actual_template_fields() -> None:
     )
 
     assert control_coverage_findings(state, PluginCapability.PROMPT_SHIELD)
+
+
+def test_prompt_shield_input_coverage_follows_field_mapper_rename_upstream() -> None:
+    state = _state(
+        _shield("shield", "raw", "mapped_in", fields=("raw_prompt",)),
+        _mapper("rename", "mapped_in", "llm_in", {"raw_prompt": "prompt"}),
+        _llm(prompt_fields=("prompt",)),
+        source_target="raw",
+    )
+
+    assert control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()
+
+
+@pytest.mark.parametrize(
+    ("mapping", "prompt_template", "shield_fields"),
+    [
+        ({"meta.prompt": "prompt"}, "{{ row.prompt }}", ["meta.prompt"]),
+        ({"meta.prompt": "meta.prompt"}, '{{ row["meta.prompt"] }}', ["meta.prompt"]),
+        ({"meta.prompt": "prompt"}, "{{ row.prompt }}", "all"),
+    ],
+)
+def test_prompt_shield_input_coverage_fails_closed_for_dotted_mapper_source(
+    mapping: dict[str, str],
+    prompt_template: str,
+    shield_fields: list[str] | str,
+) -> None:
+    shield = replace(
+        _shield("shield", "raw", "mapped_in"),
+        options={"detect_only": False, "fields": shield_fields},
+    )
+    llm = _node(
+        "judge",
+        "llm",
+        "llm_in",
+        "main",
+        options={
+            "prompt_template": prompt_template,
+            "required_input_fields": [],
+            "response_field": "llm_response",
+        },
+    )
+    state = _state(
+        shield,
+        _mapper("rename", "mapped_in", "llm_in", mapping),
+        llm,
+        source_target="raw",
+    )
+
+    findings = control_coverage_findings(state, PluginCapability.PROMPT_SHIELD)
+
+    assert [(finding.component_id, finding.reason) for finding in findings] == [
+        ("judge", "input_not_dominated"),
+    ]
+
+
+def test_prompt_shield_input_coverage_preserves_fields_unrelated_to_dotted_mapping() -> None:
+    state = _state(
+        _shield("shield", "raw", "mapped_in", fields=("prompt",)),
+        _mapper("rename", "mapped_in", "llm_in", {"meta.audit": "audit"}),
+        _llm(prompt_fields=("prompt",)),
+        source_target="raw",
+    )
+
+    assert control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()
+
+
+@pytest.mark.parametrize(("select_only", "covered"), [(False, True), (True, False)])
+def test_prompt_shield_input_coverage_tracks_dotted_literal_passthrough(
+    select_only: bool,
+    covered: bool,
+) -> None:
+    llm = _node(
+        "judge",
+        "llm",
+        "llm_in",
+        "main",
+        options={
+            "prompt_template": '{{ row["meta.prompt"] }}',
+            "required_input_fields": [],
+            "response_field": "llm_response",
+        },
+    )
+    state = _state(
+        _shield("shield", "raw", "mapped_in", fields=("meta.prompt",)),
+        _mapper(
+            "extract_nested",
+            "mapped_in",
+            "llm_in",
+            {"meta.prompt": "audit"},
+            select_only=select_only,
+        ),
+        llm,
+        source_target="raw",
+    )
+
+    assert (control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()) is covered
+
+
+@pytest.mark.parametrize(
+    ("mapping", "select_only", "translated"),
+    [
+        ({"meta.prompt": "audit"}, False, frozenset({"meta.prompt", "audit"})),
+        ({"meta.prompt": "audit"}, True, frozenset({"audit"})),
+        ({"meta.prompt": "meta.prompt"}, False, frozenset({"meta.prompt"})),
+        ({"meta.prompt": "meta.prompt"}, True, frozenset({"meta.prompt"})),
+    ],
+)
+def test_downstream_translation_tracks_dotted_literal_passthrough(
+    mapping: dict[str, str],
+    select_only: bool,
+    translated: frozenset[str] | None,
+) -> None:
+    mapper = _mapper("mapper", "in", "out", mapping, select_only=select_only)
+
+    assert (
+        _translate_protected_fields_through_mapper(
+            mapper,
+            frozenset({"meta.prompt"}),
+            direction="downstream",
+        )
+        == translated
+    )
+
+
+@pytest.mark.parametrize(
+    ("mapping", "select_only", "safety_fields", "covered"),
+    [
+        ({"q.a_llm_response": "answer"}, False, ("q.a_llm_response",), False),
+        ({"q.a_llm_response": "answer"}, False, ("q.a_llm_response", "answer"), True),
+        ({"q.a_llm_response": "answer"}, True, ("answer",), True),
+        ({"q.a_llm_response": "q.a_llm_response"}, False, ("q.a_llm_response",), True),
+        ({"q.a_llm_response": "q.a_llm_response"}, True, ("q.a_llm_response",), True),
+    ],
+)
+def test_content_safety_output_coverage_tracks_dotted_multi_query_response_mapping(
+    mapping: dict[str, str],
+    select_only: bool,
+    safety_fields: tuple[str, ...],
+    covered: bool,
+) -> None:
+    llm = _node(
+        "judge",
+        "llm",
+        "llm_in",
+        "mapped_in",
+        options={
+            "prompt_template": "{{ row.prompt }}",
+            "required_input_fields": ["prompt"],
+            "response_field": "llm_response",
+            "queries": {"q.a": {"input_fields": {"prompt": "prompt"}}},
+        },
+    )
+    state = _state(
+        llm,
+        _mapper("mapper", "mapped_in", "safe_in", mapping, select_only=select_only),
+        _safety("safety", "safe_in", "main", fields=safety_fields),
+    )
+
+    assert (control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()) is covered
 
 
 def test_prompt_shield_queue_fan_in_requires_every_path() -> None:
@@ -275,6 +455,60 @@ def test_content_safety_output_coverage_requires_llm_field_scope(
     )
 
     assert (control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()) is covered
+
+
+def test_content_safety_output_coverage_follows_field_mapper_rename_downstream() -> None:
+    state = _state(
+        _llm(on_success="mapped_in"),
+        _mapper("rename", "mapped_in", "safe_in", {"llm_response": "answer"}),
+        _safety("safety", "safe_in", "main", fields=("answer",)),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
+
+
+def test_content_safety_output_coverage_rejects_pre_rename_field_name() -> None:
+    state = _state(
+        _llm(on_success="mapped_in"),
+        _mapper("rename", "mapped_in", "safe_in", {"llm_response": "answer"}),
+        _safety("safety", "safe_in", "main", fields=("llm_response",)),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY)
+
+
+def test_content_safety_output_coverage_preserves_unmapped_fields() -> None:
+    state = _state(
+        _llm(on_success="mapped_in"),
+        _mapper("rename", "mapped_in", "safe_in", {"metadata": "label"}),
+        _safety("safety", "safe_in", "main", fields=("llm_response",)),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()
+
+
+@pytest.mark.parametrize(
+    ("mapping", "select_only"),
+    [
+        ({"metadata": "label"}, True),
+        (["not", "a", "mapping"], False),
+        ({"llm_response": 7}, False),
+        ({"llm_response": "answer", "other": "answer"}, False),
+        ({"llm_response": "answer", "answer": "final"}, False),
+        ({"llm_response": "answer"}, "false"),
+    ],
+)
+def test_content_safety_output_coverage_fails_closed_for_unprovable_field_mapper(
+    mapping: object,
+    select_only: object,
+) -> None:
+    state = _state(
+        _llm(on_success="mapped_in"),
+        _mapper("mapper", "mapped_in", "safe_in", mapping, select_only=select_only),
+        _safety("safety", "safe_in", "main", fields=("llm_response", "answer")),
+    )
+
+    assert control_coverage_findings(state, PluginCapability.CONTENT_SAFETY)
 
 
 def test_content_safety_fan_out_requires_every_sink_path() -> None:

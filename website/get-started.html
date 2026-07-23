@@ -85,7 +85,7 @@
           <h3>Run &amp; explain</h3>
           <p>Execute the example, then explore why any row reached its destination.</p>
           <pre><span class="pr">$</span> elspeth run --settings examples/threshold_gate/settings.yaml --execute
-<span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;
+<span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt; --database examples/threshold_gate/runs/audit.db --no-tui
 <span class="mut">Outcome:</span>   <span class="ok">SUCCESS</span>
 <span class="mut">Path:</span>      <span class="ok">GATE_ROUTED</span>
 <span class="mut">Sink:</span>      output</pre>
@@ -122,8 +122,10 @@
         <span class="num"><i data-lucide="arrow-right" style="width:16px;height:16px"></i></span>
         <div>
           <h3>Install, build, and run</h3>
-          <p>Install the web extras, build the frontend, then set a local secret before creating the first user.</p>
-          <pre class="copyable"><span class="pr">$</span> uv pip install -e ".[webui,dev]"
+          <p>Start from a fresh source checkout. Node.js 24 and npm 11 are required before building the frontend; then set a local secret before creating the first user.</p>
+          <pre class="copyable"><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
+<span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
+<span class="pr">$</span> uv pip install -e ".[webui,dev]"
 <span class="pr">$</span> cd src/elspeth/web/frontend
 <span class="pr">$</span> npm install
 <span class="pr">$</span> npm run build

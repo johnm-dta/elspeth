@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, SecretBytes, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, SecretStr, ValidationError, ValidationInfo, field_validator, model_validator
 
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.plugin_capabilities import ControlMode, PluginCapability
@@ -126,6 +126,11 @@ class WebSettings(BaseModel):
     operator_telemetry_task_definition_revision: str | None = None
     operator_telemetry_export_interval_seconds: int = Field(default=60, strict=True, ge=1, le=3600)
     operator_pipeline_telemetry_granularity: Literal["lifecycle", "rows"] = "lifecycle"
+    # Dedicated operator credential for the process-global Prometheus scrape
+    # surface. Tenant access tokens are intentionally not accepted. When
+    # unset, /metrics is disabled (404) rather than falling back to tenant
+    # authentication. Generate with ``openssl rand -base64 32``.
+    operator_metrics_bearer_token: SecretStr | None = None
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
@@ -459,6 +464,18 @@ class WebSettings(BaseModel):
         if not v.strip():
             raise ValueError("must not be blank")
         return v
+
+    @field_validator("operator_metrics_bearer_token")
+    @classmethod
+    def _validate_operator_metrics_bearer_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not 32 <= len(raw) <= 512:
+            raise ValueError("operator_metrics_bearer_token must be between 32 and 512 characters")
+        if not raw.isascii() or any(character.isspace() or not character.isprintable() for character in raw):
+            raise ValueError("operator_metrics_bearer_token must contain only visible ASCII characters without whitespace")
+        return value
 
     @field_validator("shareable_link_signing_key", mode="before")
     @classmethod

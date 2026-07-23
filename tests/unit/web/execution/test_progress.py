@@ -160,7 +160,7 @@ class TestProgressBroadcasterThreadSafety:
 
         After the coalesced-drain fix, the scheduled callable is
         ``_drain_pending(run_id, state)`` rather than
-        ``_safe_put(queue, event, run_id)``. The thread-safety contract
+        ``_safe_put(queue, event)``. The thread-safety contract
         (no direct put_nowait from producer thread) is preserved —
         _drain_pending runs on the loop thread and is responsible for
         invoking _safe_put.
@@ -347,7 +347,7 @@ class TestProgressBroadcasterBackpressure:
         queue: asyncio.Queue[RunEvent] = asyncio.Queue(maxsize=10)
         event = _make_event()
 
-        ProgressBroadcaster._safe_put(queue, event, "run-1")
+        ProgressBroadcaster._safe_put(queue, event)
 
         assert queue.qsize() == 1
 
@@ -360,7 +360,7 @@ class TestProgressBroadcasterBackpressure:
         assert queue.full()
 
         new_event = _make_event(event_type="progress")
-        ProgressBroadcaster._safe_put(queue, new_event, "run-1")
+        ProgressBroadcaster._safe_put(queue, new_event)
 
         # Queue still at maxsize, oldest was evicted
         assert queue.qsize() == 3
@@ -385,7 +385,7 @@ class TestProgressBroadcasterBackpressure:
         assert queue.full()
 
         terminal = _make_event(event_type="completed")
-        ProgressBroadcaster._safe_put(queue, terminal, "run-1")
+        ProgressBroadcaster._safe_put(queue, terminal)
 
         # Queue was drained then terminal inserted — only terminal event remains
         assert queue.qsize() == 1
@@ -398,7 +398,7 @@ class TestProgressBroadcasterBackpressure:
             queue.put_nowait(_make_event(event_type="progress"))
 
         failed = _make_event(event_type="failed")
-        ProgressBroadcaster._safe_put(queue, failed, "run-1")
+        ProgressBroadcaster._safe_put(queue, failed)
 
         assert queue.qsize() == 1
         assert queue.get_nowait() is failed
@@ -595,14 +595,14 @@ class TestProgressBroadcasterCallbackBacklogBound:
         for _ in range(queue.maxsize):
             queue.put_nowait(_make_event())
 
-        ProgressBroadcaster._safe_put(queue, _make_event(event_type="completed"), "run-1", telemetry=telemetry)
+        ProgressBroadcaster._safe_put(queue, _make_event(event_type="completed"), telemetry=telemetry)
 
         assert observed_value(telemetry.progress_broadcast_dropped_total) == queue.maxsize
         counter = telemetry.progress_broadcast_dropped_total
         assert isinstance(counter, _FakeCounter)
         amount, attrs, _context = counter.calls[0]
         assert amount == queue.maxsize
-        assert attrs == {"reason": "terminal_drain", "run_id": "run-1"}
+        assert attrs == {"reason": "terminal_drain"}
 
     def test_queue_full_drop_emits_telemetry_instead_of_logging(self) -> None:
         mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
@@ -612,14 +612,14 @@ class TestProgressBroadcasterCallbackBacklogBound:
         for _ in range(queue.maxsize):
             queue.put_nowait(_make_event())
 
-        ProgressBroadcaster._safe_put(queue, _make_event(), "run-1", telemetry=telemetry)
+        ProgressBroadcaster._safe_put(queue, _make_event(), telemetry=telemetry)
 
         assert observed_value(telemetry.progress_broadcast_dropped_total) == 1
         counter = telemetry.progress_broadcast_dropped_total
         assert isinstance(counter, _FakeCounter)
         amount, attrs, _context = counter.calls[0]
         assert amount == 1
-        assert attrs == {"reason": "queue_full", "run_id": "run-1"}
+        assert attrs == {"reason": "queue_full"}
 
 
 class TestProgressBroadcasterCleanup:

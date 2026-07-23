@@ -65,6 +65,7 @@ def _settings(tmp_path: Path, **overrides) -> WebSettings:
         "composer_timeout_seconds": 85.0,
         "composer_rate_limit_per_minute": 10,
         "shareable_link_signing_key": SecretBytes(b"\x00" * 32),
+        "operator_metrics_bearer_token": "operator-metrics-token-for-tests-0001",
     }
     defaults.update(overrides)
     return WebSettings(**defaults)  # type: ignore[arg-type]
@@ -620,12 +621,50 @@ class TestMetricsEndpoint:
         client = TestClient(app)
         response = client.get("/metrics")
         assert response.status_code == 401
+        assert response.headers["www-authenticate"] == 'Bearer realm="metrics"'
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_authenticated_tenant_cannot_scrape_process_global_metrics(self, tmp_path) -> None:
+        client = self._authed_client(tmp_path)
+
+        response = client.get("/metrics", headers={"Authorization": "Bearer tenant-user-b"})
+
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == 'Bearer realm="metrics"'
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_metrics_scrape_fails_closed_on_tenant_identifier_labels(self, tmp_path) -> None:
+        client = self._authed_client(tmp_path)
+        unsafe_exposition = (
+            b"# TYPE execution_progress_broadcast_dropped_total counter\n"
+            b'execution_progress_broadcast_dropped_total{reason="queue_full",run_id="run-user-a"} 1\n'
+        )
+
+        with patch("elspeth.web.app.generate_latest", return_value=unsafe_exposition):
+            response = client.get("/metrics", headers={"Authorization": "Bearer operator-metrics-token-for-tests-0001"})
+
+        assert response.status_code == 503
+        assert response.content == b"# scrape failed\n"
+        assert b"run-user-a" not in response.content
+        assert response.headers["cache-control"] == "no-store"
 
     def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
         client = self._authed_client(tmp_path)
-        response = client.get("/metrics")
+        response = client.get("/metrics", headers={"Authorization": "Bearer operator-metrics-token-for-tests-0001"})
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/plain")
+        assert response.headers["cache-control"] == "no-store"
+        assert 'run_id="' not in response.text
+        assert 'session_id="' not in response.text
+        assert 'user_id="' not in response.text
+
+    def test_metrics_is_disabled_when_operator_token_is_unset(self, tmp_path) -> None:
+        client = TestClient(create_app(_settings(tmp_path, operator_metrics_bearer_token=None)))
+
+        response = client.get("/metrics", headers={"Authorization": "Bearer tenant-user"})
+
+        assert response.status_code == 404
+        assert response.headers["cache-control"] == "no-store"
 
     def test_metrics_scrape_failure_returns_503_and_records_cause(self, tmp_path) -> None:
         """A third-party collector raising inside generate_latest() must not
@@ -640,7 +679,7 @@ class TestMetricsEndpoint:
             patch("elspeth.web.app.generate_latest", side_effect=boom),
             capture_logs() as logs,
         ):
-            response = client.get("/metrics")
+            response = client.get("/metrics", headers={"Authorization": "Bearer operator-metrics-token-for-tests-0001"})
         assert response.status_code == 503
         assert response.content == b"# scrape failed\n"
         events = [e for e in logs if e.get("event") == "prometheus_scrape_failed"]

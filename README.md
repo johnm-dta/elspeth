@@ -308,6 +308,11 @@ Then open `http://localhost:5173`.
 - Run audit data defaults to `data/runs/audit.db`; payloads default to
   `data/payloads/`. Override these with `ELSPETH_WEB__LANDSCAPE_URL` and
   `ELSPETH_WEB__PAYLOAD_STORE_PATH` when you need explicit deployment paths.
+- The process-global Prometheus `/metrics` endpoint is disabled by default.
+  To enable it, set `ELSPETH_WEB__OPERATOR_METRICS_BEARER_TOKEN` to a dedicated
+  operator secret of at least 32 visible ASCII characters (for example,
+  `openssl rand -base64 32`) and configure the scraper to send it as a Bearer
+  token. Normal user access tokens are never accepted for this endpoint.
 - The first-run tutorial scrapes three synthetic pages at
   `{base}/tutorial-site/project-N.html`, where `{base}` defaults to the
   project's public GitHub Pages copy (`https://johnm-dta.github.io/elspeth`).

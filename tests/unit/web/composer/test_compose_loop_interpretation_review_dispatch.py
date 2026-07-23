@@ -2058,8 +2058,7 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     dispatcher MUST (in this order):
 
     1. Emit the F-15 ``interpretation_rate_cap_exceeded`` telemetry signal
-       with ``cap_type='per_term'`` and ``session_id`` (NO user_term —
-       PII-clean).
+       with ``cap_type='per_term'`` and no tenant identifiers.
     2. Write the AUTO_INTERPRETED_NO_SURFACES audit row via
        ``record_auto_interpreted_no_surfaces_event`` (NULL surface
        fields; populated LLM provenance fields; choice=opted_out;
@@ -2159,9 +2158,11 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     _amount, attrs, _ctx = counter_calls[0]
     assert attrs == {
         "cap_type": "per_term",
-        "session_id": str(session_id),
     }
-    # Explicit PII guard: no user_term, no llm_draft.
+    # Explicit tenant/PII guard: no identifiers or prompt content.
+    assert "session_id" not in attrs
+    assert "run_id" not in attrs
+    assert "user_id" not in attrs
     assert "user_term" not in attrs
     assert "llm_draft" not in attrs
 

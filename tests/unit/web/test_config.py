@@ -361,6 +361,35 @@ class TestOperatorTelemetrySettings:
         assert settings.operator_telemetry_task_definition_revision is None
         assert settings.operator_telemetry_export_interval_seconds == 60
         assert settings.operator_pipeline_telemetry_granularity == "lifecycle"
+        assert settings.operator_metrics_bearer_token is None
+
+    def test_operator_metrics_bearer_token_is_masked(self) -> None:
+        raw_token = "operator-metrics-token-0123456789abcdef"
+
+        settings = WebSettings(
+            operator_metrics_bearer_token=raw_token,
+            composer_max_composition_turns=15,
+            composer_max_discovery_turns=10,
+            composer_timeout_seconds=85.0,
+            composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
+        )
+
+        assert settings.operator_metrics_bearer_token is not None
+        assert settings.operator_metrics_bearer_token.get_secret_value() == raw_token
+        assert raw_token not in repr(settings)
+
+    @pytest.mark.parametrize("raw_token", ["short", "x" * 513, "x" * 31 + " ", "x" * 31 + "ñ"])
+    def test_operator_metrics_bearer_token_rejects_weak_or_non_header_safe_values(self, raw_token: str) -> None:
+        with pytest.raises(ValidationError, match="operator_metrics_bearer_token"):
+            WebSettings(
+                operator_metrics_bearer_token=raw_token,
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+            )
 
     @pytest.mark.parametrize(
         ("field", "raw_value"),
@@ -1612,6 +1641,7 @@ def test_settings_from_env_coerces_numeric_strings_for_strict_fields(monkeypatch
         "ELSPETH_WEB__COMPOSER_PLANNER_MAX_COMPLETION_TOKENS": "32768",
         "ELSPETH_WEB__COMPOSER_PLANNER_MAX_PROVIDER_CALLS": "80",
         "ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY": base64.b64encode(_secrets.token_bytes(32)).decode(),
+        "ELSPETH_WEB__OPERATOR_METRICS_BEARER_TOKEN": "operator-metrics-token-from-environment-0001",
     }.items():
         monkeypatch.setenv(key, value)
 
@@ -1621,3 +1651,5 @@ def test_settings_from_env_coerces_numeric_strings_for_strict_fields(monkeypatch
     assert settings.composer_planner_max_provider_calls == 80
     assert settings.composer_max_composition_turns == 30
     assert settings.composer_timeout_seconds == 20.0
+    assert settings.operator_metrics_bearer_token is not None
+    assert settings.operator_metrics_bearer_token.get_secret_value() == "operator-metrics-token-from-environment-0001"

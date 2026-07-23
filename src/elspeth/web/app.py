@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import hmac
 import os
+import re
 import sys
 import time
 import weakref
@@ -17,7 +19,7 @@ from uuid import UUID
 
 import httpx
 import structlog
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -49,7 +51,6 @@ from elspeth.web.audit_readiness.routes import create_audit_readiness_router
 from elspeth.web.audit_readiness.service import ReadinessService, build_boot_plugin_policy_readiness
 from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.auth.local import LocalAuthProvider
-from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.auth.routes import create_auth_router
 from elspeth.web.auth.urls import (
@@ -120,6 +121,8 @@ from elspeth.web.shareable_reviews.signer import ShareTokenSigner
 _COMPOSER_BOOT_CONFIG_COUNTER: Counter
 _COMPOSER_BOOT_CONFIG_PROBE_LATENCY: Histogram
 _COMPOSER_BOOT_PROBE_TIMEOUT_SECONDS = 5.0
+_FORBIDDEN_METRICS_LABEL_PATTERN = re.compile(rb"(?:\{|,)\s*(run_id|session_id|user_id)\s*=")
+_METRICS_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 # Reserve bounded headroom inside the public five-second readiness contract
 # for timeout finalization, redacted logging, JSON serialization, and ASGI
 # response dispatch. The shared cache task remains shielded from this waiter.
@@ -1415,8 +1418,28 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # Backed by the retained process-level Prometheus reader; all OTel
     # counters/histograms registered via metrics.get_meter() feed into this
     # endpoint automatically via the global REGISTRY.
-    @app.get("/metrics", include_in_schema=False, dependencies=[Depends(get_current_user)])
-    def _prometheus_metrics() -> Response:
+    @app.get("/metrics", include_in_schema=False)
+    def _prometheus_metrics(request: Request) -> Response:
+        configured_token = request.app.state.settings.operator_metrics_bearer_token
+        if configured_token is None:
+            return Response(
+                content=b"Not Found\n",
+                status_code=404,
+                media_type="text/plain",
+                headers=_METRICS_NO_STORE_HEADERS,
+            )
+
+        authorization = request.headers.get("Authorization", "")
+        scheme, separator, candidate = authorization.partition(" ")
+        expected = configured_token.get_secret_value()
+        if separator != " " or scheme.casefold() != "bearer" or not candidate.isascii() or not hmac.compare_digest(candidate, expected):
+            return Response(
+                content=b"Unauthorized\n",
+                status_code=401,
+                media_type="text/plain",
+                headers={**_METRICS_NO_STORE_HEADERS, "WWW-Authenticate": 'Bearer realm="metrics"'},
+            )
+
         # ``generate_latest()`` walks the global REGISTRY; a corrupted
         # collector would raise here and Starlette's default 500 handler
         # leaks the traceback into the response body. /metrics is a
@@ -1440,8 +1463,21 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
                 content=b"# scrape failed\n",
                 status_code=503,
                 media_type=CONTENT_TYPE_LATEST,
+                headers=_METRICS_NO_STORE_HEADERS,
             )
-        return Response(content=body, media_type=CONTENT_TYPE_LATEST)
+        forbidden_labels = sorted({match.group(1).decode("ascii") for match in _FORBIDDEN_METRICS_LABEL_PATTERN.finditer(body)})
+        if forbidden_labels:
+            _handler_slog.error(
+                "prometheus_scrape_forbidden_tenant_labels",
+                label_names=forbidden_labels,
+            )
+            return Response(
+                content=b"# scrape failed\n",
+                status_code=503,
+                media_type=CONTENT_TYPE_LATEST,
+                headers=_METRICS_NO_STORE_HEADERS,
+            )
+        return Response(content=body, media_type=CONTENT_TYPE_LATEST, headers=_METRICS_NO_STORE_HEADERS)
 
     # --- Static file serving for the React SPA (production) ---
     # Mount frontend/dist/ AFTER all API and WS routes so /api/* takes precedence.

@@ -4674,7 +4674,6 @@ class ComposerServiceImpl:
                     1,
                     attributes={
                         "cap_type": cap_type,
-                        "session_id": session_id,
                     },
                 )
                 # F-6 writer SECOND. Best-effort with respect to the

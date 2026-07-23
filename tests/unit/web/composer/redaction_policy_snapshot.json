@@ -165,8 +165,8 @@
     "shape": "declarative"
   },
   "set_pipeline": {
-    "hash": "d29680c7a7b7b72390498df125ac9b4dd09bf664790b43a642de594be5f170bb",
-    "sensitive_path_count": 5,
+    "hash": "bb30ff2bb9837253eb6fad0f560ad8ad709a81512ce51eeab06c1d02600cbbf0",
+    "sensitive_path_count": 6,
     "shape": "type_driven"
   },
   "set_source": {

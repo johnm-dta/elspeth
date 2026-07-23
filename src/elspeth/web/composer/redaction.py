@@ -1462,6 +1462,26 @@ class _PipelineOutputModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _summarize_set_metadata_patch(patch: object) -> str:
+    """Summarize metadata mutations without retaining authored values.
+
+    Shared by ``set_pipeline.metadata`` and ``set_metadata.patch`` so the two
+    equivalent write paths have one persistence-redaction contract. Unknown
+    keys collapse to a fixed marker because key names are LLM-controlled too.
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+    """
+    if not isinstance(patch, Mapping):
+        return "<metadata-patch:invalid>"
+    allowed_keys = {"description", "name"}
+    keys = sorted(key for key in patch if isinstance(key, str) and key in allowed_keys)
+    if any(key not in allowed_keys for key in patch):
+        keys.append("unknown")
+    return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
+
+
 class _PipelineMetadataModel(BaseModel):
     """Nested model for ``set_pipeline.metadata``.
 
@@ -1469,8 +1489,11 @@ class _PipelineMetadataModel(BaseModel):
     ``tools.py:1122-1129``.  Both fields are optional; the handler at
     :func:`_execute_set_pipeline` constructs
     :class:`elspeth.web.composer.state.PipelineMetadata` only with the
-    explicitly-supplied subset and lets the dataclass defaults fill in
-    the rest.
+    explicitly-supplied subset and lets the dataclass defaults fill in the
+    rest. The parent ``SetPipelineArgumentsModel.metadata`` field carries the
+    same object-level Sensitive summarizer as ``set_metadata.patch`` so neither
+    arbitrary name nor description values are mirrored into persistent tool
+    invocation storage.
     """
 
     name: str | None = None
@@ -1555,11 +1578,12 @@ class SetPipelineArgumentsModel(BaseModel):
 
     Sensitive marker surface
     ------------------------
-    Four paths carry :class:`Sensitive` markers (see module-level note above):
+    Five paths carry :class:`Sensitive` markers (see module-level note above):
       * ``source.options`` — :func:`_summarize_set_source_options`.
       * ``source.inline_blob.content`` — :func:`_summarize_inline_blob_content`.
       * ``nodes[*].options`` — :func:`_summarize_set_source_options`.
       * ``outputs[*].options`` — :func:`_summarize_set_source_options`.
+      * ``metadata`` — :func:`_summarize_set_metadata_patch`.
 
     The adequacy guard (§4.4.2) fails closed on any ``dict[str, Any]`` or
     ``Any``-typed field without a Sensitive marker, which mechanically
@@ -1578,7 +1602,7 @@ class SetPipelineArgumentsModel(BaseModel):
     nodes: list[_PipelineNodeModel]
     edges: list[_PipelineEdgeModel]
     outputs: list[_PipelineOutputModel]
-    metadata: _PipelineMetadataModel | None = None
+    metadata: Annotated[_PipelineMetadataModel, Sensitive(summarizer=_summarize_set_metadata_patch)] | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2194,29 +2218,6 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 # same reuse rationale is documented in detail on
 # :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
 # ---------------------------------------------------------------------------
-
-
-def _summarize_set_metadata_patch(patch: object) -> str:
-    """Summarizer for ``set_metadata.patch``.
-
-    The patch accepts only ``name`` and ``description`` fields per the tool
-    schema — both operator-facing labels with no plugin options, no path
-    references, and no credential markers.  The summarizer records only that
-    allowlisted field names were present. Unknown patch keys are collapsed to
-    a generic marker because key names are LLM-controlled text and may
-    themselves carry secrets.
-
-    Contract (spec §4.2.6, §9 RSK-03):
-      * MUST NOT raise on any reachable input value.
-      * MUST return ``str``.
-    """
-    if not isinstance(patch, Mapping):
-        return "<metadata-patch:invalid>"
-    allowed_keys = {"description", "name"}
-    keys = sorted(key for key in patch if isinstance(key, str) and key in allowed_keys)
-    if any(key not in allowed_keys for key in patch):
-        keys.append("unknown")
-    return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
 
 
 _UPSERT_EDGE_REASON = HandlesNoSensitiveDataReason(

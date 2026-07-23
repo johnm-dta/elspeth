@@ -1135,6 +1135,27 @@ _CANARY_SOURCE_API_KEY = "CANARY-SET-PIPELINE-SOURCE-API-KEY-DO-NOT-LEAK"
 _CANARY_NODE_SECRET_REF = "CANARY-SET-PIPELINE-NODE-SECRET-REF-DO-NOT-LEAK"
 _CANARY_NODE_DSN = "CANARY-SET-PIPELINE-NODE-DSN-DO-NOT-LEAK"
 _CANARY_OUTPUT_CREDENTIAL = "CANARY-SET-PIPELINE-OUTPUT-CREDENTIAL-DO-NOT-LEAK"
+_CANARY_METADATA_NAME = "CANARY-SET-PIPELINE-METADATA-NAME-DO-NOT-LEAK"
+_CANARY_METADATA_DESCRIPTION = "CANARY-SET-PIPELINE-METADATA-DESCRIPTION-DO-NOT-LEAK"
+
+
+def test_set_pipeline_metadata_matches_set_metadata_redaction_contract() -> None:
+    """Equivalent metadata mutations must persist one identical safe projection."""
+    metadata = {
+        "name": _CANARY_METADATA_NAME,
+        "description": _CANARY_METADATA_DESCRIPTION,
+    }
+    pipeline_args = _minimal_valid_args()
+    pipeline_args["metadata"] = metadata
+    telemetry = NoopRedactionTelemetry()
+
+    pipeline_redacted = redact_tool_call_arguments("set_pipeline", pipeline_args, telemetry=telemetry)
+    patch_redacted = redact_tool_call_arguments("set_metadata", {"patch": metadata}, telemetry=telemetry)
+
+    assert pipeline_redacted["metadata"] == patch_redacted["patch"] == "<metadata-patch:description,name>"
+    serialized = json.dumps(pipeline_redacted, sort_keys=True)
+    assert _CANARY_METADATA_NAME not in serialized
+    assert _CANARY_METADATA_DESCRIPTION not in serialized
 
 
 def test_redaction_substitutes_source_options_via_summarizer() -> None:

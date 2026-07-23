@@ -527,7 +527,7 @@ def test_guided_completed_stage_edit_preserves_stable_id_and_rewinds_proposal(
         session_id,
         operation_id=str(uuid4()),
         turn_token=reviewed.json()["next_turn"]["turn_token"],
-        message="Revise the passed output instruction.",
+        message=f"Edit exact intent {retained.intent_id}: require two JSON outputs.",
     )
 
     assert edited.status_code == 200, edited.json()

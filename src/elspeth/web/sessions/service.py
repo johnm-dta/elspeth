@@ -965,7 +965,7 @@ def _expected_guided_deferred_intents_after_management(
         deferred_intents=prior_guided.deferred_intents,
         originating_message_content=originating.content,
     ):
-        raise AuditIntegrityError("multiple deferred intents require one matching UUID in the private request")
+        raise AuditIntegrityError("deferred intent mutation lacks matching exact action-specific user authority")
     _verify_guided_deferred_message_authority(conn, session_id=session_id, guided=prior_guided)
     if type(action) is DeferredIntentCancelAction:
         _require_exact_guided_intent_cancellation_audit(command, existing)

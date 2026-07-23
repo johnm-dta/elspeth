@@ -1260,7 +1260,7 @@ def test_management_resolution_cancels_one_exact_stable_id_and_edits_in_place() 
         guided=guided,
         catalog=catalog,
         originating_message_id="55555555-5555-4555-8555-555555555555",
-        originating_message_content=f"edit exact intent {INTENT_ID}",
+        originating_message_content=f"edit exact intent {INTENT_ID}: require the named transform",
     )
 
     assert type(cancelled) is DeferredIntentManagementApplied
@@ -1345,7 +1345,7 @@ def test_management_edit_exposes_replacement_as_effective_rewind_authority(
         guided=replace(GuidedSession.initial(), deferred_intents=(prior, preserved)),
         catalog=_view((("transform", "llm"), ("sink", "json"))),
         originating_message_id="55555555-5555-4555-8555-555555555555",
-        originating_message_content=f"private edit instruction {prior.intent_id}",
+        originating_message_content=f"Edit exact intent {prior.intent_id}: replace the saved instruction",
     )
 
     assert type(result) is DeferredIntentManagementApplied
@@ -1370,7 +1370,7 @@ def test_management_cancel_keeps_prior_intent_as_effective_rewind_authority() ->
         guided=replace(GuidedSession.initial(), deferred_intents=(prior,)),
         catalog=_view((("transform", "llm"),)),
         originating_message_id="55555555-5555-4555-8555-555555555555",
-        originating_message_content="private cancellation",
+        originating_message_content=f"Cancel exact intent {prior.intent_id}.",
     )
 
     assert type(result) is DeferredIntentManagementApplied
@@ -1474,16 +1474,57 @@ def test_management_rejects_model_intent_id_and_selection_token_mixup_without_mu
 
 
 @pytest.mark.parametrize(
-    ("message_template", "applied"),
+    ("intent_count", "action_kind", "message_template", "applied"),
     [
-        ("Cancel the count-one instruction.", False),
-        ("Cancel exact intent {second_id}.", False),
-        ("Compare {first_id} with {second_id}, then cancel one.", False),
-        ("Cancel exact intent {first_id}.", True),
+        pytest.param(1, "cancel", "Cancel exact intent {first_id}.", True, id="single-explicit-cancel"),
+        pytest.param(
+            1,
+            "edit",
+            "Edit exact intent {first_id}: require one named transform.",
+            True,
+            id="single-explicit-edit",
+        ),
+        pytest.param(1, "cancel", "Cancel the count-one instruction.", False, id="single-ambiguous"),
+        pytest.param(1, "cancel", "Keep this saved instruction; explain it.", False, id="single-explanation-only"),
+        pytest.param(
+            1,
+            "cancel",
+            "Do not cancel exact intent {first_id}; explain it.",
+            False,
+            id="single-contradictory",
+        ),
+        pytest.param(1, "edit", "Cancel exact intent {first_id}.", False, id="single-action-mismatch"),
+        pytest.param(2, "cancel", "Cancel exact intent {first_id}.", True, id="plural-explicit-cancel"),
+        pytest.param(
+            2,
+            "edit",
+            "Edit exact intent {first_id}: require one named transform.",
+            True,
+            id="plural-explicit-edit",
+        ),
+        pytest.param(2, "cancel", "Cancel the count-one instruction.", False, id="plural-ambiguous"),
+        pytest.param(2, "cancel", "Cancel exact intent {second_id}.", False, id="plural-wrong-target"),
+        pytest.param(
+            2,
+            "cancel",
+            "Compare {first_id} with {second_id}, then cancel one.",
+            False,
+            id="plural-multiple-targets",
+        ),
+        pytest.param(2, "cancel", "Explain exact intent {first_id}.", False, id="plural-explanation-only"),
+        pytest.param(
+            2,
+            "cancel",
+            "Do not cancel exact intent {first_id}; explain it.",
+            False,
+            id="plural-contradictory",
+        ),
+        pytest.param(2, "edit", "Cancel exact intent {first_id}.", False, id="plural-action-mismatch"),
     ],
-    ids=["zero-current-uuids", "coherent-wrong-pair", "multiple-current-uuids", "one-matching-current-uuid"],
 )
-def test_multiple_distinct_pending_intents_require_one_matching_private_uuid(
+def test_management_requires_exact_action_specific_user_authority(
+    intent_count: int,
+    action_kind: str,
     message_template: str,
     applied: bool,
 ) -> None:
@@ -1494,10 +1535,13 @@ def test_multiple_distinct_pending_intents_require_one_matching_private_uuid(
         count=2,
         message="second private",
     )
-    guided = replace(GuidedSession.initial(), deferred_intents=(first, second))
-    action = DeferredIntentCancelAction(
-        intent_id=first.intent_id,
-        selection_token=intent_management_module.deferred_intent_management_option(first).selection_token,
+    deferred_intents = (first,) if intent_count == 1 else (first, second)
+    guided = replace(GuidedSession.initial(), deferred_intents=deferred_intents)
+    selection_token = intent_management_module.deferred_intent_management_option(first).selection_token
+    action = (
+        DeferredIntentCancelAction(intent_id=first.intent_id, selection_token=selection_token)
+        if action_kind == "cancel"
+        else DeferredIntentEditAction(intent_id=first.intent_id, selection_token=selection_token, replacement=_action())
     )
 
     result = resolve_deferred_intent_management(
@@ -1510,27 +1554,13 @@ def test_multiple_distinct_pending_intents_require_one_matching_private_uuid(
 
     if applied:
         assert type(result) is DeferredIntentManagementApplied
-        assert result.deferred_intents == (second,)
+        if action_kind == "cancel":
+            assert result.deferred_intents == (() if intent_count == 1 else (second,))
+        else:
+            assert tuple(intent.intent_id for intent in result.deferred_intents) == tuple(intent.intent_id for intent in deferred_intents)
     else:
         assert type(result) is intent_management_module.DeferredIntentManagementAmbiguous
-        assert guided.deferred_intents == (first, second)
-
-
-def test_single_pending_intent_still_accepts_natural_language_selection() -> None:
-    intent = _count_intent(intent_id=INTENT_ID, message_id=MESSAGE_ID, count=1, message="private")
-
-    result = resolve_deferred_intent_management(
-        DeferredIntentCancelAction(
-            intent_id=intent.intent_id,
-            selection_token=intent_management_module.deferred_intent_management_option(intent).selection_token,
-        ),
-        guided=replace(GuidedSession.initial(), deferred_intents=(intent,)),
-        catalog=_view((("transform", "llm"),)),
-        originating_message_id="55555555-5555-4555-8555-555555555555",
-        originating_message_content="Cancel the saved count-one instruction.",
-    )
-
-    assert type(result) is DeferredIntentManagementApplied
+        assert guided.deferred_intents == deferred_intents
 
 
 def test_identical_management_options_require_private_message_to_name_exact_uuid() -> None:

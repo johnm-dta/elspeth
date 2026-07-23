@@ -1874,7 +1874,7 @@ async def test_settlement_rechecks_plural_intent_user_authority_and_rolls_back(
         ),
     )
 
-    with pytest.raises(AuditIntegrityError, match="one matching UUID"):
+    with pytest.raises(AuditIntegrityError, match="matching exact action-specific user authority"):
         await service.settle_guided_state_operation(command)
 
     with engine.connect() as connection:
@@ -2055,7 +2055,10 @@ async def test_deferred_intent_delta_allows_stable_id_edit_with_new_private_mess
         redacted_summary="model text is not durable authority",
         constraints=existing.constraints,
     )
-    private_revision = GuidedOriginatingUserMessageDraft(message_id=uuid4(), content="private revised instruction")
+    private_revision = GuidedOriginatingUserMessageDraft(
+        message_id=uuid4(),
+        content=f"Edit exact intent {existing.intent_id}: use the private revised instruction.",
+    )
     from elspeth.web.composer.guided.deferred_intents import create_deferred_stage_intent
 
     replacement = create_deferred_stage_intent(

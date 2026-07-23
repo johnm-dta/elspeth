@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -36,7 +37,7 @@ class DeferredIntentManagementBindingMismatch:
 
 @dataclass(frozen=True, slots=True)
 class DeferredIntentManagementAmbiguous:
-    """The private request did not name one exact current UUID when required."""
+    """The private request did not explicitly authorize the exact mutation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,19 +128,26 @@ def deferred_intent_management_user_authority_matches(
     deferred_intents: Sequence[DeferredStageIntent],
     originating_message_content: str,
 ) -> bool:
-    """Require one explicit current UUID when destructive selection is plural.
+    """Require an exact action-specific command for every destructive mutation.
 
-    A single pending intent remains addressable in natural language. Once the
-    current checkpoint contains multiple intents, the private user message
-    must name exactly one of their UUIDs, and it must equal the model-emitted
-    action ID. The provider's server-bound selection token remains a separate
-    integrity check; it cannot substitute for user authority.
+    The provider action and its server-bound selection token identify a
+    proposed mutation; neither grants user authority. Cancellation requires
+    ``Cancel exact intent <UUID>.`` as the whole private request. Editing
+    requires ``Edit exact intent <UUID>: <new instruction>`` so the request
+    explicitly supplies both the operation and replacement directive.
     """
 
-    if len(deferred_intents) <= 1:
-        return True
-    named_current_ids = tuple(intent.intent_id for intent in deferred_intents if intent.intent_id in originating_message_content)
-    return named_current_ids == (action.intent_id,)
+    matching_current_ids = tuple(intent.intent_id for intent in deferred_intents if intent.intent_id == action.intent_id)
+    if matching_current_ids != (action.intent_id,):
+        return False
+    escaped_intent_id = re.escape(action.intent_id)
+    if type(action) is DeferredIntentCancelAction:
+        pattern = rf"\s*cancel\s+exact\s+intent\s+{escaped_intent_id}\.?\s*"
+    elif type(action) is DeferredIntentEditAction:
+        pattern = rf"\s*edit\s+exact\s+intent\s+{escaped_intent_id}\s*:\s*\S(?:[\s\S]*\S)?\s*"
+    else:  # pragma: no cover - the closed action union owns this guard
+        return False
+    return re.fullmatch(pattern, originating_message_content, flags=re.IGNORECASE) is not None
 
 
 @dataclass(frozen=True, slots=True)

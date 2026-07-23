@@ -240,7 +240,8 @@ def _apply_deferred_management(
             error_class = "DeferredIntentBindingMismatch"
         else:
             assistant_message = (
-                "More than one saved instruction has that structure. Name the exact intent UUID so I can change the right one."
+                "Use an exact command before I change a saved instruction: "
+                "'Cancel exact intent <UUID>.' or 'Edit exact intent <UUID>: <new instruction>'."
             )
             error_class = "DeferredIntentAmbiguous"
         unavailable = StepChatResult(

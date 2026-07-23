@@ -390,7 +390,7 @@ def test_unique_future_catalog_intent_is_private_atomic_retryable_and_restart_du
     assert restarted_guided.deferred_intents == guided.deferred_intents
 
 
-def test_explicit_cancel_removes_only_the_named_pending_intent_and_replays_exactly(
+def test_cancel_requires_explicit_user_authority_then_removes_only_the_named_intent_and_replays_exactly(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,8 +409,6 @@ def test_explicit_cancel_removes_only_the_named_pending_intent_and_replays_exact
     assert retained_response.json()["assistant_message"] == "I saved that instruction for the topology stage."
     (retained,) = _guided(client, session_id).deferred_intents
 
-    operation_id = str(uuid4())
-    private_cancel_request = "Cancel the saved requirement, private-cancel-canary."
     monkeypatch.setattr(
         guided_route,
         "_run_guided_chat_provider_attempt",
@@ -421,11 +419,24 @@ def test_explicit_cancel_removes_only_the_named_pending_intent_and_replays_exact
             )
         ),
     )
+    unauthorized = _post(
+        client,
+        session_id,
+        operation_id=str(uuid4()),
+        turn_token=retained_response.json()["next_turn"]["turn_token"],
+        message="Keep this saved instruction; explain it.",
+    )
+    assert unauthorized.status_code == 200, unauthorized.json()
+    assert unauthorized.json()["assistant_message_kind"] == "synthetic_failure"
+    assert _guided(client, session_id).deferred_intents == (retained,)
+
+    operation_id = str(uuid4())
+    private_cancel_request = f"Cancel exact intent {retained.intent_id}."
     first = _post(
         client,
         session_id,
         operation_id=operation_id,
-        turn_token=retained_response.json()["next_turn"]["turn_token"],
+        turn_token=unauthorized.json()["next_turn"]["turn_token"],
         message=private_cancel_request,
     )
 
@@ -437,7 +448,7 @@ def test_explicit_cancel_removes_only_the_named_pending_intent_and_replays_exact
         client,
         session_id,
         operation_id=operation_id,
-        turn_token=retained_response.json()["next_turn"]["turn_token"],
+        turn_token=unauthorized.json()["next_turn"]["turn_token"],
         message=private_cancel_request,
     )
     assert retry.status_code == 200
@@ -574,7 +585,7 @@ def test_schema8_topology_management_rewinds_through_output_review_and_atomicall
         session_id,
         operation_id=operation_id,
         turn_token=staged["next_turn"]["turn_token"],
-        message="Cancel that topology instruction without replanning yet.",
+        message=f"Cancel exact intent {retained.intent_id}.",
     )
 
     assert cancelled.status_code == 200, cancelled.json()
@@ -600,7 +611,7 @@ def test_schema8_topology_management_rewinds_through_output_review_and_atomicall
         session_id,
         operation_id=operation_id,
         turn_token=staged["next_turn"]["turn_token"],
-        message="Cancel that topology instruction without replanning yet.",
+        message=f"Cancel exact intent {retained.intent_id}.",
     )
     assert replay.status_code == 200
     assert replay.json() == body
@@ -717,12 +728,14 @@ def test_active_proposal_future_wire_management_always_invalidates_and_rewinds_w
             intent_id=retained.intent_id,
             selection_token=deferred_intent_management_option(retained).selection_token,
         )
+        management_message = f"Cancel exact intent {retained.intent_id}."
     else:
         management_action = DeferredIntentEditAction(
             intent_id=retained.intent_id,
             selection_token=deferred_intent_management_option(retained).selection_token,
             replacement=_wire_review_action(present=False),
         )
+        management_message = f"Edit exact intent {retained.intent_id}: remove the saved wire requirement."
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _management_provider(management_action))
     operation_id = str(uuid4())
     response = _post(
@@ -730,7 +743,7 @@ def test_active_proposal_future_wire_management_always_invalidates_and_rewinds_w
         session_id,
         operation_id=operation_id,
         turn_token=staged["next_turn"]["turn_token"],
-        message=f"{management_kind} exact intent {retained.intent_id}",
+        message=management_message,
     )
 
     assert response.status_code == 200, response.json()
@@ -753,7 +766,7 @@ def test_active_proposal_future_wire_management_always_invalidates_and_rewinds_w
         session_id,
         operation_id=operation_id,
         turn_token=staged["next_turn"]["turn_token"],
-        message=f"{management_kind} exact intent {retained.intent_id}",
+        message=management_message,
     )
     assert replay.status_code == 200
     assert replay.json() == body
@@ -917,7 +930,7 @@ def test_schema8_passed_output_edit_preserves_stable_id_and_rewinds_reviewed_pen
         session_id,
         operation_id=str(uuid4()),
         turn_token=reviewed.json()["next_turn"]["turn_token"],
-        message="Revise the passed output instruction.",
+        message=f"Edit exact intent {retained.intent_id}: require two JSON outputs.",
     )
 
     assert cancelled.status_code == 200, cancelled.json()
@@ -994,7 +1007,7 @@ def test_schema8_management_proposal_invalidation_fault_rolls_back_intent_propos
             session_id,
             operation_id=operation_id,
             turn_token=staged["next_turn"]["turn_token"],
-            message="private cancellation must roll back",
+            message=f"Cancel exact intent {retained.intent_id}.",
         )
     finally:
         event.remove(engine, "before_cursor_execute", inject_fault)

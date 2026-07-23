@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,10 @@ import yaml
 from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.core.config import CheckpointSettings
 
-LARGE_SCALE_SETTINGS = Path("examples/large_scale_test/settings.yaml")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+LARGE_SCALE_DIR = REPO_ROOT / "examples" / "large_scale_test"
+LARGE_SCALE_INPUT = LARGE_SCALE_DIR / "input.csv"
+LARGE_SCALE_SETTINGS = LARGE_SCALE_DIR / "settings.yaml"
 EXPECTED_CHECKPOINT_POLICY = {
     "enabled": True,
     "frequency": "every_n",
@@ -22,6 +27,27 @@ def _load_example_settings() -> dict[str, Any]:
     loaded = yaml.safe_load(LARGE_SCALE_SETTINGS.read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
+
+
+def test_large_scale_example_input_is_shippable() -> None:
+    """The advertised 10k-row fixture must be present in clean checkouts."""
+    relative_input = LARGE_SCALE_INPUT.relative_to(REPO_ROOT)
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--verbose", str(relative_input)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert ignored.returncode == 1, (
+        f"{relative_input} is excluded from distributable source by: {ignored.stdout.strip() or ignored.stderr.strip()}"
+    )
+
+    with LARGE_SCALE_INPUT.open(encoding="utf-8", newline="") as handle:
+        rows = csv.DictReader(handle)
+        assert rows.fieldnames == ["id", "value", "category", "priority", "timestamp"]
+        assert sum(1 for _ in rows) == 10_000
 
 
 def test_large_scale_example_declares_checkpoint_policy_explicitly() -> None:

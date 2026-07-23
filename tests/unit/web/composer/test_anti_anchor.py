@@ -69,6 +69,15 @@ def test_drift_hint_names_splice_for_one_node_linear_insertions() -> None:
     assert "full-replacement payloads" in hint
 
 
+def test_drift_hint_forbids_reproducing_prior_literal_values() -> None:
+    failures = deque([("set_pipeline", "hash-a"), ("set_pipeline", "hash-b"), ("set_pipeline", "hash-c")], maxlen=5)
+
+    hint = build_drift_hint(failures)
+
+    assert "literal" in hint.lower()
+    assert "do not repeat" in hint.lower()
+
+
 def test_tracker_does_not_fire_on_mixed_tool_failures() -> None:
     """Different failing tools may be ordinary exploration, not same-tool drift."""
     tracker = AntiAnchorTracker()
@@ -154,6 +163,16 @@ def test_hint_message_actionable_instructions() -> None:
     assert "change" in hint.lower()
     # Includes a system-prefix marker so the model recognises it as system-injected.
     assert hint.startswith("[ELSPETH-SYSTEM-HINT]")
+
+
+def test_identical_failure_hint_forbids_reproducing_prior_literal_values() -> None:
+    failures = deque([("set_metadata", "hash-a"), ("set_metadata", "hash-a"), ("set_metadata", "hash-a")], maxlen=5)
+
+    hint = build_anti_anchor_hint(failures)
+
+    assert "what value you sent" not in hint.lower()
+    assert "literal" in hint.lower()
+    assert "structural" in hint.lower()
 
 
 def test_should_inject_hint_handles_empty_deque() -> None:

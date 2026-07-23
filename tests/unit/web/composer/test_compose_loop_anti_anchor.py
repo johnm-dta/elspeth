@@ -186,6 +186,53 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
 
 
 @pytest.mark.asyncio
+async def test_identical_failure_hint_does_not_solicit_canary_into_assistant_prose() -> None:
+    """The synthetic hint must not cause failed argument values to become durable prose."""
+    catalog = _mock_catalog()
+    service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=_make_settings())
+    state = _empty_state()
+    canary = "anti-anchor-sensitive-canary"
+    identical_args = {"patch": {"name": canary}}
+    call_count = 0
+
+    async def respond(messages: list[dict[str, Any]], *_args: object, **_kwargs: object) -> _FakeLLMResponse:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 3:
+            return _make_response_with_tool(f"call_{call_count}", "set_metadata", identical_args)
+        hint = next(
+            str(message["content"])
+            for message in messages
+            if message.get("role") == "user" and "[ELSPETH-SYSTEM-HINT]" in str(message.get("content", ""))
+        )
+        if "do not repeat" not in hint.lower() or "literal values" not in hint.lower():
+            return _make_text_only_response(f"The prior value was {canary}.")
+        return _make_text_only_response("The validator named patch.name; the structural mismatch is its expected shape.")
+
+    mock_llm = AsyncMock(side_effect=respond)
+    arg_error = ToolArgumentError(argument="patch", expected="non-anchored payload", actual_type="dict")
+    with (
+        patch.object(service, "_call_llm", mock_llm),
+        patch(
+            "elspeth.web.composer.tool_batch.execute_tool",
+            side_effect=[arg_error, arg_error, arg_error],
+        ),
+    ):
+        result = await service.compose("Build something", [], state)
+
+    assert mock_llm.call_count == 4
+    fourth_call_messages = mock_llm.call_args_list[3].args[0]
+    hint_text = next(
+        str(message["content"])
+        for message in fourth_call_messages
+        if isinstance(message, dict) and message.get("role") == "user" and "[ELSPETH-SYSTEM-HINT]" in str(message.get("content", ""))
+    )
+    assert canary not in hint_text
+    assert canary not in result.message
+    assert result.raw_assistant_content is None or canary not in result.raw_assistant_content
+
+
+@pytest.mark.asyncio
 async def test_three_distinct_arg_error_failures_inject_drift_hint_before_fourth_turn() -> None:
     """Same-tool failed payload drift must also reach the model before surrender."""
     catalog = _mock_catalog()

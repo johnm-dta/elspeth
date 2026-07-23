@@ -26,7 +26,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, event, func, insert, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
@@ -320,6 +320,82 @@ class TestDeleteBlob:
         assert not storage.exists()
         with pytest.raises(BlobNotFoundError):
             await blob_service.get_blob(record.id)
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_commit_failure_restores_file_and_row_after_restart(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        db_engine,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed metadata commit must not strand a live row without bytes."""
+        content = b"commit-boundary-content"
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="commit-boundary.csv",
+            content=content,
+            mime_type="text/csv",
+            created_by="user",
+        )
+        storage = Path(record.storage_path)
+        original_do_commit = db_engine.dialect.do_commit
+        fail_next_commit = True
+
+        def fail_delete_commit(dbapi_connection) -> None:
+            nonlocal fail_next_commit
+            if fail_next_commit:
+                fail_next_commit = False
+                raise RuntimeError("injected blob delete commit failure")
+            original_do_commit(dbapi_connection)
+
+        monkeypatch.setattr(db_engine.dialect, "do_commit", fail_delete_commit)
+
+        with pytest.raises(RuntimeError, match="injected blob delete commit failure"):
+            await blob_service.delete_blob(record.id)
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        restored = await restarted.get_blob(record.id)
+        assert restored.id == record.id
+        assert storage.read_bytes() == content
+        assert await restarted.read_blob_content(record.id) == content
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_sql_failure_restores_file_before_stage_escapes(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        db_engine,
+        tmp_path: Path,
+    ) -> None:
+        """A DELETE failure inside the helper restores its unreturned stage."""
+        content = b"delete-statement-boundary-content"
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="delete-statement-boundary.csv",
+            content=content,
+            mime_type="text/csv",
+            created_by="user",
+        )
+        storage = Path(record.storage_path)
+
+        def fail_blob_delete(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("DELETE FROM BLOBS"):
+                raise RuntimeError("injected blob DELETE failure")
+
+        event.listen(db_engine, "before_cursor_execute", fail_blob_delete)
+        try:
+            with pytest.raises(RuntimeError, match="injected blob DELETE failure"):
+                await blob_service.delete_blob(record.id)
+        finally:
+            event.remove(db_engine, "before_cursor_execute", fail_blob_delete)
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        assert (await restarted.get_blob(record.id)).id == record.id
+        assert await restarted.read_blob_content(record.id) == content
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3040,10 +3116,10 @@ class TestCopyBlobsForFork:
         monkeypatch.setattr(blob_service_module, "_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER", orphan_counter)
         original_delete = blob_service._delete_blob_row_locked
 
-        def _fail_one(conn, *, row, blob_id_str: str) -> None:
+        def _fail_one(conn, *, row, blob_id_str: str):
             if blob_id_str == str(failing_id):
                 raise OSError(5, "cleanup failed")
-            original_delete(conn, row=row, blob_id_str=blob_id_str)
+            return original_delete(conn, row=row, blob_id_str=blob_id_str)
 
         monkeypatch.setattr(blob_service, "_delete_blob_row_locked", _fail_one)
         result = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)

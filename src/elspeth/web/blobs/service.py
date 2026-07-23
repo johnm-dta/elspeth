@@ -9,6 +9,7 @@ import os
 import re
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar, cast
@@ -59,7 +60,6 @@ from elspeth.web.blobs.protocol import (
 from elspeth.web.sessions.converters import pipeline_dict_from_record
 from elspeth.web.sessions.locking import (
     acquire_session_advisory_xact_lock,
-    locked_session_transaction,
     postgres_session_advisory_lock,
     sqlite_process_session_lock,
 )
@@ -116,6 +116,14 @@ class _ExpectedBlobFields(TypedDict):
     content_hash: str
     size_bytes: int
     created_by: BlobCreator
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedBlobDeletion:
+    """Same-directory tombstone retained until the metadata commit wins."""
+
+    storage: Path
+    tombstone: Path | None
 
 
 _ACTIVE_RUN_COMPOSITION_COLUMNS = (
@@ -472,6 +480,45 @@ def _blob_temp_artifacts(storage: Path) -> tuple[Path, ...]:
 def _remove_blob_temp_artifacts(storage: Path) -> None:
     for path in _blob_temp_artifacts(storage):
         path.unlink(missing_ok=True)
+
+
+def _stage_blob_deletion(storage: Path) -> _StagedBlobDeletion:
+    """Atomically move canonical bytes aside while metadata is transactional."""
+
+    if not storage.exists():
+        return _StagedBlobDeletion(storage=storage, tombstone=None)
+    tombstone = storage.with_name(f".{storage.name}.delete-{uuid4().hex}")
+    os.replace(storage, tombstone)
+    _fsync_parent_directory(storage.parent)
+    return _StagedBlobDeletion(storage=storage, tombstone=tombstone)
+
+
+def _restore_staged_blob_deletion(stage: _StagedBlobDeletion, primary_exc: BaseException) -> None:
+    """Restore canonical bytes after a SQL/delete-commit failure."""
+
+    tombstone = stage.tombstone
+    if tombstone is None or not tombstone.exists():
+        return
+    try:
+        if stage.storage.exists():
+            raise FileExistsError(f"refusing to overwrite replacement blob content at {stage.storage}")
+        os.replace(tombstone, stage.storage)
+        _fsync_parent_directory(stage.storage.parent)
+    except OSError as rollback_exc:
+        primary_exc.add_note(
+            f"Rollback failed: could not restore deleted blob file {stage.storage} from tombstone "
+            f"{tombstone} ({type(rollback_exc).__name__}: {rollback_exc}). "
+            "Blob row and storage may now diverge; manual reconciliation required."
+        )
+
+
+def _finalize_staged_blob_deletion(stage: _StagedBlobDeletion) -> None:
+    """Purge staged bytes only after the metadata transaction committed."""
+
+    if stage.tombstone is not None:
+        stage.tombstone.unlink(missing_ok=True)
+        _fsync_parent_directory(stage.storage.parent)
+    _remove_blob_temp_artifacts(stage.storage)
 
 
 def _validate_reusable_blob_row(
@@ -1351,8 +1398,8 @@ class BlobServiceImpl:
         *,
         row: Row[Any],
         blob_id_str: str,
-    ) -> None:
-        """Delete a locked, already-custody-checked blob row and its file."""
+    ) -> _StagedBlobDeletion:
+        """Stage bytes and delete a locked, already-custody-checked row."""
         fork_operation_id = _in_progress_session_fork_operation_id(conn, row.session_id)
         if fork_operation_id is not None:
             raise BlobInProgressForkError(blob_id_str, operation_id=fork_operation_id)
@@ -1393,21 +1440,25 @@ class BlobServiceImpl:
         ):
             raise BlobActiveRunError(blob_id_str, run_id=active_run.run_id)
 
-        # Delete backing file first — orphaned DB row is recoverable,
-        # orphaned file with no metadata is not.
         storage = Path(row.storage_path)
-        if storage.exists():
-            storage.unlink()
-        _remove_blob_temp_artifacts(storage)
+        stage = _stage_blob_deletion(storage)
 
-        # Session qualification is required even though the UUID is globally
-        # unique: callers with stronger custody knowledge must never delete a
-        # row rebound outside that custody boundary.
-        deleted = conn.execute(
-            blobs_table.delete().where(blobs_table.c.id == blob_id_str).where(blobs_table.c.session_id == row.session_id)
-        )
-        if deleted.rowcount != 1:
-            raise AuditIntegrityError(f"blob {blob_id_str} left session custody before its qualified delete completed")
+        try:
+            # Session qualification is required even though the UUID is
+            # globally unique: callers with stronger custody knowledge must
+            # never delete a row rebound outside that custody boundary.
+            deleted = conn.execute(
+                blobs_table.delete().where(blobs_table.c.id == blob_id_str).where(blobs_table.c.session_id == row.session_id)
+            )
+            if deleted.rowcount != 1:
+                raise AuditIntegrityError(f"blob {blob_id_str} left session custody before its qualified delete completed")
+        except BaseException as primary_exc:
+            # This failure occurs before the stage can be returned to the
+            # transaction owner, so restore it here. Commit-time failures are
+            # restored by the caller after the transaction context rolls back.
+            _restore_staged_blob_deletion(stage, primary_exc)
+            raise
+        return stage
 
     async def delete_blob(self, blob_id: UUID) -> None:
         """Delete blob metadata and backing file."""
@@ -1418,13 +1469,25 @@ class BlobServiceImpl:
                 session_id = lookup_conn.execute(select(blobs_table.c.session_id).where(blobs_table.c.id == blob_id_str)).scalar()
             if session_id is None:
                 raise BlobNotFoundError(blob_id_str)
-            with locked_session_transaction(self._engine, session_id) as conn:
-                # Re-read only after the shared lock: custody/proposal/delete
-                # decisions for this session must observe one serial order.
-                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
-                if row is None:
-                    raise BlobNotFoundError(blob_id_str)
-                self._delete_blob_row_locked(conn, row=row, blob_id_str=blob_id_str)
+            stage: _StagedBlobDeletion | None = None
+            # Keep the process/session lock across transaction commit and the
+            # corresponding restore-or-purge filesystem phase.
+            with _blob_custody_session_lock(self._engine, session_id) as held_connection:
+                try:
+                    with _blob_phase_transaction(self._engine, held_connection) as conn:
+                        _acquire_blob_phase_lock(conn, session_id)
+                        # Re-read only after the shared lock: custody/proposal/
+                        # delete decisions must observe one serial order.
+                        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
+                        if row is None:
+                            raise BlobNotFoundError(blob_id_str)
+                        stage = self._delete_blob_row_locked(conn, row=row, blob_id_str=blob_id_str)
+                except BaseException as primary_exc:
+                    if stage is not None:
+                        _restore_staged_blob_deletion(stage, primary_exc)
+                    raise
+                if stage is not None:
+                    _finalize_staged_blob_deletion(stage)
 
         await self._run_sync(_sync)
 
@@ -1892,28 +1955,36 @@ class BlobServiceImpl:
                     )
 
                 for blob_id in snapshot_ids:
+                    stage: _StagedBlobDeletion | None = None
                     try:
-                        with _blob_phase_transaction(self._engine, held_connection) as conn:
-                            _acquire_blob_phase_lock(conn, target_session_id_str)
-                            _verify_fork_child_custody(
-                                conn,
-                                source_session_id=source_session_id_str,
-                                target_session_id=target_session_id_str,
-                            )
-                            _require_failed_fork_cleanup_authorization(
-                                conn,
-                                source_session_id=source_session_id_str,
-                                target_session_id=target_session_id_str,
-                                operation_id=operation_id,
-                            )
-                            row = conn.execute(
-                                select(blobs_table)
-                                .where(blobs_table.c.id == str(blob_id))
-                                .where(blobs_table.c.session_id == target_session_id_str)
-                                .with_for_update()
-                            ).one_or_none()
-                            if row is not None:
-                                self._delete_blob_row_locked(conn, row=row, blob_id_str=str(blob_id))
+                        try:
+                            with _blob_phase_transaction(self._engine, held_connection) as conn:
+                                _acquire_blob_phase_lock(conn, target_session_id_str)
+                                _verify_fork_child_custody(
+                                    conn,
+                                    source_session_id=source_session_id_str,
+                                    target_session_id=target_session_id_str,
+                                )
+                                _require_failed_fork_cleanup_authorization(
+                                    conn,
+                                    source_session_id=source_session_id_str,
+                                    target_session_id=target_session_id_str,
+                                    operation_id=operation_id,
+                                )
+                                row = conn.execute(
+                                    select(blobs_table)
+                                    .where(blobs_table.c.id == str(blob_id))
+                                    .where(blobs_table.c.session_id == target_session_id_str)
+                                    .with_for_update()
+                                ).one_or_none()
+                                if row is not None:
+                                    stage = self._delete_blob_row_locked(conn, row=row, blob_id_str=str(blob_id))
+                        except BaseException as primary_exc:
+                            if stage is not None:
+                                _restore_staged_blob_deletion(stage, primary_exc)
+                            raise
+                        if stage is not None:
+                            _finalize_staged_blob_deletion(stage)
                     except (BlobError, SQLAlchemyError, OSError) as cleanup_exc:
                         errors.append(
                             BlobForkCleanupError(

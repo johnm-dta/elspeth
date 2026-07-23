@@ -4,10 +4,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="See how ELSPETH validates pipelines, records row-level evidence, and recovers durable publication safely." />
 <title>Assurance — ELSPETH</title>
 <script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
+<link rel="icon" href="favicon.svg" />
 <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
@@ -20,7 +22,7 @@
       <nav class="nav-links">
         <a href="index.html">Home</a>
         <a href="authoring.html">Authoring</a>
-        <a href="assurance.html" class="active">Assurance</a>
+        <a href="assurance.html" class="active" aria-current="page">Assurance</a>
         <a href="use-cases.html">Use cases</a>
         <a href="get-started.html">Get started</a>
       </nav>
@@ -31,7 +33,7 @@
         <div class="nav-menu-panel">
           <a href="index.html">Home</a>
           <a href="authoring.html">Authoring</a>
-          <a href="assurance.html">Assurance</a>
+          <a href="assurance.html" class="active" aria-current="page">Assurance</a>
           <a href="use-cases.html">Use cases</a>
           <a href="get-started.html">Get started</a>
           <hr />
@@ -59,12 +61,18 @@
   <div class="wrap">
     <h2 class="vh">Assurance properties</h2>
     <div class="features" style="margin-top:8px">
-      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h3>Landscape audit trail</h3><p>Complete row lineage with content hashes. Export signed (HMAC-SHA256) with a running hash for chain-of-custody review.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h3>Landscape audit trail</h3><p>Complete row lineage with content hashes. When signing is enabled, exports include an HMAC-SHA256 signature and running hash for chain-of-custody review.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="refresh-cw"></i></span><h3>Recoverable publication</h3><p>Built-in file, object, database, Dataverse, and Chroma sinks persist immutable plans before external publication. Audit exports use the same durable boundary.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="git-compare-arrows"></i></span><h3>Two-axis terminal model</h3><p>Lifecycle outcome and path/provenance are separated — "did it succeed?" and "how did it get there?" are both explicit.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h3>Declaration-trust + VAL</h3><p>Plugin declarations the graph builder trusts are backed by runtime VAL manifests, invariant tests, and CI scanners.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h3>Declaration-trust + VAL</h3><p>Plugin declarations the graph builder trusts are checked against runtime VAL manifests and invariant tests.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="fingerprint"></i></span><h3>Secret discipline</h3><p>Secrets resolve at execution boundaries, are fingerprinted for audit, and are never persisted as raw values.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="lock"></i></span><h3>Strict response schemas</h3><p>Web execution responses forbid unknown fields, so internal drift fails loudly instead of being silently coerced.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="list-checks"></i></span><h3>Terminal statuses</h3><p>completed · completed_with_failures · failed · empty · cancelled — run accounting never collapses to one number.</p></div>
+    </div>
+    <div class="surface-card" style="margin-top:16px">
+      <h3>Resume only after reconciliation</h3>
+      <p>If a worker loses an external response, ELSPETH reconciles the recorded plan before retrying. When it cannot prove the outcome, it blocks publication for operator review instead of guessing or duplicating the effect.</p>
+      <p>After resolving the recorded uncertainty, resume an audit export with <code>elspeth export-resume &lt;run-id&gt; --execute</code>. Follow the <a href="https://github.com/johnm-dta/elspeth/blob/main/docs/runbooks/sink-effect-recovery.md">sink-effect recovery runbook</a> for the operator procedure.</p>
     </div>
   </div>
 </section>
@@ -76,10 +84,10 @@
     <div class="section-head">
       <span class="eyebrow">Show, don't tell</span>
       <h2>One row's defensible trail.</h2>
-      <p>This is real <code>explain</code> output from a bundled example run — not a mock-up. It reconstructs why a single row reached the <code>approved</code> sink: the source fingerprint it carried, the gate it passed, and the routing decision that sent it there.</p>
+      <p>This representative <code>explain</code> output shows how ELSPETH reconstructs why a single row reached the <code>approved</code> sink: the source fingerprint it carried, the gate it passed, and the routing decision that sent it there.</p>
     </div>
     <div class="proof">
-      <div class="term" aria-label="elspeth explain output for one row">
+      <figure class="term" aria-labelledby="explain-proof-caption" style="margin:0">
         <div class="term-bar">
           <i data-lucide="scroll-text" style="width:14px;height:14px;color:var(--color-text-muted)"></i>
           <span class="t">elspeth · explain one row</span>
@@ -112,23 +120,24 @@ Completed: True
 
 <span class="sec">--- Routing Events ---</span>
   [0] move edge=6b96441565… group=a5441a9c66… reason_hash=<span class="mut">f8fa1fdeab3a…</span></div>
-      </div>
+        <figcaption class="vh" id="explain-proof-caption">Representative ELSPETH lineage report for one routed row</figcaption>
+      </figure>
       <div class="proof-notes">
         <div class="proof-note">
-          <h4>Outcome and path are separate axes</h4>
+          <strong class="proof-note-title">Outcome and path are separate axes</strong>
           <p>The two-axis terminal model in practice: <code>SUCCESS</code> answers <em>did it succeed?</em>; <code>GATE_ROUTED</code> answers <em>how did it get there?</em> "It passed" and "a gate sent it to <code>approved</code>" are recorded as distinct facts.</p>
         </div>
         <div class="proof-note">
-          <h4>Every decision is bound to its evidence</h4>
+          <strong class="proof-note-title">Every decision is bound to its evidence</strong>
           <p>The source row carries a content hash; the routing event carries a <code>reason_hash</code> that ties the destination to the exact condition that produced it. Nothing in the path is asserted without a fingerprint.</p>
         </div>
         <div class="proof-note">
-          <h4>Reproducible, and exportable as evidence</h4>
-          <p>The same records export signed (HMAC-SHA256) with a running hash for chain-of-custody review — the trail a regulated or audited assessment needs to reconstruct a single decision after the fact.</p>
+          <strong class="proof-note-title">Reproducible, and exportable as evidence</strong>
+          <p>When signing is enabled, the same records export with an HMAC-SHA256 signature and running hash for chain-of-custody review — the trail an assessment needs to reconstruct a single decision after the fact.</p>
         </div>
       </div>
     </div>
-    <p class="proof-src">Node ids, source-data and reason hashes are abbreviated here (marked <code>…</code>) for display; the run records them in full. Reproduce it against any bundled run under <code>examples/*/runs/audit.db</code>.</p>
+    <p class="proof-src">Node ids, source-data and reason hashes are abbreviated here (marked <code>…</code>) for display; actual run records retain their full values.</p>
   </div>
 </section>
 

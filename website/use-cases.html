@@ -4,10 +4,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="Explore illustrative ELSPETH workflow patterns and understand which integrations are built in or require custom plugins." />
 <title>Use cases — ELSPETH</title>
 <script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
+<link rel="icon" href="favicon.svg" />
 <script src="vendor/lucide.min.js"></script>
 </head>
 <body>
@@ -21,7 +23,7 @@
         <a href="index.html">Home</a>
         <a href="authoring.html">Authoring</a>
         <a href="assurance.html">Assurance</a>
-        <a href="use-cases.html" class="active">Use cases</a>
+        <a href="use-cases.html" class="active" aria-current="page">Use cases</a>
         <a href="get-started.html">Get started</a>
       </nav>
     </div>
@@ -32,7 +34,7 @@
           <a href="index.html">Home</a>
           <a href="authoring.html">Authoring</a>
           <a href="assurance.html">Assurance</a>
-          <a href="use-cases.html">Use cases</a>
+          <a href="use-cases.html" class="active" aria-current="page">Use cases</a>
           <a href="get-started.html">Get started</a>
           <hr />
           <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
@@ -57,21 +59,38 @@
 
 <section>
   <div class="wrap">
-    <div class="table-scroll" style="margin-top:8px">
+    <div class="section-head">
+      <span class="eyebrow">Patterns, not packaged solutions</span>
+      <h2>Illustrative workflow patterns</h2>
+      <p>These patterns show how accountable batch work can map onto Sense → Decide → Act. They are starting points, not claims that every named integration ships in the box.</p>
+    </div>
+    <div class="table-scroll" style="margin-top:28px" tabindex="0" role="region" aria-label="Illustrative workflow patterns by domain">
     <table class="cases">
       <caption class="vh">ELSPETH use cases mapped to Sense, Decide, and Act</caption>
       <thead>
         <tr><th scope="col">Domain</th><th scope="col">Sense</th><th scope="col">Decide</th><th scope="col">Act</th></tr>
       </thead>
       <tbody>
-        <tr><th scope="row" class="dom">Tender evaluation</th><td>CSV of submissions</td><td>LLM classification + safety gates</td><td>Results CSV, abuse review queue</td></tr>
-        <tr><th scope="row" class="dom">Document QA</th><td>PDF / text blobs</td><td>Extraction, rubric checks, summaries</td><td>Annotated outputs, exception queue</td></tr>
-        <tr><th scope="row" class="dom">Content moderation</th><td>User submissions</td><td>Safety classifier</td><td>Published, human review, rejected</td></tr>
-        <tr><th scope="row" class="dom">Financial compliance</th><td>Transaction feed</td><td>Rules engine + ML fraud detection</td><td>Approved, flagged, blocked</td></tr>
-        <tr><th scope="row" class="dom">Weather monitoring</th><td>Sensor API feed</td><td>Threshold + ML anomaly detection</td><td>Routine log, warning, emergency alert</td></tr>
-        <tr><th scope="row" class="dom">Satellite operations</th><td>Telemetry stream</td><td>Anomaly classifier</td><td>Routine log, investigation ticket</td></tr>
+        <tr><th scope="row" class="dom">Tender evaluation</th><td>CSV submissions</td><td>LLM classification + safety gates</td><td>Results CSV; custom review workflow</td></tr>
+        <tr><th scope="row" class="dom">Document QA</th><td>Text or JSON document records</td><td>Extraction, rubric checks, summaries</td><td>Annotated outputs; custom exception workflow</td></tr>
+        <tr><th scope="row" class="dom">Content moderation</th><td>CSV, JSON, or text submissions</td><td>LLM safety classification</td><td>File or database results; custom human-review process</td></tr>
+        <tr><th scope="row" class="dom">Financial compliance</th><td>CSV or database transaction batch</td><td>Rules + custom domain ML</td><td>Recorded decisions; custom downstream actions</td></tr>
+        <tr><th scope="row" class="dom">Weather monitoring</th><td>Custom API polling plugin</td><td>Threshold + custom anomaly model</td><td>Local/object output; custom alerts</td></tr>
+        <tr><th scope="row" class="dom">Satellite operations</th><td>Telemetry batch or polled feed</td><td>Custom anomaly classifier</td><td>Recorded result; custom investigation ticket</td></tr>
       </tbody>
     </table>
+    </div>
+    <div class="features" style="margin-top:20px">
+      <div class="feature">
+        <span class="fi"><i data-lucide="package-check"></i></span>
+        <h3>Built in</h3>
+        <p>CSV, JSON, text, Azure Blob, Dataverse, database, Chroma, and local or object-store endpoints are available without writing an integration plugin.</p>
+      </div>
+      <div class="feature">
+        <span class="fi"><i data-lucide="blocks"></i></span>
+        <h3>Extend with custom plugins</h3>
+        <p>API feeds, message queues, alerts, tickets, and domain-specific ML models require custom plugins and the operator's own service configuration.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -113,7 +132,7 @@
       <h2>When to reach for something else.</h2>
       <p>The audit machinery that makes ELSPETH defensible is overhead you don't want for throughput-first work. If you don't need the trail, a leaner tool will serve you better.</p>
     </div>
-    <div class="table-scroll" style="margin-top:36px">
+    <div class="table-scroll" style="margin-top:36px" tabindex="0" role="region" aria-label="When to choose a different processing tool">
     <table class="cases">
       <caption class="vh">When to choose a different tool</caption>
       <thead>
@@ -121,7 +140,7 @@
       </thead>
       <tbody>
         <tr><th scope="row" class="dom">High-throughput ETL</th><td><code>Spark</code> · <code>dbt</code></td><td>Bulk transformation at scale, where per-row lineage and audit evidence aren't the point.</td></tr>
-        <tr><th scope="row" class="dom">Sub-second streaming</th><td><code>Flink</code> · <code>Kafka Streams</code></td><td>Low-latency event processing. ELSPETH's orchestrator is deterministic and single-writer by design.</td></tr>
+        <tr><th scope="row" class="dom">Sub-second streaming</th><td><code>Flink</code> · <code>Kafka Streams</code></td><td>Low-latency event processing. ELSPETH is not a sub-second streaming engine; its orchestrator prioritises deterministic, auditable work.</td></tr>
         <tr><th scope="row" class="dom">Simple scripts, no audit</th><td>Plain Python</td><td>One-off or low-stakes work where a reviewable trail would be ceremony, not value.</td></tr>
       </tbody>
     </table>

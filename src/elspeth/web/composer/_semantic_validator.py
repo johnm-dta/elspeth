@@ -65,6 +65,8 @@ def _is_config_probe_exception(exc: Exception) -> bool:
 def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
     """Construct a consumer transform instance to read its requirements.
 
+    The caller owns every non-None instance and must close it in ``finally``.
+
     Returns None when:
     - node.plugin is unset (typed-None on a draft node)
     - construction fails with one of the established probe-tolerant exception
@@ -107,7 +109,10 @@ def _instantiate_consumer(node: NodeSpec) -> BaseTransform | None:
 
 
 def _instantiate_producer(producer: ProducerEntry) -> BaseTransform | None:
-    """Construct a producer transform/source instance to read its facts."""
+    """Construct a producer transform/source instance to read its facts.
+
+    The caller owns every non-None instance and must close it in ``finally``.
+    """
     from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
     if producer.plugin_name is None or is_source_producer_id(producer.producer_id):
@@ -144,7 +149,10 @@ def _safe_output_semantics(producer: ProducerEntry) -> OutputSemanticDeclaration
 
     if instance is None:
         return None
-    return instance.output_semantics()
+    try:
+        return instance.output_semantics()
+    finally:
+        instance.close()
 
 
 def _find_producer_facts(
@@ -211,7 +219,10 @@ def validate_semantic_contracts(
         consumer = _instantiate_consumer(node)
         if consumer is None:
             continue
-        requirements = consumer.input_semantic_requirements()
+        try:
+            requirements = consumer.input_semantic_requirements()
+        finally:
+            consumer.close()
         if not requirements.fields:
             continue
 

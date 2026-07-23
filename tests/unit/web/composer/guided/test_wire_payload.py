@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,3 +131,62 @@ def test_connection_preserves_stable_endpoints_and_flow() -> None:
     assert connection["from_endpoint"]["kind"] == "source"
     assert connection["to_endpoint"]["kind"] == "output"
     assert connection["flow"] == {"kind": "source_success", "branch": None}
+
+
+def test_node_cardinality_closes_validation_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.composer.guided.emitters import _node_cardinality
+    from tests.unit.web.composer._probe_lifecycle_helpers import TrackingPluginManager
+
+    tracking = TrackingPluginManager(get_shared_plugin_manager())
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: tracking,
+    )
+    node = SimpleNamespace(node_type="transform", expected_output_count=None)
+    executable_node = SimpleNamespace(
+        plugin="value_transform",
+        options={
+            "schema": {"mode": "observed"},
+            "operations": [{"target": "copy", "expression": "row['value']"}],
+        },
+    )
+
+    cardinality = _node_cardinality(node, executable_node)
+
+    assert cardinality["output"] == "one"
+    assert len(tracking.instances) == 1
+    assert tracking.instances[0].close_count == 1
+
+
+def test_node_cardinality_shuts_down_concrete_llm_probe_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real resource-owning LLM validation probe releases its executor."""
+    from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+    from elspeth.web.composer.guided.emitters import _node_cardinality
+    from tests.unit.web.composer._probe_lifecycle_helpers import TrackingPluginManager
+
+    tracking = TrackingPluginManager(get_shared_plugin_manager())
+    monkeypatch.setattr(
+        "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+        lambda: tracking,
+    )
+    node = SimpleNamespace(node_type="transform", expected_output_count=None)
+    executable_node = SimpleNamespace(
+        plugin="llm",
+        options={
+            "provider": "openrouter",
+            "api_key": "probe-key",
+            "model": "openai/gpt-4o",
+            "prompt_template": "Evaluate: {{ row.text_content }}",
+            "schema": {"mode": "observed"},
+            "required_input_fields": ["text"],
+            "queries": {"quality": {"input_fields": {"text_content": "text"}}},
+            "pool_size": 2,
+        },
+    )
+
+    _node_cardinality(node, executable_node)
+
+    transform = tracking.instances[0]._delegate
+    assert transform._query_executor is not None
+    assert transform._query_executor._shutdown_event.is_set()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from elspeth.contracts.plugin_semantics import (
     ContentKind,
     SemanticOutcome,
@@ -108,6 +110,78 @@ def _wardline_state(*, text_separator: str = " ", scrape_format: str = "text"):
 
 
 class TestValidateSemanticContracts:
+    def test_validation_closes_consumer_and_producer_probes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from tests.unit.web.composer._probe_lifecycle_helpers import TrackingPluginManager
+
+        tracking = TrackingPluginManager(get_shared_plugin_manager())
+        monkeypatch.setattr(
+            "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+            lambda: tracking,
+        )
+
+        validate_semantic_contracts(_wardline_state(text_separator="\n"))
+
+        assert len(tracking.instances) >= 3, "fixture did not exercise consumer and producer probes"
+        assert [instance.close_count for instance in tracking.instances] == [1] * len(tracking.instances)
+
+    def test_consumer_probe_closes_when_semantic_inspection_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.contracts.plugin_semantics import InputSemanticRequirements
+
+        class _RaisingProbe:
+            close_count = 0
+
+            def input_semantic_requirements(self) -> InputSemanticRequirements:
+                raise RuntimeError("semantic inspection failed")
+
+            def close(self) -> None:
+                self.close_count += 1
+
+        probe = _RaisingProbe()
+
+        class _Manager:
+            def create_transform(self, plugin_name: str, options: dict[str, object]) -> _RaisingProbe:
+                return probe
+
+        monkeypatch.setattr(
+            "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+            lambda: _Manager(),
+        )
+        state = CompositionState(
+            metadata=PipelineMetadata(name="probe-close"),
+            version=1,
+            edges=(),
+            source=SourceSpec(
+                plugin="csv",
+                on_success="probe_in",
+                options={"path": "data.csv", "schema": {"mode": "fixed", "fields": ["value: str"]}},
+                on_validation_failure="quarantine",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="probe",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="probe_in",
+                    on_success="sink",
+                    on_error="discard",
+                    options={"schema": {"mode": "observed"}, "operations": []},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            outputs=(),
+        )
+
+        with pytest.raises(RuntimeError, match="semantic inspection failed"):
+            validate_semantic_contracts(state)
+
+        assert probe.close_count == 1
+
     def test_compact_text_produces_conflict(self):
         state = _wardline_state(text_separator=" ", scrape_format="text")
         errors, contracts = validate_semantic_contracts(state)

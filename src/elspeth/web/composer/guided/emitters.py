@@ -593,14 +593,17 @@ def _node_cardinality(node: Any, executable_node: Any) -> _WireRowCardinality:
         executable_node.plugin,
         prepare_validation_probe_options(executable_node.options),
     )
-    output: Literal["one", "zero_or_one", "zero_or_many"]
-    if transform.creates_tokens:
-        output = "zero_or_many"
-    elif transform.can_drop_rows:
-        output = "zero_or_one"
-    else:
-        output = "one"
-    return {"input": "one", "output": output, "expected_output_count": None}
+    try:
+        output: Literal["one", "zero_or_one", "zero_or_many"]
+        if transform.creates_tokens:
+            output = "zero_or_many"
+        elif transform.can_drop_rows:
+            output = "zero_or_one"
+        else:
+            output = "one"
+        return {"input": "one", "output": output, "expected_output_count": None}
+    finally:
+        transform.close()
 
 
 def _build_wire_projection(

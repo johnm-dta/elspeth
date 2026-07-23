@@ -2772,6 +2772,85 @@ class TestSchemaContractValidation:
             on_write_failure="discard",
         )
 
+    def test_schema_validation_closes_every_constructed_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Every schema-inspection instance is owned and closed exactly once."""
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from tests.unit.web.composer._probe_lifecycle_helpers import TrackingPluginManager
+
+        tracking = TrackingPluginManager(get_shared_plugin_manager())
+        monkeypatch.setattr(
+            "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+            lambda: tracking,
+        )
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="mapper_in",
+                plugin="text",
+                options={"schema": {"mode": "fixed", "fields": ["text: str"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "mapper",
+                "mapper_in",
+                "main",
+                plugin="field_mapper",
+                options={
+                    "schema": {
+                        "mode": "fixed",
+                        "fields": ["body: str"],
+                        "required_fields": ["body"],
+                    },
+                    "mapping": {"text": "body"},
+                    "select_only": True,
+                    "strict": True,
+                },
+            )
+        )
+        state = state.with_output(self._make_output())
+
+        state.validate()
+
+        assert len(tracking.instances) >= 2, "fixture did not exercise the schema probe sites"
+        assert [instance.close_count for instance in tracking.instances] == [1] * len(tracking.instances)
+
+    def test_declared_field_type_probe_closes_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The standalone producer-field probe owns its constructed transform."""
+        from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+        from elspeth.web.composer.state import _producer_declared_field_type
+        from tests.unit.web.composer._probe_lifecycle_helpers import TrackingPluginManager
+
+        tracking = TrackingPluginManager(get_shared_plugin_manager())
+        monkeypatch.setattr(
+            "elspeth.plugins.infrastructure.manager.get_shared_plugin_manager",
+            lambda: tracking,
+        )
+        producer = self._make_transform(
+            "mapper",
+            "mapper_in",
+            "main",
+            plugin="field_mapper",
+            options={
+                "schema": {"mode": "fixed", "fields": ["body: str"]},
+                "mapping": {"text": "body"},
+                "select_only": True,
+                "strict": True,
+            },
+        )
+
+        field_type = _producer_declared_field_type(
+            "mapper",
+            "field_mapper",
+            {},
+            node_by_id={"mapper": producer},
+            field_name="body",
+        )
+
+        assert field_type == "str"
+        assert len(tracking.instances) == 1
+        assert tracking.instances[0].close_count == 1
+
     def _make_coalesce_schema_mode_state(
         self,
         *,

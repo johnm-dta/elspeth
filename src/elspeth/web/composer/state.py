@@ -646,13 +646,16 @@ def _producer_declared_field_type(
             return None
         raise
 
-    output_schema = transform._output_schema_config
-    if output_schema is None or output_schema.fields is None:
+    try:
+        output_schema = transform._output_schema_config
+        if output_schema is None or output_schema.fields is None:
+            return None
+        for field in output_schema.fields:
+            if field.name == field_name:
+                return field.field_type
         return None
-    for field in output_schema.fields:
-        if field.name == field_name:
-            return field.field_type
-    return None
+    finally:
+        transform.close()
 
 
 def _is_static_contract_probe_exception(exc: Exception) -> bool:
@@ -1579,24 +1582,29 @@ def _check_schema_contracts(
             return True
         return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
 
-    def _probe_transform_construction(plugin: str, options: Mapping[str, Any]) -> TransformProtocol | None:
-        """Construct ``plugin``'s transform, or None on an expected config failure.
+    def _probe_transform_output_schema(plugin: str, options: Mapping[str, Any]) -> tuple[bool, SchemaConfig | None]:
+        """Read ``plugin``'s output schema, closing the validation-only instance.
 
-        Genuine engine defects (non-config-probe exceptions) crash through —
-        that re-raise is this helper's contract, keeping the enclosing
-        non_raising boundary free of raises guarded by nodes-derived data.
+        The boolean distinguishes an expected construction failure from a
+        successfully constructed plugin that abstains from an output schema.
+        Genuine engine defects crash through. Once construction succeeds,
+        close() owns every success, return, and inspection-exception path.
         """
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
         try:
-            return get_shared_plugin_manager().create_transform(
+            transform = get_shared_plugin_manager().create_transform(
                 plugin,
                 prepare_validation_probe_options(options),
             )
         except Exception as exc:
             if not _is_config_probe_exception(exc):
                 raise
-            return None
+            return False, None
+        try:
+            return True, transform._output_schema_config
+        finally:
+            transform.close()
 
     def _effective_producer_vote(producer: ProducerEntry) -> tuple[bool, frozenset[str]]:
         """Return (participates, guarantees) for preview propagation.
@@ -1640,6 +1648,7 @@ def _check_schema_contracts(
 
         is_known_pass_through = producer_node.plugin in _known_pass_through_plugins()
 
+        transform: TransformProtocol | None = None
         try:
             from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 
@@ -1695,6 +1704,9 @@ def _check_schema_contracts(
             if is_known_pass_through:
                 return True, frozenset()
             return raw_participates, raw_guaranteed
+        finally:
+            if transform is not None:
+                transform.close()
 
         if is_pass_through_instance:
             base = output_schema_config.get_effective_guaranteed_fields() if output_schema_config is not None else frozenset()
@@ -1764,10 +1776,10 @@ def _check_schema_contracts(
             producer_node = node_by_id[producer.producer_id]
             if producer_node.node_type not in {"transform", "aggregation"} or producer_node.plugin is None:
                 return None
-            transform = _probe_transform_construction(producer_node.plugin, producer_node.options)
-            if transform is None:
+            constructed, computed_schema = _probe_transform_output_schema(producer_node.plugin, producer_node.options)
+            if not constructed:
                 return None
-            schema_config = transform._output_schema_config or raw_schema
+            schema_config = computed_schema or raw_schema
 
         if schema_config is None:
             return None
@@ -1950,11 +1962,14 @@ def _check_schema_contracts(
                 raise
             return _effective_producer_guarantees(producer)
 
-        output_config = transform._output_schema_config
-        if output_config is None or output_config.guaranteed_fields is None:
-            # No computed emit set available — fall back to declared.
-            return _effective_producer_guarantees(producer)
-        return frozenset(output_config.guaranteed_fields)
+        try:
+            output_config = transform._output_schema_config
+            if output_config is None or output_config.guaranteed_fields is None:
+                # No computed emit set available — fall back to declared.
+                return _effective_producer_guarantees(producer)
+            return frozenset(output_config.guaranteed_fields)
+        finally:
+            transform.close()
 
     # Tier-3 contract-config parse boundary. node.options / output.options are
     # composer/LLM/user-authored config read back from session state, so a
@@ -2414,11 +2429,7 @@ def _check_schema_contracts(
             # default and falls into the additive/loose-bound regime that we
             # cannot adjudicate without knowing the upstream emit set.
             continue
-        transform = _probe_transform_construction(node.plugin, node.options)
-        if transform is None:
-            continue
-
-        output_config = transform._output_schema_config
+        _constructed, output_config = _probe_transform_output_schema(node.plugin, node.options)
         if output_config is None:
             continue
 

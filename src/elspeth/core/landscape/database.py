@@ -117,7 +117,7 @@ def verify_sqlite_tier1_pragmas(engine: Engine, *, owner: str) -> None:
     if engine.dialect.name != "sqlite":
         return
 
-    with engine.connect() as conn:
+    with _maybe_serialize_shared_connection(engine), engine.connect() as conn:
         fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
         jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
 

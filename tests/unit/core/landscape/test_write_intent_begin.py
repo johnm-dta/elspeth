@@ -42,6 +42,7 @@ from elspeth.core.landscape.database import (
     WRITE_INTENT_OPTION,
     LandscapeDB,
     begin_write,
+    verify_sqlite_tier1_pragmas,
 )
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
@@ -456,6 +457,94 @@ class TestStaticPoolConnectionSerialization:
             assert [row[0] for row in rows] == ["run-static-0", "run-static-1"]
         finally:
             db.close()
+
+    def test_tier1_pragma_probe_waits_for_static_pool_write_transaction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Tier-1 verification must not drive a shared connection mid-write."""
+        from elspeth.core.landscape import database as landscape_database
+
+        db = LandscapeDB.in_memory()
+        write_started = threading.Event()
+        release_write = threading.Event()
+        probe_lock_contended = threading.Event()
+        probe_finished = threading.Event()
+        probe_progressed = threading.Event()
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def record_error(exc: BaseException) -> None:
+            with errors_lock:
+                errors.append(exc)
+
+        def writer() -> None:
+            try:
+                with db.write_connection():
+                    write_started.set()
+                    assert release_write.wait(timeout=10)
+            except BaseException as exc:
+                record_error(exc)
+
+        def probe() -> None:
+            try:
+                verify_sqlite_tier1_pragmas(db.engine, owner="concurrent probe")
+            except BaseException as exc:
+                record_error(exc)
+            finally:
+                probe_finished.set()
+                probe_progressed.set()
+
+        writer_thread = threading.Thread(target=writer)
+        probe_thread = threading.Thread(target=probe)
+        writer_thread_started = False
+        probe_thread_started = False
+        try:
+            writer_thread.start()
+            writer_thread_started = True
+            assert write_started.wait(timeout=10)
+
+            real_lock = landscape_database._shared_connection_lock(db.engine)
+            assert real_lock is not None
+
+            class RecordingLock:
+                def __enter__(self) -> None:
+                    acquired = real_lock.acquire(blocking=False)
+                    if acquired:
+                        real_lock.release()
+                        raise AssertionError("writer did not hold the StaticPool lock")
+                    probe_lock_contended.set()
+                    probe_progressed.set()
+                    real_lock.acquire()
+
+                def __exit__(self, *_args: Any) -> None:
+                    real_lock.release()
+
+            original_shared_connection_lock = landscape_database._shared_connection_lock
+
+            def recording_shared_connection_lock(engine: Engine) -> Any:
+                if engine is db.engine:
+                    return RecordingLock()
+                return original_shared_connection_lock(engine)
+
+            monkeypatch.setattr(landscape_database, "_shared_connection_lock", recording_shared_connection_lock)
+
+            probe_thread.start()
+            probe_thread_started = True
+            assert probe_progressed.wait(timeout=10)
+            assert probe_lock_contended.is_set(), f"Tier-1 probe bypassed the held StaticPool lock: {errors!r}"
+            assert not probe_finished.is_set()
+
+            release_write.set()
+        finally:
+            release_write.set()
+            if writer_thread_started:
+                writer_thread.join(timeout=10)
+            if probe_thread_started:
+                probe_thread.join(timeout=10)
+            db.close()
+
+        assert not writer_thread.is_alive()
+        assert not probe_thread.is_alive()
+        assert probe_finished.is_set()
+        assert errors == []
 
     def test_file_backed_engine_takes_no_static_pool_lock(self, tmp_path: Path) -> None:
         """Production (file-backed QueuePool) engines must NOT be given the

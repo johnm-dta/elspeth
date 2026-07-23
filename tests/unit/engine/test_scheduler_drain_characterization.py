@@ -62,6 +62,7 @@ from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
     run_coordination_events_table,
     run_workers_table,
+    runs_table,
     scheduler_events_table,
     token_parents_table,
     token_work_items_table,
@@ -132,6 +133,7 @@ def _build(
     lease_owner: str | None,
     register_leader: str | None = LEADER_OWNER,
     bind_leader_token: bool = False,
+    bind_run_coordination: bool = False,
     heartbeat_seconds: int = 60,
     mode: ProcessorMode = ProcessorMode.LEADER,
 ) -> tuple[RowProcessor, _RecordingScheduler, RecorderSetup, MockClock]:
@@ -163,6 +165,7 @@ def _build(
         scheduler_lease_owner=lease_owner,
         scheduler_heartbeat_seconds=heartbeat_seconds,
         coordination_token=(leader_coordination_token(setup.factory, setup.run_id) if bind_leader_token else None),
+        run_coordination=(setup.factory.run_coordination if bind_run_coordination else None),
         clock=clock,
         mode=mode,
     )
@@ -879,6 +882,75 @@ def test_non_recovery_drains_run_maintenance_every_interval() -> None:
     assert len(recoveries) == 1
     assert set(recoveries[0]) == {"now", "coordination_token"}
     assert recoveries[0]["coordination_token"].worker_id == LEADER_OWNER
+
+
+def test_production_maintenance_evicts_only_stale_same_run_follower() -> None:
+    processor, _spy, setup, clock = _build(
+        lease_owner=LEADER_OWNER,
+        bind_leader_token=True,
+        bind_run_coordination=True,
+    )
+    now = clock.now_utc()
+    same_run_target = "stale-same-run-follower"
+    leader_role_target = "stale-leader-role"
+    foreign_run_id = "run-drain-char-foreign"
+    foreign_target = "stale-foreign-run-follower"
+    with setup.db.engine.begin() as conn:
+        conn.execute(
+            insert(runs_table).values(
+                run_id=foreign_run_id,
+                started_at=now,
+                config_hash="config",
+                settings_json="{}",
+                canonical_version="v1",
+                status="running",
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        )
+        for worker_id, run_id, role in (
+            (same_run_target, setup.run_id, "follower"),
+            (leader_role_target, setup.run_id, "leader"),
+            (foreign_target, foreign_run_id, "follower"),
+        ):
+            conn.execute(
+                insert(run_workers_table).values(
+                    worker_id=worker_id,
+                    run_id=run_id,
+                    role=role,
+                    status="active",
+                    registered_at=now,
+                    heartbeat_expires_at=now - timedelta(hours=1),
+                )
+            )
+
+    assert processor.reap_expired_peer_leases() == 0
+
+    with setup.db.engine.connect() as conn:
+        statuses = dict(
+            conn.execute(
+                select(run_workers_table.c.worker_id, run_workers_table.c.status).where(
+                    run_workers_table.c.worker_id.in_((same_run_target, leader_role_target, foreign_target))
+                )
+            ).all()
+        )
+        evicted_worker_ids = (
+            conn.execute(
+                select(run_coordination_events_table.c.worker_id).where(
+                    run_coordination_events_table.c.run_id == setup.run_id,
+                    run_coordination_events_table.c.event_type == "worker_evict",
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert statuses == {
+        same_run_target: "evicted",
+        leader_role_target: "active",
+        foreign_target: "active",
+    }
+    assert evicted_worker_ids == [same_run_target]
 
 
 def test_immediate_enqueue_routes_registered_worker_to_strict_and_unregistered_to_explicit_legacy() -> None:

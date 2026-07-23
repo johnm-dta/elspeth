@@ -142,12 +142,14 @@ the seat and departs leader membership as one repository call. `RC-05` requires
 a live seat before follower registration; `RC-06` and `RC-07` terminalize
 membership by departure or leader-fenced dead-worker eviction.
 
-Two enforcement gaps are part of the current architecture, not hidden behind
-caller assumptions. `release_seat()` may update membership even when its seat
-CAS loses, and that membership predicate is not run-scoped. `evict_worker()`
-relies on RM-08 caller preselection rather than independently refusing the
-leader role. RC-04 and RC-07 therefore remain hard-gate gaps until the
-repository predicates and zero-mutation loser images are proved.
+The repository boundary now enforces RC-04 and RC-07 without relying on caller
+assumptions. `release_seat()` couples the exact run-scoped active leader
+membership transition to the winning seat CAS. `evict_worker()` positively
+requires a same-run follower, independently excludes the current leader, and
+repeats those guards in its terminal CAS; RM-08 caller preselection remains an
+efficiency/read-model boundary rather than the safety boundary. The broader
+run-coordination hard gate remains open until the independent-process,
+restart, and full read-model matrices are complete.
 
 Coordination events are mandatory state evidence for registration, takeover,
 release, admission, departure, and eviction. A normal RC-03 heartbeat updates

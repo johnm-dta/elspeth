@@ -882,11 +882,13 @@ class RunCoordinationRepository:
 
         SLICE-4 CONSUMER: the leader's housekeeping sweep. One leader-fenced
         IMMEDIATE transaction: (1) verify-and-extend epoch fence; (2) the
-        belt-and-braces no-unexpired-leases precondition (registry eviction
-        must never outrun a lease the item layer still considers possibly
-        alive); (3) CAS eviction gated on ``heartbeat_expires_at < now -
-        grace``. Rowcount 0 anywhere ⇒ benign skip (the worker heartbeated,
-        or still holds live leases). A fence miss raises
+        target must be an active same-run follower and not the current leader;
+        (3) the belt-and-braces no-unexpired-leases precondition (registry
+        eviction must never outrun a lease the item layer still considers
+        possibly alive); (4) CAS eviction gated on ``heartbeat_expires_at <
+        now - grace``. Rowcount 0 anywhere ⇒ benign skip (the worker
+        heartbeated, is not an eligible follower, or still holds live leases).
+        A fence miss raises
         :class:`RunLeadershipLostError` via :func:`fenced_leader_transaction`
         (refusal evented on a fresh connection).
         """
@@ -905,12 +907,17 @@ class RunCoordinationRepository:
             # and then observes the evicted status.  Without the lock, a
             # fenced renewal could commit around the unlocked reads here and
             # the eviction would land on a worker holding a live lease.
-            # An absent registry row is a benign skip — nothing to evict.
+            # An absent or ineligible registry row is a benign skip.  The
+            # positive follower-role guard and explicit current-leader
+            # exclusion are repeated in the terminal CAS below so caller
+            # preselection is never the safety boundary (RC-07).
             target_registered = conn.execute(
                 select(run_workers_table.c.worker_id)
                 .where(
                     run_workers_table.c.worker_id == target_worker_id,
                     run_workers_table.c.run_id == token.run_id,
+                    run_workers_table.c.role == "follower",
+                    run_workers_table.c.worker_id != token.worker_id,
                 )
                 .with_for_update(of=run_workers_table)
             ).one_or_none()
@@ -933,6 +940,8 @@ class RunCoordinationRepository:
                 .where(
                     run_workers_table.c.worker_id == target_worker_id,
                     run_workers_table.c.run_id == token.run_id,
+                    run_workers_table.c.role == "follower",
+                    run_workers_table.c.worker_id != token.worker_id,
                     run_workers_table.c.status == "active",
                     run_workers_table.c.heartbeat_expires_at < now - timedelta(seconds=grace_seconds),
                 )
@@ -990,10 +999,11 @@ class RunCoordinationRepository:
 
         Read-only (plain connection, no write lock). Used by the leader
         housekeeping sweep (§C.2 path 1, slice 4) to enumerate candidates for
-        individual ``evict_worker`` calls. Only ``status='active'`` rows are
-        returned — departed/evicted rows are already done. The grace_seconds
-        MUST equal the value passed to ``evict_worker`` so the liveness
-        definition is consistent across the read (who to attempt to evict)
+        individual ``evict_worker`` calls. Only ``role='follower'`` and
+        ``status='active'`` rows are returned; the current leader worker ID is
+        excluded independently. Departed/evicted rows are already done. The
+        grace_seconds MUST equal the value passed to ``evict_worker`` so the
+        liveness definition is consistent across the read (who to attempt to evict)
         and the write (the CAS guard inside evict_worker).
 
         Returns a tuple of worker_ids (deterministic order by registered_at).
@@ -1007,6 +1017,7 @@ class RunCoordinationRepository:
                 .where(
                     run_workers_table.c.run_id == run_id,
                     run_workers_table.c.status == "active",
+                    run_workers_table.c.role == "follower",
                     run_workers_table.c.worker_id != leader_worker_id,
                     run_workers_table.c.heartbeat_expires_at < grace_threshold,
                 )

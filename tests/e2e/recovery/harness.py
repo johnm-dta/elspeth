@@ -394,7 +394,7 @@ def _craft_crashed_lease(
             insert(run_workers_table).values(
                 worker_id=lease_owner,
                 run_id=crashed.run_id,
-                role="leader",
+                role="follower",
                 status="active",
                 registered_at=now,
                 heartbeat_expires_at=now,

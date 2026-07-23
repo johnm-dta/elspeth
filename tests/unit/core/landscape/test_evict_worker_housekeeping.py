@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine, insert, select
 
 from elspeth.contracts.coordination import (
@@ -64,11 +65,11 @@ def _make_engine() -> Tier1Engine:
     return Tier1Engine(engine)
 
 
-def _seed_run(engine: Tier1Engine) -> None:
+def _seed_run(engine: Tier1Engine, *, run_id: str = RUN_ID) -> None:
     with engine.begin() as conn:
         conn.execute(
             insert(runs_table).values(
-                run_id=RUN_ID,
+                run_id=run_id,
                 started_at=NOW,
                 config_hash="config",
                 settings_json="{}",
@@ -84,7 +85,7 @@ def _seed_run(engine: Tier1Engine) -> None:
         ):
             conn.execute(
                 insert(nodes_table).values(
-                    run_id=RUN_ID,
+                    run_id=run_id,
                     node_id=node_id,
                     plugin_name=plugin,
                     node_type=node_type,
@@ -128,16 +129,38 @@ def _seed_follower(
     worker_id: str,
     now: datetime = NOW,
     heartbeat_expires_at: datetime,
+    run_id: str = RUN_ID,
 ) -> None:
     """Seed an active follower row."""
     with engine.begin() as conn:
         conn.execute(
             insert(run_workers_table).values(
                 worker_id=worker_id,
-                run_id=RUN_ID,
+                run_id=run_id,
                 role="follower",
                 status="active",
                 registered_at=now,
+                heartbeat_expires_at=heartbeat_expires_at,
+            )
+        )
+
+
+def _seed_leader_role_worker(
+    engine: Tier1Engine,
+    *,
+    worker_id: str,
+    registered_at: datetime,
+    heartbeat_expires_at: datetime,
+) -> None:
+    """Seed an active leader-role row that does not own the current seat."""
+    with engine.begin() as conn:
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=worker_id,
+                run_id=RUN_ID,
+                role="leader",
+                status="active",
+                registered_at=registered_at,
                 heartbeat_expires_at=heartbeat_expires_at,
             )
         )
@@ -298,6 +321,92 @@ class TestEvictWorkerHousekeepingIndividualNotBulk:
             grace_seconds=GRACE,
         )
         assert dead == (dead_follower,)  # tuple, deterministic by registered_at
+
+    def test_dead_non_leader_workers_excludes_non_current_leader_role(self) -> None:
+        engine = _make_engine()
+        coord = RunCoordinationRepository(engine)
+        _seed_run(engine)
+
+        leader_id = "leader-current"
+        _seed_leader(engine, leader_id=leader_id, now=NOW)
+        expired = NOW - timedelta(seconds=GRACE + 10)
+        _seed_leader_role_worker(
+            engine,
+            worker_id="leader-role-stale",
+            registered_at=NOW + timedelta(seconds=1),
+            heartbeat_expires_at=expired,
+        )
+        _seed_follower(
+            engine,
+            worker_id="follower-stale",
+            now=NOW + timedelta(seconds=2),
+            heartbeat_expires_at=expired,
+        )
+
+        dead = coord.dead_non_leader_workers(
+            run_id=RUN_ID,
+            leader_worker_id=leader_id,
+            now=NOW + timedelta(seconds=200),
+            grace_seconds=GRACE,
+        )
+
+        assert dead == ("follower-stale",)
+
+    @pytest.mark.parametrize("target_is_current", [True, False], ids=["current-leader", "other-leader-role"])
+    def test_evict_worker_refuses_leader_role_target(self, *, target_is_current: bool) -> None:
+        engine = _make_engine()
+        coord = RunCoordinationRepository(engine)
+        _seed_run(engine)
+
+        token = _seed_leader(engine, leader_id="leader-current", now=NOW)
+        target = token.worker_id if target_is_current else "leader-role-stale"
+        if not target_is_current:
+            _seed_leader_role_worker(
+                engine,
+                worker_id=target,
+                registered_at=NOW + timedelta(seconds=1),
+                heartbeat_expires_at=NOW - timedelta(seconds=GRACE + 10),
+            )
+
+        result = coord.evict_worker(
+            token=token,
+            target_worker_id=target,
+            now=NOW + timedelta(seconds=200),
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
+        )
+
+        assert result is False
+        assert _worker_status(engine, target) == "active"
+        assert _coordination_events(engine, "worker_evict") == []
+
+    def test_evict_worker_refuses_foreign_run_target(self) -> None:
+        engine = _make_engine()
+        coord = RunCoordinationRepository(engine)
+        _seed_run(engine)
+
+        token = _seed_leader(engine, leader_id="leader-current", now=NOW)
+        foreign_run_id = "run-foreign"
+        target = "foreign-follower-stale"
+        _seed_run(engine, run_id=foreign_run_id)
+        _seed_follower(
+            engine,
+            worker_id=target,
+            heartbeat_expires_at=NOW - timedelta(seconds=GRACE + 10),
+            run_id=foreign_run_id,
+        )
+
+        result = coord.evict_worker(
+            token=token,
+            target_worker_id=target,
+            now=NOW + timedelta(seconds=200),
+            grace_seconds=GRACE,
+            window_seconds=WINDOW,
+        )
+
+        assert result is False
+        assert _worker_status(engine, target) == "active"
+        assert _coordination_events(engine, "worker_evict") == []
 
     def test_evict_worker_cas_miss_on_fresh_heartbeat_returns_false(self) -> None:
         """If the target worker heartbeated between the dead-list scan and the

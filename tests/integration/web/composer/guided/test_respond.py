@@ -3039,6 +3039,9 @@ class TestStep2IntraStep:
         invocation = (new_messages[0].tool_calls or ())[0]["invocation"]
         assert invocation["tool_name"] == "set_pipeline"
         assert invocation["status"] == "success"
+        result_payload = json.loads(invocation["result_canonical"])
+        assert result_payload["pipeline_content_hash_schema"] == "composer.pipeline-dispatch-result.v1"
+        assert len(result_payload["pipeline_content_hash"]) == 64
         assert "accept-audit-rollback.jsonl" not in repr(new_messages[0].tool_calls)
         assert asyncio.run(composer_test_client.app.state.session_service.list_proposal_events(UUID(session_id))) == events_before
         state_after = asyncio.run(composer_test_client.app.state.session_service.get_current_state(UUID(session_id)))
@@ -3046,45 +3049,100 @@ class TestStep2IntraStep:
         proposals = asyncio.run(composer_test_client.app.state.session_service.list_composition_proposals(UUID(session_id)))
         assert len(proposals) == 1 and proposals[0].status == "pending"
 
-    def test_confirm_wiring_prepare_failure_persists_its_dispatch_evidence_with_the_failed_operation(
+    def test_confirm_wiring_dispatch_record_failure_persists_bound_dispatch_for_retry(
         self,
         composer_test_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from elspeth.contracts.freeze import deep_thaw
         from elspeth.web.composer import pipeline_commit
-        from elspeth.web.composer.audit import begin_dispatch, finish_success
-        from elspeth.web.composer.pipeline_commit import PipelineCommitError
+
+        session_id = _create_session(composer_test_client)
+        self._stage_proposal(composer_test_client, session_id, filename="confirm-record-audit.jsonl")
+        reviewed = _review_wiring(composer_test_client, session_id)
+        turn = reviewed["next_turn"]
+        service = composer_test_client.app.state.session_service
+        original_execute = pipeline_commit.execute_tool
+        executions = 0
+        record_attempts = 0
+
+        def count_executions(*args: Any, **kwargs: Any):
+            nonlocal executions
+            executions += 1
+            return original_execute(*args, **kwargs)
+
+        async def fail_first_record(_command: Any):
+            nonlocal record_attempts
+            record_attempts += 1
+            raise RuntimeError("safe failure before durable dispatch record")
+
+        monkeypatch.setattr(pipeline_commit, "execute_tool", count_executions)
+        monkeypatch.setattr(service, "record_guided_pipeline_dispatch", fail_first_record)
+
+        failed = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": turn["payload"]["proposal_id"],
+                "draft_hash": turn["payload"]["draft_hash"],
+                "chosen": ["confirm_wiring"],
+            },
+        )
+
+        assert failed.status_code == 500, failed.json()
+        messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+        dispatches = [
+            envelope
+            for message in messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
+        ]
+        assert len(dispatches) == 1
+        persisted_result = json.loads(dispatches[0]["invocation"]["result_canonical"])
+        assert persisted_result["pipeline_content_hash_schema"] == "composer.pipeline-dispatch-result.v1"
+        assert len(persisted_result["pipeline_content_hash"]) == 64
+
+        retried = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": turn["payload"]["proposal_id"],
+                "draft_hash": turn["payload"]["draft_hash"],
+                "chosen": ["confirm_wiring"],
+            },
+        )
+
+        assert retried.status_code == 200, retried.json()
+        assert executions == 1
+        assert record_attempts == 1
+        proposals = asyncio.run(service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "committed"
+
+    def test_confirm_wiring_prepare_failure_persists_bound_dispatch_for_retry(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from elspeth.web.composer import pipeline_commit
 
         session_id = _create_session(composer_test_client)
         self._stage_proposal(composer_test_client, session_id, filename="confirm-prepare-audit.jsonl")
         reviewed = _review_wiring(composer_test_client, session_id)
         turn = reviewed["next_turn"]
         operation_id = str(uuid4())
+        original_execute = pipeline_commit.execute_tool
+        executions = 0
+        expected_executor_content_hash: str | None = None
 
-        async def fail_after_recording_dispatch(**kwargs: Any):
-            authority = kwargs["authority"]
-            recorder = kwargs["recorder"]
-            audit = begin_dispatch(
-                authority.row.tool_call_id,
-                "set_pipeline",
-                deep_thaw(authority.proposal.pipeline),
-                version_before=0,
-                actor=kwargs["actor"],
-            )
-            invocation = finish_success(
-                audit,
-                result_payload={"success": False, "failure_code": "validation_failed"},
-                version_after=0,
-            )
-            recorder.record(invocation)
-            raise PipelineCommitError(
-                "pipeline proposal failed current executor validation",
-                code="VALIDATION_FAILED",
-                invocation=invocation,
-            )
+        def fail_executor_validation(*args: Any, **kwargs: Any):
+            nonlocal executions, expected_executor_content_hash
+            executions += 1
+            result = original_execute(*args, **kwargs)
+            expected_executor_content_hash = composition_content_hash(result.updated_state)
+            return replace(result, success=False)
 
-        monkeypatch.setattr(pipeline_commit, "prepare_pipeline_proposal_commit", fail_after_recording_dispatch)
+        monkeypatch.setattr(pipeline_commit, "execute_tool", fail_executor_validation)
 
         failed = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
@@ -3110,7 +3168,11 @@ class TestStep2IntraStep:
             if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
         ]
         assert len(dispatches) == 1
-        assert dispatches[0]["invocation"]["status"] == "success"
+        persisted_invocation = dispatches[0]["invocation"]
+        assert persisted_invocation["status"] == "success"
+        persisted_result = json.loads(persisted_invocation["result_canonical"])
+        assert persisted_result["pipeline_content_hash_schema"] == "composer.pipeline-dispatch-result.v1"
+        assert persisted_result["pipeline_content_hash"] == expected_executor_content_hash
         with composer_test_client.app.state.session_engine.connect() as conn:
             operation = (
                 conn.execute(
@@ -3123,6 +3185,30 @@ class TestStep2IntraStep:
             )
         assert operation["status"] == "failed"
         assert operation["failure_code"] == "operation_failed"
+
+        retried = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "operation_id": str(uuid4()),
+                "turn_token": turn["turn_token"],
+                "proposal_id": turn["payload"]["proposal_id"],
+                "draft_hash": turn["payload"]["draft_hash"],
+                "chosen": ["confirm_wiring"],
+            },
+        )
+
+        assert retried.status_code == 200, retried.json()
+        assert executions == 1
+        proposals = asyncio.run(service.list_composition_proposals(UUID(session_id)))
+        assert len(proposals) == 1 and proposals[0].status == "committed"
+        messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+        dispatches = [
+            envelope
+            for message in messages
+            for envelope in (message.tool_calls or ())
+            if envelope.get("invocation", {}).get("tool_name") == "set_pipeline"
+        ]
+        assert len(dispatches) == 1
 
     @pytest.mark.parametrize("revalidation", ("message", "mechanical"))
     def test_confirm_wiring_revalidates_deferred_authority_before_any_write(

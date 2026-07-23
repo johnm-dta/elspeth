@@ -2226,6 +2226,7 @@ async def post_guided_respond(
     from elspeth.web.composer.guided.state_machine import GuidedProposalRef
     from elspeth.web.composer.pipeline_commit import (
         PipelineCommitConfig,
+        PipelineCommitError,
         PreparedPipelineCommit,
         RecoveredPipelineCommit,
         prepare_pipeline_proposal_commit,
@@ -3476,6 +3477,13 @@ async def post_guided_respond(
                                 ),
                                 state=cancellation_state,
                             )
+                        except PipelineCommitError as exc:
+                            if exc.invocation is not None:
+                                planner_recorder.record(exc.invocation)
+                            else:
+                                for invocation in dispatch_recorder.invocations:
+                                    planner_recorder.record(invocation)
+                            raise
                         except BaseException:
                             for invocation in dispatch_recorder.invocations:
                                 planner_recorder.record(invocation)
@@ -3497,8 +3505,7 @@ async def post_guided_respond(
                                     state=cancellation_state,
                                 )
                             except BaseException:
-                                for invocation in dispatch_recorder.invocations:
-                                    planner_recorder.record(invocation)
+                                planner_recorder.record(prepared.invocation)
                                 raise
                         elif type(prepared) is not RecoveredPipelineCommit:
                             raise AuditIntegrityError("guided wire confirmation produced an unsupported commit preparation")

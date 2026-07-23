@@ -2022,7 +2022,8 @@ exporters:
     retain_initial_value_of_delta_metric: true
     resource_to_telemetry_conversion:
       enabled: true
-  awsxray/elspeth: {}
+  awsxray/elspeth:
+    indexed_attributes: [run_id, status]
 service:
   pipelines:
     metrics/elspeth:
@@ -2043,9 +2044,11 @@ scenario-owned `OPERATOR_METRICS_LOG_GROUP`, and extracts them into the
 `ELSPETH/Operator` CloudWatch namespace. `NoDimensionRollup` prevents the
 exporter from silently creating additional dimension sets, and retaining the
 first delta value preserves low-frequency acceptance and failure counters.
-The `awsxray` exporter sends traces to X-Ray. Both exporters use the default
-AWS credential chain and therefore the ECS task role; neither accepts an
-endpoint, role override, profile, or static credential here.
+The `awsxray` exporter sends traces to X-Ray and indexes only the bounded
+`run_id` and `status` lifecycle attributes that the acceptance query reads as
+annotations. Both exporters use the default AWS credential chain and therefore
+the ECS task role; neither accepts an endpoint, role override, profile, or
+static credential here.
 
 Production permits only these two supported exporters. The unsupported
 `awscloudwatch` collector exporter must not be used. Diagnostic `debug` output

@@ -177,7 +177,7 @@ def test_runbook_preserves_versioned_hashed_bounded_agent_config() -> None:
         "retain_initial_value_of_delta_metric": True,
         "resource_to_telemetry_conversion": {"enabled": True},
     }
-    assert otel["exporters"]["awsxray/elspeth"] == {}
+    assert otel["exporters"]["awsxray/elspeth"] == {"indexed_attributes": ["run_id", "status"]}
     assert "OPERATOR_METRICS_LOG_GROUP" in SCENARIO_ASSIGNMENT_NAMES
     assert otel["service"]["pipelines"] == {
         "metrics/elspeth": {

@@ -7,11 +7,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from opentelemetry.sdk.metrics.export import MetricExportResult
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import MetricExporter, MetricExportResult, MetricsData, PeriodicExportingMetricReader
 
 from elspeth.contracts.events import RunStarted
 from elspeth.core.config import TelemetrySettings
 from elspeth.telemetry.manager import TelemetryManager
+from elspeth.web import operator_telemetry
 from elspeth.web.config import WebSettings
 from elspeth.web.operator_telemetry import (
     AWS_OTLP_ENDPOINT,
@@ -191,6 +193,51 @@ class _FakeExporter:
 
     def shutdown(self, timeout_millis: float = 30_000, **_kwargs: object) -> None:
         del timeout_millis
+
+
+class _CapturingMetricExporter(MetricExporter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.exports: list[MetricsData] = []
+
+    def export(self, metrics_data: MetricsData, timeout_millis: float = 10_000, **_kwargs: object) -> MetricExportResult:
+        del timeout_millis
+        self.exports.append(metrics_data)
+        return MetricExportResult.SUCCESS
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        del timeout_millis
+        return True
+
+    def shutdown(self, timeout_millis: float = 30_000, **_kwargs: object) -> None:
+        del timeout_millis
+
+
+def test_aws_metric_export_preserves_only_bounded_acceptance_correlation() -> None:
+    inner = _CapturingMetricExporter()
+    exporter = operator_telemetry._HealthTrackingMetricExporter(inner, operator_telemetry._ExportHealth())
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=60_000)
+    provider = MeterProvider(metric_readers=[reader], shutdown_on_exit=False)
+    try:
+        counter = provider.get_meter("acceptance-contract").create_counter("operator.acceptance.sentinel")
+        counter.add(
+            17,
+            attributes={
+                "elspeth.acceptance.namespace": "acceptance-run-a",
+                "elspeth.acceptance.sentinel": "17",
+                "run_id": "must-not-become-a-metric-dimension",
+            },
+        )
+
+        assert provider.force_flush(timeout_millis=5_000) is True
+        assert len(inner.exports) == 1
+        point = inner.exports[0].resource_metrics[0].scope_metrics[0].metrics[0].data.data_points[0]  # type: ignore[union-attr]
+        assert point.attributes == {
+            "elspeth.acceptance.namespace": "acceptance-run-a",
+            "elspeth.acceptance.sentinel": "17",
+        }
+    finally:
+        provider.shutdown()
 
 
 @dataclass

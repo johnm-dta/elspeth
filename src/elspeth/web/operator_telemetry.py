@@ -44,6 +44,8 @@ SAFE_CLOUDWATCH_METRIC_ATTRIBUTES: frozenset[str] = frozenset(
         "completion_path",
         "completion_verb",
         "component_type",
+        "elspeth.acceptance.namespace",
+        "elspeth.acceptance.sentinel",
         "failure_class",
         "from_mode",
         "kind",

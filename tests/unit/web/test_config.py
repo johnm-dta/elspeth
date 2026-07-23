@@ -1242,6 +1242,17 @@ class TestOIDCBlankStringRejection:
                     **self._COMPOSER_DEFAULTS,
                 )
 
+    def test_client_id_audience_claim_rejects_browser_backend_client_mismatch(self) -> None:
+        with pytest.raises(ValidationError, match="oidc_audience must match oidc_client_id"):
+            WebSettings(
+                auth_provider="oidc",
+                oidc_issuer="https://issuer.example.com",
+                oidc_audience="backend-client",
+                oidc_client_id="browser-client",
+                oidc_audience_claim="client_id",
+                **self._COMPOSER_DEFAULTS,
+            )
+
     def test_invalid_audience_claim_mode_is_rejected(self) -> None:
         with pytest.raises(ValidationError, match=r"aud|client_id"):
             WebSettings(

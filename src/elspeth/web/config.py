@@ -708,6 +708,8 @@ class WebSettings(BaseModel):
             ]
             if missing:
                 raise ValueError(f"OIDC auth requires: {', '.join(missing)}")
+            if self.oidc_audience_claim == "client_id" and self.oidc_audience != self.oidc_client_id:
+                raise ValueError("oidc_audience must match oidc_client_id when oidc_audience_claim is client_id")
             assert self.oidc_issuer is not None
             object.__setattr__(self, "oidc_issuer", validate_oidc_issuer(self.oidc_issuer))
             if (self.oidc_authorization_endpoint is None) != (self.oidc_token_endpoint is None):

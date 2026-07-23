@@ -278,7 +278,7 @@ def _guarded_state() -> CompositionState:
                 on_error="discard",
                 options={
                     "profile": "content-default",
-                    "fields": ["response"],
+                    "fields": ["llm_response"],
                     "source": "OUTPUT",
                     "schema": {"mode": "observed", "fields": None},
                 },

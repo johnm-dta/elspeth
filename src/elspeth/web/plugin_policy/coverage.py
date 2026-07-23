@@ -6,9 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from jinja2 import TemplateSyntaxError
+
 from elspeth.contracts.enums import Determinism
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.plugin_capabilities import ControlRole, PluginCapability
+from elspeth.core.templates import extract_jinja2_field_usage
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError, get_shared_plugin_manager
 from elspeth.web.composer.state import CompositionState, NodeSpec
 
@@ -82,6 +85,8 @@ def node_has_blocking_control(
     node: NodeSpec,
     capability: PluginCapability,
     role: ControlRole,
+    *,
+    protected_fields: frozenset[str] | None = None,
 ) -> bool:
     """Credit only registered typed blocking controls with effective config."""
     if node.plugin is None:
@@ -93,11 +98,108 @@ def node_has_blocking_control(
         )
     except PluginNotFoundError:
         return False
-    return plugin_cls.is_effective_blocking_control(
+    effective = plugin_cls.is_effective_blocking_control(
         capability=capability,
         role=role,
         options=node.options,
     )
+    if not effective:
+        return False
+    return protected_fields is None or _control_covers_fields(node, protected_fields)
+
+
+def _control_covers_fields(node: NodeSpec, protected_fields: frozenset[str]) -> bool:
+    """Return whether a control scans every field whose content it protects."""
+    if not protected_fields:
+        return False
+    configured = node.options.get("fields")
+    if configured == "all":
+        return True
+    if isinstance(configured, str):
+        scanned_fields = frozenset({configured}) if configured.strip() else frozenset()
+    elif isinstance(configured, Sequence) and not isinstance(configured, (str, bytes)):
+        if any(not isinstance(field, str) or not field.strip() for field in configured):
+            return False
+        scanned_fields = frozenset(configured)
+    else:
+        return False
+    return protected_fields.issubset(scanned_fields)
+
+
+def _llm_input_fields(node: NodeSpec) -> frozenset[str]:
+    """Return row fields interpolated into LLM prompts, or empty when unprovable."""
+    prompt_fields = _template_input_fields(node.options.get("prompt_template"))
+    if prompt_fields is None:
+        return frozenset()
+    fields = set(prompt_fields)
+
+    queries = node.options.get("queries")
+    if queries is None:
+        return frozenset(fields)
+    if isinstance(queries, Mapping):
+        definitions = tuple(queries.values())
+    elif isinstance(queries, Sequence) and not isinstance(queries, (str, bytes)):
+        definitions = tuple(queries)
+    else:
+        return frozenset()
+
+    for definition in definitions:
+        if not isinstance(definition, Mapping):
+            return frozenset()
+        input_fields = definition.get("input_fields")
+        if not isinstance(input_fields, Mapping):
+            return frozenset()
+        row_fields = tuple(input_fields.values())
+        if any(not isinstance(field, str) or not field.strip() for field in row_fields):
+            return frozenset()
+        fields.update(cast("tuple[str, ...]", row_fields))
+        template = definition.get("template")
+        if template is not None:
+            query_template_fields = _template_input_fields(template)
+            if query_template_fields is None:
+                return frozenset()
+            fields.update(query_template_fields)
+    return frozenset(fields)
+
+
+def _template_input_fields(template: object) -> frozenset[str] | None:
+    """Extract static row-field accesses; dynamic or malformed templates are unprovable."""
+    if not isinstance(template, str):
+        return None
+    try:
+        usage = extract_jinja2_field_usage(template)
+    except TemplateSyntaxError:
+        return None
+    if usage.dynamic_accesses:
+        return None
+    return usage.fields
+
+
+def _llm_output_fields(node: NodeSpec) -> frozenset[str]:
+    """Return the raw model-response fields emitted by this LLM config."""
+    response_field = node.options.get("response_field", "llm_response")
+    if not isinstance(response_field, str) or not response_field.strip():
+        return frozenset()
+    queries = node.options.get("queries")
+    if queries is None:
+        return frozenset({response_field})
+
+    query_names: list[str] = []
+    if isinstance(queries, Mapping):
+        query_names.extend(name for name in queries if isinstance(name, str) and name.strip())
+        if len(query_names) != len(queries):
+            return frozenset()
+    elif isinstance(queries, Sequence) and not isinstance(queries, (str, bytes)):
+        for query in queries:
+            if not isinstance(query, Mapping):
+                return frozenset()
+            name = query.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return frozenset()
+            query_names.append(name)
+    else:
+        return frozenset()
+    return frozenset(f"{name}_{response_field}" for name in query_names)
 
 
 def node_has_capability(node: NodeSpec, capability: PluginCapability) -> bool:
@@ -125,11 +227,13 @@ def control_coverage_findings(
         if not node_has_capability(node, PluginCapability.LLM):
             continue
         if capability is PluginCapability.PROMPT_SHIELD:
+            protected_fields = _llm_input_fields(node)
             covered = _stream_proves_input_control(
                 node.input,
                 graph,
                 source_streams=source_streams,
                 visited=frozenset(),
+                protected_fields=protected_fields,
             )
             if not covered:
                 findings.append(
@@ -141,6 +245,7 @@ def control_coverage_findings(
                     )
                 )
         else:
+            protected_fields = _llm_output_fields(node)
             outputs = _node_output_streams(node)
             covered = bool(outputs) and all(
                 _stream_proves_output_control(
@@ -148,6 +253,7 @@ def control_coverage_findings(
                     graph,
                     sink_streams=sink_streams,
                     visited=frozenset({node.id}),
+                    protected_fields=protected_fields,
                 )
                 for stream in outputs
             )
@@ -195,6 +301,7 @@ def _stream_proves_input_control(
     *,
     source_streams: frozenset[str],
     visited: frozenset[str],
+    protected_fields: frozenset[str],
 ) -> bool:
     if not isinstance(stream, str) or not stream:
         return False
@@ -206,6 +313,7 @@ def _stream_proves_input_control(
                 graph,
                 source_streams=source_streams,
                 visited=visited,
+                protected_fields=protected_fields,
             )
             for producer in producers
         )
@@ -219,11 +327,17 @@ def _producer_proves_input_control(
     *,
     source_streams: frozenset[str],
     visited: frozenset[str],
+    protected_fields: frozenset[str],
 ) -> bool:
     if producer.id in visited:
         return False
     visited = visited | {producer.id}
-    if node_has_blocking_control(producer, PluginCapability.PROMPT_SHIELD, ControlRole.INPUT):
+    if node_has_blocking_control(
+        producer,
+        PluginCapability.PROMPT_SHIELD,
+        ControlRole.INPUT,
+        protected_fields=protected_fields,
+    ):
         return True
     if producer.node_type == "queue":
         predecessors = graph.queue_predecessors.get(producer.id, ())
@@ -233,6 +347,7 @@ def _producer_proves_input_control(
                 graph,
                 source_streams=source_streams,
                 visited=visited,
+                protected_fields=protected_fields,
             )
             for predecessor in predecessors
         )
@@ -249,6 +364,7 @@ def _producer_proves_input_control(
         graph,
         source_streams=source_streams,
         visited=visited,
+        protected_fields=protected_fields,
     )
 
 
@@ -258,6 +374,7 @@ def _stream_proves_output_control(
     *,
     sink_streams: frozenset[str],
     visited: frozenset[str],
+    protected_fields: frozenset[str],
 ) -> bool:
     if stream in _NON_PRODUCED_ROUTE_TARGETS:
         return True
@@ -272,6 +389,7 @@ def _stream_proves_output_control(
             graph,
             sink_streams=sink_streams,
             visited=visited,
+            protected_fields=protected_fields,
         )
         for consumer in consumers
     )
@@ -283,11 +401,17 @@ def _consumer_proves_output_control(
     *,
     sink_streams: frozenset[str],
     visited: frozenset[str],
+    protected_fields: frozenset[str],
 ) -> bool:
     if consumer.id in visited:
         return False
     visited = visited | {consumer.id}
-    if node_has_blocking_control(consumer, PluginCapability.CONTENT_SAFETY, ControlRole.OUTPUT):
+    if node_has_blocking_control(
+        consumer,
+        PluginCapability.CONTENT_SAFETY,
+        ControlRole.OUTPUT,
+        protected_fields=protected_fields,
+    ):
         return True
     outputs = _node_output_streams(consumer)
     return bool(outputs) and all(
@@ -296,6 +420,7 @@ def _consumer_proves_output_control(
             graph,
             sink_streams=sink_streams,
             visited=visited,
+            protected_fields=protected_fields,
         )
         for stream in outputs
     )

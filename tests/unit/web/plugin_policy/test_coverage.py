@@ -67,8 +67,26 @@ def _state(*nodes: NodeSpec, source_target: str = "llm_in", sinks: tuple[str, ..
     )
 
 
-def _llm(input_stream: str = "llm_in", on_success: str = "main") -> NodeSpec:
-    return _node("judge", "llm", input_stream, on_success)
+def _llm(
+    input_stream: str = "llm_in",
+    on_success: str = "main",
+    *,
+    prompt_fields: tuple[str, ...] = ("prompt",),
+    declared_prompt_fields: tuple[str, ...] | None = None,
+    response_field: str = "llm_response",
+) -> NodeSpec:
+    declared_fields = prompt_fields if declared_prompt_fields is None else declared_prompt_fields
+    return _node(
+        "judge",
+        "llm",
+        input_stream,
+        on_success,
+        options={
+            "prompt_template": " ".join(f"{{{{ row.{field} }}}}" for field in prompt_fields),
+            "required_input_fields": list(declared_fields),
+            "response_field": response_field,
+        },
+    )
 
 
 def _shield(
@@ -77,9 +95,16 @@ def _shield(
     on_success: str,
     *,
     detect_only: bool = False,
+    fields: tuple[str, ...] = ("prompt",),
     plugin: str = "azure_prompt_shield",
 ) -> NodeSpec:
-    return _node(node_id, plugin, input_stream, on_success, options={"detect_only": detect_only})
+    return _node(
+        node_id,
+        plugin,
+        input_stream,
+        on_success,
+        options={"detect_only": detect_only, "fields": list(fields)},
+    )
 
 
 def _safety(
@@ -88,9 +113,16 @@ def _safety(
     on_success: str,
     *,
     detect_only: bool = False,
+    fields: tuple[str, ...] = ("llm_response",),
     plugin: str = "azure_content_safety",
 ) -> NodeSpec:
-    return _node(node_id, plugin, input_stream, on_success, options={"detect_only": detect_only})
+    return _node(
+        node_id,
+        plugin,
+        input_stream,
+        on_success,
+        options={"detect_only": detect_only, "fields": list(fields)},
+    )
 
 
 @pytest.mark.parametrize(
@@ -118,6 +150,39 @@ def _safety(
 )
 def test_prompt_shield_input_coverage(state: CompositionState, covered: bool) -> None:
     assert (control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()) is covered
+
+
+@pytest.mark.parametrize(
+    ("shield_fields", "covered"),
+    [
+        (("benign_label",), False),
+        (("untrusted_prompt",), True),
+    ],
+)
+def test_prompt_shield_input_coverage_requires_llm_field_scope(
+    shield_fields: tuple[str, ...],
+    covered: bool,
+) -> None:
+    state = _state(
+        _shield("shield", "raw", "llm_in", fields=shield_fields),
+        _llm(prompt_fields=("untrusted_prompt",)),
+        source_target="raw",
+    )
+
+    assert (control_coverage_findings(state, PluginCapability.PROMPT_SHIELD) == ()) is covered
+
+
+def test_prompt_shield_input_coverage_uses_actual_template_fields() -> None:
+    state = _state(
+        _shield("shield", "raw", "llm_in", fields=("benign_label",)),
+        _llm(
+            prompt_fields=("untrusted_prompt",),
+            declared_prompt_fields=("benign_label",),
+        ),
+        source_target="raw",
+    )
+
+    assert control_coverage_findings(state, PluginCapability.PROMPT_SHIELD)
 
 
 def test_prompt_shield_queue_fan_in_requires_every_path() -> None:
@@ -190,6 +255,25 @@ def test_extracted_graph_preserves_error_stream_producers() -> None:
     ],
 )
 def test_content_safety_output_coverage(state: CompositionState, covered: bool) -> None:
+    assert (control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()) is covered
+
+
+@pytest.mark.parametrize(
+    ("safety_fields", "covered"),
+    [
+        (("benign_label",), False),
+        (("model_answer",), True),
+    ],
+)
+def test_content_safety_output_coverage_requires_llm_field_scope(
+    safety_fields: tuple[str, ...],
+    covered: bool,
+) -> None:
+    state = _state(
+        _llm(on_success="safe_in", response_field="model_answer"),
+        _safety("safety", "safe_in", "main", fields=safety_fields),
+    )
+
     assert (control_coverage_findings(state, PluginCapability.CONTENT_SAFETY) == ()) is covered
 
 

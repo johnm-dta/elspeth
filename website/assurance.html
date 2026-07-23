@@ -62,17 +62,16 @@
     <h2 class="vh">Assurance properties</h2>
     <div class="features" style="margin-top:8px">
       <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h3>Landscape audit trail</h3><p>Complete row lineage with content hashes. When signing is enabled, exports include an HMAC-SHA256 signature and running hash for chain-of-custody review.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="refresh-cw"></i></span><h3>Recoverable publication</h3><p>Built-in file, object, database, Dataverse, and Chroma sinks persist immutable plans before external publication. Audit exports use the same durable boundary.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="refresh-cw"></i></span><h3>Recoverable publication</h3><p>ELSPETH stores an immutable plan before external publication through a built-in destination. This covers files, object storage, databases, Dataverse, Chroma, and audit exports.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="git-compare-arrows"></i></span><h3>Two-axis terminal model</h3><p>Lifecycle outcome and path/provenance are separated — "did it succeed?" and "how did it get there?" are both explicit.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h3>Declaration-trust + VAL</h3><p>Plugin declarations the graph builder trusts are checked against runtime VAL manifests and invariant tests.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h3>Declaration-trust + VAL</h3><p>Plugin declarations are checked against runtime VAL manifests and invariant tests. Web execution responses reject unknown fields so contract drift fails loudly.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="fingerprint"></i></span><h3>Secret discipline</h3><p>Secrets resolve at execution boundaries, are fingerprinted for audit, and are never persisted as raw values.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="lock"></i></span><h3>Strict response schemas</h3><p>Web execution responses forbid unknown fields, so internal drift fails loudly instead of being silently coerced.</p></div>
       <div class="feature"><span class="fi"><i data-lucide="list-checks"></i></span><h3>Terminal statuses</h3><p>completed · completed_with_failures · failed · empty · cancelled — run accounting never collapses to one number.</p></div>
     </div>
     <div class="surface-card" style="margin-top:16px">
       <h3>Resume only after reconciliation</h3>
-      <p>If a worker loses an external response, ELSPETH reconciles the recorded plan before retrying. When it cannot prove the outcome, it blocks publication for operator review instead of guessing or duplicating the effect.</p>
-      <p>After resolving the recorded uncertainty, resume an audit export with <code>elspeth export-resume &lt;run-id&gt; --execute</code>. Follow the <a href="https://github.com/johnm-dta/elspeth/blob/main/docs/runbooks/sink-effect-recovery.md">sink-effect recovery runbook</a> for the operator procedure.</p>
+      <p>If a worker loses the response from an external system, ELSPETH checks the saved plan and destination before trying again. When it cannot determine whether the write happened, it stops for operator review rather than risk a duplicate.</p>
+      <p>Audit exports have a dedicated resume command: <code>elspeth export-resume &lt;run-id&gt; --execute</code>. Follow the <a href="https://github.com/johnm-dta/elspeth/blob/main/docs/runbooks/sink-effect-recovery.md">current sink-effect recovery runbook on GitHub</a> for the operator procedure.</p>
     </div>
   </div>
 </section>
@@ -124,15 +123,15 @@ Completed: True
       </figure>
       <div class="proof-notes">
         <div class="proof-note">
-          <strong class="proof-note-title">Outcome and path are separate axes</strong>
+          <h3 class="proof-note-title">Outcome and path are separate axes</h3>
           <p>The two-axis terminal model in practice: <code>SUCCESS</code> answers <em>did it succeed?</em>; <code>GATE_ROUTED</code> answers <em>how did it get there?</em> "It passed" and "a gate sent it to <code>approved</code>" are recorded as distinct facts.</p>
         </div>
         <div class="proof-note">
-          <strong class="proof-note-title">Every decision is bound to its evidence</strong>
+          <h3 class="proof-note-title">Every decision is bound to its evidence</h3>
           <p>The source row carries a content hash; the routing event carries a <code>reason_hash</code> that ties the destination to the exact condition that produced it. Nothing in the path is asserted without a fingerprint.</p>
         </div>
         <div class="proof-note">
-          <strong class="proof-note-title">Reproducible, and exportable as evidence</strong>
+          <h3 class="proof-note-title">Reproducible, and exportable as evidence</h3>
           <p>When signing is enabled, the same records export with an HMAC-SHA256 signature and running hash for chain-of-custody review — the trail an assessment needs to reconstruct a single decision after the fact.</p>
         </div>
       </div>

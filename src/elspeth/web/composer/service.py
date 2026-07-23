@@ -2005,7 +2005,12 @@ class ComposerServiceImpl:
             plugin_snapshot=plugin_snapshot,
         )
 
-    async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
+    async def explain_run_diagnostics(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        recorder: BufferingRecorder | None = None,
+    ) -> str:
         """Return a plain-language explanation of a bounded run snapshot.
 
         The explanation is advisory UI text only: it does not call composer
@@ -2027,9 +2032,10 @@ class ComposerServiceImpl:
                 GuardrailRaisedException,
             )
 
-            response = await asyncio.wait_for(
-                self._call_text_llm(messages),
+            return await self._call_text_llm_with_audit(
+                messages,
                 timeout=self._timeout_seconds,
+                recorder=recorder,
             )
         except TimeoutError:
             raise ComposerServiceError("Run diagnostics explanation timed out") from None
@@ -2040,11 +2046,6 @@ class ComposerServiceImpl:
             GuardrailRaisedException,
         ) as exc:
             raise ComposerServiceError(f"LLM unavailable ({type(exc).__name__})") from exc
-
-        content = cast(str | None, response.choices[0].message.content)
-        if content is None or not content.strip():
-            raise ComposerServiceError("LLM returned an empty diagnostics explanation")
-        return content.strip()
 
     async def compose(
         self,
@@ -5336,6 +5337,107 @@ class ComposerServiceImpl:
                         model_requested=self._model,
                         messages=messages,
                         tools=tools,
+                        status=status,
+                        started_at=started_at,
+                        started_ns=started_ns,
+                        temperature=self._settings.composer_temperature,
+                        seed=self._settings.composer_seed,
+                        response=response,
+                        error_class=error_class,
+                        error_message=error_message,
+                    )
+                )
+                current_exc = sys.exc_info()[1]
+                if current_exc is not None:
+                    attach_llm_calls(current_exc, recorder)
+
+    async def _call_text_llm_with_audit(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        timeout: float,
+        recorder: BufferingRecorder | None,
+    ) -> str:
+        """Call the diagnostics text model and record one redacted audit row."""
+        from litellm.exceptions import APIError as LiteLLMAPIError
+        from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any | None = None
+        error_class: str | None = None
+        error_message: str | None = None
+        try:
+            provider_response = await asyncio.wait_for(
+                self._call_text_llm(messages),
+                timeout=timeout,
+            )
+            response = provider_response
+            try:
+                content = provider_response.choices[0].message.content
+            except (AttributeError, IndexError, TypeError):
+                raise _MalformedLLMResponseError(
+                    "LLM returned a malformed diagnostics explanation",
+                    response=response,
+                ) from None
+            if type(content) is not str or not content.strip():
+                raise _MalformedLLMResponseError(
+                    "LLM returned an empty diagnostics explanation",
+                    response=response,
+                )
+            status = ComposerLLMCallStatus.SUCCESS
+            return content.strip()
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            attach_llm_calls(exc, recorder)
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            attach_llm_calls(exc, recorder)
+            raise
+        except LiteLLMAPIError as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            attach_llm_calls(exc, recorder)
+            raise
+        except _MalformedLLMResponseError as exc:
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            response = exc.response
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            attach_llm_calls(exc, recorder)
+            raise
+        except _BadRequestLLMError as exc:
+            cause = exc.__cause__
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(cause).__name__ if cause is not None else type(exc).__name__
+            error_message = error_class
+            attach_llm_calls(exc, recorder)
+            raise
+        except Exception as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            attach_llm_calls(exc, recorder)
+            raise
+        finally:
+            if recorder is not None and status is not None:
+                recorder.record_llm_call(
+                    build_llm_call_record(
+                        model_requested=self._model,
+                        messages=cast(list[dict[str, Any]], messages),
+                        tools=None,
                         status=status,
                         started_at=started_at,
                         started_ns=started_ns,

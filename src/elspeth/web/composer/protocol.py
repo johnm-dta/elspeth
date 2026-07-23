@@ -877,6 +877,11 @@ class ComposerService(Protocol):
         """
         ...
 
-    async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
+    async def explain_run_diagnostics(
+        self,
+        snapshot: Mapping[str, object],
+        *,
+        recorder: BufferingRecorder | None = None,
+    ) -> str:
         """Explain a bounded run diagnostics snapshot without mutating state."""
         ...

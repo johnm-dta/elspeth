@@ -2861,6 +2861,68 @@ class TestStep2IntraStep:
         assert snapshot.phase == "calling_model"
         assert snapshot.headline == "Planning the pipeline against the reviewed components."
 
+    def test_planner_rate_rejection_is_retryable_and_exact_replay_bypasses_admission(
+        self,
+        composer_test_client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fresh planner entries are admitted once; rejected work is not reserved.
+
+        Exact operation replay is a read of an already-settled result and must
+        remain available even after the successful planner call exhausts the
+        user's current budget.  A rejected fresh operation must remain
+        retryable with the same operation ID once capacity is available.
+        """
+        session_id = _create_session(composer_test_client)
+        staged = self._stage_proposal(composer_test_client, session_id, filename="rate-admission.jsonl")
+        turn = staged["next_turn"]
+        payload = turn["payload"]
+        app = composer_test_client.app
+        original = app.state.composer_service.plan_guided_pipeline
+        planner_calls = 0
+
+        async def counting_planner(**kwargs: Any):
+            nonlocal planner_calls
+            planner_calls += 1
+            return await original(**kwargs)
+
+        monkeypatch.setattr(app.state.composer_service, "plan_guided_pipeline", counting_planner)
+        request_payload = {
+            "operation_id": str(uuid4()),
+            "turn_token": turn["turn_token"],
+            "proposal_id": payload["proposal_id"],
+            "draft_hash": payload["draft_hash"],
+            "edited_values": {"revision_instruction": "Add a passthrough transform before saving."},
+        }
+
+        exhausted = ComposerRateLimiter(limit=1)
+        asyncio.run(exhausted.check("alice"))
+        app.state.rate_limiter = exhausted
+        rejected = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+
+        assert rejected.status_code == 429, rejected.text
+        assert rejected.json()["detail"]["error_type"] == "rate_limited"
+        assert planner_calls == 0
+
+        app.state.rate_limiter = ComposerRateLimiter(limit=1)
+        retried = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+        assert retried.status_code == 200, retried.text
+        assert planner_calls == 1
+
+        replayed = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json=request_payload,
+        )
+        assert replayed.status_code == 200, replayed.text
+        assert replayed.json() == retried.json()
+        assert planner_calls == 1
+
     def test_confirm_wiring_surfaces_pending_interpretation_events_for_committed_llm_prompts(
         self,
         composer_test_client: TestClient,

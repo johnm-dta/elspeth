@@ -46,6 +46,7 @@ from elspeth.web.execution.schemas import (
     ValidationReadiness,
     ValidationResult,
 )
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.protocol import CompositionStateRecord, RunAlreadyActiveError, RunRecord, SessionRecord, SessionServiceProtocol
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -200,6 +201,7 @@ def _create_test_app(
     app.state.broadcaster = broadcaster if broadcaster is not None else _progress_broadcaster()
     app.state.auth_provider = object()
     app.state.websocket_ticket_store = WebSocketTicketStore()
+    app.state.rate_limiter = ComposerRateLimiter(limit=100)
 
     # Mock session_service for ownership checks
     mock_session_service = _session_service()
@@ -984,7 +986,7 @@ class TestRunDiagnosticsEndpoint:
         captured: dict[str, Any] = {}
 
         class FakeComposer:
-            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
                 captured.update(snapshot)
                 return (
                     '{"headline":"The run is processing data",'
@@ -1015,6 +1017,210 @@ class TestRunDiagnosticsEndpoint:
         assert response.working_view.next_steps == ["Refresh diagnostics if this does not change soon."]
         assert captured["run_id"] == str(run_id)
         assert captured["summary"]["token_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_rate_exhaustion_blocks_model_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from fastapi import HTTPException
+
+        run_id = uuid4()
+        svc = _execution_service()
+        svc.get_status = AsyncMock(
+            spec=ExecutionService.get_status,
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            ),
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        calls = 0
+
+        class FakeComposer:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
+                nonlocal calls
+                calls += 1
+                return "provider must not be reached"
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        exhausted = ComposerRateLimiter(limit=1)
+        await exhausted.check(_TEST_USER_ID)
+        app.state.rate_limiter = exhausted
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert calls == 0
+        app.state.session_service.add_message.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("outcome", "expected_http_status"),
+        [
+            pytest.param("success", None, id="success"),
+            pytest.param("timeout", 502, id="timeout"),
+            pytest.param("malformed", 502, id="malformed"),
+            pytest.param("provider_error", 502, id="provider-error"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_persists_one_redacted_llm_audit_row(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: str,
+        expected_http_status: int | None,
+    ) -> None:
+        import time
+
+        from fastapi import HTTPException
+
+        from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+        from elspeth.web.composer.audit import BufferingRecorder
+        from elspeth.web.composer.llm_response_parsing import build_llm_call_record
+        from elspeth.web.composer.protocol import ComposerServiceError
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        run_id = uuid4()
+        session_id = uuid4()
+        state_id = uuid4()
+        svc = _execution_service()
+        svc.get_status = AsyncMock(
+            spec=ExecutionService.get_status,
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            ),
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        status_by_outcome = {
+            "success": ComposerLLMCallStatus.SUCCESS,
+            "timeout": ComposerLLMCallStatus.TIMEOUT,
+            "malformed": ComposerLLMCallStatus.MALFORMED_RESPONSE,
+            "provider_error": ComposerLLMCallStatus.BAD_REQUEST_ERROR,
+        }
+
+        class FakeComposer:
+            async def explain_run_diagnostics(
+                self,
+                snapshot: dict[str, object],
+                *,
+                recorder: BufferingRecorder | None = None,
+            ) -> str:
+                assert recorder is not None
+                recorder.record_llm_call(
+                    build_llm_call_record(
+                        model_requested="test/diagnostics",
+                        messages=[{"role": "user", "content": "SECRET_DIAGNOSTICS_PROMPT"}],
+                        tools=None,
+                        status=status_by_outcome[outcome],
+                        started_at=datetime.now(UTC),
+                        started_ns=time.monotonic_ns(),
+                        temperature=None,
+                        seed=None,
+                        error_class="ProviderError" if outcome != "success" else None,
+                        error_message="Bearer secret-provider-token-must-not-persist" if outcome != "success" else None,
+                    )
+                )
+                if outcome == "timeout":
+                    raise ComposerServiceError("Run diagnostics explanation timed out")
+                if outcome == "malformed":
+                    raise ComposerServiceError("LLM returned an empty diagnostics explanation")
+                if outcome == "provider_error":
+                    raise _BadRequestLLMError("LLM request rejected (BadRequestError)")
+                return '{"headline":"Run active","evidence":[],"meaning":"Work continues.","next_steps":[]}'
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        app.state.session_service.get_run.return_value = _run_record(
+            run_id=run_id,
+            session_id=session_id,
+            state_id=state_id,
+        )
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        if expected_http_status is None:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                await endpoint(
+                    run_id,
+                    _request_for_app(app),
+                    limit=50,
+                    user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                    service=svc,
+                )
+            assert exc_info.value.status_code == expected_http_status
+
+        assert app.state.session_service.add_message.await_count == 1
+        audit_args = app.state.session_service.add_message.await_args
+        assert audit_args.args[0] == session_id
+        assert audit_args.args[1] == "audit"
+        assert json.loads(audit_args.args[2])["status"] == status_by_outcome[outcome].value
+        assert audit_args.kwargs["composition_state_id"] == state_id
+        assert audit_args.kwargs["writer_principal"] == "compose_loop"
+        serialized_audit = repr(audit_args)
+        assert "SECRET_DIAGNOSTICS_PROMPT" not in serialized_audit
+        assert "secret-provider-token-must-not-persist" not in serialized_audit
 
     @pytest.mark.asyncio
     async def test_evaluate_diagnostics_redacts_error_payloads_before_llm_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1110,7 +1316,7 @@ class TestRunDiagnosticsEndpoint:
         captured: dict[str, Any] = {}
 
         class FakeComposer:
-            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
                 captured.update(snapshot)
                 return (
                     '{"headline":"The run failed",'
@@ -1183,7 +1389,7 @@ class TestRunDiagnosticsEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
 
         class FakeComposer:
-            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
                 return "The run is still working through the data."
 
         app = _create_test_app(execution_service=svc)
@@ -1255,7 +1461,7 @@ class TestRunDiagnosticsEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
 
         class FakeComposer:
-            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
                 raise _BadRequestLLMError(
                     "LLM request rejected (BadRequestError)",
                     provider_detail="Model `gpt-foo` does not exist",
@@ -1335,7 +1541,7 @@ class TestRunDiagnosticsEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
 
         class FakeComposer:
-            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object], *, recorder: object | None = None) -> str:
                 raise _BadRequestLLMError(
                     "LLM request rejected (BadRequestError)",
                     provider_detail="Model `gpt-foo` does not exist",

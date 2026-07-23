@@ -2235,6 +2235,7 @@ async def post_guided_respond(
     from elspeth.web.composer.pipeline_proposal import PresentBase
     from elspeth.web.composer.redaction import redact_tool_call_arguments
     from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
+    from elspeth.web.middleware.rate_limit import get_rate_limiter
     from elspeth.web.sessions.protocol import (
         GuidedCompositionStateResult,
         GuidedOperationFailureCode,
@@ -2261,6 +2262,7 @@ async def post_guided_respond(
     composer = request.app.state.composer_service
     payload_store = request.app.state.payload_store
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+    rate_limiter = await get_rate_limiter(request)
 
     def _response_from_record(record: CompositionStateRecord) -> GuidedRespondResponse:
         descriptor = parse_guided_response_descriptor(record)
@@ -2319,7 +2321,7 @@ async def post_guided_respond(
                 raise HTTPException(status_code=409, detail="edit_target does not identify a current wire component")
             raise AuditIntegrityError("guided wire correction target changed after reservation")
 
-    async def _preflight_attempt(attempt_stable_id: UUID) -> SourceInspectionFacts | None:
+    async def _preflight_attempt(attempt_stable_id: UUID) -> tuple[SourceInspectionFacts | None, bool]:
         observed = await service.get_current_state(session_id)
         observed_state = _state_from_record(observed) if observed is not None else _initial_composition_state_with_guided_session()
         observed_guided = observed_state.guided_session
@@ -2332,7 +2334,7 @@ async def post_guided_respond(
                 and body.control_signal == ControlSignal.EXIT_TO_FREEFORM.value
             ):
                 raise HTTPException(status_code=409, detail="Guided session is already terminal.")
-            return None
+            return None, False
         _verify_schema8_proposal_binding(observed_guided, body)
         is_active_exit = body.control_signal == ControlSignal.EXIT_TO_FREEFORM.value
         if not is_active_exit and observed_guided.step is GuidedStep.STEP_3_TRANSFORMS:
@@ -2392,7 +2394,8 @@ async def post_guided_respond(
                         status_code=400,
                         detail="Guided proposal revision instruction must be a non-empty string of at most 8192 characters.",
                     )
-            return None
+            requires_planner = is_prose_revise or (is_revise and body.edit_target is not None and body.edit_target.kind in {"node", "edge"})
+            return None, requires_planner
         if not is_active_exit and observed_guided.step is GuidedStep.STEP_4_WIRE:
             if observed_guided.correction_messages:
                 correction_ids = {str(reference.message_id) for reference in observed_guided.correction_messages}
@@ -2439,7 +2442,7 @@ async def post_guided_respond(
                 raise HTTPException(status_code=400, detail="Guided wire action has an invalid closed shape.")
             if is_correction:
                 _require_bound_wire_target(current_turn, public_error=True)
-            return None
+            return None, is_correction
         if not is_active_exit and observed_guided.step not in {GuidedStep.STEP_1_SOURCE, GuidedStep.STEP_2_SINK}:
             raise _schema8_unsupported_stage(observed_guided.step)
         prospective, current_turn, _prepared_current = _schema8_prospective_occurrence(
@@ -2470,7 +2473,7 @@ async def post_guided_respond(
                 session_id=str(session_id),
             )
         try:
-            _schema8_answer_and_project_next(
+            projected_state, _planned_response, _next_turn, _prepared_next = _schema8_answer_and_project_next(
                 observed_state,
                 prospective,
                 current_turn,
@@ -2485,9 +2488,16 @@ async def post_guided_respond(
                 status_code=400,
                 detail="Guided response does not satisfy the current turn contract.",
             ) from exc
-        return inspection_facts
+        projected_guided = projected_state.guided_session
+        requires_planner = (
+            observed_guided.step is GuidedStep.STEP_2_SINK
+            and projected_guided is not None
+            and projected_guided.step is GuidedStep.STEP_3_TRANSFORMS
+            and projected_guided.terminal is None
+        )
+        return inspection_facts, requires_planner
 
-    async def _preflight_or_sanitize(attempt_stable_id: UUID) -> SourceInspectionFacts | None:
+    async def _preflight_or_sanitize(attempt_stable_id: UUID) -> tuple[SourceInspectionFacts | None, bool]:
         try:
             return await _preflight_attempt(attempt_stable_id)
         except (AuditIntegrityError, InvariantError) as exc:
@@ -2527,13 +2537,18 @@ async def post_guided_respond(
         rejoin_after_lock = False
         attempt_stable_id = uuid4()
         attempt_inspection_facts: SourceInspectionFacts | None = None
+        attempt_requires_planner = False
+        attempt_planner_admitted = False
         bypass_admission = isinstance(pending, GuidedOperationExpired)
         if bypass_admission:
             # An expired same-operation retry must preflight before takeover,
             # but cannot queue behind the stale local worker it is fencing out.
             # This is a read plus a discarded pure transition. The fenced
             # settlement rechecks the exact head under compose before writing.
-            attempt_inspection_facts = await _preflight_or_sanitize(attempt_stable_id)
+            attempt_inspection_facts, attempt_requires_planner = await _preflight_or_sanitize(attempt_stable_id)
+            if attempt_requires_planner:
+                await rate_limiter.check(user.user_id)
+                attempt_planner_admitted = True
             pending = await reserve_or_replay_guided_operation(
                 service=service,
                 session_id=session_id,
@@ -2579,7 +2594,11 @@ async def post_guided_respond(
                 # preflight and settlement, so stale competing ids never mint
                 # a loser operation row.
                 async with compose_lock:
-                    attempt_inspection_facts = await _preflight_or_sanitize(attempt_stable_id)
+                    attempt_inspection_facts, attempt_requires_planner = await _preflight_or_sanitize(attempt_stable_id)
+
+            if attempt_requires_planner and not bypass_admission:
+                await rate_limiter.check(user.user_id)
+                attempt_planner_admitted = True
 
             # Reservation and any active-operation joining happen with the
             # compose lock released. The admission lock keeps local competing
@@ -2912,6 +2931,8 @@ async def post_guided_respond(
                                 request_id=body.operation_id,
                                 user_id=user.user_id,
                             )
+                            if not attempt_planner_admitted:
+                                raise AuditIntegrityError("guided planner call reached settlement without rate admission")
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=planner_intent,
                                 current_state=state,
@@ -3266,6 +3287,8 @@ async def post_guided_respond(
                                 request_id=body.operation_id,
                                 user_id=user.user_id,
                             )
+                            if not attempt_planner_admitted:
+                                raise AuditIntegrityError("guided planner call reached settlement without rate admission")
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=body.correction_feedback,
                                 current_state=predecessor_candidate,
@@ -3800,6 +3823,8 @@ async def post_guided_respond(
                                 request_id=body.operation_id,
                                 user_id=user.user_id,
                             )
+                            if not attempt_planner_admitted:
+                                raise AuditIntegrityError("guided planner call reached settlement without rate admission")
                             plan, catalog_ids = await composer.plan_guided_pipeline(
                                 intent=planner_intent,
                                 current_state=state,

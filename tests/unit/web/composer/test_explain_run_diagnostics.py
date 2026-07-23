@@ -14,6 +14,7 @@ Ticket: elspeth-ab3ad30e87.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -24,8 +25,61 @@ from litellm.exceptions import (
     GuardrailRaisedException,
 )
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.protocol import ComposerServiceError
 from elspeth.web.composer.service import ComposerServiceImpl
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status"),
+    [
+        pytest.param("success", ComposerLLMCallStatus.SUCCESS, id="success"),
+        pytest.param("timeout", ComposerLLMCallStatus.TIMEOUT, id="timeout"),
+        pytest.param("malformed", ComposerLLMCallStatus.MALFORMED_RESPONSE, id="malformed"),
+        pytest.param("provider_error", ComposerLLMCallStatus.API_ERROR, id="provider-error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_explain_run_diagnostics_records_each_outbound_call_once(
+    composer_service_without_sessions_service: ComposerServiceImpl,
+    outcome: str,
+    expected_status: ComposerLLMCallStatus,
+) -> None:
+    service = composer_service_without_sessions_service
+    recorder = BufferingRecorder()
+    snapshot: dict[str, object] = {
+        "run_id": "SECRET_DIAGNOSTICS_RUN_ID",
+        "status": "failed",
+        "rows": [],
+    }
+
+    async def fake_call_text_llm(_messages: list[dict[str, str]]) -> object:
+        if outcome == "timeout":
+            raise TimeoutError
+        if outcome == "provider_error":
+            raise BudgetExceededError(current_cost=10.0, max_budget=1.0, message="provider secret must not persist")
+        if outcome == "malformed":
+            return SimpleNamespace(model="test/diagnostics-model", choices=[])
+        return SimpleNamespace(
+            model="test/diagnostics-model",
+            choices=[SimpleNamespace(message=SimpleNamespace(content="The run is processing one row."))],
+        )
+
+    with patch.object(service, "_call_text_llm", new=fake_call_text_llm):
+        if outcome == "success":
+            assert await service.explain_run_diagnostics(snapshot, recorder=recorder) == "The run is processing one row."
+        else:
+            with pytest.raises(ComposerServiceError):
+                await service.explain_run_diagnostics(snapshot, recorder=recorder)
+
+    assert len(recorder.llm_calls) == 1
+    call = recorder.llm_calls[0]
+    assert call.status is expected_status
+    assert call.tools_spec_hash is None
+    assert call.declared_tool_names == ()
+    assert "SECRET_DIAGNOSTICS_RUN_ID" not in repr(call)
+    assert "provider secret must not persist" not in repr(call)
 
 
 @pytest.mark.parametrize(

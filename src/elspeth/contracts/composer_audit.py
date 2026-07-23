@@ -49,6 +49,8 @@ class ComposerToolStatus(StrEnum):
                  raised by a handler, or pre-dispatch validation rejected
                  the LLM-supplied arguments (JSON decode failure, non-dict
                  arguments, missing schema-required paths).
+    CANCELLED  — dispatch was intentionally cancelled by its coordinator.
+                 This is a lifecycle outcome, not a plugin defect.
     PLUGIN_CRASH — any exception class other than ``ToolArgumentError``
                  escaped the handler. Per CLAUDE.md "Plugin Ownership"
                  this is a Tier-1/2 plugin bug; the audit record fixes
@@ -57,6 +59,7 @@ class ComposerToolStatus(StrEnum):
 
     SUCCESS = "success"
     ARG_ERROR = "arg_error"
+    CANCELLED = "cancelled"
     PLUGIN_CRASH = "plugin_crash"
 
 
@@ -76,17 +79,20 @@ class ComposerToolInvocation:
 
     ``result_canonical`` / ``result_hash``
         Same pair for the dispatch result. ``None`` when the dispatch did
-        not complete (``ARG_ERROR`` pre-dispatch sites, ``PLUGIN_CRASH``).
+        not complete (``ARG_ERROR`` pre-dispatch sites, ``CANCELLED``,
+        ``PLUGIN_CRASH``).
 
     ``status``
         See :class:`ComposerToolStatus`.
 
     ``error_class`` / ``error_message``
-        Populated on ``ARG_ERROR`` and ``PLUGIN_CRASH``. ``error_message``
+        Populated on ``ARG_ERROR``, ``CANCELLED``, and ``PLUGIN_CRASH``.
+        ``error_message``
         is already-redacted at the dispatch boundary — for
         ``ToolArgumentError`` this is ``exc.args[0]``, which the structured
         constructor composes from the safe-by-design ``(argument, expected,
-        actual_type)`` triple. For ``PLUGIN_CRASH`` callers MUST NOT pass
+        actual_type)`` triple. ``CANCELLED`` stores only a closed reason code.
+        For ``PLUGIN_CRASH`` callers MUST NOT pass
         ``str(exc)`` because plugin exception messages can carry secrets,
         DB URLs, or filesystem paths; pass only ``type(exc).__name__`` and
         a sanitized summary.
@@ -94,9 +100,9 @@ class ComposerToolInvocation:
     ``version_before`` / ``version_after``
         :attr:`CompositionState.version` immediately before and after the
         dispatch. ``version_after is None`` on paths that did not complete
-        (``ARG_ERROR`` pre-dispatch, ``PLUGIN_CRASH``). ``version_after ==
-        version_before`` on cache hits and on dispatches that did not
-        mutate state.
+        (``ARG_ERROR`` pre-dispatch, ``CANCELLED``, ``PLUGIN_CRASH``).
+        ``version_after == version_before`` on cache hits and on dispatches
+        that did not mutate state.
 
     ``cache_hit``
         ``True`` when the dispatch was served from the per-compose-call

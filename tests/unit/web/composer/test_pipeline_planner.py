@@ -856,6 +856,12 @@ async def test_parallel_discovery_failure_closes_every_audit_before_return(
                 lifecycle=_lifecycle(events),
             )
         assert len(recorder.invocations) == 2
+        invocations_by_tool = {invocation.tool_name: invocation for invocation in recorder.invocations}
+        assert invocations_by_tool["list_sources"].status.value == "plugin_crash"
+        assert invocations_by_tool["list_sources"].error_class == "RuntimeError"
+        assert invocations_by_tool["list_sinks"].status.value == "cancelled"
+        assert invocations_by_tool["list_sinks"].error_class == "CancelledError"
+        assert invocations_by_tool["list_sinks"].error_message == "sibling_failure"
         closed_snapshot = tuple(call.to_dict() for call in recorder.invocations)
         assert events[-1] == "settled:failed"
     finally:
@@ -914,6 +920,9 @@ async def test_parallel_discovery_cancellation_closes_every_audit_before_return(
         with pytest.raises(asyncio.CancelledError):
             await task
         assert len(recorder.invocations) == 2
+        assert {invocation.status.value for invocation in recorder.invocations} == {"cancelled"}
+        assert {invocation.error_class for invocation in recorder.invocations} == {"CancelledError"}
+        assert {invocation.error_message for invocation in recorder.invocations} == {"coordinator_cancelled"}
         closed_snapshot = tuple(call.to_dict() for call in recorder.invocations)
         assert events[-1] == "settled:cancelled"
     finally:

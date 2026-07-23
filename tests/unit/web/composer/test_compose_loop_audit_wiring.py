@@ -588,8 +588,8 @@ async def test_preview_runtime_preflight_failure_records_tool_invocation() -> No
 
 
 @pytest.mark.asyncio
-async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
-    """Reviewer fix: ``CancelledError`` MUST be audited before propagation.
+async def test_dispatch_records_cancelled_status_on_cancelled_error() -> None:
+    """``CancelledError`` must be audited as cancellation before propagation.
 
     ``asyncio.CancelledError`` inherits from ``BaseException`` (not
     ``Exception``), so the typed handlers inside
@@ -604,7 +604,7 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
     The ``try/finally`` shape closes the hole: the ``finally`` clause
     runs on every exit (including BaseException propagation),
     reconstructs the propagating exception via :func:`sys.exc_info`,
-    and records ``PLUGIN_CRASH`` before the helper unwinds.
+    and records ``CANCELLED`` before the helper unwinds.
 
     Production-realistic path: the test injects
     ``asyncio.CancelledError`` into the ``execute_tool`` worker call
@@ -618,7 +618,7 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
       in ``ComposerPluginCrashError`` — the typed handlers never
       caught it, so neither does any wrap site).
     - The recorder captured exactly one invocation with
-      ``status=PLUGIN_CRASH``, ``error_class="CancelledError"``,
+      ``status=CANCELLED``, ``error_class="CancelledError"``,
       ``version_after=None``.
     """
     catalog = _mock_catalog()
@@ -653,7 +653,7 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
             "elspeth.web.composer.tool_batch.execute_tool",
-            side_effect=asyncio.CancelledError(),
+            side_effect=asyncio.CancelledError("raw cancellation detail must not persist"),
         ),
         patch("elspeth.web.composer.service.BufferingRecorder", _SpyRecorder),
     ):
@@ -663,13 +663,13 @@ async def test_dispatch_records_plugin_crash_on_cancelled_error() -> None:
 
     spy = captured_recorder["instance"]
     invocations = spy.invocations
-    assert len(invocations) == 1, f"Expected exactly one PLUGIN_CRASH audit row for the cancelled dispatch; got {len(invocations)}"
+    assert len(invocations) == 1, f"Expected exactly one CANCELLED audit row for the cancelled dispatch; got {len(invocations)}"
     inv = invocations[0]
-    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.status.value == "cancelled"
     assert inv.tool_call_id == "call_cancelled"
     assert inv.error_class == "CancelledError"
-    # Redaction discipline: error_message is class-name only.
-    assert inv.error_message == "CancelledError"
+    # Redaction discipline: the generic reason is a closed, value-free code.
+    assert inv.error_message == "cancelled"
     # Dispatch did not complete — version_after must be None to
     # satisfy the Tier-1 verifier invariant.
     assert inv.version_after is None

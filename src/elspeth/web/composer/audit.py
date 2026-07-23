@@ -40,6 +40,7 @@ Layer: L3 (application). Imports L0 (contracts.composer_audit), L1
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import threading
 import time
@@ -76,11 +77,20 @@ __all__ = [
     "canonicalize_pydantic_cause",
     "dispatch_with_audit",
     "finish_arg_error",
+    "finish_cancelled",
     "finish_plugin_crash",
     "finish_success",
     "llm_call_audit_envelope",
     "rebind_dispatch_arguments",
 ]
+
+_CANCELLATION_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "cancelled",
+        "coordinator_cancelled",
+        "sibling_failure",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +613,40 @@ def finish_arg_error(
     )
 
 
+def finish_cancelled(
+    audit: DispatchAudit,
+    *,
+    exc: asyncio.CancelledError,
+) -> ComposerToolInvocation:
+    """Build a CANCELLED invocation with a closed, value-free reason code.
+
+    ``Task.cancel(message)`` carries its message through
+    :class:`asyncio.CancelledError`. The message is an external value at this
+    audit boundary, so only coordinator-authored codes from the closed set are
+    persisted; arbitrary text falls back to the generic ``cancelled`` code.
+    """
+    reason = "cancelled"
+    if len(exc.args) == 1 and type(exc.args[0]) is str and exc.args[0] in _CANCELLATION_REASON_CODES:
+        reason = exc.args[0]
+    return ComposerToolInvocation(
+        tool_call_id=audit.tool_call_id,
+        tool_name=audit.tool_name,
+        arguments_canonical=audit.arguments_canonical,
+        arguments_hash=audit.arguments_hash,
+        result_canonical=None,
+        result_hash=None,
+        status=ComposerToolStatus.CANCELLED,
+        error_class="CancelledError",
+        error_message=reason,
+        version_before=audit.version_before,
+        version_after=None,
+        started_at=audit.started_at,
+        finished_at=datetime.now(UTC),
+        latency_ms=(time.monotonic_ns() - audit.started_ns) // 1_000_000,
+        actor=audit.actor,
+    )
+
+
 def finish_plugin_crash(
     audit: DispatchAudit,
     *,
@@ -733,17 +777,14 @@ async def dispatch_with_audit(
         so the caller's ``except Exception`` block can wrap with
         :meth:`ComposerPluginCrashError.capture`.
 
-    PLUGIN_CRASH (BaseException)
+    CANCELLED / PLUGIN_CRASH (BaseException)
         ``do_dispatch`` raised an exception that does NOT inherit from
-        ``Exception`` — most importantly :class:`asyncio.CancelledError`,
-        which fires when an ASGI client disconnects mid-dispatch. The
-        typed except handlers above do not catch it (CancelledError
-        inherits ``BaseException`` directly). The ``finally`` clause
-        detects the propagating exception via :func:`sys.exc_info`,
-        records it as PLUGIN_CRASH (so the audit trail captures the
-        dispatch attempt the client cancelled), and lets the exception
-        continue propagating. This applies equally to ``SystemExit``,
-        ``KeyboardInterrupt``, and ``GeneratorExit``. The audit
+        ``Exception``. The ``finally`` clause detects the propagating
+        exception via :func:`sys.exc_info`. It records
+        :class:`asyncio.CancelledError` as CANCELLED with a bounded reason
+        code, because coordinator cancellation is not a plugin defect. It
+        records ``SystemExit``, ``KeyboardInterrupt``, and ``GeneratorExit``
+        as PLUGIN_CRASH. In both cases the exception keeps propagating. The audit
         invariant — "if it's not recorded, it didn't happen" — now
         holds even at interpreter-shutdown boundaries; the in-memory
         list append is safe even if the persistence layer never gets
@@ -772,10 +813,11 @@ async def dispatch_with_audit(
         ``AssertionError``/``MemoryError``/``RecursionError``/``SystemError``:
             re-raised after recording PLUGIN_CRASH.
         ``Exception`` (other classes): re-raised after recording PLUGIN_CRASH.
-        ``asyncio.CancelledError`` and other ``BaseException`` subclasses
-            (``SystemExit``, ``KeyboardInterrupt``, ``GeneratorExit``):
-            propagate after the ``finally`` clause records PLUGIN_CRASH
-            via :func:`sys.exc_info`.
+        ``asyncio.CancelledError``: propagates after the ``finally`` clause
+            records CANCELLED via :func:`sys.exc_info`.
+        Other ``BaseException`` subclasses (``SystemExit``,
+            ``KeyboardInterrupt``, ``GeneratorExit``): propagate after the
+            ``finally`` clause records PLUGIN_CRASH.
     """
     # Outcome variables — populated by the success branch / except
     # blocks, consumed by the finally clause. The four-status discriminant
@@ -838,8 +880,8 @@ async def dispatch_with_audit(
         # KeyboardInterrupt, GeneratorExit) that the typed except
         # handlers above do not catch. ``status`` is ``None`` exactly
         # when such an exception is propagating; we reconstruct it via
-        # sys.exc_info() and record PLUGIN_CRASH so the audit row lands
-        # before the exception leaves the helper.
+        # sys.exc_info() and record CANCELLED for coordinator cancellation
+        # or PLUGIN_CRASH for other BaseException subclasses before it leaves.
         if status is None:
             current_exc = sys.exc_info()[1]
             # Offensive guard: status==None with no propagating
@@ -852,7 +894,10 @@ async def dispatch_with_audit(
                 raise RuntimeError(
                     "dispatch_with_audit: finally entered with status=None and no propagating exception — audit invariant violated"
                 )
-            recorder.record(finish_plugin_crash(audit, exc=current_exc))
+            if isinstance(current_exc, asyncio.CancelledError):
+                recorder.record(finish_cancelled(audit, exc=current_exc))
+            else:
+                recorder.record(finish_plugin_crash(audit, exc=current_exc))
         elif status is ComposerToolStatus.SUCCESS:
             # success_version_after was assigned alongside status.
             # Offensive guard: the dataclass requires ``int`` here, so

@@ -1938,7 +1938,7 @@ async def _plan_pipeline_inner(
         except BaseException:
             for task in discovery_tasks:
                 if not task.done():
-                    task.cancel()
+                    task.cancel("coordinator_cancelled")
             await asyncio.gather(*discovery_tasks, return_exceptions=True)
             raise
 
@@ -1955,7 +1955,7 @@ async def _plan_pipeline_inner(
                 break
         if primary_error is not None:
             for task in pending:
-                task.cancel()
+                task.cancel("sibling_failure")
             # Every dispatch owns one audit record in its finally block. Do not
             # let the planner settle or return until all sibling tasks have
             # reached that terminal recorder state. Cancelled sync workers may

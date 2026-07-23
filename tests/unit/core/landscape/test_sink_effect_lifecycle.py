@@ -211,6 +211,25 @@ def test_expired_preparation_claim_takeover_fences_stale_binder(db_factory: tupl
     assert prepared.generation == takeover.generation
 
 
+def test_preparation_claim_heartbeat_extends_reserved_claim(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
+    _db, factory = db_factory
+    effect = _reserved(factory)
+    repo = factory.execution.sink_effects
+    claim = repo.claim_preparation(effect.effect_id, owner="worker-a", ttl=timedelta(seconds=30))
+
+    renewed = repo.heartbeat_lease(
+        effect.effect_id,
+        owner=claim.owner,
+        generation=claim.generation,
+        ttl=timedelta(seconds=60),
+    )
+
+    assert renewed.owner == claim.owner
+    assert renewed.generation == claim.generation
+    assert renewed.expires_at > claim.expires_at
+    assert repo.get_effect(effect.effect_id).state is SinkEffectState.RESERVED  # type: ignore[union-attr]
+
+
 def test_lease_takeover_increments_generation_and_fences_stale_results(db_factory: tuple[LandscapeDB, RecorderFactory]) -> None:
     _db, factory = db_factory
     effect = _reserved(factory)

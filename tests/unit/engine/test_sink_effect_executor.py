@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import threading
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -41,6 +42,7 @@ from elspeth.engine.executors.sink_effects import (
     SinkEffectInjectedFault,
     SinkEffectLeaseHeld,
 )
+from elspeth.plugins.sinks import _local_file_effects as local_effects
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.sink_effects import DuplicateObservableSink, DuplicateObservableTarget
@@ -425,6 +427,86 @@ def test_second_preparer_refuses_while_preparation_claim_is_live() -> None:
         assert (rival_sink.inspect_calls, rival_sink.prepare_calls, rival_sink.commit_calls) == (0, 0, 0)
         assert target.published_rows == [[{"ordinal": 0}]]
     finally:
+        db.close()
+
+
+def test_preparation_claim_stays_live_while_adapter_installs_local_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow preparer must keep its claim while adapter I/O is in progress."""
+    db = make_landscape_db()
+    release_install = threading.Event()
+    install_entered = threading.Event()
+    rival_errors: list[BaseException] = []
+    stale_errors: list[BaseException] = []
+    lease_ttl = timedelta(milliseconds=50)
+    target = tmp_path / "out.csv"
+    sink_config = {"path": str(target), "schema": {"mode": "observed"}}
+    original_replace = local_effects.os.replace
+
+    def block_stale_install(source: str | Path, destination: str | Path) -> None:
+        if threading.current_thread().name == "stale-preparer" and str(destination).endswith(".stage"):
+            install_entered.set()
+            if not release_install.wait(timeout=5):
+                raise AssertionError("timed out waiting to release stale stage installation")
+        original_replace(source, destination)
+
+    def fail_before_effect(seam: SinkEffectExecutionSeam) -> None:
+        if seam is SinkEffectExecutionSeam.BEFORE_EFFECT:
+            raise SinkEffectInjectedFault(seam)
+
+    monkeypatch.setattr(local_effects.os, "replace", block_stale_install)
+    try:
+        factory = make_factory(db)
+        run_id, sink_id, members = _pipeline_members(factory, 1)
+        request = _execution_request(run_id, sink_id, members)
+
+        def run_stale_preparer() -> None:
+            try:
+                SinkEffectCoordinator(
+                    factory=factory,
+                    worker_id="worker-a",
+                    lease_ttl=lease_ttl,
+                    fault_hook=fail_before_effect,
+                ).execute(request, CSVSink(sink_config))
+            except BaseException as exc:
+                stale_errors.append(exc)
+
+        stale_thread = threading.Thread(target=run_stale_preparer, name="stale-preparer")
+        stale_thread.start()
+        assert install_entered.wait(timeout=5), "stale preparer never reached stage installation"
+
+        # Stay blocked for multiple original lease windows. A preparation
+        # heartbeat must keep worker B out before it invokes adapter I/O.
+        threading.Event().wait(lease_ttl.total_seconds() * 3)
+        try:
+            SinkEffectCoordinator(
+                factory=make_factory(db),
+                worker_id="worker-b",
+                lease_ttl=timedelta(seconds=1),
+                fault_hook=fail_before_effect,
+            ).execute(request, CSVSink(sink_config))
+        except BaseException as exc:
+            rival_errors.append(exc)
+
+        release_install.set()
+        stale_thread.join(timeout=5)
+        assert not stale_thread.is_alive(), "stale preparer thread wedged"
+
+        effects = factory.execution.sink_effects.get_effects_for_run(run_id)
+        assert len(effects) == 1
+        plan = SinkEffectCoordinator._load_plan(effects[0])
+        staging = Path(str(plan.safe_evidence["staging_path"]))
+        assert local_effects._snapshot(staging).file_id == plan.safe_evidence["staged_file_id"], (
+            "durable plan points at staging inode replaced by stale preparer"
+        )
+        assert len(rival_errors) == 1
+        assert isinstance(rival_errors[0], SinkEffectLeaseHeld)
+        assert len(stale_errors) == 1
+        assert isinstance(stale_errors[0], SinkEffectInjectedFault)
+    finally:
+        release_install.set()
         db.close()
 
 

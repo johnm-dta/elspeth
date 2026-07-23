@@ -367,11 +367,15 @@ class SinkEffectLifecycle:
         with self._db.write_connection() as conn:
             row = self._lock_effect(conn, effect_id, include_stream=False)
             timestamp = now()
+            # Expiry alone does not depose a RESERVED preparation holder. A
+            # competing claim wins by changing owner/generation under this
+            # same row lock; an otherwise unchanged claim may revive, matching
+            # complete_plan(). Preserve the stricter IN_FLIGHT lease contract.
             if (
-                row.state != SinkEffectState.IN_FLIGHT.value
+                row.state not in {SinkEffectState.RESERVED.value, SinkEffectState.IN_FLIGHT.value}
                 or row.lease_owner != owner
                 or row.generation != generation
-                or _utc(row.lease_expires_at) < timestamp
+                or (row.state == SinkEffectState.IN_FLIGHT.value and _utc(row.lease_expires_at) < timestamp)
             ):
                 raise LandscapeRecordError("sink effect lease heartbeat has stale owner or generation")
             expires_at = timestamp + ttl

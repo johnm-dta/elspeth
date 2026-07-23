@@ -9,6 +9,7 @@ final publication is committed atomically with the pipeline audit outcome.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -52,6 +53,7 @@ from elspeth.core.landscape.execution.sink_effect_attempt_results import (
     decode_sink_effect_returned_result,
     encode_sink_effect_returned_result,
 )
+from elspeth.core.landscape.execution.sink_effects import SinkEffectRepository
 from elspeth.core.landscape.factory import RecorderFactory
 
 
@@ -91,6 +93,58 @@ class SinkEffectLeaseHeld(RuntimeError):
     contended effect becomes actionable again once the holder finalizes or its
     lease expires and takeover fences the generation.
     """
+
+
+class _PreparationLeaseHeartbeat:
+    """Keep one preparation claim live while synchronous adapter I/O runs."""
+
+    def __init__(
+        self,
+        *,
+        effects: SinkEffectRepository,
+        claim: SinkEffectLease,
+        ttl: timedelta,
+    ) -> None:
+        self._effects = effects
+        self._claim = claim
+        self._ttl = ttl
+        self._interval_seconds = max(ttl.total_seconds() / 3, 0.001)
+        self._stop_event = threading.Event()
+        self._failed_event = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"sink-prepare-heartbeat:{claim.effect_id[:8]}",
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join()
+
+    def check_and_raise(self) -> None:
+        if not self._failed_event.is_set():
+            return
+        if self._error is None:  # pragma: no cover - Event publication orders the stored error first
+            raise LandscapeRecordError("sink effect preparation heartbeat failed without an error")
+        raise self._error
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                self._effects.heartbeat_lease(
+                    self._claim.effect_id,
+                    owner=self._claim.owner,
+                    generation=self._claim.generation,
+                    ttl=self._ttl,
+                )
+            except BaseException as exc:
+                self._error = exc
+                self._failed_event.set()
+                return
 
 
 class _SinkEffectAdapter(Protocol):
@@ -744,62 +798,69 @@ class SinkEffectCoordinator:
         effect = self._require_effect(effect.effect_id)
         if effect.state is not SinkEffectState.RESERVED:  # pragma: no cover - claim holds the effect reserved
             return self._load_plan(effect)
-        predecessor = self._predecessor_descriptor(effect)
-        inspection_request = SinkEffectInspectionRequest(
-            effect_id=effect.effect_id,
-            target=effect.target_json,
-            predecessor_descriptor=predecessor,
-            input_kind=request.reservation.input_kind,
-        )
-        request_hash = stable_hash(
-            {
-                "effect_id": effect.effect_id,
-                "predecessor": None if predecessor is None else predecessor.content_hash,
-                "schema": "sink-effect-inspection-request-v1",
-                "target": effect.target_json,
-            }
-        )
-        returned_inspection = self._returned_attempt(
-            effect.effect_id,
-            action=SinkEffectAttemptAction.INSPECT,
-            request_hash=request_hash,
-        )
-        if returned_inspection is not None:
-            inspection_result, _attempt = returned_inspection
-            if not isinstance(inspection_result, SinkEffectInspection):
-                raise LandscapeRecordError("durable inspect attempt decoded to the wrong result type")
-            inspection = inspection_result
-        else:
-            inspection_attempt = self._effects.begin_attempt(
-                SinkEffectAttemptRequest(
-                    effect_id=effect.effect_id,
-                    member_ordinal=None,
-                    generation=effect.generation,
-                    action=SinkEffectAttemptAction.INSPECT,
-                    call_kind=sink.effect_call_type,
-                    request_hash=request_hash,
-                )
+        heartbeat = _PreparationLeaseHeartbeat(effects=self._effects, claim=claim, ttl=self._lease_ttl)
+        heartbeat.start()
+        try:
+            predecessor = self._predecessor_descriptor(effect)
+            inspection_request = SinkEffectInspectionRequest(
+                effect_id=effect.effect_id,
+                target=effect.target_json,
+                predecessor_descriptor=predecessor,
+                input_kind=request.reservation.input_kind,
             )
-            started = time.monotonic()
-            try:
-                inspection = sink.inspect_effect(inspection_request, ctx)
-            except BaseException:
-                self._effects.mark_response_lost(inspection_attempt.attempt_id)
-                raise
-            self._effects.record_attempt_result(
-                SinkEffectAttemptResult(
-                    attempt_id=inspection_attempt.attempt_id,
-                    evidence=encode_sink_effect_returned_result(inspection),
-                    latency_ms=(time.monotonic() - started) * 1_000,
-                )
+            request_hash = stable_hash(
+                {
+                    "effect_id": effect.effect_id,
+                    "predecessor": None if predecessor is None else predecessor.content_hash,
+                    "schema": "sink-effect-inspection-request-v1",
+                    "target": effect.target_json,
+                }
             )
-        prepare_request = SinkEffectPrepareRequest(
-            effect_id=effect.effect_id,
-            effect_input=request.effect_input,  # type: ignore[arg-type]
-            inspection=inspection,
-        )
-        plan = sink.prepare_effect(prepare_request, ctx)
-        prepare_request.validate_plan(plan)
+            returned_inspection = self._returned_attempt(
+                effect.effect_id,
+                action=SinkEffectAttemptAction.INSPECT,
+                request_hash=request_hash,
+            )
+            if returned_inspection is not None:
+                inspection_result, _attempt = returned_inspection
+                if not isinstance(inspection_result, SinkEffectInspection):
+                    raise LandscapeRecordError("durable inspect attempt decoded to the wrong result type")
+                inspection = inspection_result
+            else:
+                inspection_attempt = self._effects.begin_attempt(
+                    SinkEffectAttemptRequest(
+                        effect_id=effect.effect_id,
+                        member_ordinal=None,
+                        generation=effect.generation,
+                        action=SinkEffectAttemptAction.INSPECT,
+                        call_kind=sink.effect_call_type,
+                        request_hash=request_hash,
+                    )
+                )
+                started = time.monotonic()
+                try:
+                    inspection = sink.inspect_effect(inspection_request, ctx)
+                except BaseException:
+                    self._effects.mark_response_lost(inspection_attempt.attempt_id)
+                    raise
+                self._effects.record_attempt_result(
+                    SinkEffectAttemptResult(
+                        attempt_id=inspection_attempt.attempt_id,
+                        evidence=encode_sink_effect_returned_result(inspection),
+                        latency_ms=(time.monotonic() - started) * 1_000,
+                    )
+                )
+            heartbeat.check_and_raise()
+            prepare_request = SinkEffectPrepareRequest(
+                effect_id=effect.effect_id,
+                effect_input=request.effect_input,  # type: ignore[arg-type]
+                inspection=inspection,
+            )
+            plan = sink.prepare_effect(prepare_request, ctx)
+            prepare_request.validate_plan(plan)
+        finally:
+            heartbeat.stop()
+        heartbeat.check_and_raise()
         self._effects.complete_plan(effect.effect_id, plan, claim=claim)
         return plan
 

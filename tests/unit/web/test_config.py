@@ -1535,6 +1535,31 @@ class TestJWKSFailureRetryFloor:
             WebSettings(jwks_failure_retry_seconds=-1, **self._COMPOSER_DEFAULTS)
 
 
+class TestJWKSMaxStaleAge:
+    """The operator-configured JWKS hard lifetime must be finite and positive."""
+
+    _COMPOSER_DEFAULTS: typing.ClassVar[dict[str, object]] = {
+        "composer_max_composition_turns": 15,
+        "composer_max_discovery_turns": 10,
+        "composer_timeout_seconds": 85.0,
+        "composer_rate_limit_per_minute": 10,
+        "shareable_link_signing_key": b"\x00" * 32,
+    }
+
+    def test_default_is_one_day(self) -> None:
+        settings = WebSettings(**self._COMPOSER_DEFAULTS)
+        assert settings.jwks_max_stale_seconds == 86_400
+
+    def test_positive_override_accepted(self) -> None:
+        settings = WebSettings(jwks_max_stale_seconds=1, **self._COMPOSER_DEFAULTS)
+        assert settings.jwks_max_stale_seconds == 1
+
+    @pytest.mark.parametrize("invalid", [0, -1])
+    def test_non_positive_rejected(self, invalid: int) -> None:
+        with pytest.raises(ValidationError):
+            WebSettings(jwks_max_stale_seconds=invalid, **self._COMPOSER_DEFAULTS)
+
+
 def _settings(**overrides: Any) -> WebSettings:
     """Construct WebSettings with required no-default fields + overrides.
 

@@ -453,9 +453,12 @@ elspeth_shareable_link_lifetime_seconds: 2592000     # 30 * 24 * 3600
 # during an IdP outage — the first caller pays the httpx timeout (~15s
 # worst case) and subsequent callers short-circuit through this window.
 # Do NOT lower below 10 even in test fixtures (the validator rejects it).
+# jwks_max_stale_seconds: absolute lifetime of cached keys from the last
+# successful JWKS fetch. Retry windows never renew this hard limit.
 elspeth_auth_rate_limit_per_minute: 20
 elspeth_jwks_cache_ttl_seconds: 3600
 elspeth_jwks_failure_retry_seconds: 300
+elspeth_jwks_max_stale_seconds: 86400
 
 # ---- Upload + blob limits --------------------------------------------
 # max_upload_bytes: per-request body cap on POST /api/blobs upload path.
@@ -715,6 +718,7 @@ under Database Lifecycle for the rotation procedure.
 | `auth_rate_limit_per_minute` | Per-IP auth-attempt cap. | Default 20. Behind Front Door / Caddy this fires after the CDN cap; in direct-bind deployments it is the only auth-throttle. |
 | `jwks_cache_ttl_seconds` | How long a fetched JWKS document is reused before re-fetch from the IdP. | 3600s default. Lowering accelerates key-rotation pickup at the cost of more IdP load. |
 | `jwks_failure_retry_seconds` | Cool-down between JWKS re-fetch attempts when the IdP is unreachable. | Floor of 10 enforced. The first caller pays the httpx timeout (~15s); subsequent callers short-circuit to the stale JWKS via this window. Raising it makes the stale-serve window longer (safer during brief outages); lowering it shrinks the partial-DoS blast radius during a sustained outage. Do NOT lower the floor in test fixtures — the validator rejects values below 10. |
+| `jwks_max_stale_seconds` | Hard upper bound on cached-key use after the last successful, fully validated JWKS fetch. | 86400s (24h) default; minimum 1. Transient refresh failures may serve stale keys only below this age. Once reached, authentication fails closed with 503 until a refresh succeeds; retry throttling still applies. |
 
 ### Upload and Blob Limits
 
@@ -1235,6 +1239,7 @@ ELSPETH_WEB__SHAREABLE_LINK_LIFETIME_SECONDS={{ elspeth_shareable_link_lifetime_
 ELSPETH_WEB__AUTH_RATE_LIMIT_PER_MINUTE={{ elspeth_auth_rate_limit_per_minute }}
 ELSPETH_WEB__JWKS_CACHE_TTL_SECONDS={{ elspeth_jwks_cache_ttl_seconds }}
 ELSPETH_WEB__JWKS_FAILURE_RETRY_SECONDS={{ elspeth_jwks_failure_retry_seconds }}
+ELSPETH_WEB__JWKS_MAX_STALE_SECONDS={{ elspeth_jwks_max_stale_seconds }}
 # Upload + blob limits
 ELSPETH_WEB__MAX_UPLOAD_BYTES={{ elspeth_max_upload_bytes }}
 ELSPETH_WEB__MAX_BLOB_STORAGE_PER_SESSION_BYTES={{ elspeth_max_blob_storage_per_session_bytes }}
@@ -2328,6 +2333,8 @@ template:
           value: "{{ elspeth_jwks_cache_ttl_seconds }}"
         - name: ELSPETH_WEB__JWKS_FAILURE_RETRY_SECONDS
           value: "{{ elspeth_jwks_failure_retry_seconds }}"
+        - name: ELSPETH_WEB__JWKS_MAX_STALE_SECONDS
+          value: "{{ elspeth_jwks_max_stale_seconds }}"
         - name: ELSPETH_WEB__MAX_UPLOAD_BYTES
           value: "{{ elspeth_max_upload_bytes }}"
         - name: ELSPETH_WEB__MAX_BLOB_STORAGE_PER_SESSION_BYTES

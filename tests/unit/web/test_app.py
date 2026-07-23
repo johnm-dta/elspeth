@@ -1118,6 +1118,24 @@ class TestOidcDiscoveryStartup:
         )
         assert entra_app.state.auth_provider._validator._audience_claim == "aud"
 
+    @pytest.mark.parametrize("auth_provider", ["oidc", "entra"])
+    def test_create_app_threads_jwks_max_stale_age(self, tmp_path, auth_provider: str) -> None:
+        settings = {
+            "auth_provider": auth_provider,
+            "oidc_audience": "client",
+            "oidc_client_id": "client",
+            "jwks_max_stale_seconds": 12_345,
+            "secret_key": "dev-secret",
+        }
+        if auth_provider == "oidc":
+            settings["oidc_issuer"] = "https://issuer.example.com"
+        else:
+            settings["entra_tenant_id"] = "tenant"
+
+        app = create_app(_settings(tmp_path / auth_provider, **settings))
+
+        assert app.state.auth_provider._validator._jwks_max_stale_seconds == 12_345
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "payload",

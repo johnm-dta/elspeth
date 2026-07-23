@@ -322,6 +322,9 @@ class WebSettings(BaseModel):
     # that production operators cannot configure the throttle away.
     jwks_cache_ttl_seconds: int = Field(default=3600, ge=1)
     jwks_failure_retry_seconds: int = Field(default=300, ge=10)
+    # Absolute cache authority is measured from the most recent successful,
+    # fully validated JWKS fetch. Failure retry windows never renew it.
+    jwks_max_stale_seconds: int = Field(default=86_400, ge=1)
 
     # Session database (sessions, messages, composition states, runs)
     # Separate from landscape_url (audit DB)

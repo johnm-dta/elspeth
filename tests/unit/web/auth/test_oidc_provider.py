@@ -1059,10 +1059,199 @@ class TestOIDCStaleCacheBackoff:
         with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
             await provider.authenticate(token)  # first failed fetch
             # Simulate time passing past the retry window.
-            provider._validator._next_refresh_at = time.time() - 1
+            provider._validator._next_refresh_at = time.monotonic() - 1
             await provider.authenticate(token)  # should attempt fetch again
 
         assert attempt_count == 2
+
+
+class TestOIDCAbsoluteJWKSStaleness:
+    """Cached keys have a hard lifetime measured from the last good fetch."""
+
+    @staticmethod
+    def _failing_client(attempts: list[str]):
+        async def failing_get(url, **kwargs):
+            attempts.append(url)
+            raise httpx.ConnectError("IdP is down")
+
+        client = create_autospec(httpx.AsyncClient, instance=True)
+        client.get = failing_get
+        client.__aenter__.return_value = client
+        client.__aexit__.return_value = False
+        return client
+
+    @pytest.mark.asyncio
+    async def test_retry_window_cannot_extend_cache_past_absolute_age(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """A sliding failure retry deadline must not renew stale-key authority."""
+        private_key, _ = rsa_keypair
+        now = 1_000.0
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=60,
+            jwks_max_stale_seconds=30,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+        attempts: list[str] = []
+
+        with patch("elspeth.web.auth.oidc.time.monotonic", side_effect=lambda: now):
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+
+            now = 1_001.0
+            failing_client = self._failing_client(attempts)
+            with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
+                # The first outage refresh is within the absolute grace period.
+                assert (await provider.authenticate(token)).user_id == "user-123"
+
+                # Still inside the 60-second retry throttle, but no longer
+                # inside the 30-second absolute stale-key lifetime.
+                now = 1_030.0
+                with pytest.raises(AuthProviderUnavailable, match="maximum stale age"):
+                    await provider.authenticate(token)
+
+        # The hard-expiry caller fails closed without defeating retry throttling.
+        assert len(attempts) == 1
+
+    @pytest.mark.asyncio
+    async def test_successful_recovery_resets_absolute_age(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Only a fully validated successful fetch starts a new stale lifetime."""
+        private_key, _ = rsa_keypair
+        now = 2_000.0
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=10,
+            jwks_max_stale_seconds=30,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+        attempts: list[str] = []
+
+        with patch("elspeth.web.auth.oidc.time.monotonic", side_effect=lambda: now):
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+
+            now = 2_005.0
+            failing_client = self._failing_client(attempts)
+            with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
+                assert (await provider.authenticate(token)).user_id == "user-123"
+
+            # Recover after the retry window. This successful validation must
+            # reset the age even though the key material is unchanged.
+            now = 2_016.0
+            with mock_httpx_discovery:
+                assert (await provider.authenticate(token)).user_id == "user-123"
+
+            now = 2_040.0
+            failing_client = self._failing_client(attempts)
+            with patch("elspeth.web.auth.oidc.httpx.AsyncClient", return_value=failing_client):
+                assert (await provider.authenticate(token)).user_id == "user-123"
+
+                now = 2_046.0
+                with pytest.raises(AuthProviderUnavailable, match="maximum stale age"):
+                    await provider.authenticate(token)
+
+        assert len(attempts) == 2
+
+    @pytest.mark.asyncio
+    async def test_hard_expired_follower_does_not_bypass_refresh_lock(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """Lock-decoupled followers may use stale keys only inside the hard limit."""
+        private_key, _ = rsa_keypair
+        now = 3_000.0
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=60,
+            jwks_max_stale_seconds=30,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+
+        with patch("elspeth.web.auth.oidc.time.monotonic", side_effect=lambda: now):
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+
+            now = 3_030.0
+            await provider._validator._jwks_lock.acquire()
+            try:
+                with pytest.raises(AuthProviderUnavailable, match="maximum stale age"):
+                    await provider.authenticate(token)
+            finally:
+                provider._validator._jwks_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_hard_age_shorter_than_cache_ttl_triggers_refresh(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """A healthy IdP is refreshed at the hard age even if cache TTL is longer."""
+        private_key, _ = rsa_keypair
+        now = 4_000.0
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=3_600,
+            jwks_failure_retry_seconds=60,
+            jwks_max_stale_seconds=30,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+
+        with patch("elspeth.web.auth.oidc.time.monotonic", side_effect=lambda: now):
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+            assert provider._validator._jwks_last_success_at == 4_000.0
+
+            now = 4_030.0
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+            assert provider._validator._jwks_last_success_at == 4_030.0
+
+    @pytest.mark.asyncio
+    async def test_shape_failure_after_hard_age_is_provider_unavailable(
+        self,
+        rsa_keypair,
+        mock_httpx_discovery,
+    ) -> None:
+        """A malformed refresh cannot leave hard-expired keys usable or report 401."""
+        private_key, _ = rsa_keypair
+        now = 5_000.0
+        provider = OIDCAuthProvider(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            jwks_cache_ttl_seconds=0,
+            jwks_failure_retry_seconds=60,
+            jwks_max_stale_seconds=30,
+        )
+        token = make_rs256_token(private_key, _valid_claims())
+
+        with patch("elspeth.web.auth.oidc.time.monotonic", side_effect=lambda: now):
+            with mock_httpx_discovery:
+                await provider.authenticate(token)
+
+            now = 5_030.0
+            with (
+                TestOIDCJWKSShapeValidation._patch_responses(
+                    {"issuer": ISSUER, "jwks_uri": f"{ISSUER}/keys"},
+                    [],
+                ),
+                pytest.raises(AuthProviderUnavailable, match="maximum stale age"),
+            ):
+                await provider.authenticate(token)
 
 
 @pytest.mark.asyncio
@@ -1357,6 +1546,14 @@ class TestOIDCConcurrentStaleDuringOutage:
             assert sig.parameters["jwks_failure_retry_seconds"].default == 300, (
                 f"{cls.__name__}.jwks_failure_retry_seconds default regressed below 300s — see elspeth-32982f17cf"
             )
+
+    def test_default_max_stale_seconds_is_finite(self) -> None:
+        """Provider defaults must never permit indefinitely renewable stale keys."""
+        from elspeth.web.auth.oidc import JWKSTokenValidator
+
+        for cls in (JWKSTokenValidator, OIDCAuthProvider):
+            sig = inspect.signature(cls.__init__)
+            assert sig.parameters["jwks_max_stale_seconds"].default == 86_400
 
 
 class TestOIDCStaleCacheDoesNotLaunderProgrammerBugs:
@@ -1705,7 +1902,7 @@ class TestOIDCColdStartBackoff:
             await provider.authenticate(token)
 
         # Simulate time passing past the retry window.
-        provider._validator._next_refresh_at = time.time() - 1
+        provider._validator._next_refresh_at = time.monotonic() - 1
 
         # Now the IdP is healthy again.
         with mock_httpx_discovery:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Literal, cast
+from typing import Any, Literal, NoReturn, cast
 
 import httpx
 import jwt
@@ -66,6 +66,7 @@ class JWKSTokenValidator:
         audience: str,
         jwks_cache_ttl_seconds: int = 3600,
         jwks_failure_retry_seconds: int = 300,
+        jwks_max_stale_seconds: int = 86_400,
         *,
         audience_claim: Literal["aud", "client_id"] = "aud",
     ) -> None:
@@ -81,7 +82,13 @@ class JWKSTokenValidator:
         # httpx.get to a dead IdP. Lower values amplify the per-retry
         # partial DoS described in elspeth-32982f17cf.
         self._jwks_failure_retry_seconds = jwks_failure_retry_seconds
+        # Absolute upper bound on cached-key authority. Failure retries move
+        # ``_next_refresh_at`` but must never renew this lifetime; only a
+        # fully validated successful fetch resets ``_jwks_last_success_at``.
+        self._jwks_max_stale_seconds = jwks_max_stale_seconds
         self._jwks: dict[str, Any] | None = None
+        self._jwks_last_success_at: float | None = None
+        self._jwks_refresh_failed = False
         # Separate "when should we try to refresh next" from "when did we
         # last succeed." A successful fetch sets this to now+ttl; a failure
         # that serves stale cache sets this to now+failure_retry so concurrent
@@ -89,6 +96,18 @@ class JWKSTokenValidator:
         # re-hitting a dead IdP.
         self._next_refresh_at: float = 0.0
         self._jwks_lock = asyncio.Lock()
+
+    def _cached_jwks_within_max_stale_age(self, now: float) -> bool:
+        """Return whether cached keys still have authority at ``now``."""
+        if self._jwks is None or self._jwks_last_success_at is None:
+            return False
+        age = now - self._jwks_last_success_at
+        return 0 <= age < self._jwks_max_stale_seconds
+
+    @staticmethod
+    def _raise_max_stale_age_exceeded() -> NoReturn:
+        """Fail closed without exposing IdP payloads or cache timestamps."""
+        raise AuthProviderUnavailable("JWKS unavailable (cached keys exceeded maximum stale age)")
 
     @trust_boundary(
         tier=3,
@@ -215,8 +234,9 @@ class JWKSTokenValidator:
         """Fetch and cache JWKS keys from the OIDC discovery endpoint.
 
         Uses double-checked locking to prevent thundering herd at TTL
-        boundary. On fetch failure, serves stale cache if available
-        and advances the refresh horizon by ``jwks_failure_retry_seconds``
+        boundary. On fetch failure, serves stale cache only within
+        ``jwks_max_stale_seconds`` of the last successful fetch and advances
+        the refresh horizon by ``jwks_failure_retry_seconds``
         so concurrent auth requests during an IdP outage don't all queue
         behind the lock re-hitting a dead IdP. (JWKS keys are long-lived;
         stale keys during a transient IdP blip are safer than a hard
@@ -239,9 +259,17 @@ class JWKSTokenValidator:
         means only the first request per retry window pays the network
         cost, and the rest fail fast with 503 until the horizon passes.
         """
-        now = time.time()
+        now = time.monotonic()
         if self._jwks is not None and now < self._next_refresh_at:
-            return self._jwks
+            if self._cached_jwks_within_max_stale_age(now):
+                return self._jwks
+            # A failure retry window remains load-bearing even after cached
+            # keys lose authority: fail closed until the retry horizon rather
+            # than re-hitting a dead IdP on every request. If this is merely a
+            # cache TTL longer than the configured hard age, fall through and
+            # refresh now.
+            if self._jwks_refresh_failed:
+                self._raise_max_stale_age_exceeded()
 
         # Cold-start throttle fast-path: a prior fetch failed within the
         # current retry window AND we have no cache to serve. Fail fast
@@ -262,13 +290,18 @@ class JWKSTokenValidator:
         # acquire call, we fall through to the normal double-checked
         # locking path and the re-check inside the lock is authoritative.
         if self._jwks is not None and self._jwks_lock.locked():
-            return self._jwks
+            if self._cached_jwks_within_max_stale_age(now):
+                return self._jwks
+            self._raise_max_stale_age_exceeded()
 
         async with self._jwks_lock:
             # Re-check inside lock (another coroutine may have refreshed)
-            now = time.time()
+            now = time.monotonic()
             if self._jwks is not None and now < self._next_refresh_at:
-                return self._jwks
+                if self._cached_jwks_within_max_stale_age(now):
+                    return self._jwks
+                if self._jwks_refresh_failed:
+                    self._raise_max_stale_age_exceeded()
 
             # Cold-start throttle inside lock: another coroutine's fetch
             # may have failed while we were queued on the lock. Repeat
@@ -292,8 +325,11 @@ class JWKSTokenValidator:
                     # response must not poison self._jwks.
                     validated = self._validate_jwks_document(jwks_resp.json())
                     self._parse_jwk_set(validated)
+                    success_at = time.monotonic()
                     self._jwks = validated
-                    self._next_refresh_at = now + self._jwks_cache_ttl_seconds
+                    self._jwks_last_success_at = success_at
+                    self._jwks_refresh_failed = False
+                    self._next_refresh_at = success_at + self._jwks_cache_ttl_seconds
             except AuthenticationError:
                 # Shape-validation failure — advance the refresh horizon
                 # by ``_jwks_failure_retry_seconds`` (the same throttle the
@@ -331,13 +367,17 @@ class JWKSTokenValidator:
                 # above, setting the horizon here lets all subsequent
                 # callers in the retry window fail fast at the top of
                 # ``ensure_jwks`` with a clean 401.
-                self._next_refresh_at = now + self._jwks_failure_retry_seconds
+                failure_at = time.monotonic()
+                self._jwks_refresh_failed = True
+                self._next_refresh_at = failure_at + self._jwks_failure_retry_seconds
                 slog.debug(
                     "JWKS shape validation failed; throttling refresh",
                     issuer=self._issuer,
                     has_stale_cache=stale_jwks is not None,
                     next_refresh_in_seconds=self._jwks_failure_retry_seconds,
                 )
+                if stale_jwks is not None and not self._cached_jwks_within_max_stale_age(failure_at):
+                    self._raise_max_stale_age_exceeded()
                 raise
             except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
                 # Narrowed from the historical (HTTPError, KeyError, ValueError,
@@ -381,8 +421,10 @@ class JWKSTokenValidator:
                 # (above) was added to close. Writing the horizon here is
                 # the same source-of-truth update that makes the
                 # fast-paths at the top of ``ensure_jwks`` fire.
-                self._next_refresh_at = now + self._jwks_failure_retry_seconds
-                if stale_jwks is not None:
+                failure_at = time.monotonic()
+                self._jwks_refresh_failed = True
+                self._next_refresh_at = failure_at + self._jwks_failure_retry_seconds
+                if stale_jwks is not None and self._cached_jwks_within_max_stale_age(failure_at):
                     # Serve stale cache -- JWKS keys are long-lived
                     slog.debug(
                         "JWKS fetch failed, serving stale cache",
@@ -391,6 +433,15 @@ class JWKSTokenValidator:
                         next_refresh_in_seconds=self._jwks_failure_retry_seconds,
                     )
                     return stale_jwks
+                if stale_jwks is not None:
+                    slog.debug(
+                        "JWKS fetch failed after cached keys exceeded maximum stale age",
+                        issuer=self._issuer,
+                        exc_class=type(exc).__name__,
+                        max_stale_seconds=self._jwks_max_stale_seconds,
+                        next_refresh_in_seconds=self._jwks_failure_retry_seconds,
+                    )
+                    self._raise_max_stale_age_exceeded()
                 slog.debug(
                     "JWKS cold-start fetch failed; throttling retry",
                     issuer=self._issuer,
@@ -471,6 +522,7 @@ class OIDCAuthProvider:
         audience: str,
         jwks_cache_ttl_seconds: int = 3600,
         jwks_failure_retry_seconds: int = 300,
+        jwks_max_stale_seconds: int = 86_400,
         *,
         audience_claim: Literal["aud", "client_id"] = "aud",
     ) -> None:
@@ -479,6 +531,7 @@ class OIDCAuthProvider:
             audience,
             jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds,
+            jwks_max_stale_seconds,
             audience_claim=audience_claim,
         )
 

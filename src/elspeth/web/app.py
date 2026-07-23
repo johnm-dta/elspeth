@@ -1012,6 +1012,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             audience=settings.oidc_audience,
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
+            jwks_max_stale_seconds=settings.jwks_max_stale_seconds,
             audience_claim=settings.oidc_audience_claim,
         )
     elif settings.auth_provider == "entra":
@@ -1024,6 +1025,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             audience=settings.oidc_audience,
             jwks_cache_ttl_seconds=settings.jwks_cache_ttl_seconds,
             jwks_failure_retry_seconds=settings.jwks_failure_retry_seconds,
+            jwks_max_stale_seconds=settings.jwks_max_stale_seconds,
         )
     else:
         raise RuntimeError(f"Unsupported auth provider: {settings.auth_provider}")

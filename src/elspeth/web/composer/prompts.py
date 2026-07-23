@@ -30,9 +30,10 @@ if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
 
 # Load both static prompt sources and their individual hashes atomically. The
-# exported ``PIPELINE_COMPOSER_SKILL_HASH`` below covers their exact rendered
-# composition, while these source hashes let service startup detect on-disk
-# drift in either file.
+# compatibility export ``PIPELINE_COMPOSER_SKILL_HASH`` below covers the exact
+# no-deployment rendering. Stateful services derive their instance hash after
+# adding the deployment overlay. These source hashes let service startup detect
+# on-disk drift in either static file.
 _PIPELINE_SKILL, PIPELINE_COMPOSER_INTERACTION_SKILL_HASH = load_skill_with_hash("pipeline_composer")
 PIPELINE_COMPOSER_SKILL_NAME: str = "pipeline_composer"
 PIPELINE_COMPOSER_SKILL_FILENAME: str = f"{PIPELINE_COMPOSER_SKILL_NAME}.md"
@@ -60,9 +61,8 @@ SYSTEM_PROMPT = render_with_pipeline_capabilities(_strip_advisor_disabled_fallba
 PIPELINE_COMPOSER_SKILL_HASH = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 
 
-@lru_cache(maxsize=8)
-def build_system_prompt(data_dir: str | None = None) -> str:
-    """Build the full system prompt: core skill + optional deployment skill.
+def render_system_prompt(data_dir: str | None = None) -> str:
+    """Render the full system prompt from the current deployment files.
 
     The deployment skill is loaded from ``{data_dir}/skills/pipeline_composer.md``
     if it exists.  This lets operators inject company-specific knowledge
@@ -72,9 +72,6 @@ def build_system_prompt(data_dir: str | None = None) -> str:
     Advisor is mandatory, so the core skill always teaches the LLM about
     ``request_advisor_hint``; only the advisor-disabled fallback prose is
     stripped via ``_strip_advisor_disabled_fallback``.
-
-    Cached per ``data_dir`` — the deployment skill is read once from disk per
-    unique value, not on every LLM call.
 
     Args:
         data_dir: Root data directory.  ``None`` skips the deployment layer.
@@ -87,6 +84,18 @@ def build_system_prompt(data_dir: str | None = None) -> str:
     if deployment:
         return core + "\n\n---\n\n" + deployment
     return core
+
+
+@lru_cache(maxsize=8)
+def build_system_prompt(data_dir: str | None = None) -> str:
+    """Return a process-cached rendering for stateless prompt callers.
+
+    Stateful composer services call :func:`render_system_prompt` exactly once
+    at construction and retain that immutable text together with its hash.
+    Direct helpers use this cache to avoid deployment-file I/O per request.
+    """
+
+    return render_system_prompt(data_dir)
 
 
 # Sentinel marking "caller did not thread the schemas-loaded tracker."
@@ -302,6 +311,7 @@ def build_messages(
     data_dir: str | None = None,
     *,
     plugin_snapshot: PluginAvailabilitySnapshot,
+    rendered_skill: str | None = None,
     guided_terminal: TerminalState | None = None,
     schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
 ) -> list[dict[str, Any]]:
@@ -338,6 +348,9 @@ def build_messages(
             overlay.  When provided, the deployment skill at
             ``{data_dir}/skills/pipeline_composer.md`` is appended to
             the core skill in the system prompt.
+        rendered_skill: Exact service-instance rendering of the core plus
+            deployment overlay. When supplied, this is used verbatim instead
+            of reloading the deployment layer mid-service.
         guided_terminal: When set, the resolved TerminalState from the
             completed guided session; triggers the layered transition
             prompt instead of the freeform-only prompt.
@@ -387,13 +400,13 @@ def build_messages(
         # subsequent freeform turns (Codex #17). build_system_prompt is
         # @lru_cache'd — this call hits the same cache entry as the
         # non-transition branch below.
-        freeform_skill = build_system_prompt(data_dir)
+        freeform_skill = rendered_skill if rendered_skill is not None else build_system_prompt(data_dir)
         prompt = build_mode_transition_system_prompt(
             terminal_reason=reason_str,
             freeform_skill=freeform_skill,
         )
     else:
-        prompt = build_system_prompt(data_dir)
+        prompt = rendered_skill if rendered_skill is not None else build_system_prompt(data_dir)
     messages.append({"role": "system", "content": prompt})
 
     # 2. Dynamic state/plugin context. This contains stored user/LLM-authored

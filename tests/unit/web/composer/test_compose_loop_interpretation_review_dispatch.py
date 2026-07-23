@@ -52,6 +52,7 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationSource,
 )
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.prompts import render_system_prompt
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
@@ -189,8 +190,10 @@ class _ScriptedLLM:
 
     def __init__(self, responses: list[Any]) -> None:
         self._responses = list(responses)
+        self.messages: list[list[dict[str, Any]]] = []
 
-    async def __call__(self, _messages: Any, _tools: Any) -> Any:
+    async def __call__(self, _messages: list[dict[str, Any]], _tools: Any) -> Any:
+        self.messages.append(_messages)
         if not self._responses:
             return _fake_text_response("Done.")
         return self._responses.pop(0)
@@ -2042,6 +2045,66 @@ async def test_f5c_skill_markdown_history_upsert_idempotent(
     with sessions_service._engine.connect() as conn:
         rows = conn.execute(select(skill_markdown_history_table)).fetchall()
     assert len(rows) == 1  # no duplicate
+
+
+@pytest.mark.asyncio
+async def test_f5c_deployment_overlay_changes_skill_identity_and_exact_archive(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Identity/history must cover the exact deployment-augmented prompt."""
+    deployment_text = "# Deployment overlay\n\nUse the audited regional provider mapping.\n"
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    (skills_dir / "pipeline_composer.md").write_text(deployment_text)
+
+    composer = _build_composer(tmp_path, sessions_service)
+    session_id, state_id = await _seed_session_and_state(sessions_service)
+    exact_prompt = render_system_prompt(str(tmp_path))
+    exact_hash = hashlib.sha256(exact_prompt.encode("utf-8")).hexdigest()
+
+    llm = _ScriptedLLM([_fake_text_response("Hello with deployment policy.")])
+    await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_state=_state_with_llm_node(),
+    )
+
+    with sessions_service._engine.connect() as conn:
+        rows = conn.execute(select(skill_markdown_history_table)).fetchall()
+    assert len(rows) == 1
+    assert composer._composer_skill_hash == exact_hash
+    assert llm.messages[0][0]["role"] == "system"
+    assert llm.messages[0][0]["content"] == exact_prompt
+    assert rows[0].hash == exact_hash
+    assert rows[0].content == exact_prompt
+    assert deployment_text in rows[0].content
+
+    # Rebuild the service at the same data_dir after changing only the overlay.
+    # The process-level convenience cache must not pin the new instance to the
+    # first deployment's bytes or identity.
+    replacement_text = "# Replacement overlay\n\nUse the audited sovereign provider mapping.\n"
+    (skills_dir / "pipeline_composer.md").write_text(replacement_text)
+    replacement = _build_composer(tmp_path, sessions_service)
+    replacement_session_id, replacement_state_id = await _seed_session_and_state(sessions_service)
+    replacement_prompt = render_system_prompt(str(tmp_path))
+    replacement_hash = hashlib.sha256(replacement_prompt.encode("utf-8")).hexdigest()
+    replacement_llm = _ScriptedLLM([_fake_text_response("Hello with replacement policy.")])
+
+    await replacement._run_one_turn_for_test(
+        llm=replacement_llm,
+        session_id=str(replacement_session_id),
+        current_state_id=str(replacement_state_id),
+        initial_state=_state_with_llm_node(),
+    )
+
+    with sessions_service._engine.connect() as conn:
+        archived = {row.hash: row.content for row in conn.execute(select(skill_markdown_history_table)).fetchall()}
+    assert replacement_hash != exact_hash
+    assert replacement._composer_skill_hash == replacement_hash
+    assert replacement_llm.messages[0][0]["content"] == replacement_prompt
+    assert archived == {exact_hash: exact_prompt, replacement_hash: replacement_prompt}
 
 
 # ---------------------------------------------------------------------------

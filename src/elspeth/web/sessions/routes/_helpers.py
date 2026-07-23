@@ -60,6 +60,7 @@ from elspeth.web.composer.audit import (
     llm_call_audit_envelope,
 )
 from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_and_envelope
+from elspeth.web.composer.control_messages import replay_composer_control_message
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
     emit_step_advanced,
@@ -1148,13 +1149,27 @@ def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[s
     appended. The LLM sees its own prose unmodified on subsequent
     turns; the suffix stays out of the prompt.
 
-    Composer tool-call audit rows are persisted as ``role="tool"`` messages so
+    Provider-visible composer control rows are persisted as ``role="audit"``
+    with a closed envelope; they are decoded back to their exact provider role
+    here. Composer tool-call audit rows are persisted as ``role="tool"`` messages so
     the session record retains the dispatch trail. They are not prior LLM
     dialogue turns: replaying them without the in-loop assistant tool-call
     request that produced them creates orphan OpenAI tool messages. Keep them
     in storage, but exclude them from prompt history and normal chat responses.
     """
-    return [{"role": message.role, "content": _composer_history_content(message)} for message in _composer_conversation_messages(messages)]
+    history: list[dict[str, str]] = []
+    for message in messages:
+        control = replay_composer_control_message(
+            stored_role=message.role,
+            writer_principal=message.writer_principal,
+            content=message.content,
+            tool_calls=message.tool_calls,
+        )
+        if control is not None:
+            history.append(control)
+        elif not _is_composer_audit_tool_message(message):
+            history.append({"role": message.role, "content": _composer_history_content(message)})
+    return history
 
 
 def _composer_persisted_validation(

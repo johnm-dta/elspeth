@@ -10,6 +10,7 @@ would never see it).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,12 +19,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.control_messages import anti_anchor_control_envelope, replay_composer_control_message
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
+from elspeth.web.sessions.routes._helpers import _composer_chat_history
+
+from .conftest import build_test_sessions_service
 
 
 @dataclass
@@ -183,6 +189,89 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
     hint_text = hint_messages[0]["content"]
     assert "set_metadata" in hint_text, "hint should name the anchored tool"
     assert "byte-identical" in hint_text or "identical" in hint_text
+
+
+@pytest.mark.asyncio
+async def test_anti_anchor_hint_is_durable_before_fourth_call_and_replays_once(tmp_path: Path) -> None:
+    """The provider-visible hint must be committed before the call it changes."""
+    catalog = _mock_catalog()
+    sessions = build_test_sessions_service(data_dir=tmp_path)
+    session = await sessions.create_session("anti-anchor-user", "Anti-anchor audit", "local")
+    service = ComposerServiceImpl.for_trained_operator(
+        catalog=catalog,
+        settings=_make_settings(),
+        sessions_service=sessions,
+    )
+    state = _empty_state()
+    identical_args = {"patch": {"name": "Anchored Build"}}
+    arg_error = ToolArgumentError(argument="patch", expected="non-anchored payload", actual_type="dict")
+    call_count = 0
+
+    async def respond(messages: list[dict[str, Any]], *_args: object, **_kwargs: object) -> _FakeLLMResponse:
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 3:
+            return _make_response_with_tool(f"call_{call_count}", "set_metadata", identical_args)
+
+        # The durable write is a precondition of the provider call, not
+        # best-effort settlement after the model has already observed it.
+        stored = await sessions.get_messages(session.id, limit=None)
+        durable_hints = [message for message in stored if message.role == "audit" and "[ELSPETH-SYSTEM-HINT]" in message.content]
+        assert len(durable_hints) == 1
+        durable = durable_hints[0]
+        assert durable.writer_principal == "compose_loop"
+        assert durable.tool_calls == (
+            {
+                "_kind": "composer_control_message",
+                "schema": "composer.control-message.v1",
+                "origin": "anti_anchor",
+                "provider_role": "user",
+                "content_hash": hashlib.sha256(durable.content.encode("utf-8")).hexdigest(),
+            },
+        )
+
+        # A fresh service/route reconstruction must recover the same provider
+        # role and exact redacted content without duplicating the intervention.
+        replayed = _composer_chat_history(stored)
+        replayed_hints = [message for message in replayed if message["role"] == "user" and "[ELSPETH-SYSTEM-HINT]" in message["content"]]
+        assert replayed_hints == [{"role": "user", "content": durable.content}]
+        assert replayed_hints[0] in messages
+        return _make_text_only_response("The durable hint changed my next action.")
+
+    with (
+        patch.object(service, "_call_llm", side_effect=respond),
+        patch(
+            "elspeth.web.composer.tool_batch.execute_tool",
+            side_effect=[arg_error, arg_error, arg_error],
+        ),
+    ):
+        await service.compose("Build something", [], state, session_id=str(session.id))
+
+    assert call_count == 4
+
+
+@pytest.mark.parametrize("tamper", ("content", "stored_role", "writer_principal", "provider_role"))
+def test_anti_anchor_control_replay_fails_closed_on_provenance_tamper(tamper: str) -> None:
+    content = "[ELSPETH-SYSTEM-HINT] Choose a structurally different repair."
+    envelope = anti_anchor_control_envelope(content)
+    stored_role = "audit"
+    writer_principal = "compose_loop"
+    if tamper == "content":
+        content += " altered"
+    elif tamper == "stored_role":
+        stored_role = "user"
+    elif tamper == "writer_principal":
+        writer_principal = "route_user_message"
+    else:
+        envelope["provider_role"] = "system"
+
+    with pytest.raises(AuditIntegrityError):
+        replay_composer_control_message(
+            stored_role=stored_role,
+            writer_principal=writer_principal,
+            content=content,
+            tool_calls=[envelope],
+        )
 
 
 @pytest.mark.asyncio

@@ -81,6 +81,7 @@ from elspeth.web.composer.audit import (
 )
 from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_and_envelope
 from elspeth.web.composer.availability import ComposerAvailability as ComposerAvailability  # re-export; genuine home is availability.py
+from elspeth.web.composer.control_messages import anti_anchor_control_envelope
 from elspeth.web.composer.discovery_cache import (
     CachedDiscoveryPayload as _CachedDiscoveryPayload,
 )
@@ -118,7 +119,7 @@ from elspeth.web.composer.progress import (
     emit_progress,
     model_call_progress_event,
 )
-from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
+from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, render_system_prompt
 from elspeth.web.composer.proposals import build_tool_proposal_summary
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
@@ -1204,7 +1205,6 @@ class ComposerServiceImpl:
             PIPELINE_CAPABILITIES_SKILL_HASH,
             PIPELINE_CAPABILITIES_SKILL_NAME,
             PIPELINE_COMPOSER_INTERACTION_SKILL_HASH,
-            PIPELINE_COMPOSER_SKILL_HASH,
             PIPELINE_COMPOSER_SKILL_NAME,
         )
 
@@ -1216,7 +1216,12 @@ class ComposerServiceImpl:
             PIPELINE_CAPABILITIES_SKILL_NAME,
             PIPELINE_CAPABILITIES_SKILL_HASH,
         )
-        self._composer_skill_hash: str = PIPELINE_COMPOSER_SKILL_HASH
+        # Bind the service instance to the exact prompt stack it will send.
+        # This includes the deployment overlay and is rendered once so a
+        # mid-service file change cannot split provider bytes from identity or
+        # archival evidence.
+        self._composer_skill_text: str = render_system_prompt(self._data_dir)
+        self._composer_skill_hash: str = hashlib.sha256(self._composer_skill_text.encode("utf-8")).hexdigest()
         self._composer_skill_name: str = PIPELINE_COMPOSER_SKILL_NAME
         # F-5c gate: ensures the first ``compose()`` call upserts
         # the skill markdown into ``skill_markdown_history`` exactly once
@@ -1445,22 +1450,18 @@ class ComposerServiceImpl:
             return
         if self._sessions_service is None:
             return
-        # Archive the exact composed static prompt, not either source markdown
-        # in isolation. Startup independently verified both cached source files
-        # against disk before this exact in-memory composition was accepted.
-        from elspeth.web.composer.prompts import SYSTEM_PROMPT
-
-        text = SYSTEM_PROMPT
+        # Archive the exact service-instance prompt, including its deployment
+        # overlay, not either static source markdown in isolation.
+        text = self._composer_skill_text
         sha256_hex = hashlib.sha256(text.encode("utf-8")).hexdigest()
         # Defensive Tier-1 consistency check: the service's composed prompt
         # hash and the exact archived content MUST agree.
         if sha256_hex != self._composer_skill_hash:
             raise RuntimeError(
                 f"Composer skill hash drift detected: service instance cached "
-                f"{self._composer_skill_hash!r} but exact prompt composition now returns "
-                f"{sha256_hex!r}. The LRU cache was invalidated mid-process; restart "
-                f"elspeth-web.service so the in-memory skill prompt and the audit "
-                f"row's composer_skill_hash agree."
+                f"{self._composer_skill_hash!r} but its retained prompt bytes hash to "
+                f"{sha256_hex!r}. Restart elspeth-web.service so the in-memory skill "
+                f"prompt and the audit row's composer_skill_hash agree."
             )
         await self._sessions_service.upsert_skill_markdown_history(
             skill_hash=sha256_hex,
@@ -2295,7 +2296,7 @@ class ComposerServiceImpl:
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
                 escape_hatch_model=self._settings.composer_advisor_model,
             ),
-            rendered_skill=build_system_prompt(self._data_dir),
+            rendered_skill=self._composer_skill_text,
             repair_budget=self._settings.composer_planner_repair_budget,
             budget_policy=PlannerBudgetPolicy(
                 max_total_provider_calls=self._settings.composer_planner_max_provider_calls,
@@ -2718,7 +2719,7 @@ class ComposerServiceImpl:
             else AbsentBase()
         )
         preferences = await self._require_sessions_service().get_composer_preferences(session_uuid)
-        rendered_skill = build_system_prompt(self._data_dir)
+        rendered_skill = self._composer_skill_text
         origin = PlannerOriginatingMessage(
             session_id=session_id,
             message_id=user_message_id,
@@ -3122,11 +3123,21 @@ class ComposerServiceImpl:
         # validator feedback. Inject a synthetic role="user" hint before
         # the next LLM turn so the model breaks the anchor. consume_fire()
         # clears the deque so the hint cannot re-fire on the same anchor.
-        # Persisted via the normal llm_messages → chat_messages path; the
-        # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
-        # marker so its system origin is unambiguous.
+        # Persisted first as a system-origin audit row whose closed envelope
+        # records the provider role. Replay restores that exact role/content.
         if anti_anchor.should_fire():
             hint_text = anti_anchor.build_hint()
+            if session_id is not None:
+                # Audit publication is a precondition of the provider-visible
+                # intervention. A storage failure propagates before the hint is
+                # appended, so the model can never act on unrecorded control.
+                await self._require_sessions_service().add_message(
+                    UUID(session_id),
+                    "audit",
+                    hint_text,
+                    writer_principal="compose_loop",
+                    tool_calls=[anti_anchor_control_envelope(hint_text)],
+                )
             anti_anchor.consume_fire()
             llm_messages.append({"role": "user", "content": hint_text})
             is_drift_hint = "drift without convergence" in hint_text
@@ -4310,6 +4321,7 @@ class ComposerServiceImpl:
                 catalog=policy_catalog,
                 data_dir=self._data_dir,
                 plugin_snapshot=plugin_snapshot,
+                rendered_skill=self._composer_skill_text,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
@@ -4867,7 +4879,7 @@ class ComposerServiceImpl:
         effective_timeout = configured_timeout if timeout is None else min(configured_timeout, timeout)
         max_completion = self._settings.composer_advisor_max_completion_tokens
 
-        system_msg = build_system_prompt(self._data_dir) + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
+        system_msg = self._composer_skill_text + "\n\n" + _ADVISOR_SYSTEM_INSTRUCTIONS
         # Required fields (trigger, problem_summary, recent_errors,
         # attempted_actions) are validated by _TOOL_REQUIRED_PATHS before this
         # method runs, so direct dict access is sound. schema_excerpt is the

@@ -62,6 +62,25 @@ from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessio
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
+def _option_shape_summary(
+    *,
+    mapping: int = 0,
+    sequence: int = 0,
+    set_: int = 0,
+    scalar: int = 0,
+) -> dict[str, object]:
+    return {
+        "_option_shape": "mapping",
+        "entry_count": mapping + sequence + set_ + scalar,
+        "value_shape_counts": {
+            "mapping": mapping,
+            "scalar": scalar,
+            "sequence": sequence,
+            "set": set_,
+        },
+    }
+
+
 def _empty_state() -> CompositionState:
     return CompositionState(
         source=None,
@@ -1183,10 +1202,7 @@ def test_redaction_substitutes_source_options_via_summarizer() -> None:
     assert redacted["source"]["on_success"] == "rows"
     # options collapses to the summarizer's str output.
     assert isinstance(redacted["source"]["options"], str)
-    assert json.loads(redacted["source"]["options"]) == {
-        "blob_ref": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["source"]["options"]) == _option_shape_summary(scalar=2)
     # The canary path MUST NOT appear anywhere in the redacted output.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY_PATH not in serialized
@@ -1275,8 +1291,8 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
     # summarizer's canonical-JSON shape output.
     assert isinstance(redacted["nodes"][0]["options"], str)
     assert isinstance(redacted["outputs"][0]["options"], str)
-    assert json.loads(redacted["nodes"][0]["options"]) == {"prompt_template": "<redacted-option-value>"}
-    assert json.loads(redacted["outputs"][0]["options"]) == {"path": "<redacted-option-value>"}
+    assert json.loads(redacted["nodes"][0]["options"]) == _option_shape_summary(scalar=1)
+    assert json.loads(redacted["outputs"][0]["options"]) == _option_shape_summary(scalar=1)
     # ``routes`` and ``trigger`` pass through with their original shapes
     # — structurally exempt under §4.4.2 (closed-list scalar element types).
     assert redacted["nodes"][0]["routes"] == {"true": _CANARY_ROUTES}
@@ -1342,20 +1358,9 @@ def test_redaction_redacts_sensitive_set_pipeline_option_values_inside_summaries
 
     redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
 
-    assert json.loads(redacted["source"]["options"]) == {
-        "api_key": "<redacted-option-value>",
-        "dsn": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
-    assert json.loads(redacted["nodes"][0]["options"]) == {
-        "api_key": {"secret_ref": "<redacted-option-value>"},
-        "connection_string": "<redacted-option-value>",
-        "prompt_template": "<redacted-option-value>",
-    }
-    assert json.loads(redacted["outputs"][0]["options"]) == {
-        "credential": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["source"]["options"]) == _option_shape_summary(scalar=3)
+    assert json.loads(redacted["nodes"][0]["options"]) == _option_shape_summary(mapping=1, scalar=2)
+    assert json.loads(redacted["outputs"][0]["options"]) == _option_shape_summary(scalar=2)
     serialized = json.dumps(redacted, sort_keys=True)
     for canary in (
         _CANARY_PATH,

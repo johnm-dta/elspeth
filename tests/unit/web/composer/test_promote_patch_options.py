@@ -53,6 +53,19 @@ from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 # ---------------------------------------------------------------------------
 
 
+def _option_shape_summary(*, scalar: int) -> dict[str, object]:
+    return {
+        "_option_shape": "mapping",
+        "entry_count": scalar,
+        "value_shape_counts": {
+            "mapping": 0,
+            "scalar": scalar,
+            "sequence": 0,
+            "set": 0,
+        },
+    }
+
+
 def _ctx() -> ToolContext:
     """Bare ToolContext sufficient for the argument-validation tests below.
 
@@ -305,10 +318,7 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
-        assert json.loads(redacted["patch"]) == {
-            "api_key": "<redacted-option-value>",
-            "path": "<redacted-option-value>",
-        }
+        assert json.loads(redacted["patch"]) == _option_shape_summary(scalar=2)
         assert "secret-ref" not in redacted["patch"]
         assert "/data/in.csv" not in redacted["patch"]
 
@@ -549,10 +559,7 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
-        assert json.loads(redacted["patch"]) == {
-            "api_key": "<redacted-option-value>",
-            "prompt_template": "<redacted-option-value>",
-        }
+        assert json.loads(redacted["patch"]) == _option_shape_summary(scalar=2)
         assert "secret-ref" not in redacted["patch"]
         assert "prompt-text" not in redacted["patch"]
         # node_id is non-sensitive — passes through verbatim
@@ -643,10 +650,7 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
         assert "patch" in redacted
         # The summarizer collapses the dict to a string, not a nested dict.
         assert isinstance(redacted["patch"], str), "patch field should be a string summary, not a raw dict"
-        assert json.loads(redacted["patch"]) == {
-            "api_key": "<redacted-option-value>",
-            "path": "<redacted-option-value>",
-        }
+        assert json.loads(redacted["patch"]) == _option_shape_summary(scalar=2)
         assert "secret-ref" not in redacted["patch"]
         assert "/private/out.json" not in redacted["patch"]
         # sink_name is non-sensitive — passes through verbatim

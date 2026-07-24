@@ -45,6 +45,19 @@ from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
+def _option_shape_summary(*, scalar: int) -> dict[str, object]:
+    return {
+        "_option_shape": "mapping",
+        "entry_count": scalar,
+        "value_shape_counts": {
+            "mapping": 0,
+            "scalar": scalar,
+            "sequence": 0,
+            "set": 0,
+        },
+    }
+
+
 def _empty_state() -> CompositionState:
     return CompositionState(
         source=None,
@@ -406,10 +419,7 @@ def test_redaction_substitutes_options_via_summarizer() -> None:
     assert redacted["on_success"] == "out"
     # options is now the summarizer's str output.
     assert isinstance(redacted["options"], str)
-    assert json.loads(redacted["options"]) == {
-        "blob_ref": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["options"]) == _option_shape_summary(scalar=2)
     # The canary value MUST NOT appear in the redacted dict OR its JSON form.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY not in serialized
@@ -427,7 +437,7 @@ def test_redaction_hides_paths_without_blob_ref() -> None:
     }
     redacted = redact_tool_call_arguments("set_source_from_blob", args, telemetry=tel)
     assert isinstance(redacted["options"], str)
-    assert json.loads(redacted["options"]) == {"path": "<redacted-option-value>"}
+    assert json.loads(redacted["options"]) == _option_shape_summary(scalar=1)
     assert "/tmp/data.csv" not in redacted["options"]
 
 

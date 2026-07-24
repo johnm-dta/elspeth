@@ -19,7 +19,7 @@ from sqlalchemy import Engine, create_engine, text
 
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import DEPLOYMENT_TARGET_AWS_ECS
-from elspeth.web.paths import allowed_source_directories
+from elspeth.web.paths import managed_blob_directory
 from elspeth.web.schema_probe import (
     SchemaState,
     postgres_engine_kwargs,
@@ -276,7 +276,7 @@ def _check_payload_store(settings: WebSettings) -> _ProbeResult:
 
 def _check_blob_dir(settings: WebSettings) -> _ProbeResult:
     try:
-        path = allowed_source_directories(str(settings.data_dir))[0]
+        path = managed_blob_directory(str(settings.data_dir))
     except BaseException as exc:
         return (ReadinessCheck("blob_dir", False, f"directory resolution failed ({type(exc).__name__})"),)
     return _validate_directory("blob_dir", path)

@@ -526,7 +526,12 @@ def _execute_set_source(
         return credential_error
 
     # S2: Validate source path allowlist
-    path_error = _validate_source_path(options, context.data_dir, require_data_dir=context.require_data_dir_for_paths)
+    path_error = _validate_source_path(
+        options,
+        context.data_dir,
+        session_id=context.session_id,
+        require_data_dir=context.require_data_dir_for_paths,
+    )
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -964,7 +969,12 @@ def _execute_patch_source_options(
         return credential_error
 
     # S2: Validate patched source paths against allowlist
-    path_error = _validate_source_path(new_options, context.data_dir, require_data_dir=context.require_data_dir_for_paths)
+    path_error = _validate_source_path(
+        new_options,
+        context.data_dir,
+        session_id=context.session_id,
+        require_data_dir=context.require_data_dir_for_paths,
+    )
     if path_error is not None:
         return _failure_result(state, path_error)
 

@@ -284,6 +284,8 @@ def execute_tool(
     **kwargs: Any,
 ) -> ToolResult:
     """Invoke the strict dispatcher through an explicit test trust boundary."""
+    if kwargs.get("data_dir") is not None and "session_id" not in kwargs:
+        kwargs["session_id"] = "test-session"
     supplied_snapshot = kwargs.pop("plugin_snapshot", None)
     if isinstance(catalog, PolicyCatalogView):
         if not isinstance(supplied_snapshot, PluginAvailabilitySnapshot):
@@ -1957,7 +1959,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "csv_out",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r1.updated_state,
@@ -1996,7 +1998,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "err_out",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r1.updated_state,
@@ -2037,7 +2039,7 @@ class TestUpsertEdge:
                 "sink_name": "llm_failures",
                 "plugin": "json",
                 "options": {
-                    "path": "/data/outputs/magic_comp_rules_layers_failures.json",
+                    "path": "/data/outputs/test-session/magic_comp_rules_layers_failures.json",
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -2104,7 +2106,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             state,
@@ -2147,7 +2149,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             state,
@@ -2187,7 +2189,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             with_node.updated_state,
@@ -2218,7 +2220,7 @@ class TestUpsertEdge:
             {
                 "plugin": "csv",
                 "on_success": "old_stream",
-                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "discard",
             },
             state,
@@ -2229,7 +2231,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r1.updated_state,
@@ -2307,7 +2309,7 @@ class TestUpsertEdge:
             {
                 "sink_name": "csv_out",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r1.updated_state,
@@ -2420,7 +2422,7 @@ class TestRemoveEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             with_node.updated_state,
@@ -2449,7 +2451,7 @@ class TestRemoveEdge:
             {
                 "plugin": "csv",
                 "on_success": "rows",
-                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "discard",
             },
             state,
@@ -2460,7 +2462,7 @@ class TestRemoveEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             with_source.updated_state,
@@ -2505,7 +2507,7 @@ class TestRemoveEdge:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             state,
@@ -2646,7 +2648,7 @@ class TestSetOutput:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             state,
@@ -2667,7 +2669,7 @@ class TestSetOutput:
                 "sink_name": "main",
                 "plugin": "csv",
                 "options": {
-                    "path": "/data/outputs/out.csv",
+                    "path": "/data/outputs/test-session/out.csv",
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -2817,7 +2819,7 @@ class TestRemoveOutput:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             state,
@@ -2836,7 +2838,7 @@ class TestRemoveOutput:
 
 
 class TestSetSourcePathSecurity:
-    """S2: Source path allowlist — paths must be under {data_dir}/blobs/."""
+    """S2: Source paths must stay inside the caller's blob subtree."""
 
     def test_path_under_blobs_succeeds(self) -> None:
         state = _empty_state()
@@ -2846,7 +2848,7 @@ class TestSetSourcePathSecurity:
             {
                 "plugin": "csv",
                 "on_success": "t1",
-                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             state,
@@ -2962,7 +2964,7 @@ class TestSetSourcePathSecurity:
             {
                 "plugin": "csv",
                 "on_success": "t1",
-                "options": {"path": "blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             state,
@@ -2987,6 +2989,52 @@ class TestSetSourcePathSecurity:
             catalog,
             data_dir="/data",
         )
+        assert result.success is False
+
+    def test_other_session_blob_path_fails(self, tmp_path: Path) -> None:
+        victim_path = tmp_path / "blobs" / "victim-session" / "input.csv"
+        victim_path.parent.mkdir(parents=True)
+        victim_path.write_text("value\nsecret\n", encoding="utf-8")
+
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": str(victim_path), "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            _empty_state(),
+            _mock_catalog(),
+            data_dir=str(tmp_path),
+            session_id="attacker-session",
+        )
+
+        assert result.success is False
+        assert "path" in result.data["error"].lower()
+
+    def test_symlink_from_own_blob_subtree_to_other_session_fails(self, tmp_path: Path) -> None:
+        own_root = tmp_path / "blobs" / "attacker-session"
+        victim_root = tmp_path / "blobs" / "victim-session"
+        own_root.mkdir(parents=True)
+        victim_root.mkdir(parents=True)
+        (victim_root / "input.csv").write_text("value\nsecret\n", encoding="utf-8")
+        (own_root / "foreign-link").symlink_to(victim_root, target_is_directory=True)
+
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {"path": str(own_root / "foreign-link" / "input.csv"), "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            _empty_state(),
+            _mock_catalog(),
+            data_dir=str(tmp_path),
+            session_id="attacker-session",
+        )
+
         assert result.success is False
 
 
@@ -3596,7 +3644,7 @@ class TestExecuteToolPriorValidation:
             {
                 "sink_name": "main",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r1.updated_state,
@@ -3772,7 +3820,7 @@ class TestToolRegistry:
             {
                 "plugin": "csv",
                 "on_success": "t1",
-                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             state,
@@ -3821,7 +3869,7 @@ class TestGetPipelineState:
             {
                 "plugin": "csv",
                 "on_success": "t1",
-                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/in.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             state,
@@ -3849,7 +3897,7 @@ class TestGetPipelineState:
             {
                 "sink_name": "out",
                 "plugin": "csv",
-                "options": {"path": "/data/outputs/result.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/outputs/test-session/result.csv", "schema": {"mode": "observed"}},
                 "on_write_failure": "discard",
             },
             r2.updated_state,
@@ -7150,7 +7198,7 @@ class TestPatchOutputPathSecurity:
         return r.updated_state
 
     def test_path_outside_allowlist_rejected(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
@@ -7163,11 +7211,11 @@ class TestPatchOutputPathSecurity:
         assert "path" in result.data["error"].lower()
 
     def test_traversal_attack_rejected(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
-            {"sink_name": "main", "patch": {"path": "/data/outputs/../../etc/passwd"}},
+            {"sink_name": "main", "patch": {"path": "/data/outputs/test-session/../../etc/passwd"}},
             state,
             catalog,
             data_dir="/data",
@@ -7175,7 +7223,7 @@ class TestPatchOutputPathSecurity:
         assert result.success is False
 
     def test_file_key_also_validated(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
@@ -7215,12 +7263,56 @@ class TestPatchOutputPathSecurity:
         error = _validate_sink_path({"path": "/data/blobs/sess-a/out.json"}, data_dir="/data", session_id=None)
         assert error is not None
 
+    def test_append_sink_cannot_adopt_other_session_output(self, tmp_path: Path) -> None:
+        victim_path = tmp_path / "outputs" / "victim-session" / "shared.csv"
+        victim_path.parent.mkdir(parents=True)
+        victim_path.write_text("value\nsecret\n", encoding="utf-8")
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {
+                    "path": str(victim_path),
+                    "schema": {"mode": "observed"},
+                    "mode": "append",
+                    "collision_policy": "append_or_create",
+                },
+                "on_write_failure": "discard",
+            },
+            _empty_state(),
+            _mock_catalog(),
+            data_dir=str(tmp_path),
+            session_id="attacker-session",
+        )
+
+        assert result.success is False
+        assert "path" in result.data["error"].lower()
+
+    def test_sink_symlink_to_other_session_output_rejected(self, tmp_path: Path) -> None:
+        from elspeth.web.composer.tools._common import _validate_sink_path
+
+        own_root = tmp_path / "outputs" / "attacker-session"
+        victim_root = tmp_path / "outputs" / "victim-session"
+        own_root.mkdir(parents=True)
+        victim_root.mkdir(parents=True)
+        (own_root / "foreign-link").symlink_to(victim_root, target_is_directory=True)
+
+        error = _validate_sink_path(
+            {"path": str(own_root / "foreign-link" / "out.csv")},
+            data_dir=str(tmp_path),
+            session_id="attacker-session",
+        )
+
+        assert error is not None
+
     def test_file_key_traversal_rejected(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
-            {"sink_name": "main", "patch": {"file": "/data/outputs/../../etc/shadow"}},
+            {"sink_name": "main", "patch": {"file": "/data/outputs/test-session/../../etc/shadow"}},
             state,
             catalog,
             data_dir="/data",
@@ -7228,7 +7320,7 @@ class TestPatchOutputPathSecurity:
         assert result.success is False
 
     def test_relative_path_under_outputs_accepted(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
@@ -7247,14 +7339,14 @@ class TestPatchOutputPathSecurity:
         assert result.success is True
 
     def test_absolute_path_under_allowed_dir_accepted(self) -> None:
-        state = self._state_with_output({"path": "/data/outputs/ok.csv"})
+        state = self._state_with_output({"path": "/data/outputs/test-session/ok.csv"})
         catalog = _mock_catalog()
         result = execute_tool(
             "patch_output_options",
             {
                 "sink_name": "main",
                 "patch": {
-                    "path": "/data/outputs/subdir/out.csv",
+                    "path": "/data/outputs/test-session/subdir/out.csv",
                     "mode": "write",
                     "collision_policy": "fail_if_exists",
                 },
@@ -7340,9 +7432,9 @@ class TestTransformProviderConfigPathSecurity:
         from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
 
         error = _validate_transform_provider_config_path(
-            {"provider": "chroma", "provider_config": {"persist_directory": "/data/outputs/chroma"}},
+            {"provider": "chroma", "provider_config": {"persist_directory": "/data/outputs/test-session/chroma"}},
             data_dir="/data",
-            session_id=None,
+            session_id="test-session",
         )
         assert error is None
 
@@ -7367,6 +7459,21 @@ class TestTransformProviderConfigPathSecurity:
             data_dir="/data",
             session_id="sess-a",
         )
+        assert error is not None
+        assert "persist_directory" in error
+
+    def test_helper_rejects_persist_directory_in_other_session_outputs(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
+
+        error = _validate_transform_provider_config_path(
+            {
+                "provider": "chroma",
+                "provider_config": {"persist_directory": "/data/outputs/victim-session/chroma"},
+            },
+            data_dir="/data",
+            session_id="attacker-session",
+        )
+
         assert error is not None
         assert "persist_directory" in error
 
@@ -7439,7 +7546,7 @@ class TestTransformProviderConfigPathSecurity:
                 "input": "rows",
                 "on_success": "retrieved",
                 "on_error": "discard",
-                "options": self._rag_options("/data/outputs/chroma"),
+                "options": self._rag_options("/data/outputs/test-session/chroma"),
             },
             state,
             catalog,
@@ -7475,7 +7582,7 @@ class TestTransformProviderConfigPathSecurity:
             "source": {
                 "plugin": "csv",
                 "on_success": "source_out",
-                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/in.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             "nodes": [
@@ -7495,7 +7602,7 @@ class TestTransformProviderConfigPathSecurity:
                     "sink_name": "main",
                     "plugin": "csv",
                     "options": {
-                        "path": "/data/outputs/out.csv",
+                        "path": "/data/outputs/test-session/out.csv",
                         "schema": {"mode": "observed"},
                         "collision_policy": "auto_increment",
                     },
@@ -7551,7 +7658,7 @@ class TestTransformProviderConfigPathSecurity:
                 "input": "rows",
                 "on_success": "retrieved",
                 "on_error": "discard",
-                "options": self._rag_options("/data/outputs/chroma"),
+                "options": self._rag_options("/data/outputs/test-session/chroma"),
             },
             state,
             catalog,
@@ -7571,7 +7678,7 @@ class TestTransformProviderConfigPathSecurity:
                 "input": "rows",
                 "on_success": "retrieved",
                 "on_error": "discard",
-                "options": self._rag_options("/data/outputs/chroma"),
+                "options": self._rag_options("/data/outputs/test-session/chroma"),
             },
             state,
             catalog,
@@ -7600,7 +7707,7 @@ class TestTransformProviderConfigPathSecurity:
             "source": {
                 "plugin": "csv",
                 "on_success": "source_out",
-                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/in.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             "nodes": [
@@ -7619,7 +7726,7 @@ class TestTransformProviderConfigPathSecurity:
                 {
                     "sink_name": "main",
                     "plugin": "csv",
-                    "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    "options": {"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                     "on_write_failure": "discard",
                 }
             ],
@@ -7758,7 +7865,7 @@ class TestTransformLlmRetryBudgetPolicy:
             "source": {
                 "plugin": "csv",
                 "on_success": "source_out",
-                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/in.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             "nodes": [
@@ -7778,7 +7885,7 @@ class TestTransformLlmRetryBudgetPolicy:
                     "sink_name": "main",
                     "plugin": "csv",
                     "options": {
-                        "path": "/data/outputs/out.csv",
+                        "path": "/data/outputs/test-session/out.csv",
                         "schema": {"mode": "observed"},
                         "collision_policy": "auto_increment",
                     },
@@ -8176,7 +8283,7 @@ class TestSetPipeline:
         state = _empty_state()
         catalog = self._catalog_with_json_sink()
         args = _valid_pipeline_args()
-        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        args["source"]["options"]["path"] = "/data/blobs/test-session/in.csv"
         del args["outputs"][0]["options"]
         args["outputs"][0]["plugin"] = "json"
 
@@ -8197,7 +8304,7 @@ class TestSetPipeline:
         state = _empty_state()
         catalog = self._catalog_with_text_sink()
         args = _valid_pipeline_args()
-        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        args["source"]["options"]["path"] = "/data/blobs/test-session/in.csv"
         del args["outputs"][0]["options"]
         args["outputs"][0]["plugin"] = "text"
 
@@ -8224,7 +8331,7 @@ class TestSetPipeline:
         state = _empty_state()
         catalog = self._catalog_with_json_sink()
         args = _valid_pipeline_args()
-        args["source"]["options"]["path"] = "/data/blobs/in.csv"
+        args["source"]["options"]["path"] = "/data/blobs/test-session/in.csv"
         del args["outputs"][0]["options"]
         args["outputs"][0]["plugin"] = "json"
 
@@ -8248,14 +8355,14 @@ class TestSetPipeline:
         state = _empty_state()
         catalog = self._catalog_with_json_sink()
         args = _valid_pipeline_args()
-        args["source"]["options"]["path"] = str(tmp_path / "blobs" / "input.csv")
+        args["source"]["options"]["path"] = str(tmp_path / "blobs" / "test-session" / "input.csv")
         args["nodes"][0]["on_error"] = "failures"
         args["outputs"] = [
             {
                 "sink_name": "main",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / "main.json"),
+                    "path": str(tmp_path / "outputs" / "test-session" / "main.json"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -8266,7 +8373,7 @@ class TestSetPipeline:
                 "sink_name": "failures",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / "failures.json"),
+                    "path": str(tmp_path / "outputs" / "test-session" / "failures.json"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -8789,7 +8896,7 @@ class TestSetPipeline:
             "options": {"schema": {"mode": "observed"}},
             "on_validation_failure": "quarantine",
         }
-        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / session_id / "out.csv")
         args["outputs"][0]["options"]["mode"] = "write"
         args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
 
@@ -9575,7 +9682,7 @@ class TestSetPipeline:
         state = _empty_state()
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
-        output_path = tmp_path / "outputs" / "append.csv"
+        output_path = tmp_path / "outputs" / session_id / "append.csv"
         args = {
             "source": {
                 "plugin": "text",
@@ -9753,7 +9860,7 @@ class TestClearSource:
             {
                 "plugin": "csv",
                 "on_success": "t1",
-                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "quarantine",
             },
             state,
@@ -10757,7 +10864,11 @@ class TestPreviewPipeline:
         )
         r3 = execute_tool(
             "set_output",
-            {"sink_name": "main", "plugin": "csv", "options": {"path": "/data/outputs/output.csv", "schema": {"mode": "observed"}}},
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/test-session/output.csv", "schema": {"mode": "observed"}},
+            },
             r2.updated_state,
             catalog,
         )
@@ -10950,7 +11061,7 @@ class TestPreviewPipeline:
                 SourceSpec(
                     plugin="csv",
                     on_success="main",
-                    options={"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                    options={"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                     on_validation_failure="discard",
                 )
             )
@@ -10958,7 +11069,7 @@ class TestPreviewPipeline:
                 OutputSpec(
                     name="main",
                     plugin="csv",
-                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    options={"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                     on_write_failure="discard",
                 )
             )
@@ -11013,7 +11124,7 @@ class TestPreviewPipeline:
                 SourceSpec(
                     plugin="csv",
                     on_success="main",
-                    options={"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                    options={"path": "/data/blobs/test-session/input.csv", "schema": {"mode": "observed"}},
                     on_validation_failure="discard",
                 )
             )
@@ -11021,7 +11132,7 @@ class TestPreviewPipeline:
                 OutputSpec(
                     name="main",
                     plugin="csv",
-                    options={"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    options={"path": "/data/outputs/test-session/out.csv", "schema": {"mode": "observed"}},
                     on_write_failure="discard",
                 )
             )
@@ -11089,7 +11200,7 @@ class TestPrevalidatePluginOptions:
         result = _prevalidate_plugin_options(
             "source",
             "no_such_source_plugin",
-            {"path": "/data/blobs/in.csv"},
+            {"path": "/data/blobs/test-session/in.csv"},
         )
         assert result is not None
         assert "no_such_source_plugin" in result
@@ -11101,7 +11212,7 @@ class TestPrevalidatePluginOptions:
         result = _prevalidate_plugin_options(
             "sink",
             "no_such_sink_plugin",
-            {"path": "/data/outputs/out.csv"},
+            {"path": "/data/outputs/test-session/out.csv"},
         )
         assert result is not None
         assert "no_such_sink_plugin" in result
@@ -14309,7 +14420,7 @@ class TestQueueBoundaryFieldEvidenceAbstains:
         return OutputSpec(
             name="main",
             plugin="json",
-            options={"path": "/data/outputs/main.jsonl", "format": "jsonl", "schema": {"mode": "observed"}},
+            options={"path": "/data/outputs/test-session/main.jsonl", "format": "jsonl", "schema": {"mode": "observed"}},
             on_write_failure="discard",
         )
 

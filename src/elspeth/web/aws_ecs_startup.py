@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import validate_aws_ecs_settings
-from elspeth.web.paths import allowed_source_directories
+from elspeth.web.paths import managed_blob_directory
 from elspeth.web.schema_probe import (
     DatabaseTargetConflictError,
     SchemaState,
@@ -105,7 +105,7 @@ def require_runtime_directories_mounted(settings: WebSettings) -> None:
     _require_safe_payload_directory(raw_payload_path.expanduser())
 
     try:
-        blob_root = allowed_source_directories(str(settings.data_dir))[0]
+        blob_root = managed_blob_directory(str(settings.data_dir))
     except (OSError, RuntimeError, ValueError):
         raise _contract_error("AWS ECS runtime directory blob (derived from ELSPETH_WEB__DATA_DIR) is missing or invalid.") from None
     _require_existing_directory(blob_root, label="blob", env_var="ELSPETH_WEB__DATA_DIR")

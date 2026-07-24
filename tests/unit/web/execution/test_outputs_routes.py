@@ -7,7 +7,7 @@ The manifest endpoint is the authoritative full-list of every sink-write
 artefact produced by a run (distinct from the diagnostics endpoint's
 20-artifact preview). The content endpoint streams the bytes of one
 artefact, gated by a path-allowlist guard that enforces
-``allowed_sink_directories(data_dir)``.
+``allowed_sink_directories(data_dir, session_id=run.session_id)``.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from elspeth.web.execution.schemas import (
 )
 
 _TEST_USER_ID = "test-user-123"
+_TEST_SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 
 
 @dataclass
@@ -53,7 +54,7 @@ class _FakeSession:
 
 @dataclass
 class _FakeRun:
-    session_id: UUID = field(default_factory=uuid4)
+    session_id: UUID = field(default_factory=lambda: _TEST_SESSION_ID)
     landscape_run_id: str | None = None
 
 
@@ -241,8 +242,8 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_streams_file_bytes_when_inside_sink_allowlist(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / 'results "é".jsonl'
         sink_bytes = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(sink_bytes)
@@ -294,8 +295,8 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_content_serves_decoded_file_uri_candidate_when_raw_percent_file_also_exists(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         decoded_file = outputs_dir / "results?token=literal.csv"
         raw_percent_file = outputs_dir / "results%3Ftoken%3Dliteral.csv"
         audited_bytes = b"id,name\n1,alice\n"
@@ -340,8 +341,8 @@ class TestRunOutputContentEndpoint:
     async def test_content_streams_verified_bytes_when_file_rewritten_after_integrity_check(self, monkeypatch, tmp_path) -> None:
         """The bytes returned must be the bytes that passed artifact integrity verification."""
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         original = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(original)
@@ -406,8 +407,8 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_content_supports_single_range_request_from_verified_snapshot(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         sink_bytes = b"0123456789"
         sink_file.write_bytes(sink_bytes)
@@ -462,8 +463,8 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_content_removes_temp_snapshot_when_send_fails(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         sink_bytes = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(sink_bytes)
@@ -566,8 +567,8 @@ class TestRunOutputContentEndpoint:
         hash and reject drift with 409.
         """
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         original = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(original)
@@ -672,7 +673,7 @@ class TestRunOutputContentEndpoint:
         monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
 
         # data_dir does not contain elsewhere/, so rogue_file is outside
-        # allowed_sink_directories(data_dir) = (data_dir/outputs, data_dir/blobs).
+        # The path is outside both session-owned output and blob subtrees.
         settings = _FakeSettings(data_dir=str(tmp_path))
 
         app = _create_test_app(execution_service=svc, settings=settings)
@@ -827,8 +828,8 @@ class TestRunOutputContentEndpoint:
     @pytest.mark.asyncio
     async def test_410_when_artifact_path_no_longer_exists(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         sink_file.write_bytes(b"will-purge\n")
         sink_file.unlink()  # File was purged after the run
@@ -932,8 +933,8 @@ class TestRunOutputPreviewEndpoint:
     async def test_preview_uses_verified_bytes_when_file_rewritten_after_integrity_check(self, monkeypatch, tmp_path) -> None:
         """Preview must be built from the bytes that passed artifact integrity verification."""
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         original = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(original)
@@ -994,8 +995,8 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_preview_serves_legacy_raw_percent_candidate_when_it_matches_audit(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         legacy_raw_file = outputs_dir / "results%3Ftoken=literal.jsonl"
         decoded_decoy = outputs_dir / "results?token=literal.jsonl"
         audited_bytes = b'{"legacy":true}\n'
@@ -1040,8 +1041,8 @@ class TestRunOutputPreviewEndpoint:
     async def test_409_when_preview_file_content_drifts_under_same_size(self, monkeypatch, tmp_path) -> None:
         """Preview must not expose bytes that no longer match the artifact audit row."""
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.jsonl"
         original = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(original)
@@ -1089,8 +1090,8 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_returns_csv_preview_for_small_file(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "results.csv"
         sink_file.write_text("col1,col2\n1,2\n3,4\n")
 
@@ -1114,8 +1115,8 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_text_file_under_cap_returns_full_content(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "log.txt"
         sink_file.write_text("hello world\n")
 
@@ -1137,8 +1138,8 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_binary_file_returns_binary_content_type(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "blob.bin"
         sink_file.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 200)
 
@@ -1211,8 +1212,8 @@ class TestRunOutputPreviewEndpoint:
     @pytest.mark.asyncio
     async def test_410_when_file_purged_between_manifest_and_preview(self, monkeypatch, tmp_path) -> None:
         run_id = uuid4()
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        outputs_dir = tmp_path / "outputs" / str(_TEST_SESSION_ID)
+        outputs_dir.mkdir(parents=True)
         sink_file = outputs_dir / "gone.csv"
         sink_file.write_text("data\n")
         sink_file.unlink()

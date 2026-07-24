@@ -464,6 +464,17 @@ def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> Session
     )
 
 
+def _composer_service_with_session(catalog: CatalogService, settings: Any) -> tuple[ComposerServiceImpl, str]:
+    engine, session_id = _session_engine_with_session()
+    service = ComposerServiceImpl.for_trained_operator(
+        catalog=catalog,
+        settings=settings,
+        sessions_service=_test_sessions_service(engine, Path(settings.data_dir)),
+        session_engine=engine,
+    )
+    return service, session_id
+
+
 def _create_session_blob_for_test(
     *,
     engine: Any,
@@ -1131,7 +1142,7 @@ class TestComposerSingleToolCall:
         """LLM makes one tool call, then responds with text."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        service, session_id = _composer_service_with_session(catalog, settings)
         state = _empty_state()
 
         # Turn 1: tool call to set_source
@@ -1144,7 +1155,10 @@ class TestComposerSingleToolCall:
                     "arguments": {
                         "plugin": "csv",
                         "on_success": "t1",
-                        "options": {"path": "/data/blobs/data.csv", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": f"/data/blobs/{session_id}/data.csv",
+                            "schema": {"mode": "observed"},
+                        },
                         "on_validation_failure": "quarantine",
                     },
                 }
@@ -1159,7 +1173,7 @@ class TestComposerSingleToolCall:
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
             mock_llm.side_effect = [tool_response, text_response]
-            result = await service.compose("Use CSV as source", [], state)
+            result = await service.compose("Use CSV as source", [], state, session_id=session_id)
 
         assert result.message == "I've set up a CSV source."
         assert result.state.sources["source"] is not None
@@ -1252,7 +1266,7 @@ class TestComposerSingleToolCall:
         )
         user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
-        output_path = tmp_path / "outputs" / "append.csv"
+        output_path = tmp_path / "outputs" / session_id / "append.csv"
         pipeline_args = {
             "source": {
                 "plugin": "text",
@@ -1354,7 +1368,7 @@ class TestComposerMultiTurnToolCalls:
         """Multiple tool calls across turns — state accumulates."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        service, session_id = _composer_service_with_session(catalog, settings)
         state = _empty_state()
 
         # Turn 1: set_source
@@ -1366,7 +1380,10 @@ class TestComposerMultiTurnToolCalls:
                     "arguments": {
                         "plugin": "csv",
                         "on_success": "t1",
-                        "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": f"/data/blobs/{session_id}/input.csv",
+                            "schema": {"mode": "observed"},
+                        },
                         "on_validation_failure": "quarantine",
                     },
                 }
@@ -1391,7 +1408,7 @@ class TestComposerMultiTurnToolCalls:
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
             mock_llm.side_effect = [turn1, turn2, turn3]
-            result = await service.compose("Build a pipeline", [], state)
+            result = await service.compose("Build a pipeline", [], state, session_id=session_id)
 
         assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "My Pipeline"
@@ -2448,7 +2465,7 @@ class TestComposerMultipleToolCallsPerTurn:
         """LLM returns multiple tool calls in one response — all executed."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        service, session_id = _composer_service_with_session(catalog, settings)
         state = _empty_state()
 
         # Turn 1: two tool calls in one response
@@ -2460,7 +2477,10 @@ class TestComposerMultipleToolCallsPerTurn:
                     "arguments": {
                         "plugin": "csv",
                         "on_success": "t1",
-                        "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": f"/data/blobs/{session_id}/input.csv",
+                            "schema": {"mode": "observed"},
+                        },
                         "on_validation_failure": "quarantine",
                     },
                 },
@@ -2480,7 +2500,7 @@ class TestComposerMultipleToolCallsPerTurn:
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
             mock_llm.side_effect = [multi_call, text]
-            result = await service.compose("Setup", [], state)
+            result = await service.compose("Setup", [], state, session_id=session_id)
 
         assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "Dual Call Pipeline"
@@ -2579,7 +2599,7 @@ class TestDiscoveryCache:
         """Cacheable discovery data is reused, but validation/version stay current."""
         catalog = _mock_catalog()
         settings = _make_settings()
-        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        service, session_id = _composer_service_with_session(catalog, settings)
         state = _empty_state()
 
         disc1 = _make_llm_response(
@@ -2593,7 +2613,10 @@ class TestDiscoveryCache:
                     "arguments": {
                         "plugin": "csv",
                         "on_success": "out",
-                        "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": f"/data/blobs/{session_id}/input.csv",
+                            "schema": {"mode": "observed"},
+                        },
                         "on_validation_failure": "quarantine",
                     },
                 }
@@ -2610,7 +2633,7 @@ class TestDiscoveryCache:
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
             mock_llm.side_effect = [disc1, mutate, disc2, text]
-            result = await service.compose("Build", [], state)
+            result = await service.compose("Build", [], state, session_id=session_id)
 
         assert result.state.version == 2
         cached_tool_message = mock_llm.call_args_list[3][0][0][-1]
@@ -2988,7 +3011,7 @@ class TestPartialStatePreservation:
         partial_state is attached to the exception."""
         catalog = _mock_catalog()
         settings = _make_settings(composer_max_composition_turns=1)
-        service = ComposerServiceImpl.for_trained_operator(catalog=catalog, settings=settings)
+        service, session_id = _composer_service_with_session(catalog, settings)
         state = _empty_state()
 
         # Turn 1: mutation (set_source) — composition budget exhausted (1/1)
@@ -3000,7 +3023,10 @@ class TestPartialStatePreservation:
                     "arguments": {
                         "plugin": "csv",
                         "on_success": "t1",
-                        "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                        "options": {
+                            "path": f"/data/blobs/{session_id}/input.csv",
+                            "schema": {"mode": "observed"},
+                        },
                         "on_validation_failure": "quarantine",
                     },
                 }
@@ -3020,7 +3046,7 @@ class TestPartialStatePreservation:
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = [mut, mut2]
             with pytest.raises(ComposerConvergenceError) as exc_info:
-                await service.compose("Build pipeline", [], state)
+                await service.compose("Build pipeline", [], state, session_id=session_id)
 
             assert exc_info.value.partial_state is not None
             assert exc_info.value.partial_state.sources["source"] is not None

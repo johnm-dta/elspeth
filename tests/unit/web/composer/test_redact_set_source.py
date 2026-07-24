@@ -29,6 +29,25 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 
 
+def _option_shape_summary(
+    *,
+    mapping: int = 0,
+    sequence: int = 0,
+    set_: int = 0,
+    scalar: int = 0,
+) -> dict[str, object]:
+    return {
+        "_option_shape": "mapping",
+        "entry_count": mapping + sequence + set_ + scalar,
+        "value_shape_counts": {
+            "mapping": mapping,
+            "scalar": scalar,
+            "sequence": sequence,
+            "set": set_,
+        },
+    }
+
+
 def test_set_source_manifest_entry_is_type_driven() -> None:
     entry = MANIFEST["set_source"]
     assert entry.argument_model is SetSourceArgumentsModel
@@ -110,10 +129,7 @@ def test_redact_substitutes_options_via_summarizer() -> None:
     assert redacted["on_validation_failure"] == "discard"
     # Sensitive substitution: options is now the summarizer's str output.
     assert isinstance(redacted["options"], str)
-    assert json.loads(redacted["options"]) == {
-        "blob_ref": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["options"]) == _option_shape_summary(scalar=2)
     # The original internal path MUST NOT appear in the summary.
     assert "/internal/blob/path.csv" not in redacted["options"]
     # Telemetry recorded the manifest dispatch with the type-driven shape.
@@ -750,6 +766,32 @@ def test_summarize_set_source_options_accepts_coerced_datetime() -> None:
     options = {"since": datetime(2026, 1, 1, tzinfo=UTC), "key": "v"}
     result = _summarize_set_source_options(options)
     assert isinstance(result, str)
+
+
+def test_summarize_set_source_options_never_serializes_untrusted_key_names() -> None:
+    """Open option keys are data, not trusted audit-schema field names."""
+    secret_key = "api-key=SUPER-SECRET-CANARY"
+    nested_key = "nested-secret-key=PROMPT-INJECTION-CANARY"
+    unicode_key = "秘密🔐キー"
+    long_key = "LONG-KEY-CANARY-" + ("x" * 20_000)
+    options = {
+        secret_key: {nested_key: "value"},
+        unicode_key: ["first", "second"],
+        long_key: {"set-member-a", "set-member-b"},
+    }
+    equivalent_shape = {
+        "different-mapping-key": {"different-nested-key": "different-value"},
+        "different-sequence-key": [1, 2, 3, 4],
+        "different-set-key": {1},
+    }
+
+    summary = _summarize_set_source_options(options)
+
+    assert json.loads(summary) == _option_shape_summary(mapping=1, sequence=1, set_=1)
+    assert summary == _summarize_set_source_options(equivalent_shape)
+    assert len(summary) < 256
+    for canary in (secret_key, nested_key, unicode_key, long_key, "set-member-a"):
+        assert canary not in summary
 
 
 _CANARY = "CANARY-SENSITIVE-PATH-DO-NOT-LEAK"

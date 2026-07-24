@@ -20,7 +20,7 @@ from elspeth.web.composer.yaml_importer import (
     composition_state_from_runtime_yaml,
 )
 from elspeth.web.interpretation_state import parse_interpretation_requirements
-from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
+from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, managed_blob_directory, resolve_data_path
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
 from elspeth.web.sessions.protocol import GuidedCompositionStateResult, GuidedOperationSettlementConflictError
@@ -149,13 +149,13 @@ class SeedCompositionStateRequest(BaseModel):
     test_fingerprint="18ac99a70b815badb2f8ef53eb3061e7cb3d8b13299965bc591e559d2d961bf9",
 )
 def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
-    allowed_dirs = allowed_source_directories(data_dir)
+    blob_root = managed_blob_directory(data_dir)
     for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         value = options.get(key)
         if not isinstance(value, str):
             continue
         resolved = resolve_data_path(value, data_dir)
-        if any(resolved.is_relative_to(directory) for directory in allowed_dirs):
+        if resolved.is_relative_to(blob_root):
             return True
     return False
 
@@ -166,7 +166,7 @@ def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_d
     source_param="state",
     suppresses=("R1",),
     invariant=(
-        "raises HTTPException 400 for any source whose options reference session blob storage "
+        "raises HTTPException 400 for any source whose options reference managed blob storage "
         "without a blob_ref binding; blob_ref-bound and non-blob sources pass"
     ),
     test_ref="tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_unbound_blob_storage_sources_raises_400_on_unbound_blob_path",
@@ -199,8 +199,8 @@ def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: s
     ),
     test_fingerprint="ee81505482c502b3bed9e0ce1ccb6fa1e94983ce0e147ebf6e6461bf61038ca1",
 )
-def _reject_disallowed_source_paths(state: CompositionState, *, data_dir: str) -> None:
-    allowed_dirs = allowed_source_directories(data_dir)
+def _reject_disallowed_source_paths(state: CompositionState, *, data_dir: str, session_id: str) -> None:
+    allowed_dirs = allowed_source_directories(data_dir, session_id=session_id)
     for source_name, source in state.sources.items():
         for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
             value = source.options.get(key)
@@ -586,6 +586,7 @@ async def import_state_yaml(
         _reject_disallowed_source_paths(
             imported_state,
             data_dir=str(request.app.state.settings.data_dir),
+            session_id=str(session.id),
         )
         _reject_fabricated_secret_literals(
             imported_state,
@@ -764,6 +765,7 @@ async def seed_state_for_e2e(
         _reject_disallowed_source_paths(
             seeded_state,
             data_dir=str(request.app.state.settings.data_dir),
+            session_id=str(session.id),
         )
         _reject_fabricated_secret_literals(
             seeded_state,

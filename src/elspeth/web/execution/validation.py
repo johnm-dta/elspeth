@@ -977,9 +977,10 @@ def validate_pipeline(
         allowed_sink_directories,
         allowed_source_directories,
         resolve_data_path,
+        resolve_sink_data_path,
     )
 
-    allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
+    allowed_source_dirs = allowed_source_directories(str(settings.data_dir), session_id=session_id)
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir), session_id=session_id)
     path_checked = False
     for source_name, source in state.sources.items():
@@ -1028,7 +1029,7 @@ def validate_pipeline(
             value = output.options[key] if key in output.options else None
             if value is not None:
                 path_checked = True
-                resolved = resolve_data_path(value, str(settings.data_dir))
+                resolved = resolve_sink_data_path(value, str(settings.data_dir), session_id=session_id)
                 if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
                     return ValidationResult(
                         is_valid=False,
@@ -1047,7 +1048,7 @@ def validate_pipeline(
                                 component_id=output.name,
                                 component_type="sink",
                                 message=f"Path traversal blocked: sink '{output.name}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
+                                suggestion="Use a path within this session's output or blob subtree.",
                                 error_code=None,
                             ),
                         ],
@@ -1073,7 +1074,7 @@ def validate_pipeline(
             value = provider_config.get(key)
             if value is not None:
                 path_checked = True
-                resolved = resolve_data_path(value, str(settings.data_dir))
+                resolved = resolve_sink_data_path(value, str(settings.data_dir), session_id=session_id)
                 if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
                     return ValidationResult(
                         is_valid=False,
@@ -1092,7 +1093,7 @@ def validate_pipeline(
                                 component_id=node.id,
                                 component_type="transform",
                                 message=f"Path traversal blocked: transform '{node.id}' {key}='{value}' resolves outside allowed directories",
-                                suggestion="Use a path within the outputs directory or this session's own blobs subtree.",
+                                suggestion="Use a path within this session's output or blob subtree.",
                                 error_code=None,
                             ),
                         ],
@@ -1513,7 +1514,7 @@ def validate_pipeline(
 
     # Step 2: Generate YAML
     pipeline_yaml = yaml_generator.generate_yaml(materialized_state)
-    pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
+    pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir), session_id=session_id)
 
     if blob_get_metadata is not None and "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml:
         config_dict = load_bounded_pipeline_yaml(pipeline_yaml)

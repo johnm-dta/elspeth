@@ -84,6 +84,7 @@ from elspeth.web.paths import (
     allowed_sink_directories,
     allowed_source_directories,
     resolve_data_path,
+    resolve_sink_data_path,
 )
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId, PluginUnavailableReason
 from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
@@ -1368,9 +1369,10 @@ def _validate_source_path(
     options: Mapping[str, Any],
     data_dir: str | None,
     *,
+    session_id: str | None,
     require_data_dir: bool = False,
 ) -> str | None:
-    """S2: Validate that path/file options are under allowed source directories.
+    """S2: Validate path/file options under the caller's blob subtree.
 
     Returns an error message if validation fails, None if OK.
     Uses Path.resolve() + is_relative_to() to defeat ../ traversal.
@@ -1385,13 +1387,13 @@ def _validate_source_path(
                     "for allowlist enforcement. Bind uploaded files through "
                     "set_source_from_blob or provide the dispatcher data_dir."
                 )
-            allowed = allowed_source_directories(data_dir)
+            allowed = allowed_source_directories(data_dir, session_id=session_id)
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
                     f"Path violation (S2): '{options[key]}' is outside the "
                     f"allowed directories. Source file paths "
-                    f"must be under {data_dir}/blobs/."
+                    f"must be under this session's {data_dir}/blobs/<session>/ subtree."
                 )
     return None
 
@@ -1416,13 +1418,13 @@ def _validate_sink_path(
 
     for key in SINK_LOCAL_PATH_OPTION_KEYS:
         if key in options:
-            resolved = resolve_data_path(options[key], data_dir)
+            resolved = resolve_sink_data_path(options[key], data_dir, session_id=session_id)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
                     f"Path violation (S2): '{key}' value '{options[key]}' is outside the "
                     f"allowed directories. Sink output paths "
-                    f"must be under {data_dir}/outputs/ or this session's own "
-                    f"{data_dir}/blobs/<session>/ subtree."
+                    f"must be under this session's {data_dir}/outputs/<session>/ "
+                    f"or {data_dir}/blobs/<session>/ subtree."
                 )
     return None
 
@@ -1463,13 +1465,13 @@ def _validate_transform_provider_config_path(
         # ``value is not None`` before resolving.
         if value is None:
             continue
-        resolved = resolve_data_path(value, data_dir)
+        resolved = resolve_sink_data_path(value, data_dir, session_id=session_id)
         if not any(resolved.is_relative_to(d) for d in allowed):
             return (
                 f"Path violation (S2): provider_config '{key}' value "
                 f"'{value}' is outside the allowed directories. "
-                f"Transform provider paths must be under {data_dir}/outputs/ "
-                f"or this session's own {data_dir}/blobs/<session>/ subtree."
+                f"Transform provider paths must be under this session's "
+                f"{data_dir}/outputs/<session>/ or {data_dir}/blobs/<session>/ subtree."
             )
     return None
 

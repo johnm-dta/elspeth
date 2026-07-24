@@ -331,7 +331,7 @@ def _build_threshold_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "id": "threshold_gate",
                 "node_type": "gate",
                 "input": "numeric_rows",
-                "condition": f"row['{field}'] >= {threshold}",
+                "condition": f"row[{field!r}] >= {threshold}",
                 "routes": {"true": "above", "false": "below"},
             },
         ],

@@ -822,35 +822,57 @@ class ToolRedaction:
             )
 
 
-def _summarize_option_shape(value: object) -> object:
+_OPTION_SHAPE_CLASSES = ("mapping", "scalar", "sequence", "set")
+
+
+def _option_shape_class(value: object) -> str:
     if isinstance(value, Mapping):
-        return {str(key): _summarize_option_shape(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+        return "mapping"
     if isinstance(value, (list, tuple)):
-        return [_summarize_option_shape(item) for item in value]
+        return "sequence"
     if isinstance(value, AbstractSet):
-        return sorted((_summarize_option_shape(item) for item in value), key=repr)
-    return _REDACTED_OPTION_VALUE
+        return "set"
+    return "scalar"
+
+
+def _summarize_option_shape(value: object) -> object:
+    if not isinstance(value, (Mapping, list, tuple, AbstractSet)):
+        return _REDACTED_OPTION_VALUE
+
+    shape_class = _option_shape_class(value)
+    children = value.values() if isinstance(value, Mapping) else value
+    shape_counts = dict.fromkeys(_OPTION_SHAPE_CLASSES, 0)
+    entry_count = 0
+    for child in children:
+        child_shape = _option_shape_class(child)
+        shape_counts[child_shape] += 1
+        entry_count += 1
+    return {
+        "_option_shape": shape_class,
+        "entry_count": entry_count,
+        "value_shape_counts": shape_counts,
+    }
 
 
 def _summarize_set_source_options(options: object) -> str:
     """Summarizer for ``set_source.options`` (spec §4.2.6).
 
-    Produces canonical JSON for the option payload's shape: mapping keys,
-    nested mappings, and sequence lengths are preserved, but every scalar
-    value is replaced before serialization. Plugin options are an open,
-    plugin-defined surface and routinely carry filesystem paths, source
-    object locators, prompt text, and credential material such as connection
-    strings, SAS tokens, API keys, and client secrets. Therefore the summary
-    must not rely on per-plugin sensitive-key knowledge or on the blob_ref
-    path-only redactor.
+    Produces canonical JSON for the option payload's bounded shape: the root
+    container kind, its entry count, and counts drawn from a closed vocabulary
+    of immediate value-shape classes. Raw mapping keys and nested contents are
+    never serialized. Plugin options are an open, plugin-defined surface and
+    routinely carry filesystem paths, source object locators, prompt text, and
+    credential material such as connection strings, SAS tokens, API keys, and
+    client secrets. Therefore the summary must not rely on per-plugin
+    sensitive-key knowledge or on the blob_ref path-only redactor.
 
     Contract (spec §4.2.6, §9 RSK-03):
       * MUST NOT raise on any reachable input value.
       * MUST return ``str``.
 
     ``default=str`` on :func:`json.dumps` is retained as a final defensive
-    guard for unusual mapping keys or container shapes; reachable scalar
-    values are substituted before dumps sees them.
+    guard. The fixed summary normally contains only trusted strings and
+    integers.
     """
     return json.dumps(
         _summarize_option_shape(options) if isinstance(options, Mapping) else "<invalid-options>",
@@ -1359,12 +1381,12 @@ class _PipelineNodeModel(BaseModel):
     side options.
 
     The summarizer is reused (NOT a new node-specific one) because it is
-    option-surface agnostic: it preserves mapping keys and nested container
-    shape while replacing every scalar value. That behaviour is correct for
-    ``nodes[*].options`` too because plugin options may carry credentials,
-    paths, prompts, or future plugin-defined sensitive fields. Future work
-    may introduce a node-shape-aware summarizer that preserves more
-    non-sensitive structure.
+    option-surface agnostic: it emits only bounded container counts and a
+    closed vocabulary of value-shape classes, without mapping keys or nested
+    content. That behaviour is correct for ``nodes[*].options`` too because
+    plugin options may carry credentials, paths, prompts, or future
+    plugin-defined sensitive fields. Future work may introduce a
+    node-shape-aware summarizer that preserves more non-sensitive structure.
 
     ``routes`` and ``trigger`` typing
     ---------------------------------

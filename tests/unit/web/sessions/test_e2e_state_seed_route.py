@@ -81,9 +81,9 @@ def _ready_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
 
 
-def _valid_state(tmp_path: Path) -> CompositionState:
+def _valid_state(tmp_path: Path, *, session_id: str) -> CompositionState:
     blob_ref = "00000000-0000-4000-8000-000000000001"
-    source_path = tmp_path / "blobs" / "seed" / f"{blob_ref}_input.csv"
+    source_path = tmp_path / "blobs" / session_id / f"{blob_ref}_input.csv"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text("id\n1\n")
     return CompositionState(
@@ -116,7 +116,7 @@ async def test_e2e_state_seed_route_is_disabled_by_default(tmp_path: Path) -> No
 
     response = client.post(
         f"/api/sessions/{session.id}/state/e2e-seed",
-        json={"state": _valid_state(tmp_path).to_dict()},
+        json={"state": _valid_state(tmp_path, session_id=str(session.id)).to_dict()},
     )
 
     assert response.status_code == 404
@@ -143,7 +143,7 @@ async def test_e2e_state_seed_route_persists_canonical_state(tmp_path: Path) -> 
     app, service = _make_app(tmp_path, e2e_state_seed_enabled=True)
     client = TestClient(app)
     session = await service.create_session("alice", "Seed", "local")
-    seeded = _valid_state(tmp_path)
+    seeded = _valid_state(tmp_path, session_id=str(session.id))
 
     async def _pass_preflight(*_args, **_kwargs):
         return ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())

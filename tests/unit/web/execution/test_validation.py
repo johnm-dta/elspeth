@@ -48,7 +48,9 @@ from elspeth.web.execution.validation import (
     _format_edge_contract_failure,
     _infer_component_type_from_plugin_error,
     _reframe_settings_missing_parts,
-    validate_pipeline_for_trained_operator,
+)
+from elspeth.web.execution.validation import (
+    validate_pipeline_for_trained_operator as _validate_pipeline_for_trained_operator,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
@@ -61,6 +63,17 @@ from elspeth.web.plugin_policy.models import (
 from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
 from elspeth.web.plugin_policy.validation import validate_plugin_policy
 from elspeth.web.provider_config_policy import AWS_S3_ENDPOINT_URL_POLICY_ERROR
+
+
+def validate_pipeline_for_trained_operator(
+    state: CompositionState,
+    settings: Any,
+    yaml_generator: YamlGenerator,
+    **kwargs: Any,
+) -> Any:
+    """Exercise validation with the session identity present in web calls."""
+    kwargs.setdefault("session_id", "test-session")
+    return _validate_pipeline_for_trained_operator(state, settings, yaml_generator, **kwargs)
 
 
 def _make_source(options: dict[str, Any] | None = None, plugin: str = "csv") -> SourceSpec:
@@ -720,7 +733,7 @@ class TestValidatePipelinePathAllowlist:
 
     def test_path_within_blobs_passes(self) -> None:
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/data.csv"},
+            source_options={"path": "/tmp/test_data/blobs/test-session/data.csv"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -738,7 +751,7 @@ class TestValidatePipelinePathAllowlist:
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
-        result = validate_pipeline_for_trained_operator(state, settings, mock_yaml_gen)
+        result = validate_pipeline_for_trained_operator(state, settings, mock_yaml_gen, session_id=None)
         assert result.is_valid is False
         assert _check(result, "path_allowlist").passed is False
         assert any("Path traversal" in e.message for e in result.errors)
@@ -747,7 +760,7 @@ class TestValidatePipelinePathAllowlist:
         state = CompositionState(
             source=None,
             sources={
-                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "orders": _make_source({"path": "/tmp/test_data/blobs/test-session/orders.csv"}),
                 "refunds": _make_source({"path": "/etc/passwd"}),
             },
             nodes=(),
@@ -1756,7 +1769,7 @@ class TestValidatePipelineSinkPathAllowlist:
     def test_sink_path_under_outputs_passes(self) -> None:
         state = _make_state(
             source_options={},
-            outputs=(_make_output(name="primary", options={"path": "/tmp/test_data/outputs/result.csv"}),),
+            outputs=(_make_output(name="primary", options={"path": "/tmp/test_data/outputs/test-session/result.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -1806,7 +1819,7 @@ class TestValidatePipelineSinkPathAllowlist:
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
-        result = validate_pipeline_for_trained_operator(state, settings, mock_yaml_gen)
+        result = validate_pipeline_for_trained_operator(state, settings, mock_yaml_gen, session_id=None)
         assert result.is_valid is False
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is False
@@ -1816,7 +1829,7 @@ class TestValidatePipelineSinkPathAllowlist:
         state = CompositionState(
             source=None,
             sources={
-                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "orders": _make_source({"path": "/tmp/test_data/blobs/test-session/orders.csv"}),
                 "refunds": _make_source({"path": "/etc/passwd"}),
             },
             nodes=(),
@@ -1888,7 +1901,7 @@ class TestValidatePipelineTransformProviderConfigPathAllowlist:
     def test_transform_provider_persist_directory_under_outputs_passes(self) -> None:
         node = _make_node(
             plugin="rag_retrieval",
-            options={"provider": "chroma", "provider_config": {"persist_directory": "/tmp/test_data/outputs/chroma"}},
+            options={"provider": "chroma", "provider_config": {"persist_directory": "/tmp/test_data/outputs/test-session/chroma"}},
         )
         state = _make_state(source_options={}, nodes=(node,))
         settings = _make_settings(data_dir="/tmp/test_data")
@@ -2081,7 +2094,7 @@ class TestValidatePipelineSemanticContractsLegacy:
                 plugin="text",
                 on_success="scrape_in",
                 options={
-                    "path": "/tmp/test_data/blobs/urls.txt",
+                    "path": "/tmp/test_data/blobs/test-session/urls.txt",
                     "column": "url",
                     "schema": {"mode": "fixed", "fields": ["url: str"]},
                 },
@@ -2138,7 +2151,7 @@ class TestValidatePipelineSemanticContractsLegacy:
                 OutputSpec(
                     name="results",
                     plugin="json",
-                    options={"path": "/tmp/test_data/outputs/lines.json", "format": "json"},
+                    options={"path": "/tmp/test_data/outputs/test-session/lines.json", "format": "json"},
                     on_write_failure="discard",
                 ),
             ),
@@ -2204,7 +2217,7 @@ class TestValidatePipelineSemanticContracts:
                 plugin="csv",
                 on_success="scrape_in",
                 options={
-                    "path": "/tmp/test_data/blobs/url.csv",
+                    "path": "/tmp/test_data/blobs/test-session/url.csv",
                     "schema": {"mode": "fixed", "fields": ["url: str"]},
                 },
                 on_validation_failure="quarantine",
@@ -2262,13 +2275,13 @@ class TestValidatePipelineSemanticContracts:
                 OutputSpec(
                     name="sink",
                     plugin="json",
-                    options={"path": "/tmp/test_data/outputs/out.json"},
+                    options={"path": "/tmp/test_data/outputs/test-session/out.json"},
                     on_write_failure="discard",
                 ),
                 OutputSpec(
                     name="errors",
                     plugin="json",
-                    options={"path": "/tmp/test_data/outputs/err.json"},
+                    options={"path": "/tmp/test_data/outputs/test-session/err.json"},
                     on_write_failure="discard",
                 ),
             ),
@@ -2309,7 +2322,7 @@ class TestValidatePipelineSemanticContracts:
                 plugin="csv",
                 on_success="llm_in",
                 options={
-                    "path": "/tmp/test_data/blobs/prompts.csv",
+                    "path": "/tmp/test_data/blobs/test-session/prompts.csv",
                     "schema": {"mode": "fixed", "fields": ["topic: str"]},
                 },
                 on_validation_failure="quarantine",
@@ -2364,7 +2377,7 @@ class TestValidatePipelineSemanticContracts:
                 OutputSpec(
                     name="results",
                     plugin="json",
-                    options={"path": "/tmp/test_data/outputs/themes.json"},
+                    options={"path": "/tmp/test_data/outputs/test-session/themes.json"},
                     on_write_failure="discard",
                 ),
             ),
@@ -2412,7 +2425,7 @@ class TestValidatePipelineRelativePaths:
     def test_relative_source_path_resolves_against_data_dir(self) -> None:
         """blobs/data.csv should resolve under {data_dir}/blobs/."""
         state = _make_state(
-            source_options={"path": "blobs/data.csv"},
+            source_options={"path": "blobs/test-session/data.csv"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -2594,8 +2607,8 @@ class TestValidatePipelineExportNoResolverSecretRef:
 
         # Source paths must resolve under data_dir/blobs, sink paths under
         # data_dir/outputs (allowed_source_directories / allowed_sink_directories).
-        blobs_dir = tmp_path / "blobs"
-        blobs_dir.mkdir()
+        blobs_dir = tmp_path / "blobs" / "test-session"
+        blobs_dir.mkdir(parents=True)
         text_path = blobs_dir / "input.txt"
         text_path.write_text("hello world\n", encoding="utf-8")
         prompt_template = "Summarise: {{ row.text }}"
@@ -3620,7 +3633,7 @@ class TestValidatePipelineFabricatedCredentials:
         extraction key, not a credential — a literal value must not trip the
         fabricated_secret check and block /validate + /execute."""
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/data.json", "data_key": "results"},
+            source_options={"path": "/tmp/test_data/blobs/test-session/data.json", "data_key": "results"},
         )
         settings = _make_settings()
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -3677,7 +3690,7 @@ class TestValidatePipelineFabricatedCredentials:
         """Literal strings in non-credential fields pass — only credential
         fields are scope of the fabrication check."""
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/data.csv", "delimiter": ","},
+            source_options={"path": "/tmp/test_data/blobs/test-session/data.csv", "delimiter": ","},
         )
         settings = _make_settings()
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -3961,7 +3974,7 @@ class TestValidatePipelineRuntimePathResolution:
             source=SourceSpec(
                 plugin="csv",
                 on_success="main",
-                options={"path": "blobs/session/input.csv"},
+                options={"path": "blobs/test-session/input.csv"},
                 on_validation_failure="discard",
             ),
             nodes=(),
@@ -3985,7 +3998,7 @@ sources:
     plugin: csv
     on_success: main
     options:
-      path: blobs/session/input.csv
+      path: blobs/test-session/input.csv
       on_validation_failure: discard
 sinks:
   main:
@@ -4000,15 +4013,15 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/session/input.csv"
-        assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/test-session/input.csv"
+        assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/test-session/out.csv"
 
     def test_validate_pipeline_preserves_absolute_paths_before_settings_load(self) -> None:
         state = CompositionState(
             source=SourceSpec(
                 plugin="csv",
                 on_success="main",
-                options={"path": "/tmp/test_data/blobs/input.csv"},
+                options={"path": "/tmp/test_data/blobs/test-session/input.csv"},
                 on_validation_failure="discard",
             ),
             nodes=(),
@@ -4017,7 +4030,7 @@ sinks:
                 OutputSpec(
                     name="main",
                     plugin="csv",
-                    options={"path": "/tmp/test_data/outputs/out.csv"},
+                    options={"path": "/tmp/test_data/outputs/test-session/out.csv"},
                     on_write_failure="discard",
                 ),
             ),
@@ -4032,13 +4045,13 @@ sources:
     plugin: csv
     on_success: main
     options:
-      path: /tmp/test_data/blobs/input.csv
+      path: /tmp/test_data/blobs/test-session/input.csv
       on_validation_failure: discard
 sinks:
   main:
     plugin: csv
     options:
-      path: /tmp/test_data/outputs/out.csv
+      path: /tmp/test_data/outputs/test-session/out.csv
 """
 
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
@@ -4047,8 +4060,8 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/input.csv"
-        assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/test-session/input.csv"
+        assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/test-session/out.csv"
 
 
 class TestValidatePipelineRuntimeCheckBoundaries:
@@ -4072,8 +4085,8 @@ class TestValidatePipelineRuntimeCheckBoundaries:
         from elspeth.web.execution.preflight import RUNTIME_GRAPH_VALIDATION_CHECKS
 
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/input.csv"},
-            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+            source_options={"path": "/tmp/test_data/blobs/test-session/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/test-session/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -4083,13 +4096,13 @@ sources:
     plugin: csv
     on_success: primary
     options:
-      path: /tmp/test_data/blobs/input.csv
+      path: /tmp/test_data/blobs/test-session/input.csv
       on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
     options:
-      path: /tmp/test_data/outputs/out.csv
+      path: /tmp/test_data/outputs/test-session/out.csv
 """
         fake_graph = _runtime_graph_mock()
 
@@ -4120,8 +4133,8 @@ sinks:
         from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
 
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/input.csv"},
-            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+            source_options={"path": "/tmp/test_data/blobs/test-session/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/test-session/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -4157,8 +4170,8 @@ sinks:
         mock_load: MagicMock,
     ) -> None:
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/input.csv"},
-            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+            source_options={"path": "/tmp/test_data/blobs/test-session/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/test-session/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -4168,13 +4181,13 @@ sources:
     plugin: csv
     on_success: primary
     options:
-      path: /tmp/test_data/blobs/input.csv
+      path: /tmp/test_data/blobs/test-session/input.csv
       on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
     options:
-      path: /tmp/test_data/outputs/out.csv
+      path: /tmp/test_data/outputs/test-session/out.csv
 """
         fake_settings = _fake_settings()
         fake_graph = _runtime_graph_mock(validate_side_effect=GraphValidationError("bad graph"))
@@ -4201,8 +4214,8 @@ sinks:
         mock_assemble: MagicMock,
     ) -> None:
         state = _make_state(
-            source_options={"path": "/tmp/test_data/blobs/input.csv"},
-            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+            source_options={"path": "/tmp/test_data/blobs/test-session/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/test-session/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
@@ -4212,13 +4225,13 @@ sources:
     plugin: csv
     on_success: primary
     options:
-      path: /tmp/test_data/blobs/input.csv
+      path: /tmp/test_data/blobs/test-session/input.csv
       on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
     options:
-      path: /tmp/test_data/outputs/out.csv
+      path: /tmp/test_data/outputs/test-session/out.csv
 """
         fake_settings = _fake_settings()
         fake_graph = _runtime_graph_mock(edge_validation_side_effect=GraphValidationError("schema mismatch"))

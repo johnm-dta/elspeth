@@ -358,11 +358,11 @@ def _make_settings(data_dir: str = "/tmp/test_data") -> WebSettings:
 
 
 def _allowlisted_source(data_dir: str = "/tmp/test_data") -> SourceSpec:
-    """Source with a path under ``data_dir/blobs/`` — passes path_allowlist."""
+    """Source with a path under the test session's blob subtree."""
     return SourceSpec(
         plugin="csv",
         on_success="page_in",
-        options={"path": f"{data_dir}/blobs/in.csv"},
+        options={"path": f"{data_dir}/blobs/test-session/in.csv"},
         on_validation_failure="discard",
     )
 
@@ -371,11 +371,11 @@ def _allowlisted_observed_sink(
     name: str = "json_out",
     data_dir: str = "/tmp/test_data",
 ) -> OutputSpec:
-    """Observed-mode sink with a path under ``data_dir/outputs/``."""
+    """Observed-mode sink with a path under the test session's output subtree."""
     return OutputSpec(
         name=name,
         plugin="json",
-        options={"path": f"{data_dir}/outputs/out.json", "schema": {"mode": "observed"}},
+        options={"path": f"{data_dir}/outputs/test-session/out.json", "schema": {"mode": "observed"}},
         on_write_failure="discard",
     )
 
@@ -432,7 +432,7 @@ def test_validate_pipeline_emits_advisory_on_happy_path(
         ),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen)
+    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen, session_id="test-session")
 
     assert result.is_valid is True, "Advisory must not block is_valid"
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]
@@ -469,7 +469,7 @@ def test_validate_pipeline_emits_no_advisory_when_clean(
         nodes=(_make_real_transform_node(on_success="json_out"),),
         outputs=(_allowlisted_observed_sink(),),
     )
-    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen)
+    result = validate_pipeline_for_trained_operator(state, _make_settings(), yaml_gen, session_id="test-session")
 
     assert result.is_valid is True
     advisories = [c for c in result.checks if c.name == _CHECK_IDENTITY_NODE_ADVISORY]

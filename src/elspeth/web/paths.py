@@ -8,6 +8,7 @@ web/ (not composer/ or execution/) to avoid cross-package coupling.
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 SOURCE_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file")
 SINK_LOCAL_PATH_OPTION_KEYS: tuple[str, ...] = ("path", "file", "persist_directory")
@@ -40,25 +41,48 @@ def resolve_data_path(value: str, data_dir: str) -> Path:
     return (Path(data_dir).resolve() / raw).resolve()
 
 
-def allowed_source_directories(data_dir: str) -> tuple[Path, ...]:
-    """Return the set of directories from which source paths are allowed."""
-    base = Path(data_dir).resolve()
-    return (base / "blobs",)
+def _validate_session_path_segment(session_id: str, *, caller: str) -> None:
+    if not session_id or session_id in (".", "..") or "/" in session_id or "\\" in session_id:
+        raise ValueError(f"{caller}: malformed session_id {session_id!r} — expected a UUID-shaped path segment")
+
+
+def managed_blob_directory(data_dir: str) -> Path:
+    """Return the deployment-owned blob root for infrastructure probes."""
+    return Path(data_dir).resolve() / "blobs"
+
+
+def _is_uuid_path_segment(value: str) -> bool:
+    try:
+        UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return True
+
+
+def allowed_source_directories(data_dir: str, *, session_id: str | None) -> tuple[Path, ...]:
+    """Return session-owned directories from which source paths may read.
+
+    The deployment blob root is shared infrastructure, not authorization.
+    A caller without a session identity receives no readable local paths.
+    """
+    if session_id is None:
+        return ()
+    _validate_session_path_segment(session_id, caller="allowed_source_directories")
+    return (managed_blob_directory(data_dir) / session_id,)
 
 
 def allowed_sink_directories(data_dir: str, *, session_id: str | None) -> tuple[Path, ...]:
     """Return the set of directories to which sink paths may write.
 
-    Includes data_dir/outputs (primary sink target, shared flat pool) and
-    the caller's own session subtree of data_dir/blobs — blob storage is
-    laid out as ``blobs/<session_id>/<blob_id>_<filename>`` and a sink (or
-    a transform's ``provider_config.persist_directory``) must never be
-    able to address another session's subtree (elspeth-bdc17cfdb1).
+    Includes only the caller's ``data_dir/outputs/<session_id>`` and
+    ``data_dir/blobs/<session_id>`` subtrees. The deployment-level roots are
+    shared infrastructure, not authorization boundaries. A sink (or a
+    transform's ``provider_config.persist_directory``) must never address
+    another session's subtree.
 
     ``session_id=None`` means the caller has no session identity: the
-    result fails closed to outputs only — it never widens to the blobs
-    root. ``session_id`` is required as a keyword so no call site can
-    silently keep the old unscoped behaviour.
+    result is empty. ``session_id`` is required as a keyword so no call site
+    can silently keep unscoped behaviour.
 
     Raises:
         ValueError: if ``session_id`` is present but could alter the path
@@ -68,7 +92,34 @@ def allowed_sink_directories(data_dir: str, *, session_id: str | None) -> tuple[
     """
     base = Path(data_dir).resolve()
     if session_id is None:
-        return (base / "outputs",)
-    if not session_id or session_id in (".", "..") or "/" in session_id or "\\" in session_id:
-        raise ValueError(f"allowed_sink_directories: malformed session_id {session_id!r} — expected a UUID-shaped path segment")
-    return (base / "outputs", base / "blobs" / session_id)
+        return ()
+    _validate_session_path_segment(session_id, caller="allowed_sink_directories")
+    return (base / "outputs" / session_id, base / "blobs" / session_id)
+
+
+def resolve_sink_data_path(value: str, data_dir: str, *, session_id: str | None) -> Path:
+    """Resolve a sink path into the caller's session-owned local namespace.
+
+    ``outputs/report.csv`` remains the stable authoring form, but resolves to
+    ``outputs/<session_id>/report.csv`` on disk. Already-scoped paths are not
+    double-prefixed. Absolute paths and non-output relative paths retain their
+    literal resolution so the caller's allowlist check can reject shared or
+    foreign locations rather than silently rewriting them.
+    """
+    raw = Path(value)
+    if raw.is_absolute() or session_id is None:
+        return resolve_data_path(value, data_dir)
+
+    _validate_session_path_segment(session_id, caller="resolve_sink_data_path")
+    if raw.parts and raw.parts[0] == "outputs":
+        if len(raw.parts) > 1 and raw.parts[1] == session_id:
+            scoped = raw
+        elif len(raw.parts) > 1 and _is_uuid_path_segment(raw.parts[1]):
+            # An explicitly session-scoped foreign path must remain foreign
+            # so the allowlist rejects it. Never adopt it by nesting it under
+            # the caller's output directory.
+            scoped = raw
+        else:
+            scoped = Path("outputs") / session_id / Path(*raw.parts[1:])
+        return (Path(data_dir).resolve() / scoped).resolve()
+    return resolve_data_path(value, data_dir)

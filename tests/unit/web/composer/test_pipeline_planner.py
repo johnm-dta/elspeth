@@ -64,6 +64,8 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
+_TEST_SESSION_ID = "11111111-1111-4111-8111-111111111111"
+
 
 @dataclass
 class _Function:
@@ -143,12 +145,15 @@ def _empty_state() -> CompositionState:
     return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
 
 
-def _pipeline(data_dir: Path) -> dict[str, Any]:
+def _pipeline(data_dir: Path, *, session_id: str = _TEST_SESSION_ID) -> dict[str, Any]:
     return {
         "source": {
             "plugin": "csv",
             "on_success": "rows",
-            "options": {"path": str(data_dir / "blobs" / "input.csv"), "schema": {"mode": "observed"}},
+            "options": {
+                "path": str(data_dir / "blobs" / session_id / "input.csv"),
+                "schema": {"mode": "observed"},
+            },
             "on_validation_failure": "discard",
         },
         "nodes": [],
@@ -158,7 +163,7 @@ def _pipeline(data_dir: Path) -> dict[str, Any]:
                 "sink_name": "rows",
                 "plugin": "json",
                 "options": {
-                    "path": str(data_dir / "outputs" / "result.jsonl"),
+                    "path": "outputs/result.jsonl",
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -203,7 +208,10 @@ def _pipeline_with_short_form_llm_review(data_dir: Path) -> dict[str, Any]:
         "source": {
             "plugin": "csv",
             "on_success": "rows",
-            "options": {"path": str(data_dir / "blobs" / "input.csv"), "schema": {"mode": "observed"}},
+            "options": {
+                "path": str(data_dir / "blobs" / _TEST_SESSION_ID / "input.csv"),
+                "schema": {"mode": "observed"},
+            },
             "on_validation_failure": "discard",
         },
         "nodes": [
@@ -236,7 +244,7 @@ def _pipeline_with_short_form_llm_review(data_dir: Path) -> dict[str, Any]:
                 "sink_name": "summarised",
                 "plugin": "json",
                 "options": {
-                    "path": str(data_dir / "outputs" / "result.jsonl"),
+                    "path": "outputs/result.jsonl",
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -279,7 +287,7 @@ def _model(completion: _ScriptedCompletion, **overrides: object) -> PlannerModel
 
 def _origin() -> PlannerOriginatingMessage:
     return PlannerOriginatingMessage(
-        session_id=str(uuid4()),
+        session_id=_TEST_SESSION_ID,
         message_id=str(uuid4()),
         content="Build the requested pipeline.",
         user_id="planner-user",
@@ -1361,7 +1369,7 @@ async def test_safe_candidate_argument_error_gets_closed_feedback_then_repairs_w
     invalid["source"]["inline_blob"]["content"] = raw_canary
     completion = _ScriptedCompletion(
         _response(("emit_pipeline_proposal", {"pipeline": invalid})),
-        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path, session_id=origin.session_id)})),
     )
 
     proposal = await _plan(
@@ -2372,7 +2380,12 @@ async def test_blob_content_discovery_audit_projection_never_retains_content(
     blob_id = proposal.proposal.to_dict()["pipeline"]["source"]["blob_id"]
     second = _ScriptedCompletion(
         _response(("get_blob_content", {"blob_id": blob_id})),
-        _response(("emit_pipeline_proposal", {"pipeline": _pipeline(tmp_path)})),
+        _response(
+            (
+                "emit_pipeline_proposal",
+                {"pipeline": proposal.proposal.to_dict()["pipeline"]},
+            )
+        ),
     )
     recorder = BufferingRecorder()
     await _plan(

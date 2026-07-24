@@ -39,8 +39,9 @@ def _is_path_in_sink_allowlist(fs_path: Path, data_dir: str | Path, *, session_i
     """Mirror of the read-side guard in the ``/content`` endpoint.
 
     Returns True iff ``fs_path`` resolves to a location inside one of
-    the canonical sink directories — ``data_dir/outputs`` or the owning
-    session's ``data_dir/blobs/<session_id>`` subtree (elspeth-bdc17cfdb1).
+    the canonical sink directories — the owning session's
+    ``data_dir/outputs/<session_id>`` or ``data_dir/blobs/<session_id>``
+    subtree (elspeth-056c26a251).
     Used to decide whether the UI may surface a Download button — a
     sink that wrote outside the allowlist produces a real artefact
     record but the download endpoint will refuse to serve it.

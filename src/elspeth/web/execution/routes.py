@@ -1520,7 +1520,7 @@ def create_execution_router() -> APIRouter:
 
         Path-allowlist guard: refuses any artefact whose ``path_or_uri``
         resolves outside the canonical sink set for the run's owning
-        session — ``data_dir/outputs`` plus that session's own
+        session — that session's own ``data_dir/outputs/<session>`` plus its
         ``data_dir/blobs/<session>/`` subtree (elspeth-bdc17cfdb1). This
         is defence-in-depth — the path was already allowlisted at write
         time, but the audit row is read-mutable in principle and the

@@ -433,6 +433,14 @@ def _composition_state_record(
     nodes: list[dict[str, Any]],
     sources: dict[str, dict[str, Any]] | None = None,
 ) -> CompositionStateRecord:
+    if source_path.parent.name == "blobs":
+        scoped_source_path = source_path.parent / str(session_id) / source_path.name
+        scoped_source_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_path.exists():
+            scoped_source_path.write_bytes(source_path.read_bytes())
+        source_path = scoped_source_path
+    if output_path.parent.name == "outputs":
+        output_path = output_path.parent / str(session_id) / output_path.name
     source = {
         "plugin": "text",
         "on_success": "source_rows",
@@ -1146,13 +1154,13 @@ class TestExecutionFanoutGuard:
         from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
 
         data_dir = tmp_path
-        blob_dir = data_dir / "blobs"
-        output_dir = data_dir / "outputs"
-        blob_dir.mkdir()
-        output_dir.mkdir()
+        session_id = uuid4()
+        blob_dir = data_dir / "blobs" / str(session_id)
+        output_dir = data_dir / "outputs" / str(session_id)
+        blob_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
         source_path = blob_dir / "input.txt"
         source_path.write_text("alpha\nbeta\n", encoding="utf-8")
-        session_id = uuid4()
         mock_settings.data_dir = data_dir
         mock_session_service.get_current_state.return_value = _composition_state_record(
             session_id=session_id,
@@ -1337,15 +1345,15 @@ class TestExecutionFanoutGuard:
         from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
 
         data_dir = tmp_path
-        blob_dir = data_dir / "blobs"
-        output_dir = data_dir / "outputs"
-        blob_dir.mkdir()
-        output_dir.mkdir()
+        session_id = uuid4()
+        blob_dir = data_dir / "blobs" / str(session_id)
+        output_dir = data_dir / "outputs" / str(session_id)
+        blob_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True)
         orders_path = blob_dir / "orders.txt"
         refunds_path = blob_dir / "refunds.txt"
         orders_path.write_text("one\n", encoding="utf-8")
         refunds_path.write_text("\n".join(f"refund-{i}" for i in range(101)) + "\n", encoding="utf-8")
-        session_id = uuid4()
         mock_settings.data_dir = data_dir
         mock_session_service.get_current_state.return_value = _composition_state_record(
             session_id=session_id,
@@ -4448,11 +4456,12 @@ class TestBlobRefPreValidation:
         """Malformed blob_ref on any named source is rejected before create_run()."""
         from elspeth.web.execution.errors import MalformedBlobRefError
 
+        session_id = uuid4()
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "orders_rows",
-            "options": {"path": "/tmp/data/blobs/orders.csv"},
+            "options": {"path": f"/tmp/data/blobs/{session_id}/orders.csv"},
             "on_validation_failure": "quarantine",
         }
         state.sources = {
@@ -4460,7 +4469,7 @@ class TestBlobRefPreValidation:
             "refunds": {
                 "plugin": "csv",
                 "on_success": "refunds_rows",
-                "options": {"blob_ref": "not-a-uuid", "path": "/tmp/data/blobs/refunds.csv"},
+                "options": {"blob_ref": "not-a-uuid", "path": f"/tmp/data/blobs/{session_id}/refunds.csv"},
                 "on_validation_failure": "quarantine",
             },
         }
@@ -4469,7 +4478,7 @@ class TestBlobRefPreValidation:
         cast(Any, service)._blob_service = blob_service
 
         with pytest.raises(MalformedBlobRefError, match=r"sources\.refunds\.blob_ref"):
-            await service.execute(session_id=uuid4())
+            await service.execute(session_id=session_id)
 
         mock_session_service.create_run.assert_not_called()
         blob_service.get_blob.assert_not_called()
@@ -4593,7 +4602,7 @@ class TestBlobOwnership:
         orders_blob = str(uuid4())
         refunds_blob = str(uuid4())
         orders_path = f"/tmp/data/blobs/{executing_session_id}/{orders_blob}_orders.csv"
-        refunds_path = f"/tmp/data/blobs/{other_session_id}/{refunds_blob}_refunds.csv"
+        refunds_path = f"/tmp/data/blobs/{executing_session_id}/{refunds_blob}_refunds.csv"
 
         blob_service = _blob_service_stub()
         blob_service.get_blob.side_effect = lambda blob_id: SimpleNamespace(
@@ -5408,13 +5417,14 @@ class TestSinkPathRestriction:
     ) -> None:
         """Sink with path under data_dir/outputs is allowed."""
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         state = mock_session_service.get_current_state.return_value
         state.source = None
         state.outputs = [
             {
                 "name": "primary",
                 "plugin": "csv",
-                "options": {"path": "/tmp/elspeth_data/outputs/result.csv"},
+                "options": {"path": f"/tmp/elspeth_data/outputs/{session_id}/result.csv"},
                 "on_write_failure": "discard",
             }
         ]
@@ -5422,7 +5432,7 @@ class TestSinkPathRestriction:
         state.edges = None
 
         with patch.object(service, "_run_pipeline"):
-            run_id = await service.execute(session_id=uuid4())
+            run_id = await service.execute(session_id=session_id)
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
@@ -5454,6 +5464,38 @@ class TestSinkPathRestriction:
 
         with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
             await service.execute(session_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_sink_path_in_other_session_outputs_rejected(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """A shared output root is infrastructure, not cross-session write authority."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        executing_session = uuid4()
+        other_session = uuid4()
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = [
+            {
+                "name": "append_foreign",
+                "plugin": "csv",
+                "options": {
+                    "path": f"/tmp/elspeth_data/outputs/{other_session}/shared.csv",
+                    "mode": "append",
+                },
+                "on_write_failure": "discard",
+            }
+        ]
+        state.nodes = None
+        state.edges = None
+
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
+        with pytest.raises(PathAllowlistViolationError, match="resolves outside allowed output directories"):
+            await service.execute(session_id=executing_session)
 
     @pytest.mark.asyncio
     async def test_sink_path_in_own_session_blobs_accepted(
@@ -5622,6 +5664,7 @@ class TestTransformProviderConfigPathRestriction:
     ) -> None:
         """Transform with provider_config.persist_directory under data_dir/outputs is allowed."""
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         state = mock_session_service.get_current_state.return_value
         state.source = None
         state.outputs = None
@@ -5635,14 +5678,14 @@ class TestTransformProviderConfigPathRestriction:
                 "on_error": "discard",
                 "options": {
                     "provider": "chroma",
-                    "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/chroma"},
+                    "provider_config": {"persist_directory": f"/tmp/elspeth_data/outputs/{session_id}/chroma"},
                 },
             }
         ]
         state.edges = None
 
         with patch.object(service, "_run_pipeline"):
-            run_id = await service.execute(session_id=uuid4())
+            run_id = await service.execute(session_id=session_id)
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
@@ -5828,6 +5871,7 @@ class TestExecuteSemanticContractViolation:
     def _set_web_scrape_line_explode_state(
         mock_session_service: MagicMock,
         *,
+        session_id: UUID,
         scrape_options: dict[str, Any] | None = None,
     ) -> None:
         state = mock_session_service.get_current_state.return_value
@@ -5850,7 +5894,7 @@ class TestExecuteSemanticContractViolation:
             "plugin": "text",
             "on_success": "scrape_in",
             "options": {
-                "path": "blobs/urls.txt",
+                "path": f"blobs/{session_id}/urls.txt",
                 "column": "url",
                 "schema": {"mode": "fixed", "fields": ["url: str"]},
             },
@@ -5908,13 +5952,14 @@ class TestExecuteSemanticContractViolation:
         mock_settings: MagicMock,
     ) -> None:
         mock_settings.data_dir = "/tmp/elspeth_data"
-        self._set_web_scrape_line_explode_state(mock_session_service)
+        session_id = uuid4()
+        self._set_web_scrape_line_explode_state(mock_session_service, session_id=session_id)
 
         # SemanticContractViolationError IS a ValueError, so legacy
         # ``except ValueError`` paths still catch it. New callers should
         # catch the specific type and read .entries/.contracts.
         with pytest.raises(ValueError, match="line_explode"):
-            await service.execute(session_id=uuid4())
+            await service.execute(session_id=session_id)
 
         mock_session_service.create_run.assert_not_awaited()
 
@@ -5934,10 +5979,11 @@ class TestExecuteSemanticContractViolation:
         from elspeth.web.execution.errors import SemanticContractViolationError
 
         mock_settings.data_dir = "/tmp/elspeth_data"
-        self._set_web_scrape_line_explode_state(mock_session_service)
+        session_id = uuid4()
+        self._set_web_scrape_line_explode_state(mock_session_service, session_id=session_id)
 
         with pytest.raises(SemanticContractViolationError) as excinfo:
-            await service.execute(session_id=uuid4())
+            await service.execute(session_id=session_id)
 
         exc = excinfo.value
         assert len(exc.entries) >= 1
@@ -5953,13 +5999,15 @@ class TestExecuteSemanticContractViolation:
         mock_settings: MagicMock,
     ) -> None:
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         self._set_web_scrape_line_explode_state(
             mock_session_service,
+            session_id=session_id,
             scrape_options={"text_separator": "\n"},
         )
 
         with patch.object(service, "_run_pipeline"):
-            run_id = await service.execute(session_id=uuid4())
+            run_id = await service.execute(session_id=session_id)
 
         assert isinstance(run_id, UUID)
 
@@ -6399,12 +6447,13 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         from elspeth.web.sessions.telemetry import _FakeCounter
 
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         prompt = "Rate visually-appealing aspects."
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "rate_in",
-            "options": {"path": "blobs/rows.csv"},
+            "options": {"path": f"blobs/{session_id}/rows.csv"},
             "on_validation_failure": "discard",
         }
         state.nodes = [
@@ -6470,7 +6519,7 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
             patch.object(service, "_run_pipeline"),
             patch("elspeth.web.execution.service.evaluate_execution_fanout_guard", return_value=None),
         ):
-            run_id = await service.execute(session_id=uuid4())
+            run_id = await service.execute(session_id=session_id)
 
         assert isinstance(run_id, UUID)
         # Counter was NOT incremented.
@@ -6524,11 +6573,12 @@ class TestRelativePathResolution:
     ) -> None:
         """Source with a relative path under blobs/ passes when resolved against data_dir."""
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "continue",
-            "options": {"path": "blobs/data.csv"},
+            "options": {"path": f"blobs/{session_id}/data.csv"},
             "on_validation_failure": "quarantine",
         }
         state.outputs = None
@@ -6536,7 +6586,7 @@ class TestRelativePathResolution:
         state.edges = None
 
         with patch.object(service, "_run_pipeline"):
-            run_id = await service.execute(session_id=uuid4())
+            run_id = await service.execute(session_id=session_id)
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
@@ -6548,11 +6598,12 @@ class TestRelativePathResolution:
     ) -> None:
         """Every named source path must pass the direct /execute allowlist."""
         mock_settings.data_dir = "/tmp/elspeth_data"
+        session_id = uuid4()
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
             "on_success": "orders_out",
-            "options": {"path": "blobs/orders.csv"},
+            "options": {"path": f"blobs/{session_id}/orders.csv"},
             "on_validation_failure": "quarantine",
         }
         state.sources = {
@@ -6571,7 +6622,7 @@ class TestRelativePathResolution:
         from elspeth.web.execution.errors import PathAllowlistViolationError
 
         with pytest.raises(PathAllowlistViolationError, match=r"Source 'refunds'.*resolves outside allowed directories"):
-            await service.execute(session_id=uuid4())
+            await service.execute(session_id=session_id)
 
     @pytest.mark.asyncio
     async def test_relative_traversal_still_blocked(
@@ -7063,8 +7114,8 @@ class TestResolveYamlPaths:
             "      mode: persistent\n"
             "      persist_directory: outputs/chroma-store\n"
         )
-        result = _resolve_yaml_paths(yaml_str, "/srv/data")
-        assert "/srv/data/outputs/chroma-store" in result
+        result = _resolve_yaml_paths(yaml_str, "/srv/data", session_id="sess-a")
+        assert "/srv/data/outputs/sess-a/chroma-store" in result
 
     def test_transform_provider_persist_directory_relative_path_rewritten(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
@@ -7082,8 +7133,8 @@ class TestResolveYamlPaths:
             "      provider_config:\n"
             "        persist_directory: outputs/chroma-index\n"
         )
-        result = _resolve_yaml_paths(yaml_str, "/srv/data")
-        assert "/srv/data/outputs/chroma-index" in result
+        result = _resolve_yaml_paths(yaml_str, "/srv/data", session_id="sess-a")
+        assert "/srv/data/outputs/sess-a/chroma-index" in result
 
     def test_transform_provider_persist_directory_absolute_path_unchanged(self) -> None:
         from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths

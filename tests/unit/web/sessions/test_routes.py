@@ -759,12 +759,12 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
-    input_path = tmp_path / "blobs" / "input.csv"
-    input_path.parent.mkdir(parents=True, exist_ok=True)
-    input_path.write_text("value\n1\n", encoding="utf-8")
     client = TestClient(app)
     session = client.post("/api/sessions", json={"title": "Accept"}).json()
     session_id = uuid.UUID(session["id"])
+    input_path = tmp_path / "blobs" / str(session_id) / "input.csv"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    input_path.write_text("value\n1\n", encoding="utf-8")
     proposal = asyncio.run(
         service.create_composition_proposal(
             session_id=session_id,
@@ -807,7 +807,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
                         "sink_name": "main",
                         "plugin": "csv",
                         "options": {
-                            "path": str(tmp_path / "outputs" / "output.csv"),
+                            "path": "outputs/output.csv",
                             "schema": {"mode": "observed"},
                             "mode": "write",
                             "collision_policy": "auto_increment",
@@ -858,7 +858,9 @@ async def _create_canonical_pipeline_route_proposal(
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
-    input_path = tmp_path / "blobs" / f"{tool_call_id}.csv"
+    session = await service.create_session("alice", "Canonical accept", "local")
+    session_id = session.id
+    input_path = tmp_path / "blobs" / str(session_id) / f"{tool_call_id}.csv"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_text("value\n1\n", encoding="utf-8")
     pipeline: dict[str, Any] = {
@@ -875,7 +877,7 @@ async def _create_canonical_pipeline_route_proposal(
                 "sink_name": "rows",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / f"{tool_call_id}.jsonl"),
+                    "path": f"outputs/{tool_call_id}.jsonl",
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -895,8 +897,6 @@ async def _create_canonical_pipeline_route_proposal(
         covered_deferred_intent_ids=(),
         supersedes_draft_hash=None,
     )
-    session = await service.create_session("alice", "Canonical accept", "local")
-    session_id = session.id
     row = await service.create_pipeline_composition_proposal(
         session_id=session_id,
         plan=PipelinePlanResult(
@@ -1408,7 +1408,10 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         "elspeth.web.sessions.routes._helpers._runtime_preflight_for_state",
         _async_return(ValidationResult(is_valid=True, checks=[], errors=[])),
     )
-    input_path = tmp_path / "blobs" / "canonical.csv"
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Canonical accept"}).json()
+    session_id = uuid.UUID(session["id"])
+    input_path = tmp_path / "blobs" / str(session_id) / "canonical.csv"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_text("value\n1\n", encoding="utf-8")
     pipeline = {
@@ -1425,7 +1428,7 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
                 "sink_name": "rows",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / "canonical.jsonl"),
+                    "path": "outputs/canonical.jsonl",
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -1453,9 +1456,6 @@ def test_canonical_pipeline_accept_requires_and_echoes_draft_hash(tmp_path, monk
         model_version="planner-model-v1",
         provider="test",
     )
-    client = TestClient(app)
-    session = client.post("/api/sessions", json={"title": "Canonical accept"}).json()
-    session_id = uuid.UUID(session["id"])
     row = asyncio.run(
         service.create_pipeline_composition_proposal(
             session_id=session_id,

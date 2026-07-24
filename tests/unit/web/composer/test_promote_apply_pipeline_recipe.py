@@ -42,6 +42,19 @@ from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot
 
 
+def _option_shape_summary(*, sequence: int = 0, scalar: int = 0) -> dict[str, object]:
+    return {
+        "_option_shape": "mapping",
+        "entry_count": sequence + scalar,
+        "value_shape_counts": {
+            "mapping": 0,
+            "scalar": scalar,
+            "sequence": sequence,
+            "set": 0,
+        },
+    }
+
+
 def _empty_state() -> CompositionState:
     return CompositionState(
         source=None,
@@ -209,8 +222,8 @@ _CANARY_MODEL = "CANARY-APPLY-RECIPE-MODEL-DO-NOT-LEAK"
 def test_redaction_substitutes_slots_via_summarizer() -> None:
     """``slots`` collapses to the summarizer's canonical-JSON output.
 
-    The shared option summarizer preserves slot shape but replaces scalar
-    values before producing the JSON-string output.
+    The shared option summarizer preserves bounded slot-shape counts without
+    copying keys or values into the JSON-string output.
     """
     tel = NoopRedactionTelemetry()
     args = {
@@ -225,10 +238,7 @@ def test_redaction_substitutes_slots_via_summarizer() -> None:
     assert redacted["recipe_name"] == "classify-rows-llm-jsonl"
     # slots collapses to the summarizer str output.
     assert isinstance(redacted["slots"], str)
-    assert json.loads(redacted["slots"]) == {
-        "blob_ref": "<redacted-option-value>",
-        "path": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["slots"]) == _option_shape_summary(scalar=2)
     # The canary path MUST NOT appear in the redacted output.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY_PATH not in serialized
@@ -237,11 +247,11 @@ def test_redaction_substitutes_slots_via_summarizer() -> None:
 
 
 def test_redaction_preserves_non_path_slot_shape_inside_summary() -> None:
-    """Non-path slot shape is preserved while scalar values are redacted.
+    """Non-path slot shape is summarized without keys or scalar values.
 
     The structural Sensitive marker prevents un-redacted dict materialisation
-    on the audit boundary. The shared option summarizer keeps slot keys for
-    audit shape but replaces values such as providers and templates.
+    on the audit boundary. The shared option summarizer retains only bounded
+    shape counts for values such as providers and templates.
     """
     tel = NoopRedactionTelemetry()
     args: dict[str, Any] = {
@@ -254,10 +264,7 @@ def test_redaction_preserves_non_path_slot_shape_inside_summary() -> None:
     redacted = redact_tool_call_arguments("apply_pipeline_recipe", args, telemetry=tel)
     # slots is the summarizer's str output (a JSON object string).
     assert isinstance(redacted["slots"], str)
-    assert json.loads(redacted["slots"]) == {
-        "classifier_template": "<redacted-option-value>",
-        "provider": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["slots"]) == _option_shape_summary(scalar=2)
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY_TEMPLATE not in serialized
 
@@ -282,16 +289,7 @@ def test_redaction_redacts_classify_recipe_slot_values_inside_summary() -> None:
     redacted = redact_tool_call_arguments("apply_pipeline_recipe", args, telemetry=tel)
 
     assert isinstance(redacted["slots"], str)
-    assert json.loads(redacted["slots"]) == {
-        "api_key_secret": "<redacted-option-value>",
-        "classifier_template": "<redacted-option-value>",
-        "label_field": "<redacted-option-value>",
-        "model": "<redacted-option-value>",
-        "output_path": "<redacted-option-value>",
-        "provider": "<redacted-option-value>",
-        "required_input_fields": ["<redacted-option-value>", "<redacted-option-value>"],
-        "source_blob_id": "<redacted-option-value>",
-    }
+    assert json.loads(redacted["slots"]) == _option_shape_summary(sequence=1, scalar=7)
     serialized = json.dumps(redacted, sort_keys=True)
     for canary in (
         _CANARY_BLOB_ID,

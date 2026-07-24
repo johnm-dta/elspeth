@@ -890,7 +890,7 @@ class ExecutionServiceImpl:
                     )
 
         fanout_guard = evaluate_execution_fanout_guard(
-            composition_state,
+            policy_result.executable_state,
             data_dir=self._settings.data_dir,
         )
         if fanout_guard is not None:

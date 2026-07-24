@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import fields
@@ -3347,6 +3348,7 @@ def test_scenario_resource_namespace_fits_strict_aws_name_limits() -> None:
 def _init_control_manifest(
     path: Path,
     *,
+    run_id: str = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48",
     deadline: str = "2026-07-14T05:00:00Z",
     inventory_mutator: Callable[[dict[str, object], str], None] | None = None,
     preapply_inventory_mutator: Callable[[dict[str, object], str], None] | None = None,
@@ -3356,7 +3358,6 @@ def _init_control_manifest(
     bind_retained: bool = True,
     prepare_apply_evidence: bool = True,
 ) -> dict[str, object]:
-    run_id = "4adf8a87-7fe2-44cc-9c9f-e39f9f51ac48"
     scenario_a = path.parent / "scenario-a.json"
     scenario_b = path.parent / "scenario-b.json"
     scenario_a_preapply = path.parent / "scenario-a-preapply.json"
@@ -6384,7 +6385,10 @@ def test_final_evidence_export_requires_distinct_path_and_preserves_initial_rece
         )
 
 
-def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_after_all_surfaces(tmp_path: Path) -> None:
+def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_after_all_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manifest_path = tmp_path / "control.json"
     manifest = _init_control_manifest(manifest_path)
     ledger_path = Path(manifest["gate_ledger_path"])
@@ -6433,14 +6437,135 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
                 cleanup_checkpoint=f"{surface}:confirmed",
                 now=lambda: datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
             )
-    committed = acceptance.cleanup_evidence_finalize(
-        manifest_path,
-        ledger_path=ledger_path,
-        phase="commit",
-        clear_cleanup_required=True,
-        now=lambda: datetime(2026, 7, 14, 1, 6, tzinfo=UTC),
-    )
+    original_require_mutable = acceptance._require_mutable_control_manifest
+    mutation_inside_lock = threading.Event()
+    release_mutation = threading.Event()
+    finalizer_started = threading.Event()
+    finalizer_finished = threading.Event()
+    results: dict[str, dict[str, object]] = {}
+    errors: list[BaseException] = []
+
+    def pause_late_mutation(manifest: Mapping[str, object]) -> None:
+        original_require_mutable(manifest)
+        if threading.current_thread().name == "late-manifest-mutator":
+            mutation_inside_lock.set()
+            if not release_mutation.wait(timeout=5):
+                raise AssertionError("timed out waiting to release manifest mutation")
+
+    def mutate_manifest() -> None:
+        try:
+            results["mutation"] = acceptance.control_manifest_update(
+                manifest_path,
+                cleanup_checkpoint="coordinator:confirmed",
+                now=lambda: datetime(2026, 7, 14, 1, 5, 30, tzinfo=UTC),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def finalize_manifest() -> None:
+        finalizer_started.set()
+        try:
+            results["finalizer"] = acceptance.cleanup_evidence_finalize(
+                manifest_path,
+                ledger_path=ledger_path,
+                phase="commit",
+                clear_cleanup_required=True,
+                now=lambda: datetime(2026, 7, 14, 1, 6, tzinfo=UTC),
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finalizer_finished.set()
+
+    monkeypatch.setattr(acceptance, "_require_mutable_control_manifest", pause_late_mutation)
+    mutation_thread = threading.Thread(target=mutate_manifest, name="late-manifest-mutator")
+    finalizer_thread = threading.Thread(target=finalize_manifest, name="final-receipt-writer")
+    mutation_thread.start()
+    assert mutation_inside_lock.wait(timeout=5)
+    finalizer_thread.start()
+    assert finalizer_started.wait(timeout=5)
+    assert not finalizer_finished.wait(timeout=0.1)
+    release_mutation.set()
+    mutation_thread.join(timeout=5)
+    finalizer_thread.join(timeout=5)
+    assert not mutation_thread.is_alive()
+    assert not finalizer_thread.is_alive()
+    assert errors == []
+    committed = results["finalizer"]
     assert committed["cleanup_required"] is False
+    final_receipt = manifest_path.with_name(f"{manifest_path.name}.final-receipt.json")
+    committed_manifest_bytes = manifest_path.read_bytes()
+    committed_receipt_bytes = final_receipt.read_bytes()
+    with pytest.raises(acceptance.AcceptanceCheckError, match="control_manifest_finalized"):
+        acceptance.control_manifest_update(
+            path=manifest_path,
+            cleanup_checkpoint="coordinator:confirmed",
+            now=lambda: datetime(2026, 7, 14, 1, 6, 30, tzinfo=UTC),
+        )
+    assert manifest_path.read_bytes() == committed_manifest_bytes
+    assert final_receipt.read_bytes() == committed_receipt_bytes
+
+    evidence = committed["evidence"]
+    scenarios = committed["scenarios"]
+    assert isinstance(evidence, dict) and isinstance(scenarios, dict)
+    scenario_a = scenarios["A"]
+    assert isinstance(scenario_a, dict)
+    sealed_mutations = (
+        lambda: acceptance.control_manifest_bind_retained_evidence(
+            manifest_path,
+            receipt_path=str(evidence["retained_evidence_path"]),
+        ),
+        lambda: acceptance.control_manifest_checkpoint_operator_evidence(
+            manifest_path,
+            exec_receipt_path=str(tmp_path / "unused-exec-receipt.json"),
+            checkpoint_path=str(tmp_path / "unused-checkpoint.json"),
+        ),
+        lambda: acceptance.control_manifest_bind_scenario(
+            manifest_path,
+            scenario_id="A",
+            inventory_path=str(scenario_a["inventory_path"]),
+        ),
+        lambda: acceptance.receipt_store(
+            manifest_path,
+            scenario_id="A",
+            kind="terraform-plan",
+            subject_id="1" * 64,
+            receipt_file=tmp_path / "a-plan-receipt.json",
+        ),
+        lambda: acceptance.approval_verify(
+            manifest_path,
+            scenario_id="A",
+            kind="terraform-plan",
+            plan_receipt_hash="1" * 64,
+            approval_file=tmp_path / "unused-approval.json",
+            signature_verifier=lambda _payload, _signature, _key_id: True,
+        ),
+    )
+    for mutate in sealed_mutations:
+        with pytest.raises(acceptance.AcceptanceCheckError, match="control_manifest_finalized"):
+            mutate()
+        assert manifest_path.read_bytes() == committed_manifest_bytes
+        assert final_receipt.read_bytes() == committed_receipt_bytes
+
+    version_directory = tmp_path / "version-2"
+    version_directory.mkdir()
+    versioned_manifest_path = version_directory / "control.json"
+    _init_control_manifest(
+        versioned_manifest_path,
+        run_id="4b735e5b-3037-4a3f-938b-69135ef9cd62",
+    )
+    acceptance.control_manifest_update(
+        versioned_manifest_path,
+        cleanup_required=True,
+        ecr_baseline_tag="acceptance-4b735e5b-3037-4a3f-938b-69135ef9cd62-baseline",
+        ecr_candidate_tag="acceptance-4b735e5b-3037-4a3f-938b-69135ef9cd62-candidate",
+        ecr_registry="123456789012.dkr.ecr.ap-southeast-2.amazonaws.com",
+        ecr_repository="elspeth-acceptance-v2",
+        now=lambda: datetime(2026, 7, 14, 1, 6, 40, tzinfo=UTC),
+    )
+    assert manifest_path.read_bytes() == committed_manifest_bytes
+    assert final_receipt.read_bytes() == committed_receipt_bytes
+    assert acceptance.control_manifest_get(versioned_manifest_path, "cleanup_required") == "true"
     assert acceptance.control_manifest_get(manifest_path, "cleanup_states.coordinator") == "confirmed"
     cleanup_ledger = json.loads(ledger_path.read_text())
     assert cleanup_ledger["finalized"] is None
@@ -6476,7 +6601,6 @@ def test_cleanup_evidence_finalize_is_two_phase_refuses_pending_and_clears_only_
         require_cleanup_cleared=True,
         now=lambda: datetime(2026, 7, 14, 6, 1, tzinfo=UTC),
     )
-    final_receipt = manifest_path.with_name(f"{manifest_path.name}.final-receipt.json")
     assert final_receipt.stat().st_mode & 0o777 == 0o600
     final_payload = json.loads(final_receipt.read_text())
     assert len(final_payload["manifest_sha256"]) == 64

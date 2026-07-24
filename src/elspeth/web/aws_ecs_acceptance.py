@@ -14,6 +14,7 @@ import binascii
 import contextlib
 import hashlib
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -28,6 +29,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, cast
@@ -4067,6 +4069,27 @@ def _receipt_manifest_write_lock(path: Path, *, check: str) -> Iterator[None]:
         os.close(descriptor)
 
 
+def _serialized_control_manifest_write[**P, R](
+    operation: Callable[P, R],
+) -> Callable[P, R]:
+    """Hold the manifest sidecar lock across one complete read-modify-write."""
+
+    operation_signature = inspect.signature(operation)
+    path_parameter = next(iter(operation_signature.parameters))
+
+    @wraps(operation)
+    def serialized(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        bound = operation_signature.bind(*args, **kwargs)
+        path = cast(Path, bound.arguments[path_parameter])
+        with _receipt_manifest_write_lock(path, check="control_manifest_file"):
+            return operation(*args, **kwargs)
+
+    return serialized
+
+
 def _write_protected_document(
     path: Path,
     payload: Mapping[str, object],
@@ -4407,6 +4430,14 @@ def _validate_control_manifest(payload: object) -> dict[str, object]:
 
 def _read_control_manifest(path: Path) -> dict[str, object]:
     return _validate_control_manifest(_read_protected_document(path, check="control_manifest_file"))
+
+
+def _require_mutable_control_manifest(manifest: Mapping[str, object]) -> None:
+    """Reject every rewrite after final receipt authority is committed."""
+
+    final_evidence = manifest["final_evidence"]
+    if isinstance(final_evidence, Mapping) and final_evidence.get("phase") == "committed":
+        raise AcceptanceCheckError("control_manifest_finalized")
 
 
 def _scenario_inventory_hash(inventory: Mapping[str, object]) -> str:
@@ -5346,6 +5377,7 @@ def _load_retained_evidence(manifest: Mapping[str, object]) -> dict[str, object]
     return receipt
 
 
+@_serialized_control_manifest_write
 def control_manifest_bind_retained_evidence(
     path: Path,
     *,
@@ -5356,6 +5388,7 @@ def control_manifest_bind_retained_evidence(
     """Bind an immutable monotonic checkpoint of retained metric/trace identities."""
 
     manifest = _read_control_manifest(path)
+    _require_mutable_control_manifest(manifest)
     current = now()
     if current >= _control_timestamp(manifest["teardown_deadline_utc"]):
         raise AcceptanceCheckError("control_manifest_expired")
@@ -5428,6 +5461,7 @@ def control_manifest_checkpoint_operator_evidence(
     """Create and bind the next immutable checkpoint from one positive operator receipt."""
 
     manifest = _read_control_manifest(path)
+    _require_mutable_control_manifest(manifest)
     exec_receipt = _validate_exec_receipt_schema(
         _read_protected_document(Path(_control_path(exec_receipt_path)), check="operator_exec_receipt_file")
     )
@@ -5653,6 +5687,7 @@ def control_manifest_init(
     return manifest
 
 
+@_serialized_control_manifest_write
 def control_manifest_bind_scenario(
     path: Path,
     *,
@@ -5665,6 +5700,7 @@ def control_manifest_bind_scenario(
     if scenario_id not in {"A", "B"}:
         raise AcceptanceCheckError("scenario_inventory_binding")
     manifest = _read_control_manifest(path)
+    _require_mutable_control_manifest(manifest)
     scenarios = manifest["scenarios"]
     aws = manifest["aws"]
     assert isinstance(scenarios, dict) and isinstance(aws, dict)
@@ -5924,6 +5960,7 @@ def create_evidence_export_receipt(
     return receipt
 
 
+@_serialized_control_manifest_write
 def control_manifest_update(
     path: Path,
     *,
@@ -5948,6 +5985,7 @@ def control_manifest_update(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> dict[str, object]:
     manifest = _read_control_manifest(path)
+    _require_mutable_control_manifest(manifest)
     current = now()
     tag_shape = (
         cleanup_required is True
@@ -8185,6 +8223,7 @@ def _receipt_store_locked(
         document = decoded
     subject_sha256 = _sha256(subject_id.encode("utf-8"))
     manifest = _read_control_manifest(manifest_path)
+    _require_mutable_control_manifest(manifest)
     candidate_sha = manifest["candidate_sha"]
     assert isinstance(candidate_sha, str)
     expected_plugin_policy_binding_sha256: str | None = None
@@ -8343,6 +8382,7 @@ def _configured_approval_signature_verifier(
     return verify
 
 
+@_serialized_control_manifest_write
 def approval_verify(
     manifest_path: Path,
     *,
@@ -8363,6 +8403,7 @@ def approval_verify(
     if _SHA256_PATTERN.fullmatch(plan_receipt_hash) is None:
         raise AcceptanceCheckError("approval_binding")
     manifest = _read_control_manifest(manifest_path)
+    _require_mutable_control_manifest(manifest)
     evidence = manifest["evidence"]
     assert isinstance(evidence, dict)
     receipts = evidence["receipts"]
@@ -8750,6 +8791,7 @@ def _ensure_final_cleanup_receipt(
     )
 
 
+@_serialized_control_manifest_write
 def cleanup_evidence_finalize(
     manifest_path: Path,
     *,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -49,13 +50,49 @@ from elspeth.web.sessions.models import (
     guided_operations_table,
     proposal_events_table,
 )
-from elspeth.web.sessions.protocol import GuidedOriginatingUserMessageDraft
+from elspeth.web.sessions.protocol import GUIDED_FAILURE_AUDIT_LINEAGE_KEY, GuidedOriginatingUserMessageDraft
 from elspeth.web.sessions.routes.composer import guided as guided_route
 from elspeth.web.sessions.routes.composer import guided_chat_atomic
 from elspeth.web.sessions.routes.composer.guided_chat_atomic import GuidedChatProviderOutcome
 from tests.integration.web.composer.guided.test_respond import TestStep2IntraStep
 from tests.integration.web.composer.guided.test_step_chat import TestStepChatCrossStep, _create_session
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+def _session_message_rows(connection, session_id: str) -> list[dict[str, object]]:
+    return [
+        dict(row)
+        for row in connection.execute(
+            select(chat_messages_table).where(chat_messages_table.c.session_id == session_id).order_by(chat_messages_table.c.sequence_no)
+        )
+        .mappings()
+        .all()
+    ]
+
+
+def _assert_only_failure_chat_turn_audit_added(
+    before: list[dict[str, object]],
+    after: list[dict[str, object]],
+    *,
+    operation_id: str,
+) -> None:
+    before_by_id = {row["id"]: row for row in before}
+    after_by_id = {row["id"]: row for row in after}
+    assert {row_id: after_by_id[row_id] for row_id in before_by_id} == before_by_id
+    added = [row for row_id, row in after_by_id.items() if row_id not in before_by_id]
+    assert len(added) == 1, added
+    (audit_row,) = added
+    assert audit_row["role"] == "audit"
+    assert audit_row["raw_content"] is None
+    assert audit_row["writer_principal"] == "compose_loop"
+    content = json.loads(str(audit_row["content"]))
+    assert content["_kind"] == "chat_turn_audit"
+    assert content[GUIDED_FAILURE_AUDIT_LINEAGE_KEY]["operation_id"] == operation_id
+    tool_calls = audit_row["tool_calls"]
+    assert isinstance(tool_calls, list)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["_kind"] == "chat_turn_audit"
+    assert tool_calls[0][GUIDED_FAILURE_AUDIT_LINEAGE_KEY] == content[GUIDED_FAILURE_AUDIT_LINEAGE_KEY]
 
 
 def _action(
@@ -973,9 +1010,7 @@ def test_schema8_management_proposal_invalidation_fault_rolls_back_intent_propos
         state_count_before = connection.execute(
             select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
         ).scalar_one()
-        message_count_before = connection.execute(
-            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
-        ).scalar_one()
+        messages_before = _session_message_rows(connection, session_id)
 
     monkeypatch.setattr(
         guided_route,
@@ -1022,12 +1057,7 @@ def test_schema8_management_proposal_invalidation_fault_rolls_back_intent_propos
             ).scalar_one()
             == state_count_before
         )
-        assert (
-            connection.execute(
-                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
-            ).scalar_one()
-            == message_count_before
-        )
+        messages_after = _session_message_rows(connection, session_id)
         proposal = (
             connection.execute(select(composition_proposals_table).where(composition_proposals_table.c.id == proposal_id)).mappings().one()
         )
@@ -1048,6 +1078,7 @@ def test_schema8_management_proposal_invalidation_fault_rolls_back_intent_propos
         )
     assert proposal["status"] == "pending"
     assert proposal_event_types == ["proposal.created"]
+    _assert_only_failure_chat_turn_audit_added(messages_before, messages_after, operation_id=operation_id)
     assert operation["status"] == "failed"
     assert operation["originating_message_id"] is None
     assert operation["result_state_id"] is None
@@ -1549,7 +1580,7 @@ def test_absence_policy_denial_and_current_target_clarify_without_mutation(
     "fault_point",
     ("state_insert", "message_insert", "audit_insert", "operation_bind", "operation_complete", "operation_event"),
 )
-def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state_and_completion(
+def test_fault_at_each_settlement_boundary_rolls_back_business_state_but_persists_failure_audit(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     fault_point: str,
@@ -1564,9 +1595,7 @@ def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state
         state_count_before = connection.execute(
             select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == session_id)
         ).scalar_one()
-        message_count_before = connection.execute(
-            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
-        ).scalar_one()
+        messages_before = _session_message_rows(connection, session_id)
     armed = True
     writes: list[str] = []
     chat_insert_count = 0
@@ -1617,12 +1646,7 @@ def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state
             ).scalar_one()
             == state_count_before
         )
-        assert (
-            connection.execute(
-                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == session_id)
-            ).scalar_one()
-            == message_count_before
-        )
+        messages_after = _session_message_rows(connection, session_id)
         operation = (
             connection.execute(
                 select(guided_operations_table).where(
@@ -1643,6 +1667,7 @@ def test_fault_at_each_settlement_boundary_rolls_back_intent_message_audit_state
             .all()
         )
     assert operation["status"] == "failed"
+    _assert_only_failure_chat_turn_audit_added(messages_before, messages_after, operation_id=operation_id)
     assert operation["originating_message_id"] is None
     assert operation["result_state_id"] is None
     assert operation["response_hash"] is None
@@ -1672,12 +1697,8 @@ def test_corrupt_origin_custody_is_an_integrity_failure_and_rolls_back_atomicall
         target_state_count_before = connection.execute(
             select(func.count()).select_from(composition_states_table).where(composition_states_table.c.session_id == target_session_id)
         ).scalar_one()
-        target_message_count_before = connection.execute(
-            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == target_session_id)
-        ).scalar_one()
-        other_message_count_before = connection.execute(
-            select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == other_session_id)
-        ).scalar_one()
+        target_messages_before = _session_message_rows(connection, target_session_id)
+        other_messages_before = _session_message_rows(connection, other_session_id)
     turn = client.get(f"/api/sessions/{target_session_id}/guided").json()["next_turn"]
     operation_id = str(uuid4())
     monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _provider(_action()))
@@ -1723,15 +1744,11 @@ def test_corrupt_origin_custody_is_an_integrity_failure_and_rolls_back_atomicall
             ).scalar_one()
             == target_state_count_before
         )
-        assert (
-            connection.execute(
-                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == target_session_id)
-            ).scalar_one()
-            == target_message_count_before
-        )
-        assert (
-            connection.execute(
-                select(func.count()).select_from(chat_messages_table).where(chat_messages_table.c.session_id == other_session_id)
-            ).scalar_one()
-            == other_message_count_before
-        )
+        target_messages_after = _session_message_rows(connection, target_session_id)
+        other_messages_after = _session_message_rows(connection, other_session_id)
+    _assert_only_failure_chat_turn_audit_added(
+        target_messages_before,
+        target_messages_after,
+        operation_id=operation_id,
+    )
+    assert other_messages_after == other_messages_before

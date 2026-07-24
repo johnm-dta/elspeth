@@ -101,8 +101,9 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     adding ``app.state.scoped_secret_resolver = None``.  The composer
     service has ``_litellm_acompletion`` patched to avoid real LLM calls.
 
-    A fake ``OPENAI_API_KEY`` env var is set so the service's boot-time
-    availability check passes without a real API key.
+    A fake ``OPENAI_API_KEY`` env var is set and both mocked models use that
+    provider so the service's boot-time availability checks pass without real
+    API keys.
     """
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key-for-integration-tests")
 
@@ -123,6 +124,7 @@ def composer_freeform_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     settings = WebSettings(
         data_dir=tmp_path,
         composer_model="gpt-4o-mini",
+        composer_advisor_model="openai/gpt-4.1-mini",
         composer_max_composition_turns=5,
         composer_max_discovery_turns=5,
         composer_timeout_seconds=30.0,

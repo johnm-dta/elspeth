@@ -13,6 +13,11 @@
 #   docker run elspeth run --settings /app/config/pipeline.yaml              # Run batch pipeline
 #   docker run -p 8451:8451 -e ELSPETH_WEB__SECRET_KEY=<key> elspeth web     # Start web server
 
+# One canonical build selection is threaded through every stage. The runtime
+# label makes the selected extras inspectable on the final artifact; official
+# generic GHCR/ACR builds set this explicitly to "all".
+ARG INSTALL_EXTRAS="all"
+
 # =============================================================================
 # Stage 1: Frontend Builder
 # =============================================================================
@@ -47,7 +52,7 @@ COPY elspeth-lints/ ./elspeth-lints/
 
 # Create virtual environment and sync the selected locked dependencies.
 # The default "all" preserves the shared GHCR/ACR image behavior.
-ARG INSTALL_EXTRAS="all"
+ARG INSTALL_EXTRAS
 RUN uv venv /opt/venv && \
     . /opt/venv/bin/activate && \
     test -n "$INSTALL_EXTRAS" && \
@@ -90,11 +95,14 @@ RUN . /opt/venv/bin/activate && \
 # =============================================================================
 FROM python:3.13-slim@sha256:b04b5d7233d2ad9c379e22ea8927cd1378cd15c60d4ef876c065b25ea8fb3bf3 AS runtime
 
+ARG INSTALL_EXTRAS
+
 # Labels for container registry
 LABEL org.opencontainers.image.title="ELSPETH"
 LABEL org.opencontainers.image.description="Auditable Sense/Decide/Act Pipelines"
 LABEL org.opencontainers.image.source="https://github.com/johnm-dta/elspeth"
 LABEL org.opencontainers.image.licenses="MIT"
+LABEL io.elspeth.install-extras="$INSTALL_EXTRAS"
 
 # Create non-root user for security
 RUN groupadd --gid 1000 elspeth && \

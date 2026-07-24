@@ -37,8 +37,11 @@ application and collector have deliberately separate evidence roles:
   committed Landscape record.
 
 `ELSPETH_WEB__DEPLOYMENT_TARGET=aws-ecs` requires PostgreSQL
-`session_db_url` and `landscape_url` values (including
-`postgresql+psycopg://...`), a pre-provisioned writable `data_dir`, an explicit
+`session_db_url` and `landscape_url` values. Both bare `postgresql://...`
+(SQLAlchemy's default `psycopg2` driver) and explicit
+`postgresql+psycopg://...` (psycopg v3) are supported. Production images that
+include the `postgres` extra contain both drivers. The deployment also requires
+a pre-provisioned writable `data_dir`, an explicit
 writable `payload_store_path`, and non-placeholder
 `ELSPETH_WEB__SECRET_KEY` and
 `ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY` secrets. Web startup validates this
@@ -1916,7 +1919,16 @@ Every web, doctor, verifier, and rollback definition declares
 `ARM64`). A host-native image with no recorded target platform is NO-GO. The
 lean image omits the `azure` extra; `azure_blob` pipelines need the default
 `all` image or an expanded `INSTALL_EXTRAS`. The published GHCR/ACR default
-remains `all`.
+remains `all`. Every image records its exact selection in the
+`io.elspeth.install-extras` OCI label. Before promoting any generic release
+tag, require this check to print exactly `all`:
+
+```bash
+docker image inspect --format '{{ index .Config.Labels "io.elspeth.install-extras" }}' "$IMAGE"
+```
+
+Acceptance/lean images instead report `webui llm aws postgres`; never retag
+one of those digests as the generic GHCR/ACR release image.
 
 ## Storage provisioning and cold start
 
@@ -3351,8 +3363,10 @@ deadline. Cleanup failure is itself NO-GO and escalates to the named owner.
 
 Durable lean-image publication is separate release-owner work after GO: build
 the GO SHA for each approved platform, verify SBOM/provenance/signature and
-vulnerability policy, and repeat live acceptance for any rebuilt digest.
-Mere retagging of the temporary candidate is not publication evidence.
+vulnerability policy, inspect `io.elspeth.install-extras` as
+`webui llm aws postgres`, and repeat live acceptance for any rebuilt digest.
+Mere retagging of the temporary candidate is not publication evidence, and a
+lean digest must never receive the generic release tag (whose label is `all`).
 
 ## See also
 

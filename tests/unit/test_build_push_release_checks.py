@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_PUSH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build-push.yaml"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
 def _workflow() -> dict[str, Any]:
@@ -87,6 +89,9 @@ def test_build_push_exposes_registry_push_decisions_as_outputs() -> None:
 
     assert "steps.registries.outputs.push_ghcr" in outputs["push_ghcr"]
     assert "steps.registries.outputs.push_acr" in outputs["push_acr"]
+    assert outputs["ghcr_digest"] == "${{ steps.ghcr-push.outputs.digest }}"
+    assert outputs["acr_digest"] == "${{ steps.acr-push.outputs.digest }}"
+    assert "secrets." not in str(outputs)
 
 
 def test_smoke_test_skipped_when_no_image_was_pushed() -> None:
@@ -99,22 +104,28 @@ def test_smoke_test_skipped_when_no_image_was_pushed() -> None:
 
 
 def test_smoke_test_image_selection_is_registry_aware() -> None:
-    """The smoke image must be chosen from the pushed registry, not hardcoded GHCR."""
+    """Smoke must consume the immutable digest from every pushed registry."""
     job = _job("smoke-test")
-    run = _step_run(job, "Determine smoke-test image")
+    step = _step(job, "Determine smoke-test images")
+    run = step["run"]
 
-    # Picks GHCR when pushed, else the ACR image — written to the job env.
-    assert "SMOKE_IMAGE=ghcr.io/" in run
-    assert "SMOKE_IMAGE=${ACR_REGISTRY}/" in run
+    assert step["env"]["GHCR_DIGEST"] == "${{ needs.build-push.outputs.ghcr_digest }}"
+    assert step["env"]["ACR_DIGEST"] == "${{ needs.build-push.outputs.acr_digest }}"
+    assert step["env"]["ACR_REGISTRY"] == "${{ secrets.ACR_REGISTRY }}"
+    assert 'GHCR_IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}@${GHCR_DIGEST}"' in run
+    assert 'ACR_IMAGE="${ACR_REGISTRY}/${IMAGE_NAME}@${ACR_DIGEST}"' in run
+    assert 'SMOKE_IMAGE="$GHCR_IMAGE"' in run
+    assert 'SMOKE_IMAGE="$ACR_IMAGE"' in run
+    assert ":sha-" not in run
     assert "GITHUB_ENV" in run
 
 
 def test_smoke_test_run_steps_use_the_selected_image() -> None:
-    """No smoke run step may hardcode the GHCR image; all use $SMOKE_IMAGE."""
+    """After digest selection, smoke run steps must use the selected image."""
     job = _job("smoke-test")
     for step in job["steps"]:
         run = step.get("run")
-        if not isinstance(run, str):
+        if not isinstance(run, str) or step.get("name") == "Determine smoke-test images":
             continue
         assert 'IMAGE="ghcr.io/${REPO_OWNER}' not in run, f"hardcoded GHCR image in step {step.get('name')!r}"
 
@@ -217,6 +228,67 @@ def test_release_dockerfile_defaults_to_all_extras_and_validates_both_sync_layer
     assert dockerfile.count('case "$e" in *[!a-z0-9-]*) exit 2 ;; esac;') == 2
     assert dockerfile.count('set -- "$@" --extra "$e"') == 2
     assert dockerfile.count('test "$#" -gt 0') == 2
+
+
+def test_postgres_extra_supports_both_accepted_sqlalchemy_url_forms() -> None:
+    """The production postgres extra must install both SQLAlchemy defaults."""
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    dependencies = project["optional-dependencies"]["postgres"]
+
+    assert any(dependency.startswith("psycopg[") for dependency in dependencies)
+    assert any(dependency.startswith("psycopg2-binary") for dependency in dependencies)
+
+
+def test_release_dockerfile_records_selected_extras_on_the_runtime_image() -> None:
+    """Operators must be able to prove which extras a built artifact contains."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert 'LABEL io.elspeth.install-extras="$INSTALL_EXTRAS"' in dockerfile
+
+
+def test_release_workflow_proves_lean_postgres_image_before_registry_push() -> None:
+    """The ECS lean extras set must pass its runtime contract before publication."""
+    job = _build_push_job()
+    run = _step_run(job, "Verify lean PostgreSQL image contract")
+
+    assert 'INSTALL_EXTRAS="webui llm aws postgres"' in run
+    assert "import psycopg" in run
+    assert "import psycopg2" in run
+    assert "postgresql://" in run
+    assert "postgresql+psycopg://" in run
+    step_names = [step.get("name") for step in job["steps"]]
+    assert step_names.index("Verify lean PostgreSQL image contract") < step_names.index("Build and push to GHCR")
+
+
+def test_generic_registry_builds_explicitly_select_all_extras() -> None:
+    """Generic GHCR/ACR artifacts may never inherit a lean build selection."""
+    job = _build_push_job()
+
+    for name in ("Build and push to GHCR", "Build and push to ACR"):
+        build_args = _step(job, name)["with"]["build-args"]
+        assert build_args == "INSTALL_EXTRAS=all"
+
+
+def test_version_tags_are_promoted_only_after_smoke_verifies_the_digest() -> None:
+    """A version tag must point only at the already-smoked immutable digest."""
+    build_job = _build_push_job()
+    for name in ("Build and push to GHCR", "Build and push to ACR"):
+        tags = _step(build_job, name)["with"]["tags"]
+        assert "github.ref_name" not in tags
+
+    smoke_job = _job("smoke-test")
+    verify = _step_run(smoke_job, "Verify generic image runtime contract")
+    assert 'for image in "$GHCR_IMAGE" "$ACR_IMAGE"' in verify
+    assert 'docker pull "$image"' in verify
+    assert "docker inspect --format" in verify
+    assert 'docker run --rm --interactive --entrypoint python "$image"' in verify
+
+    release_job = _job("release")
+    assert "smoke-test" in release_job["needs"]
+    promote = _step_run(release_job, "Promote verified image digest to release tag")
+    assert "docker buildx imagetools create" in promote
+    assert "needs.build-push.outputs.ghcr_digest" in promote
+    assert "needs.build-push.outputs.acr_digest" in promote
 
 
 @pytest.mark.parametrize("extras", ["", "   ", "--no-dev", "ALL", "webui*", "webui;llm"])

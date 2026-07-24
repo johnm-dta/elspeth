@@ -84,8 +84,10 @@ jobs:
 
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
-      ghcr_image: ${{ steps.ghcr-push.outputs.digest && format('ghcr.io/{0}/{1}@{2}', github.repository_owner, env.IMAGE_NAME, steps.ghcr-push.outputs.digest) || '' }}
-      acr_image: ${{ steps.acr-push.outputs.digest && format('{0}/{1}@{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, steps.acr-push.outputs.digest) || '' }}
+      # Export only non-secret digest values. GitHub Actions suppresses job
+      # outputs that contain secret-derived values such as the ACR hostname.
+      ghcr_digest: ${{ steps.ghcr-push.outputs.digest }}
+      acr_digest: ${{ steps.acr-push.outputs.digest }}
       # Which registries were actually pushed, so the smoke-test job tests the
       # image that exists rather than unconditionally pulling GHCR.
       push_ghcr: ${{ steps.registries.outputs.push_ghcr }}
@@ -113,6 +115,35 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      # This is the exact lean extras profile used by ECS acceptance builds.
+      # Build and exercise it before any registry login/push so dev/all extras
+      # cannot mask a missing production dependency.
+      - name: Verify lean PostgreSQL image contract
+        run: |
+          set -euo pipefail
+          INSTALL_EXTRAS="webui llm aws postgres"
+          LEAN_IMAGE="elspeth-lean-postgres:${IMAGE_SHA}"
+          docker build --load \
+            --build-arg INSTALL_EXTRAS="$INSTALL_EXTRAS" \
+            --tag "$LEAN_IMAGE" \
+            .
+          test "$(docker inspect --format '{{ index .Config.Labels "io.elspeth.install-extras" }}' "$LEAN_IMAGE")" = "$INSTALL_EXTRAS"
+          docker run --rm --interactive --entrypoint python "$LEAN_IMAGE" - <<'PY'
+          import psycopg
+          import psycopg2
+          from sqlalchemy import create_engine
+
+          del psycopg, psycopg2
+          for url, expected_driver in (
+              ("postgresql://user:password@localhost/database", "psycopg2"),  # secret-scan: allow-this-line
+              ("postgresql+psycopg://user:password@localhost/database", "psycopg"),
+          ):
+              engine = create_engine(url)
+              assert engine.dialect.driver == expected_driver
+              engine.dispose()
+          PY
+          docker image rm "$LEAN_IMAGE"
 
       # -----------------------------------------------------------------------
       # Determine which registries to push to
@@ -190,10 +221,10 @@ jobs:
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
+          build-args: INSTALL_EXTRAS=all
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ env.IMAGE_SHA }}
-            ${{ contains(github.ref, 'refs/tags/v') && format('ghcr.io/{0}/{1}:{2}', github.repository_owner, env.IMAGE_NAME, github.ref_name) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -210,10 +241,10 @@ jobs:
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
+          build-args: INSTALL_EXTRAS=all
           push: true
           tags: |
             ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.IMAGE_SHA }}
-            ${{ contains(github.ref, 'refs/tags/v') && format('{0}/{1}:{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, github.ref_name) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -287,32 +318,39 @@ jobs:
         with:
           ref: ${{ env.IMAGE_SHA }}
 
-      # Pick the image to smoke-test from the registry that was actually pushed.
-      # GHCR is preferred when present (the common path); ACR is used for an
-      # ACR-only dispatch. The chosen image and registry are exported so the
-      # login steps and every test step below operate on the real artifact.
-      - name: Determine smoke-test image
+      # Bind smoke verification to the immutable action-output digests that the
+      # release job will promote. When both registries are enabled, both
+      # independently-pushed digests must pass the runtime contract.
+      - name: Determine smoke-test images
         env:
-          PUSH_GHCR: ${{ needs.build-push.outputs.push_ghcr }}
-          PUSH_ACR: ${{ needs.build-push.outputs.push_acr }}
+          GHCR_DIGEST: ${{ needs.build-push.outputs.ghcr_digest }}
+          ACR_DIGEST: ${{ needs.build-push.outputs.acr_digest }}
           ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
           REPO_OWNER: ${{ github.repository_owner }}
-          IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
           set -euo pipefail
-          if [[ "$PUSH_GHCR" == "true" ]]; then
-            echo "SMOKE_REGISTRY=ghcr" >> "$GITHUB_ENV"
-            echo "SMOKE_IMAGE=ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
-          elif [[ "$PUSH_ACR" == "true" ]]; then
-            echo "SMOKE_REGISTRY=acr" >> "$GITHUB_ENV"
-            echo "SMOKE_IMAGE=${ACR_REGISTRY}/${IMAGE_NAME}:sha-${IMAGE_SHA}" >> "$GITHUB_ENV"
+          GHCR_IMAGE=""
+          ACR_IMAGE=""
+          if [[ -n "$GHCR_DIGEST" ]]; then
+            GHCR_IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}@${GHCR_DIGEST}"
+          fi
+          if [[ -n "$ACR_DIGEST" ]]; then
+            ACR_IMAGE="${ACR_REGISTRY}/${IMAGE_NAME}@${ACR_DIGEST}"
+          fi
+          if [[ -n "$GHCR_IMAGE" ]]; then
+            SMOKE_IMAGE="$GHCR_IMAGE"
+          elif [[ -n "$ACR_IMAGE" ]]; then
+            SMOKE_IMAGE="$ACR_IMAGE"
           else
             echo "No image was pushed; nothing to smoke-test." >&2
             exit 1
           fi
+          echo "GHCR_IMAGE=$GHCR_IMAGE" >> "$GITHUB_ENV"
+          echo "ACR_IMAGE=$ACR_IMAGE" >> "$GITHUB_ENV"
+          echo "SMOKE_IMAGE=$SMOKE_IMAGE" >> "$GITHUB_ENV"
 
       - name: Login to GHCR (to pull image)
-        if: env.SMOKE_REGISTRY == 'ghcr'
+        if: needs.build-push.outputs.push_ghcr == 'true'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
@@ -320,12 +358,35 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to ACR (to pull image)
-        if: env.SMOKE_REGISTRY == 'acr'
+        if: needs.build-push.outputs.push_acr == 'true'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ${{ secrets.ACR_REGISTRY }}
           username: ${{ secrets.AZURE_CLIENT_ID }}
           password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Verify generic image runtime contract
+        run: |
+          set -euo pipefail
+          for image in "$GHCR_IMAGE" "$ACR_IMAGE"; do
+            [[ -n "$image" ]] || continue
+            docker pull "$image"
+            test "$(docker inspect --format '{{ index .Config.Labels "io.elspeth.install-extras" }}' "$image")" = "all"
+            docker run --rm --interactive --entrypoint python "$image" - <<'PY'
+          import psycopg
+          import psycopg2
+          from sqlalchemy import create_engine
+
+          del psycopg, psycopg2
+          for url, expected_driver in (
+              ("postgresql://user:password@localhost/database", "psycopg2"),  # secret-scan: allow-this-line
+              ("postgresql+psycopg://user:password@localhost/database", "psycopg"),
+          ):
+              engine = create_engine(url)
+              assert engine.dialect.driver == expected_driver
+              engine.dispose()
+          PY
+          done
 
       - name: Basic CLI tests
         env:
@@ -466,9 +527,49 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+
+      - name: Login to GHCR for verified promotion
+        if: needs.build-push.outputs.push_ghcr == 'true'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ACR for verified promotion
+        if: needs.build-push.outputs.push_acr == 'true'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.AZURE_CLIENT_ID }}
+          password: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Promote verified image digest to release tag
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+        run: |
+          set -euo pipefail
+          GHCR_DIGEST="${{ needs.build-push.outputs.ghcr_digest }}"
+          ACR_DIGEST="${{ needs.build-push.outputs.acr_digest }}"
+          if [[ -n "$GHCR_DIGEST" ]]; then
+            GHCR_IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}@${GHCR_DIGEST}"
+            docker buildx imagetools create \
+              --tag "ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}:${GITHUB_REF_NAME}" \
+              "$GHCR_IMAGE"
+          fi
+          if [[ -n "$ACR_DIGEST" ]]; then
+            ACR_IMAGE="${ACR_REGISTRY}/${IMAGE_NAME}@${ACR_DIGEST}"
+            docker buildx imagetools create \
+              --tag "${ACR_REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}" \
+              "$ACR_IMAGE"
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844

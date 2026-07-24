@@ -91,6 +91,17 @@ docker run --rm \
 | `OPENROUTER_API_KEY` | LLM provider API key |
 | `DATABASE_URL` | Audit database (default: SQLite) |
 
+For PostgreSQL, ELSPETH supports both SQLAlchemy URL forms:
+`postgresql://...` uses the bundled `psycopg2` driver, while
+`postgresql+psycopg://...` selects bundled psycopg v3 explicitly. Images built
+with the `postgres` extra contain both. The official generic image is built
+with `INSTALL_EXTRAS=all`; verify an artifact's selected profile before
+promotion with:
+
+```bash
+docker image inspect --format '{{ index .Config.Labels "io.elspeth.install-extras" }}' "$IMAGE"
+```
+
 ---
 
 ## Common Commands

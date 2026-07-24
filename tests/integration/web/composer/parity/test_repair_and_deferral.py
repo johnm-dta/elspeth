@@ -117,9 +117,9 @@ _UNAVAILABLE_SOURCE = "aws_s3"
 # --------------------------------------------------------------------------- #
 
 
-def _valid_pipeline(env: ParityEnv, fixture: dict[str, Any]) -> dict[str, Any]:
+def _valid_pipeline(env: ParityEnv, fixture: dict[str, Any], session_id: str) -> dict[str, Any]:
     """The fixture's canonical pipeline with source paths bound under the S2 allowlist."""
-    return rewrite_source_paths(fixture["canonical_arguments"], env.data_dir)
+    return rewrite_source_paths(fixture["canonical_arguments"], env.data_dir, session_id)
 
 
 def _malformed_missing_edges(pipeline: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +157,7 @@ async def _drive_freeform_scripted(
     env: ParityEnv,
     fixture: dict[str, Any],
     completion: _ScriptedCompletion,
+    session: Any,
 ) -> tuple[Any, Any]:
     """Run the real freeform ``compose`` empty-build path under ``completion``, then accept.
 
@@ -165,7 +166,6 @@ async def _drive_freeform_scripted(
     ``CompositionState`` and the accepted proposal record.
     """
     env.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
-    session = await env.sessions.create_session("alice", "Alice", "local")
     await env.sessions.update_composer_preferences(
         session.id,
         trust_mode="explicit_approve",
@@ -257,13 +257,14 @@ def _assert_allowlisted_feedback_shape(feedback: dict[str, Any], *, error_class:
 async def test_freeform_one_repair_converges_to_reference_graph(parity_env: ParityEnv) -> None:
     """A malformed terminal, then a valid one: converges with repair_count == 1."""
     reference = parity_env.reference_state(_LINEAR)
-    valid = _valid_pipeline(parity_env, _LINEAR)
+    session = await parity_env.sessions.create_session("alice", "Alice", "local")
+    valid = _valid_pipeline(parity_env, _LINEAR, str(session.id))
     completion = _ScriptedCompletion(
         emit_proposal_response(_malformed_missing_edges(valid)),
         emit_proposal_response(valid),
     )
 
-    committed, proposal = await _drive_freeform_scripted(parity_env, _LINEAR, completion)
+    committed, proposal = await _drive_freeform_scripted(parity_env, _LINEAR, completion, session)
 
     assert_isomorphic(committed, reference, left="freeform-one-repair:linear_transform", right="reference")
     assert proposal.pipeline_metadata.repair_count == 1
@@ -275,19 +276,18 @@ async def test_freeform_one_repair_converges_to_reference_graph(parity_env: Pari
 @pytest.mark.asyncio
 async def test_freeform_repair_exhaustion_is_translated_to_a_safe_disposition(parity_env: ParityEnv) -> None:
     """Every terminal malformed: REPAIR_EXHAUSTED → 502 + one closed disposition row."""
-    valid = _valid_pipeline(parity_env, _LINEAR)
-    malformed = emit_proposal_response(_malformed_missing_edges(valid))
-    # Budget is 2 (parity settings inherit the WebSettings default); the third
-    # malformed terminal makes repair_count == 3 > 2, which now engages the
-    # escape-hatch overtime turn on the advisor model. A fourth malformed
-    # terminal spends the hatch, so the original REPAIR_EXHAUSTED stands.
-    completion = _ScriptedCompletion(malformed, malformed, malformed, malformed)
-    parity_env.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
-
     async with parity_env._client() as client:
         created = await client.post("/api/sessions", json={"title": "freeform repair exhaustion"})
         assert created.status_code == 201, created.text
         session_id = created.json()["id"]
+        valid = _valid_pipeline(parity_env, _LINEAR, session_id)
+        malformed = emit_proposal_response(_malformed_missing_edges(valid))
+        # Budget is 2 (parity settings inherit the WebSettings default); the third
+        # malformed terminal makes repair_count == 3 > 2, which now engages the
+        # escape-hatch overtime turn on the advisor model. A fourth malformed
+        # terminal spends the hatch, so the original REPAIR_EXHAUSTED stands.
+        completion = _ScriptedCompletion(malformed, malformed, malformed, malformed)
+        parity_env.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
         response = await client.post(f"/api/sessions/{session_id}/messages", json={"content": _LINEAR["intent"]})
 
     assert response.status_code == 502, response.text
@@ -311,13 +311,14 @@ async def test_freeform_repair_exhaustion_is_translated_to_a_safe_disposition(pa
 async def test_freeform_policy_denied_candidate_is_rejected_with_allowlisted_shape(parity_env: ParityEnv) -> None:
     """A policy-denied plugin is rejected with the allowlisted candidate feedback, then repaired."""
     reference = parity_env.reference_state(_LINEAR)
-    valid = _valid_pipeline(parity_env, _LINEAR)
+    session = await parity_env.sessions.create_session("alice", "Alice", "local")
+    valid = _valid_pipeline(parity_env, _LINEAR, str(session.id))
     completion = _ScriptedCompletion(
         emit_proposal_response(_policy_denied_variant(valid)),
         emit_proposal_response(valid),
     )
 
-    committed, proposal = await _drive_freeform_scripted(parity_env, _LINEAR, completion)
+    committed, proposal = await _drive_freeform_scripted(parity_env, _LINEAR, completion, session)
 
     assert_isomorphic(committed, reference, left="freeform-policy-rejection:linear_transform", right="reference")
     assert proposal.pipeline_metadata.repair_count == 1

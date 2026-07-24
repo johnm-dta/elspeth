@@ -194,6 +194,8 @@ from tests.fixtures.plugins import (
     PassTransform,
 )
 
+_AGREEMENT_SESSION_ID = "00000000-0000-4000-8000-000000000001"
+
 
 class TestComposerRuntimeAgreement:
     """Shared agreement checks plus documented runtime-only gap characterization."""
@@ -1669,6 +1671,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             state,
             TestComposerRuntimeRouteTargetAgreement._validation_settings(data_dir),
             composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
         )
         assert result.is_valid is False, "Composer should reject pipelines with dangling route targets"
         check_by_name = {check.name: check for check in result.checks}
@@ -1709,7 +1712,7 @@ class TestComposerRuntimeRouteTargetAgreement:
     @staticmethod
     def _csv_input(tmp_path: Path) -> Path:
         # Sources must live under data_dir/blobs/ for the path allowlist.
-        path = tmp_path / "blobs" / "input.csv"
+        path = tmp_path / "blobs" / _AGREEMENT_SESSION_ID / "input.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("value\n1\n", encoding="utf-8")
         return path
@@ -1717,7 +1720,7 @@ class TestComposerRuntimeRouteTargetAgreement:
     @staticmethod
     def _csv_output(tmp_path: Path, name: str = "out.csv") -> Path:
         # Sinks must live under data_dir/outputs/ (or blobs/) for the allowlist.
-        out_dir = tmp_path / "outputs"
+        out_dir = tmp_path / "outputs" / _AGREEMENT_SESSION_ID
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir / name
 
@@ -1858,7 +1861,12 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
+        )
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_error_sink" in composer_messages
@@ -1985,7 +1993,12 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
+        )
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_failsink" in composer_messages
@@ -2073,7 +2086,12 @@ class TestComposerRuntimeRouteTargetAgreement:
             metadata=PipelineMetadata(),
             version=1,
         )
-        composer_result = validate_pipeline_for_trained_operator(state, self._validation_settings(tmp_path), composer_yaml_generator)
+        composer_result = validate_pipeline_for_trained_operator(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
+        )
         assert composer_result.is_valid is False
         composer_messages = " | ".join(err.message for err in composer_result.errors)
         assert "missing_route_sink" in composer_messages
@@ -2167,6 +2185,7 @@ class TestComposerRuntimeRouteTargetAgreement:
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
         )
         assert result.is_valid, "\n".join(err.message for err in result.errors)
         rt_check = next(c for c in result.checks if c.name == "route_target_resolution")
@@ -2325,8 +2344,8 @@ class TestComposerRuntimeSecretRefAgreement:
         # ``secret_refs`` predicate fires before the path check, but build a
         # legitimate source so the failure is unambiguously the credential
         # check rather than a parallel rejection.
-        blobs = tmp_path / "blobs"
-        blobs.mkdir()
+        blobs = tmp_path / "blobs" / _AGREEMENT_SESSION_ID
+        blobs.mkdir(parents=True)
         csv_path = blobs / "tickets.csv"
         csv_path.write_text("subject\nticket-1\n", encoding="utf-8")
 
@@ -2366,7 +2385,10 @@ class TestComposerRuntimeSecretRefAgreement:
                 OutputSpec(
                     name="main",
                     plugin="csv",
-                    options={"path": str(tmp_path / "outputs" / "out.csv"), "schema": {"mode": "observed"}},
+                    options={
+                        "path": str(tmp_path / "outputs" / _AGREEMENT_SESSION_ID / "out.csv"),
+                        "schema": {"mode": "observed"},
+                    },
                     on_write_failure="discard",
                 ),
             ),
@@ -2380,6 +2402,7 @@ class TestComposerRuntimeSecretRefAgreement:
             composer_yaml_generator,
             secret_service=_AgreementSecretService(),
             user_id="agreement-suite-user",
+            session_id=_AGREEMENT_SESSION_ID,
         )
 
         # The agreement gate: /validate must reject this shape so /execute
@@ -2993,7 +3016,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
 
     @staticmethod
     def _csv_input(tmp_path: Path) -> Path:
-        path = tmp_path / "blobs" / "input.csv"
+        path = tmp_path / "blobs" / _AGREEMENT_SESSION_ID / "input.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("ticket_id,customer_tier\n1,enterprise\n", encoding="utf-8")
         return path
@@ -3042,7 +3065,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         # Pre-create the sink target. Runtime execution with fail_if_exists
         # must still reject this, but composer preflight must not observe
         # local filesystem collision state during plugin construction.
-        sink_path = tmp_path / "outputs" / "all.jsonl"
+        sink_path = tmp_path / "outputs" / _AGREEMENT_SESSION_ID / "all.jsonl"
         sink_path.parent.mkdir(parents=True, exist_ok=True)
         sink_path.write_text("", encoding="utf-8")  # any pre-existing content
         assert sink_path.exists()
@@ -3053,6 +3076,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
         )
 
         assert result.is_valid is True
@@ -3069,7 +3093,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         firing on the actual fs-collision condition, not converting all
         plugin-init failures into the same shape."""
         csv_path = self._csv_input(tmp_path)
-        sink_path = tmp_path / "outputs" / "fresh.jsonl"
+        sink_path = tmp_path / "outputs" / _AGREEMENT_SESSION_ID / "fresh.jsonl"
         sink_path.parent.mkdir(parents=True, exist_ok=True)
         # Deliberately do NOT create the sink_path file.
         assert not sink_path.exists()
@@ -3079,6 +3103,7 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
             state,
             self._validation_settings(tmp_path),
             composer_yaml_generator,
+            session_id=_AGREEMENT_SESSION_ID,
         )
 
         check_by_name = {check.name: check for check in result.checks}
@@ -3247,8 +3272,8 @@ class TestComposerRuntimeBlobInlineAgreement:
 
     @staticmethod
     def _state_with_inline_prompt(tmp_path: Path, blob_id: UUID, sha256: str) -> CompositionState:
-        blobs_dir = tmp_path / "blobs"
-        outputs_dir = tmp_path / "outputs"
+        blobs_dir = tmp_path / "blobs" / _AGREEMENT_SESSION_ID
+        outputs_dir = tmp_path / "outputs" / _AGREEMENT_SESSION_ID
         blobs_dir.mkdir(parents=True, exist_ok=True)
         outputs_dir.mkdir(parents=True, exist_ok=True)
         return CompositionState(
@@ -3395,6 +3420,7 @@ sinks:
             self._validation_settings(tmp_path),
             composer_yaml_generator,
             blob_get_metadata=lambda _blob_id: None,
+            session_id=_AGREEMENT_SESSION_ID,
         )
 
         assert result.is_valid is False

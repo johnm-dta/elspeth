@@ -439,38 +439,39 @@ def test_send_message_freeform_planner_decline_is_a_normal_assistant_message(
     assert len(assistant_rows) == 1
 
 
-def _valid_pipeline_completion(tmp_path: Path) -> Any:
+def _valid_pipeline_completion(tmp_path: Path, session_id_holder: dict[str, str]) -> Any:
     """One-shot planner completion emitting a committable csv→json pipeline."""
-    pipeline = {
-        "source": {
-            "plugin": "csv",
-            "on_success": "rows",
-            "options": {
-                "path": str(tmp_path / "blobs" / "input.csv"),
-                "schema": {"mode": "flexible", "fields": ["name: str"]},
-            },
-            "on_validation_failure": "discard",
-        },
-        "nodes": [],
-        "edges": [],
-        "outputs": [
-            {
-                "sink_name": "rows",
-                "plugin": "json",
-                "options": {
-                    "path": str(tmp_path / "outputs" / "result.json"),
-                    "schema": {"mode": "observed"},
-                    "format": "json",
-                    "mode": "write",
-                    "collision_policy": "auto_increment",
-                },
-                "on_write_failure": "discard",
-            }
-        ],
-    }
     import json as _json
 
     async def completion(**_kwargs: Any) -> _Response:
+        session_id = session_id_holder["id"]
+        pipeline = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {
+                    "path": str(tmp_path / "blobs" / session_id / "input.csv"),
+                    "schema": {"mode": "flexible", "fields": ["name: str"]},
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "sink_name": "rows",
+                    "plugin": "json",
+                    "options": {
+                        "path": str(tmp_path / "outputs" / session_id / "result.json"),
+                        "schema": {"mode": "observed"},
+                        "format": "json",
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
         return _Response(
             choices=[
                 _Choice(
@@ -506,12 +507,18 @@ def test_freeform_auto_commit_surfaces_interpretation_reviews(
     from unittest.mock import AsyncMock
 
     (tmp_path / "outputs").mkdir(exist_ok=True)
-    client, _engine, _sessions = _build_app(tmp_path, monkeypatch, _valid_pipeline_completion(tmp_path))
+    session_id_holder: dict[str, str] = {}
+    client, _engine, _sessions = _build_app(
+        tmp_path,
+        monkeypatch,
+        _valid_pipeline_completion(tmp_path, session_id_holder),
+    )
     composer = client.app.state.composer_service
     spy = AsyncMock(wraps=composer.surface_pending_interpretation_reviews)
     monkeypatch.setattr(composer, "surface_pending_interpretation_reviews", spy)
 
     session_id = client.post("/api/sessions", json={"title": "auto-commit surfacer"}).json()["id"]
+    session_id_holder["id"] = session_id
     response = client.post(f"/api/sessions/{session_id}/messages", json={"content": _EMPTY_INTENT})
 
     assert response.status_code == 200, response.text

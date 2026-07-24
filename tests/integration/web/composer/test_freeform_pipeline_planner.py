@@ -77,12 +77,15 @@ def _empty_state() -> CompositionState:
     return CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
 
 
-def _pipeline(data_dir: Path) -> dict[str, Any]:
+def _pipeline(data_dir: Path, session_id: str) -> dict[str, Any]:
     return {
         "source": {
             "plugin": "csv",
             "on_success": "rows",
-            "options": {"path": str(data_dir / "blobs" / "input.csv"), "schema": {"mode": "observed"}},
+            "options": {
+                "path": str(data_dir / "blobs" / session_id / "input.csv"),
+                "schema": {"mode": "observed"},
+            },
             "on_validation_failure": "discard",
         },
         "nodes": [],
@@ -92,7 +95,7 @@ def _pipeline(data_dir: Path) -> dict[str, Any]:
                 "sink_name": "rows",
                 "plugin": "json",
                 "options": {
-                    "path": str(data_dir / "outputs" / "result.jsonl"),
+                    "path": str(data_dir / "outputs" / session_id / "result.jsonl"),
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -104,7 +107,7 @@ def _pipeline(data_dir: Path) -> dict[str, Any]:
     }
 
 
-def _terminal_response(data_dir: Path) -> _Response:
+def _terminal_response(data_dir: Path, session_id: str) -> _Response:
     return _Response(
         choices=[
             _Choice(
@@ -115,7 +118,7 @@ def _terminal_response(data_dir: Path) -> _Response:
                             id="freeform-terminal",
                             function=_Function(
                                 name="emit_pipeline_proposal",
-                                arguments=json.dumps({"pipeline": _pipeline(data_dir)}),
+                                arguments=json.dumps({"pipeline": _pipeline(data_dir, session_id)}),
                             ),
                         )
                     ],
@@ -194,7 +197,7 @@ async def test_empty_build_stages_one_canonical_pipeline_proposal_for_both_trust
 
     async def completion(**kwargs: Any) -> _Response:
         requests.append(kwargs)
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
@@ -212,7 +215,7 @@ async def test_empty_build_stages_one_canonical_pipeline_proposal_for_both_trust
     assert len(proposals) == 1
     proposal = proposals[0]
     assert proposal.tool_name == "set_pipeline"
-    assert deep_thaw(proposal.arguments_json) == _pipeline(tmp_path)
+    assert deep_thaw(proposal.arguments_json) == _pipeline(tmp_path, str(session.id))
     assert proposal.pipeline_metadata is not None
     assert proposal.pipeline_metadata.base["kind"] == ("present" if persisted_base else "absent")
     assert proposal.base_state_id == (current_state.id if current_state is not None else None)
@@ -292,7 +295,7 @@ async def test_cancellation_during_proposal_create_preserves_trust_mode_lifecycl
     )
 
     async def completion(**_kwargs: Any) -> _Response:
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
@@ -395,7 +398,7 @@ async def test_auto_commit_cancellation_survives_rejection_failure_and_repeated_
     )
 
     async def completion(**_kwargs: Any) -> _Response:
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
@@ -584,7 +587,7 @@ async def test_planner_audit_failure_publishes_no_proposal_authority_or_state(
     )
 
     async def completion(**_kwargs: Any) -> _Response:
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
     monkeypatch.setattr(
@@ -734,7 +737,7 @@ async def test_freeform_planner_manifest_mismatch_is_durable_before_failure(
             raise RuntimeError("provider unavailable")
         if provider_outcome == "cancel":
             raise asyncio.CancelledError()
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr(planner_module, "build_planner_capability_manifest", capture_manifest)
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
@@ -776,7 +779,7 @@ async def test_freeform_manifest_mismatch_audit_write_defers_request_cancellatio
 
     async def mutating_completion(**kwargs: Any) -> _Response:
         kwargs["messages"][0]["content"] += "\nprovider-side mutation"
-        return _terminal_response(tmp_path)
+        return _terminal_response(tmp_path, str(session.id))
 
     monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", mutating_completion)
 

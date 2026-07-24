@@ -208,6 +208,7 @@ def _web_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     defaults: dict[str, Any] = {
         "data_dir": data_dir,
         "composer_model": EVAL_MODEL,
+        "composer_advisor_model": "openrouter/openai/gpt-4.1-mini",
         "composer_max_composition_turns": 15,
         "composer_max_discovery_turns": 10,
         "composer_timeout_seconds": 180.0,
@@ -417,7 +418,7 @@ def _aggregation_state(
 def _scenario_2_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     data_dir = tmp_path / "data"
     source_path = data_dir / "blobs" / SCENARIO_2_SESSION_ID / "tickets.csv"
-    output_path = data_dir / "outputs" / "tier_summary.jsonl"
+    output_path = data_dir / "outputs" / SCENARIO_2_SESSION_ID / "tier_summary.jsonl"
     _write_scenario_csv(source_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     return data_dir, source_path, output_path
@@ -864,7 +865,7 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
 
     state = _direct_source_state(
         str(canonical_storage_path),
-        str(data_dir / "outputs" / "scenario_1b_summary.jsonl"),
+        str(data_dir / "outputs" / SCENARIO_1B_SESSION_ID / "scenario_1b_summary.jsonl"),
         blob_ref=blob_id,
     )
 
@@ -875,6 +876,7 @@ def test_scenario_1b_blob_service_storage_path_validates_through_runtime_path_al
         state,
         _web_settings(data_dir),
         composer_yaml_generator,
+        session_id=SCENARIO_1B_SESSION_ID,
     )
 
     assert runtime_result.is_valid, _format_validation_errors(runtime_result)
@@ -890,7 +892,12 @@ def test_scenario_2_end_of_source_condition_rejected_before_runtime_settings_loa
         aggregation_options={"schema": {"mode": "observed"}, "value_field": "amount"},
     )
 
-    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(
+        state,
+        _web_settings(data_dir),
+        composer_yaml_generator,
+        session_id=SCENARIO_2_SESSION_ID,
+    )
     assert not runtime_result.is_valid
     assert "end_of_source" in _format_validation_errors(runtime_result)
 
@@ -915,7 +922,12 @@ def test_scenario_2_omitted_trigger_is_end_of_source_only_contract(tmp_path: Pat
     yaml_doc = yaml.safe_load(composer_yaml_generator.generate_yaml(state))
     assert "trigger" not in yaml_doc["aggregations"][0]
 
-    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(
+        state,
+        _web_settings(data_dir),
+        composer_yaml_generator,
+        session_id=SCENARIO_2_SESSION_ID,
+    )
     assert runtime_result.is_valid, _format_validation_errors(runtime_result)
 
 
@@ -933,7 +945,12 @@ def test_scenario_2_batch_stats_required_input_fields_returns_pre_execution_vali
         },
     )
 
-    runtime_result = validate_pipeline_for_trained_operator(state, _web_settings(data_dir), composer_yaml_generator)
+    runtime_result = validate_pipeline_for_trained_operator(
+        state,
+        _web_settings(data_dir),
+        composer_yaml_generator,
+        session_id=SCENARIO_2_SESSION_ID,
+    )
     assert not runtime_result.is_valid
     assert "batch-aware" in _format_validation_errors(runtime_result)
 
@@ -1223,7 +1240,12 @@ def test_runtime_preflight_preview_blocks_scenario_2_invalid_trigger(tmp_path: P
     catalog = _trained_operator_catalog()
 
     def runtime_preflight(candidate: CompositionState) -> ValidationResult:
-        return validate_pipeline_for_trained_operator(candidate, settings, composer_yaml_generator)
+        return validate_pipeline_for_trained_operator(
+            candidate,
+            settings,
+            composer_yaml_generator,
+            session_id=SCENARIO_2_SESSION_ID,
+        )
 
     preview = execute_tool(
         "preview_pipeline",
@@ -1267,7 +1289,7 @@ async def test_final_completion_claim_is_augmented_with_runtime_preflight_failur
         state=changed_state,
         initial_version=state.version,
         user_id=EVAL_USER_ID,
-        session_id=None,
+        session_id=SCENARIO_2_SESSION_ID,
         last_runtime_preflight=None,
         runtime_preflight_cache=composer._new_runtime_preflight_cache(),
         session_scope="session:eval",

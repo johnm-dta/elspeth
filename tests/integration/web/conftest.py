@@ -291,7 +291,7 @@ def _lifespan_test_client(app: FastAPI) -> Iterator[TestClient]:
             raise error
 
 
-def _passthrough_composition_state(data_dir: Path) -> CompositionState:
+def _passthrough_composition_state(data_dir: Path, session_id: UUID) -> CompositionState:
     """Build a source → passthrough → sink composition.
 
     The passthrough node MUST trigger ``identity_node_advisory`` in
@@ -299,14 +299,14 @@ def _passthrough_composition_state(data_dir: Path) -> CompositionState:
     ``provenance`` row surfaces as ``status == "warning"`` with a
     populated ``component_ids`` tuple (C1 guard).
 
-    Source / sink paths are anchored to ``data_dir/blobs`` and
-    ``data_dir/outputs`` respectively so they satisfy
+    Source / sink paths are anchored to the session-owned subtrees under
+    ``data_dir/blobs`` and ``data_dir/outputs`` respectively so they satisfy
     ``allowed_source_directories`` / ``allowed_sink_directories`` in
     ``web/paths.py`` — otherwise validation reports a path-traversal
     error and the happy-path advisory never emits.
     """
-    source_path = str(data_dir / "blobs" / "audit_readiness_fixture.csv")
-    sink_path = str(data_dir / "outputs" / "audit_readiness_fixture_out.csv")
+    source_path = str(data_dir / "blobs" / str(session_id) / "audit_readiness_fixture.csv")
+    sink_path = str(data_dir / "outputs" / str(session_id) / "audit_readiness_fixture_out.csv")
     return CompositionState(
         source=SourceSpec(
             plugin="csv",
@@ -382,19 +382,19 @@ def _seed_session_with_state(
     """
     session_service = client.app.state.session_service
     settings: WebSettings = client.app.state.settings
+
     # Ensure path-allowlisted directories exist so source/sink option
     # paths inside the persisted CompositionState satisfy
     # web/paths.py's resolve_data_path() invariants.
-    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
-    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
-
     async def _seed() -> UUID:
         record = await session_service.create_session(
             user_id=user_id,
             title="audit-readiness fixture",
             auth_provider_type=settings.auth_provider,
         )
-        state = _passthrough_composition_state(settings.data_dir)
+        (settings.data_dir / "blobs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "outputs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        state = _passthrough_composition_state(settings.data_dir, record.id)
         state_d = state.to_dict()
         await session_service.save_composition_state(
             record.id,
@@ -525,8 +525,6 @@ def _seed_session_with_mismatched_auth_provider(
     """
     session_service = client.app.state.session_service
     settings: WebSettings = client.app.state.settings
-    (settings.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
-    (settings.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
 
     async def _seed() -> UUID:
         record = await session_service.create_session(
@@ -534,7 +532,9 @@ def _seed_session_with_mismatched_auth_provider(
             title="audit-readiness mismatched-provider fixture",
             auth_provider_type=auth_provider_type,  # type: ignore[arg-type]
         )
-        state = _passthrough_composition_state(settings.data_dir)
+        (settings.data_dir / "blobs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "outputs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        state = _passthrough_composition_state(settings.data_dir, record.id)
         state_d = state.to_dict()
         await session_service.save_composition_state(
             record.id,

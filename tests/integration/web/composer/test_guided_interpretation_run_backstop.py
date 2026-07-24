@@ -230,10 +230,11 @@ async def _persist_state_with_unresolved_node(
     (llm_prompt_template + llm_model_choice). The complete shape is what lets the
     REAL validate_pipeline pass once both reviews resolve. Returns
     (session_id, state_id, pt_event_id, mc_event_id, state)."""
-    src = tmp_path / "blobs" / "input.txt"
+    session_id = uuid4()
+    src = tmp_path / "blobs" / str(session_id) / "input.txt"
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text("hello world\n", encoding="utf-8")
-    out = tmp_path / "outputs" / "out.jsonl"
+    out = tmp_path / "outputs" / str(session_id) / "out.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
     state = CompositionState(
         source=None,
@@ -266,7 +267,6 @@ async def _persist_state_with_unresolved_node(
         )
     )
     state = state.with_edge(EdgeSpec(id="e1", from_node="source", to_node="rate_node", edge_type="on_success", label=None))
-    session_id = uuid4()
     with sessions_service._engine.begin() as conn:
         conn.execute(
             insert(sessions_table).values(

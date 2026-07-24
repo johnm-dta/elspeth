@@ -876,7 +876,7 @@ def test_validate_pipeline_resolves_server_profile_before_plugin_construction(
                 scoped_resolutions.append(resolved)
             return resolved
 
-    input_path = tmp_path / "blobs" / "input.csv"
+    input_path = tmp_path / "blobs" / "session-profile-validation" / "input.csv"
     input_path.parent.mkdir(parents=True)
     input_path.write_text("customer\nAlice\n")
     state = CompositionState(

@@ -137,7 +137,7 @@ async def test_committed_profiled_multi_query_llm_passes_readiness_preflight(par
     assert "pool_size" not in assess["options"]
     assert "max_capacity_retry_seconds" not in assess["options"]
 
-    session_id = uuid4()
+    session_id = UUID("00000000-0000-4000-8000-000000000001")
     app_state = parity_env.app.state
     record = _record_from_committed(committed, session_id)
 

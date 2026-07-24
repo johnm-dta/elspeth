@@ -176,18 +176,19 @@ def load_parity_fixtures() -> list[dict[str, Any]]:
 
 
 PARITY_FIXTURES = load_parity_fixtures()
+_REFERENCE_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
-def rewrite_source_paths(args: Mapping[str, Any], data_dir: Path) -> dict[str, Any]:
-    """Rebind every source ``path`` under ``{data_dir}/blobs/`` (the S2 allowlist).
+def rewrite_source_paths(args: Mapping[str, Any], data_dir: Path, session_id: str) -> dict[str, Any]:
+    """Rebind source paths under the caller's session-owned blob subtree.
 
     The committed ``set_pipeline`` dispatch enforces that source file paths live
-    under ``{data_dir}/blobs/``; the corpus stores abstract relative names. Both
-    surfaces receive the same rewrite so their committed graphs stay identical,
-    and the isomorphism helper canonicalizes paths to basename regardless.
+    under ``{data_dir}/blobs/{session_id}/``; the corpus stores abstract relative
+    names. Both surfaces receive the same rewrite so their committed graphs stay
+    identical, and the isomorphism helper canonicalizes paths to basename regardless.
     """
     rewritten = copy.deepcopy(dict(args))
-    blobs = data_dir / "blobs"
+    blobs = data_dir / "blobs" / session_id
 
     def fix(spec: dict[str, Any]) -> None:
         options = spec.get("options")
@@ -244,6 +245,7 @@ def _derive_guided_candidate(
     source_map: Mapping[str, str],
     output_map: Mapping[str, str],
     data_dir: Path,
+    session_id: str,
 ) -> dict[str, Any]:
     """Rename the canonical pipeline into the guided candidate the planner emits.
 
@@ -275,7 +277,7 @@ def _derive_guided_candidate(
         entry = copy.deepcopy(dict(spec))
         options = entry.get("options")
         if isinstance(options, dict) and isinstance(options.get("path"), str):
-            entry["options"] = {**options, "path": str(data_dir / "blobs" / Path(options["path"]).name)}
+            entry["options"] = {**options, "path": str(data_dir / "blobs" / session_id / Path(options["path"]).name)}
         if "on_success" in entry:
             entry["on_success"] = route(entry["on_success"])
         if "on_validation_failure" in entry:
@@ -365,9 +367,9 @@ class ParityEnv:
     def _client(self) -> AsyncClient:
         return AsyncClient(transport=ASGITransport(app=self.app), base_url="http://parity")
 
-    def _script(self, fixture: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _script(self, fixture: Mapping[str, Any], session_id: str) -> Mapping[str, Any]:
         """Patch the completion global to emit this fixture's pipeline; return it."""
-        pipeline = rewrite_source_paths(fixture["canonical_arguments"], self.data_dir)
+        pipeline = rewrite_source_paths(fixture["canonical_arguments"], self.data_dir, session_id)
         completion = _ScriptedCompletion(emit_proposal_response(pipeline))
         self.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
         return pipeline
@@ -381,7 +383,7 @@ class ParityEnv:
         alias — resolves identically). Each surface's real-path committed graph
         must be isomorphic to this, which anchors cross-surface parity.
         """
-        pipeline = rewrite_source_paths(fixture["canonical_arguments"], self.data_dir)
+        pipeline = rewrite_source_paths(fixture["canonical_arguments"], self.data_dir, _REFERENCE_SESSION_ID)
         user = UserIdentity(user_id="alice", username="alice")
         snapshot = self.app.state.plugin_snapshot_factory(user)
         policy = PolicyCatalogView(
@@ -396,6 +398,7 @@ class ParityEnv:
             policy,
             plugin_snapshot=snapshot,
             data_dir=str(self.data_dir),
+            session_id=_REFERENCE_SESSION_ID,
             session_engine=self.app.state.session_engine,
             secret_service=None,
             user_id="alice",
@@ -429,8 +432,8 @@ class ParityEnv:
         stages one pending proposal, which is then accepted over the real HTTP
         route.
         """
-        self._script(fixture)
         session = await self.sessions.create_session("alice", "Alice", "local")
+        self._script(fixture, str(session.id))
         await self.sessions.update_composer_preferences(
             session.id,
             trust_mode="explicit_approve",
@@ -473,12 +476,12 @@ class ParityEnv:
 
     async def drive_guided_full(self, fixture: Mapping[str, Any]) -> CompositionState:
         """Guided-full: authenticated ``POST /guided/plan`` → proposal → accept."""
-        self._script(fixture)
         async with self._client() as client:
             created = await client.post("/api/sessions", json={"title": "parity guided-full"})
             if created.status_code != 201:
                 raise AssertionError(f"session create failed ({created.status_code}): {created.text}")
             session_id = created.json()["id"]
+            self._script(fixture, session_id)
             plan = await client.post(
                 f"/api/sessions/{session_id}/guided/plan",
                 json={"operation_id": str(uuid4()), "intent": fixture["intent"]},
@@ -514,7 +517,7 @@ class ParityEnv:
             raise AssertionError(f"guided-staged respond {sorted(fields)} failed ({resp.status_code}): {resp.text}")
         return resp.json()
 
-    def _source_review_options(self, spec: Mapping[str, Any], output_map: Mapping[str, str]) -> dict[str, Any]:
+    def _source_review_options(self, spec: Mapping[str, Any], output_map: Mapping[str, str], session_id: str) -> dict[str, Any]:
         """Build the Step-1 SCHEMA_FORM options that review one source verbatim.
 
         ``on_validation_failure`` rides inside the submitted options (the
@@ -525,16 +528,16 @@ class ParityEnv:
         """
         options = copy.deepcopy(dict(spec["options"]))
         if isinstance(options.get("path"), str):
-            options["path"] = str(self.data_dir / "blobs" / Path(options["path"]).name)
+            options["path"] = str(self.data_dir / "blobs" / session_id / Path(options["path"]).name)
         failure = spec.get("on_validation_failure", "discard")
         options["on_validation_failure"] = output_map.get(failure, failure)
         return options
 
-    def _output_review_options(self, output: Mapping[str, Any], output_map: Mapping[str, str]) -> dict[str, Any]:
+    def _output_review_options(self, output: Mapping[str, Any], output_map: Mapping[str, str], session_id: str) -> dict[str, Any]:
         """Build the Step-2 SCHEMA_FORM options that review one output verbatim."""
         options = copy.deepcopy(dict(output["options"]))
         if isinstance(options.get("path"), str):
-            options["path"] = str(self.data_dir / "outputs" / Path(options["path"]).name)
+            options["path"] = str(self.data_dir / "outputs" / session_id / Path(options["path"]).name)
         failure = output.get("on_write_failure", "discard")
         options["on_write_failure"] = output_map.get(failure, failure)
         return options
@@ -566,12 +569,6 @@ class ParityEnv:
         """
         args = fixture["canonical_arguments"]
         source_map, output_map = _guided_naming(args)
-        candidate = _derive_guided_candidate(args, source_map, output_map, self.data_dir)
-        (self.data_dir / "blobs").mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "outputs").mkdir(parents=True, exist_ok=True)
-
-        completion = _ScriptedCompletion(emit_proposal_response(candidate))
-        self.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
         source_items = list(args["sources"].items()) if isinstance(args.get("sources"), dict) else [("source", args["source"])]
         outputs = args["outputs"]
@@ -581,6 +578,12 @@ class ParityEnv:
             if created.status_code != 201:
                 raise AssertionError(f"session create failed ({created.status_code}): {created.text}")
             session_id = created.json()["id"]
+            candidate = _derive_guided_candidate(args, source_map, output_map, self.data_dir, session_id)
+            (self.data_dir / "blobs" / session_id).mkdir(parents=True, exist_ok=True)
+            (self.data_dir / "outputs" / session_id).mkdir(parents=True, exist_ok=True)
+
+            completion = _ScriptedCompletion(emit_proposal_response(candidate))
+            self.monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", completion)
 
             if start_profile is not None:
                 started = await client.post(
@@ -613,7 +616,7 @@ class ParityEnv:
                 reviewed = await self._staged_respond(
                     client,
                     session_id,
-                    edited_values={"plugin": spec["plugin"], "options": self._source_review_options(spec, output_map)},
+                    edited_values={"plugin": spec["plugin"], "options": self._source_review_options(spec, output_map, session_id)},
                 )
                 if reviewed["next_turn"]["type"] == "inspect_and_confirm":
                     columns = list(
@@ -636,7 +639,7 @@ class ParityEnv:
                 await self._staged_respond(
                     client,
                     session_id,
-                    edited_values={"plugin": output["plugin"], "options": self._output_review_options(output, output_map)},
+                    edited_values={"plugin": output["plugin"], "options": self._output_review_options(output, output_map, session_id)},
                 )
                 await self._staged_respond(client, session_id, control_signal="passthrough")
             staged = await self._staged_respond(client, session_id, component_action={"action": "finish", "component_kind": "output"})

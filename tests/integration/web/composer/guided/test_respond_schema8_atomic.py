@@ -236,7 +236,7 @@ def test_http_output_edit_omits_hidden_policy_and_preserves_server_reviewed_valu
     assert form_turn["type"] == "schema_form"
     assert form_turn["payload"]["prefilled"]["on_write_failure"] == "failures"
 
-    output_path = Path(client.app.state.settings.data_dir) / "outputs" / "revised.jsonl"
+    output_path = Path(client.app.state.settings.data_dir) / "outputs" / session_id / "revised.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     submitted_options = {
         "path": str(output_path),

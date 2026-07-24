@@ -1139,6 +1139,8 @@ async def test_source_blob_delete_and_planned_copy_serialize_under_lock_contenti
                     staged.state,
                     copied,
                     {},
+                    data_dir=tmp_path,
+                    parent_session_id=parent.id,
                     child_session_id=staged.session.id,
                 )
             await race_service.fail_guided_operation(
@@ -1162,6 +1164,8 @@ async def test_source_blob_delete_and_planned_copy_serialize_under_lock_contenti
                 staged.state,
                 copied,
                 {source_blob.storage_path: copied[source_blob.id]},
+                data_dir=tmp_path,
+                parent_session_id=parent.id,
                 child_session_id=staged.session.id,
             )
             response_hash = "b" * 64
@@ -1182,6 +1186,42 @@ async def test_source_blob_delete_and_planned_copy_serialize_under_lock_contenti
             assert await blob_service.list_blobs(parent.id, limit=None) == []
     finally:
         _cleanup_race_user(durable_engine, user_id)
+
+
+@pytest.mark.asyncio
+async def test_fork_rebases_parent_session_sink_paths_into_child_namespace(
+    service: SessionServiceImpl,
+    tmp_path: Path,
+) -> None:
+    parent = await service.create_session("alice", "Parent", "local")
+    child_id = uuid4()
+    parent_output = tmp_path / "outputs" / str(parent.id) / "result.jsonl"
+    foreign_id = uuid4()
+    foreign_output = tmp_path / "outputs" / str(foreign_id) / "foreign.jsonl"
+    state = await service.save_composition_state(
+        parent.id,
+        CompositionStateData(
+            sources={},
+            outputs=[
+                {"name": "owned", "plugin": "json", "options": {"path": str(parent_output)}},
+                {"name": "foreign", "plugin": "json", "options": {"path": str(foreign_output)}},
+            ],
+        ),
+        provenance="session_seed",
+    )
+
+    rewritten = _rewrite_fork_state_blob_custody(
+        state,
+        {},
+        {},
+        data_dir=tmp_path,
+        parent_session_id=parent.id,
+        child_session_id=child_id,
+    )
+
+    assert rewritten is not None
+    assert rewritten.outputs[0]["options"]["path"] == str(tmp_path / "outputs" / str(child_id) / "result.jsonl")
+    assert rewritten.outputs[1]["options"]["path"] == str(foreign_output)
 
 
 @pytest.mark.asyncio

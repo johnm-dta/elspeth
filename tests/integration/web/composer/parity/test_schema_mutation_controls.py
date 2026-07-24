@@ -270,8 +270,8 @@ async def test_freeform_drive_narrowed_advertised_schema_trips_gate_upstream_of_
     monkeypatch.setattr(planner_module, "planner_terminal_tool_definition", _narrowed_terminal)
 
     fixture = _fixture("fork_coalesce")
-    parity_env._script(fixture)
     session = await parity_env.sessions.create_session("alice", "Alice", "local")
+    parity_env._script(fixture, str(session.id))
     await parity_env.sessions.update_composer_preferences(session.id, trust_mode="explicit_approve", density_default="high", actor="test")
     user_message = await parity_env.sessions.add_message(session.id, "user", fixture["intent"], writer_principal="route_user_message")
 

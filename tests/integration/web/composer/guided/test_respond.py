@@ -249,15 +249,15 @@ def _seed_blob(client: TestClient, session_id: str, *, content: str | None = Non
     return blob_id, record.storage_path
 
 
-def _outputs_path(client: TestClient, filename: str) -> str:
-    """Return an absolute path under {data_dir}/outputs/ for use as a sink path.
+def _outputs_path(client: TestClient, session_id: str, filename: str) -> str:
+    """Return an absolute path under the session-owned outputs subtree.
 
-    Sink paths are validated by _validate_sink_path to be under {data_dir}/outputs/
-    or {data_dir}/blobs/.  Tests must use this helper instead of bare relative paths
-    like "out.jsonl" to pass the path allowlist check.
+    Sink paths are validated by _validate_sink_path to be under the caller's
+    ``{data_dir}/outputs/{session_id}/`` or ``{data_dir}/blobs/{session_id}/``
+    subtree.
     """
     data_dir: Path = client.app.state.settings.data_dir
-    outputs_dir = data_dir / "outputs"
+    outputs_dir = data_dir / "outputs" / session_id
     outputs_dir.mkdir(parents=True, exist_ok=True)
     return str(outputs_dir / filename)
 
@@ -563,7 +563,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(client, filename),
+                    "path": _outputs_path(client, session_id, filename),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -606,7 +606,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, f"sketch-{profile}.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, f"sketch-{profile}.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -708,7 +708,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, f"{profile}-{provider_outcome}.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, f"{profile}-{provider_outcome}.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -820,7 +820,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "matching-cancel.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "matching-cancel.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -961,7 +961,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "request-cancelled-before-stage.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "request-cancelled-before-stage.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -1037,7 +1037,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "request-cancelled-during-stage.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "request-cancelled-during-stage.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -1116,7 +1116,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out.jsonl")
 
         # The strict form echoes the selected plugin with its validated options.
         body = _respond(
@@ -1147,7 +1147,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out.jsonl")
         # Step-2 SCHEMA_FORM: structured shape with plugin + options.
         _respond(
             composer_test_client,
@@ -1182,7 +1182,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out_sink_commit.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out_sink_commit.jsonl")
         # Step-2 SCHEMA_FORM: structured shape with plugin + options.
         _respond(
             composer_test_client,
@@ -1230,7 +1230,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "reject.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "reject.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -1264,7 +1264,7 @@ class TestStep2IntraStep:
     def test_exact_reviewed_non_blob_source_path_can_stage_and_accept(self, composer_test_client: TestClient) -> None:
         session_id = _create_session(composer_test_client)
         data_dir = Path(composer_test_client.app.state.settings.data_dir)
-        source_path = data_dir / "blobs" / "operator-reviewed.csv"
+        source_path = data_dir / "blobs" / session_id / "operator-reviewed.csv"
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text("text,category\nHello,greeting\n", encoding="utf-8")
 
@@ -1291,7 +1291,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "non-blob-accepted.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "non-blob-accepted.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -2241,7 +2241,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "failed-plan.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "failed-plan.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -2346,7 +2346,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "failed-plan-audit-rollback.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "failed-plan-audit-rollback.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -2765,7 +2765,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "accepted.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "accepted.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",
@@ -3532,7 +3532,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out_passthrough.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out_passthrough.jsonl")
         _respond(
             composer_test_client,
             session_id,
@@ -3572,7 +3572,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out_bare_empty.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out_bare_empty.jsonl")
         _respond(
             composer_test_client,
             session_id,
@@ -3604,7 +3604,7 @@ class TestStep2IntraStep:
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
-        output_path = _outputs_path(composer_test_client, "out_contradiction.jsonl")
+        output_path = _outputs_path(composer_test_client, session_id, "out_contradiction.jsonl")
         _respond(
             composer_test_client,
             session_id,
@@ -3644,7 +3644,7 @@ class TestStep2IntraStep:
             edited_values={
                 "plugin": "json",
                 "options": {
-                    "path": _outputs_path(composer_test_client, "failed-settlement.jsonl"),
+                    "path": _outputs_path(composer_test_client, session_id, "failed-settlement.jsonl"),
                     "schema": {"mode": "observed"},
                     "mode": "write",
                     "collision_policy": "auto_increment",

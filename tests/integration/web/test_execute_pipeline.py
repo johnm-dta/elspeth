@@ -110,8 +110,11 @@ class TestEndToEndPipelineExecution:
             session_id = resp.json()["id"]  # SessionResponse.id, NOT session_id
 
             # 2. Save composition state programmatically
-            csv_path = str(work_dir / "blobs" / "input.csv")
-            output_path = str(work_dir / "outputs" / "result.csv")
+            session_blob_dir = work_dir / "blobs" / session_id
+            session_blob_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(work_dir / "blobs" / "input.csv", session_blob_dir / "input.csv")
+            csv_path = str(session_blob_dir / "input.csv")
+            output_path = str(work_dir / "outputs" / session_id / "result.csv")
 
             state = CompositionState(
                 source=SourceSpec(
@@ -198,7 +201,7 @@ class TestEndToEndPipelineExecution:
             assert status["landscape_run_id"] is not None
 
             # 7. Verify output file was created
-            output_file = work_dir / "outputs" / "result.csv"
+            output_file = work_dir / "outputs" / session_id / "result.csv"
             assert output_file.exists()
 
             # 8. Verify audit database exists
@@ -258,11 +261,6 @@ class TestGateRoutedPipelineExecution:
         from elspeth.web.config import WebSettings
         from elspeth.web.sessions.protocol import CompositionStateData
 
-        # Overwrite the input.csv prepared by ``work_dir`` with the
-        # gate-routed reproducer schema (id, tier).
-        gate_csv = work_dir / "blobs" / "input.csv"
-        gate_csv.write_text(GATE_ROUTED_CSV_CONTENT)
-
         settings = WebSettings(
             data_dir=work_dir,
             landscape_url=f"sqlite:///{work_dir}/runs/audit.db",
@@ -297,9 +295,13 @@ class TestGateRoutedPipelineExecution:
             assert resp.status_code == 201, f"Session creation failed: {resp.text}"
             session_id = resp.json()["id"]
 
+            # Scope the source and sink fixtures to the newly created session.
+            gate_csv = work_dir / "blobs" / session_id / "input.csv"
+            gate_csv.parent.mkdir(parents=True, exist_ok=True)
+            gate_csv.write_text(GATE_ROUTED_CSV_CONTENT)
             csv_path = str(gate_csv)
-            high_path = str(work_dir / "outputs" / "high.csv")
-            low_path = str(work_dir / "outputs" / "low.csv")
+            high_path = str(work_dir / "outputs" / session_id / "high.csv")
+            low_path = str(work_dir / "outputs" / session_id / "low.csv")
             row_schema = {
                 "mode": "fixed",
                 "fields": ["id: int", "tier: str"],

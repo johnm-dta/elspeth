@@ -235,12 +235,14 @@ def test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline(
             title="audit-readiness disallowed secret-ref fixture",
             auth_provider_type=settings.auth_provider,
         )
+        (settings.data_dir / "blobs" / str(record.id)).mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "outputs" / str(record.id)).mkdir(parents=True, exist_ok=True)
         state = CompositionState(
             source=SourceSpec(
                 plugin="csv",
                 on_success="src_out",
                 options={
-                    "path": str(settings.data_dir / "blobs" / "audit_readiness_fixture.csv"),
+                    "path": str(settings.data_dir / "blobs" / str(record.id) / "audit_readiness_fixture.csv"),
                     "schema": {"mode": "observed"},
                 },
                 on_validation_failure="discard",
@@ -279,7 +281,7 @@ def test_secrets_row_surfaces_disallowed_secret_ref_from_real_validate_pipeline(
                     name="out",
                     plugin="csv",
                     options={
-                        "path": str(settings.data_dir / "outputs" / "audit_readiness_fixture_out.csv"),
+                        "path": str(settings.data_dir / "outputs" / str(record.id) / "audit_readiness_fixture_out.csv"),
                         "schema": {"mode": "observed"},
                     },
                     on_write_failure="discard",

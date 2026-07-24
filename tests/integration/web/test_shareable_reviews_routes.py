@@ -112,7 +112,7 @@ def _seed_session_with_blob_subtree_sink(client: TestClient, *, user_id: str) ->
             auth_provider_type=settings.auth_provider,
         )
         (settings.data_dir / "blobs" / str(record.id)).mkdir(parents=True, exist_ok=True)
-        state_d = _passthrough_composition_state(settings.data_dir).to_dict()
+        state_d = _passthrough_composition_state(settings.data_dir, record.id).to_dict()
         state_d["outputs"][0]["options"]["path"] = str(settings.data_dir / "blobs" / str(record.id) / "review_out.csv")
         await session_service.save_composition_state(
             record.id,

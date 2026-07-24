@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -229,6 +230,43 @@ def _rewrite_source_blob_options(
     return rebuilt, True
 
 
+def _rewrite_session_owned_sink_options(
+    options: object,
+    *,
+    data_dir: Path,
+    parent_session_id: UUID,
+    child_session_id: UUID,
+    field_path: str,
+) -> tuple[dict[str, Any], bool]:
+    """Rebase managed sink targets from the parent namespace to the child."""
+    if type(options) is not dict:
+        raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path} must be an exact dict")
+    rebuilt = deep_thaw(options)
+    if type(rebuilt) is not dict:  # pragma: no cover - deep_thaw contract
+        raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path} thaw did not produce a dict")
+
+    base = data_dir.resolve()
+    rewritten = False
+    for key in ("path", "file", "persist_directory"):
+        value = rebuilt.get(key)
+        if value is None:
+            continue
+        if type(value) is not str:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: {field_path}.{key} must be a string")
+        raw = Path(value)
+        resolved = raw.resolve() if raw.is_absolute() else (base / raw).resolve()
+        for namespace in ("outputs", "blobs"):
+            parent_root = base / namespace / str(parent_session_id)
+            try:
+                suffix = resolved.relative_to(parent_root)
+            except ValueError:
+                continue
+            rebuilt[key] = str(base / namespace / str(child_session_id) / suffix)
+            rewritten = True
+            break
+    return rebuilt, rewritten
+
+
 def _contains_exact_string(value: object, needles: frozenset[str]) -> bool:
     if type(value) is str:
         return value in needles or any(value == f"{BLOB_REF_PATH_PREFIX}{needle}" for needle in needles)
@@ -243,6 +281,10 @@ def _rewrite_guided_blob_custody(
     composer_meta: Mapping[str, Any] | None,
     blob_map: dict[UUID, BlobRecord],
     source_blob_path_map: dict[str, BlobRecord],
+    *,
+    data_dir: Path,
+    parent_session_id: UUID,
+    child_session_id: UUID,
 ) -> tuple[dict[str, Any] | None, bool]:
     if composer_meta is None:
         return None, False
@@ -289,6 +331,25 @@ def _rewrite_guided_blob_custody(
                     )
                 identity["blob_id"] = str(copied.id)
                 rewritten = True
+    for stable_id, reviewed in rebuilt["reviewed_outputs"].items():
+        reviewed["options"], changed = _rewrite_session_owned_sink_options(
+            reviewed["options"],
+            data_dir=data_dir,
+            parent_session_id=parent_session_id,
+            child_session_id=child_session_id,
+            field_path=f"guided_session.reviewed_outputs[{stable_id!r}].options",
+        )
+        rewritten = rewritten or changed
+    for stable_id, pending in rebuilt["pending_output_intents"].items():
+        if pending["options"] is not None:
+            pending["options"], changed = _rewrite_session_owned_sink_options(
+                pending["options"],
+                data_dir=data_dir,
+                parent_session_id=parent_session_id,
+                child_session_id=child_session_id,
+                field_path=f"guided_session.pending_output_intents[{stable_id!r}].options",
+            )
+            rewritten = rewritten or changed
     rebuilt = GuidedSession.from_dict(rebuilt).to_dict()
     source_ids = frozenset(str(blob_id) for blob_id in blob_map)
     if _contains_exact_string(rebuilt, source_ids):
@@ -303,6 +364,8 @@ def _rewrite_fork_state_blob_custody(
     blob_map: dict[UUID, BlobRecord],
     source_blob_path_map: dict[str, BlobRecord],
     *,
+    data_dir: Path,
+    parent_session_id: UUID,
     child_session_id: UUID,
 ) -> CompositionStateData | None:
     if state is None:
@@ -328,6 +391,20 @@ def _rewrite_fork_state_blob_custody(
                     field_path=f"sources.{source_name}.options",
                 )
                 rewritten = rewritten or changed
+    if outputs is not None and type(outputs) is not list:
+        raise AuditIntegrityError("Tier 1 audit anomaly: forked composition outputs must be an exact list")
+    for index, output in enumerate(outputs or []):
+        if type(output) is not dict:
+            raise AuditIntegrityError(f"Tier 1 audit anomaly: outputs[{index}] must be an exact dict")
+        if output.get("options") is not None:
+            output["options"], changed = _rewrite_session_owned_sink_options(
+                output["options"],
+                data_dir=data_dir,
+                parent_session_id=parent_session_id,
+                child_session_id=child_session_id,
+                field_path=f"outputs[{index}].options",
+            )
+            rewritten = rewritten or changed
     for field_name, value in (("sources", sources), ("nodes", nodes), ("outputs", outputs)):
         rewritten = (
             _rewrite_inline_content_blob_refs(
@@ -339,7 +416,14 @@ def _rewrite_fork_state_blob_custody(
             )
             or rewritten
         )
-    composer_meta, guided_rewritten = _rewrite_guided_blob_custody(composer_meta, blob_map, source_blob_path_map)
+    composer_meta, guided_rewritten = _rewrite_guided_blob_custody(
+        composer_meta,
+        blob_map,
+        source_blob_path_map,
+        data_dir=data_dir,
+        parent_session_id=parent_session_id,
+        child_session_id=child_session_id,
+    )
     rewritten = rewritten or guided_rewritten
     if not rewritten:
         return None
@@ -600,6 +684,8 @@ def register_session_routes(router: APIRouter) -> None:
                     staged.state,
                     blob_map,
                     source_blob_path_map,
+                    data_dir=Path(request.app.state.settings.data_dir),
+                    parent_session_id=session_id,
                     child_session_id=staged.session.id,
                 )
                 response = ForkSessionResponse(session_id=staged.session.id)

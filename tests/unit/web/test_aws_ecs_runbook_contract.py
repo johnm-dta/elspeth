@@ -390,7 +390,7 @@ def test_runbook_pins_core_runtime_and_identity_contracts() -> None:
         "AllowedOAuthFlows",
         "AllowedOAuthScopes",
         "CallbackURLs",
-        "elspeth:ecs-0.7.1-closeout",
+        "elspeth:ecs-0.7.2-closeout",
         "TARGET_PLATFORM",
         "runtimePlatform",
         "linux/amd64",

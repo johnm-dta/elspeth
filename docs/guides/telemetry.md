@@ -133,7 +133,7 @@ telemetry:
           Authorization: "Bearer ${OTEL_TOKEN}"
         batch_size: 100  # Events per batch (default: 100)
         service_name: elspeth
-        service_version: "0.7.1"  # optional
+        service_version: "0.7.2"  # optional
         deployment_environment: production  # optional
         cloud_provider: aws  # optional, explicit; the generic exporter is vendor-neutral
 ```

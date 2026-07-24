@@ -2,10 +2,15 @@
 
 Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: Composer parity (session epoch 36 and Landscape epoch 29)
+## Current Cutover: 0.7.2 blob deletion cleanup (session epoch 36 and Landscape epoch 29)
 
-0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
-`user_preferences.freeform_intro_dismissed_at` can persist the account-wide
+0.7.2 advances `SESSION_SCHEMA_EPOCH` from 35 to 36 so a committed blob
+deletion whose tombstone unlink or directory fsync fails remains retryable
+after restart. An epoch-35 database cannot represent that durable blob-deletion cleanup state
+and must be recreated.
+
+0.7.1 advances the session store from epoch 26 through epoch 35. Epoch 27 lets
+`user_preferences.freeform_intro_dismissed_at` persist the account-wide
 freeform-primer preference, then to 28 so SQLite and PostgreSQL session stores
 carry the same application/store/epoch identity proof. Composer parity then
 advances the session store to epoch 29 for guided schema 8 and durable fenced
@@ -14,11 +19,8 @@ guided operations, and to epoch 30 because the closed
 boundary makes a fork quota failure settle and replay as a stable HTTP 413.
 Later hard cuts add guided pipeline-proposal replay (31), exact failed-operation
 audit cohorts (32), guided-start negative admission (33), guided schema 10 (34),
-and exclusive guided-confirmation proposal admission (35). Durable blob-deletion
-cleanup state advances the session store again to epoch 36 so a committed delete
-whose tombstone unlink or directory fsync fails remains retryable after restart.
-An epoch-35 database cannot represent that recovery state and must be recreated. The universal web
-plugin-policy work also advances
+and exclusive guided-confirmation proposal admission (35). The universal web
+plugin-policy work in 0.7.1 also advances
 `SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
 table is optional per run but required in the schema: web runs receive one
 policy-evidence row atomically with the run, attribution, and leader records;
@@ -52,7 +54,7 @@ and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Older code is not compatible with
 the freshly recreated current databases. Rollback across this boundary is
 unsupported: keep the service drained, repair the epoch-36 release forward,
-recreate fresh state, and retry. Plans 10 and 12 must cite the
+recreate fresh state, and retry. The release acceptance record must cite the
 session-epoch-36/Landscape-epoch-29 record when binding candidate and rollback
 decisions.
 

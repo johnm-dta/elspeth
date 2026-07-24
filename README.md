@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: 0.7.1](https://img.shields.io/badge/status-0.7.1-green.svg)
+![Status: 0.7.2](https://img.shields.io/badge/status-0.7.2-green.svg)
 
 Elspeth is a pipeline engine for building, validating, running, and auditing
 workflows where outputs need to be reviewed, explained, and reproduced. It
@@ -31,7 +31,7 @@ and audit model used by YAML-authored pipelines.
 
 - [Why Elspeth Exists](#why-elspeth-exists)
 - [Architecture At A Glance](#architecture-at-a-glance)
-- [What Changed In 0.7.1](#what-changed-in-071)
+- [What Changed In 0.7.2](#what-changed-in-072)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -153,41 +153,36 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ---
 
-## What Changed In 0.7.1
+## What Changed In 0.7.2
 
-0.7.1 focuses on recoverability at the two places where uncertainty is most
-expensive: publishing external effects and accepting LLM-authored pipeline
-changes.
+0.7.2 hardens the production paths introduced in 0.7.1, with emphasis on
+bounded trust boundaries and recovery after a worker loses ownership or a
+filesystem operation fails after commit.
 
-- **External publication is now durable and replay-safe.** Built-in sinks and
-  audit exports persist an immutable effect plan before I/O, fence the active
-  worker, and reconcile a lost response before another publication attempt.
-  An outcome that cannot be proved remains blocked for operator review instead
-  of being guessed or repeated. See the
-  [sink-effect recovery runbook](docs/runbooks/sink-effect-recovery.md).
-- **Guided and freeform Composer authoring now share the same proposal
-  contract.** Guided mode can build and revise plural components, queues,
-  gates, forks, and coalesces; the candidate stays separate from committed
-  state until review and wire confirmation. Durable operations, closed repair
-  codes, and a single-in-flight mutation gate make cancellation, retry, fork,
-  and concurrent submissions recoverable. See the
-  [Composer guide](docs/release/composer-guide.md).
-- **AWS ECS is a supported deployment path.** The release includes a Fargate
-  web profile with Aurora PostgreSQL, EFS, task-role S3, Bedrock and guardrails,
-  Cognito authorization code with PKCE, CloudWatch, X-Ray, validate-only
-  startup, readiness checks, and a deployment doctor. See the
-  [AWS ECS deployment runbook](docs/runbooks/aws-ecs-deployment.md).
-- **Audit and DAG state fail closed at more crash seams.** Source completion,
-  child scheduling, aggregation and coalesce continuations, routing, token
-  ancestry, artifacts, and sidecar-journal publication are run-scoped and
-  persisted with their controlling transitions.
+- **Committed blob deletion is recoverable.** The session store retains the
+  exact staged tombstone until unlink and parent-directory fsync complete, so a
+  restart can resume direct or failed-fork cleanup without retaining
+  unaccounted bytes.
+- **Composer evidence remains request-bound.** Provider and prompt identity,
+  failed-turn audit evidence, source selection, and fork retention survive
+  durable retry without allowing stale or untrusted model data to replace the
+  current session state.
+- **Multi-worker recovery is more defensive.** Sink-effect preparation and
+  fork copying renew leases during I/O, stale workers are fenced after
+  ownership loss, and leadership release plus transition responses commit
+  atomically.
+- **AWS and PostgreSQL defaults are production-aligned.** Bedrock uses the AWS
+  default credential chain, both supported PostgreSQL URL driver forms work in
+  packaged images, X-Ray identifiers use the compatible format, and acceptance
+  manifests bind their final evidence.
 
-**Operational:** 0.7.1 is a pre-1.0 database cutover. The session store moves
-from epoch 26 to 36 (guided schema 7 to 10), and Landscape moves from epoch 22
-to 29. Archive or export evidence as required, stop the old service, recreate
-both stale stores, and install 0.7.1. Do not roll older code back over the
-recreated databases. `data/auth.db` remains separate; recreating the session
-store does not remove local user accounts.
+**Operational:** 0.7.2 is a pre-1.0 session-store cutover. The session store moves
+from epoch 35 to 36; guided schema remains at 10, and Landscape remains at epoch 29.
+Archive or export evidence as required, stop the old service, recreate a stale
+session store, and install 0.7.2. A Landscape store already at epoch 29 remains
+current. Do not roll older code back over the recreated session database.
+`data/auth.db` remains separate; recreating the session store does not remove
+local user accounts.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release-level summary and
 [ADR-030](docs/architecture/adr/030-multi-worker-deployment-shape.md) for the
@@ -493,7 +488,7 @@ Elspeth is a dual-surface authoring and execution platform: a CLI-first
 auditable pipeline engine plus a Web Composer for guided authoring, over one
 shared execution and audit core.
 
-Current 0.7.1 behaviour:
+Current 0.7.2 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
@@ -845,12 +840,12 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.7.1` with the tag
+Elspeth can run from a published Docker image. Replace `v0.7.2` with the tag
 published for the release you are deploying; use the exact tag for an older
 release line when deploying an earlier version.
 
 ```bash
-IMAGE_TAG=v0.7.1
+IMAGE_TAG=v0.7.2
 
 # Run a pipeline
 docker run --rm \

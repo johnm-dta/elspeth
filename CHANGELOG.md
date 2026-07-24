@@ -4,6 +4,56 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
+## 0.7.2 - 2026-07-24 (Release hardening and recovery correctness)
+
+0.7.2 separates the production-path hardening completed after 0.7.1. It
+tightens Composer, authentication, multi-worker recovery, packaging, and AWS
+acceptance boundaries, and it makes committed blob deletion cleanup durable
+across process restarts. The notes below intentionally cover only release-level
+changes and critical correctness or security fixes.
+
+**Breaking pre-1.0 session-schema cutover:** `SESSION_SCHEMA_EPOCH` advances from 35
+to 36. Guided checkpoints remain at schema 10 and Landscape
+`SQLITE_SCHEMA_EPOCH` remains at 29. ELSPETH does not migrate the predecessor
+session database in place before 1.0. Archive or export required evidence, stop
+the old service, recreate a stale session store, then install
+0.7.2. A Landscape database already at epoch 29 remains current. Do not roll
+older code back over the recreated session database; keep the service drained
+and repair this release forward.
+
+### Major changes
+
+- **AWS and PostgreSQL runtime paths align with production defaults** —
+  Composer can use Bedrock through the AWS default credential chain, packaging
+  supports both standard PostgreSQL URL driver forms, X-Ray trace identifiers
+  use the AWS-compatible shape, and acceptance control manifests bind their
+  final evidence before release decisions.
+- **Composer evidence is bound more tightly to the request that produced it** —
+  provider and prompt identity survive durable retries, failed and cancelled
+  turns retain their audit evidence, source reselection and fork retention stay
+  session-scoped, and finalization stops when bounded proof collection is
+  exhausted.
+
+### Critical fixes
+
+- **Blob deletion cleanup remains retryable after metadata commit** — the
+  session store retains the exact staged tombstone until its unlink and parent
+  directory fsync both succeed, allowing direct and failed-fork cleanup to
+  resume safely after a process restart.
+- **Untrusted model and provider data stays inside its trust boundary** —
+  bounded JSON ingress, CSV custody inspection, structural unknown-source
+  handling, protected-field propagation, and value-safe audit redaction prevent
+  provider errors, option keys, pipeline metadata, and tool payloads from
+  escaping through user-visible or durable evidence surfaces.
+- **Lease loss and concurrency settle without stale mutation** — sink-effect
+  preparation and fork copying renew their leases during I/O, leadership
+  release and transition responses commit atomically, and post-plugin work is
+  fenced after ownership loss.
+- **Authentication state fails closed** — local authentication databases must
+  pass secure file admission, OIDC client identities must match exactly, JWKS
+  staleness has an absolute cap, and state changes remain bound to their audit
+  writes.
+
 ## 0.7.1 - 2026-07-23 (Recoverable effects and Composer proposal-validation coverage)
 
 0.7.1 makes both pipeline publication and web authoring recoverable. It adds a
@@ -13,7 +63,7 @@ the supported AWS ECS deployment profile. The notes below intentionally cover
 only release-level changes and critical correctness or security fixes.
 
 **Breaking pre-1.0 schema cutover:** `SESSION_SCHEMA_EPOCH` advances from 26
-to 36, guided checkpoints advance from schema 7 to 10, and Landscape
+to 35, guided checkpoints advance from schema 7 to 10, and Landscape
 `SQLITE_SCHEMA_EPOCH` advances from 22 to 29. ELSPETH does not migrate either
 predecessor database in place before 1.0. Archive or export required evidence,
 stop the old service, recreate stale session and Landscape stores, then install
@@ -85,11 +135,6 @@ service drained and repair this release forward.
   providers return closed rejection codes, remote OTLP endpoints require TLS,
   malformed ODBC brace syntax fails closed, and auth state compensates when its
   audit write cannot be persisted.
-- **Blob deletion cleanup remains retryable after metadata commit** — the
-  session store retains the exact staged tombstone until its unlink and parent
-  directory fsync both succeed, allowing direct and failed-fork cleanup to
-  resume safely after a process restart.
-
 ## 0.7.0 - 2026-07-09 (LLM-primary guided pipeline creation)
 
 Guided pipeline creation becomes LLM-primary. The guided composer is

@@ -2897,7 +2897,7 @@ migration runner. For now, the deploy procedure is:
    service, removes stale `.db-wal` / `.db-shm` sidecars (which
    otherwise replay over the restored file on next open), and
    archives the pre-rollback `audit.db` off-host before overwrite.
-2. **For a schema-incompatible 0.7.1 upgrade from 0.7.0**, stop the service and
+2. **For a schema-incompatible 0.7.2 upgrade from 0.7.1**, stop the service and
    recreate the session database before handing the site back to users:
    ```bash
    sudo -u elspeth rm /var/lib/elspeth/sessions.db
@@ -2905,8 +2905,8 @@ migration runner. For now, the deploy procedure is:
    ```
    The exact paths and SQLite sidecar handling depend on the deployment; use
    [staging-session-db-recreation.md](staging-session-db-recreation.md) as the
-   current operational source of truth. Keep the epoch-22 Landscape audit DB
-   for a direct 0.7.0→0.7.1 upgrade. Deployments crossing from an older release
+   current operational source of truth. Keep the epoch-29 Landscape audit DB
+   for a direct 0.7.1→0.7.2 upgrade. Deployments crossing from an older release
    must also apply the historical 0.7.0 two-database reset. `data/auth.db` is
    separate and survives both reset paths.
 3. **On rollback**, restore both pre-deploy snapshots before re-running the

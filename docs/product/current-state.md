@@ -1,67 +1,45 @@
 # Current State — ELSPETH
 
-**Checkpoint:** 2026-07-14
-**Release branch:** `release/0.7.1`
-**Runtime-readiness integration branch:** `feat/aws-ecs-program`
+**Checkpoint:** 2026-07-24
+**Release branch:** `release/0.7.2`
+**Release-prep issue:** `elspeth-64c319bf4d`
 **Release milestone:** `elspeth-6343920a47`
 
 ## The Bet Right Now
 
-**Complete and integrate the 0.7.1 AWS ECS runtime-readiness programme, then
-run the owned release closeout against one unchanged candidate.**
+**Prepare 0.7.2 as a distinct maintenance release, prove one unchanged
+candidate, then hand the operator the signing and publication boundary.**
 
-The programme branch now contains the reviewed `release/0.7.1` tip plus the
-completed PostgreSQL, S3, Bedrock, Cognito, telemetry, packaging, and deployment
-slices. The release branch itself does not contain that programme until the
-coordinator completes Plan 12 and performs the planned final fast-forward.
+Commit `720d44133` is the semantic 0.7.1 release point. The current release
+branch contains the subsequent production-path hardening; those changes must
+not remain folded into the historical 0.7.1 notes.
 
 ## Current Release State
 
-- The root package metadata and lockfile identify 0.7.1.
+- The root package metadata and lockfile identify 0.7.2.
 - Current release labels, container examples, website footers, and release
-  documentation indexes identify the 0.7.1 line.
-- `CHANGELOG.md` contains the release branch's Composer notes and the integrated
-  schema-cutover correction; Plan 12 still owns the final AWS programme entry.
-- `SESSION_SCHEMA_EPOCH` is 36 and `SQLITE_SCHEMA_EPOCH` is 29. Epoch 35 adds
-  database-enforced exclusive admission for guided proposal confirmation so
-  independent workers cannot record more than one durable logical dispatch for
-  the same pending proposal. The pure in-memory candidate computation may run
-  again after a process death before that record; acceptance still publishes
-  exactly one dispatch record, event, and composition state. Epoch 36 adds a
-  durable cleanup row for blob deletions so post-commit tombstone unlink and
-  directory-fsync failures remain retryable after restart.
-  The integrated
-  candidate requires a two-database cutover from older schemas. Because ELSPETH
-  is pre-1.0, neither database is migrated in place: archive/export when
-  required, uninstall, recreate both stale stores, and reinstall.
-- No 0.7.1 tag or final release candidate has been cut.
+  documentation indexes identify the 0.7.2 line.
+- `CHANGELOG.md` preserves the 0.7.1 session cutover at epoch 35 and assigns the
+  epoch-36 blob-deletion cleanup boundary to 0.7.2.
+- `SESSION_SCHEMA_EPOCH` is 36, guided checkpoint schema is 10, and
+  `SQLITE_SCHEMA_EPOCH` is 29. An upgrade from 0.7.1 recreates a stale session
+  store; a Landscape store already at epoch 29 remains current.
+- No 0.7.2 tag or final release candidate has been published.
 
-## In Flight
+## Release Gates
 
-- **Plan 12 — final integration closeout** (`elspeth-05396fed38`) is the sole
-  remaining milestone step.
-- All 19 prerequisite steps, including universal web plugin policy, Bedrock
-  Guardrail shields, PostgreSQL doctor proof, and packaging/deployment, are
-  closed with program-branch commit anchors.
-- `feat/aws-ecs-program` must remain the evidence-bound integration surface
-  until its final gates complete; do not describe that work as released from
-  the current `release/0.7.1` checkout.
-
-## Release Blockers
-
-- Complete the remaining Filigree critical path and close all implementation
-  prerequisites with commit anchors.
-- Run the full Plan 12 local, hosted-CI, trust, live AWS, rollback, evidence,
-  and teardown gates against one unchanged candidate SHA.
-- Fast-forward `release/0.7.1` to that accepted candidate only after the gates
-  pass; then rebuild and verify the durable release artifacts under the
-  release-owner workflow.
-- Record final approval, artifact provenance, and operator-owned evidence
-  before publishing a tag or image.
+- Resolve autonomous failures in the complete local release suite and bind the
+  result to one unchanged release SHA.
+- Re-run PostgreSQL, packaging/container, and live AWS acceptance against that
+  final SHA; older Plan 12 evidence does not transfer to the moved branch tip.
+- Complete the operator-held trust-tier judgment signing and regenerate the
+  fingerprint baseline through the supported tooling. Do not bypass signature
+  verification or hand-edit the baseline.
+- Tag, push, publish images, and create the GitHub release only after every
+  required gate passes on the same candidate.
 
 ## Next Session, Start Here
 
-1. Resume Plan 12 on the reconciled programme branch and freeze one candidate.
-2. Keep release-branch publication claims separate until final acceptance.
-3. Refresh the 0.7.1 changelog against the accepted candidate before the final
-   release fast-forward.
+1. Inspect `elspeth-64c319bf4d` and the exact release-branch SHA.
+2. Resume the first incomplete release gate without changing the candidate.
+3. Keep signing and external publication operator-controlled.

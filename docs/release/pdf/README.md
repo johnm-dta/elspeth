@@ -1,7 +1,7 @@
 # ELSPETH release PDFs
 
 > **Legacy RC-5.2 pack.** These Typst sources and generated-output names have
-> not been refreshed for the 0.7.1 release. Use the Markdown files in
+> not been refreshed for the 0.7.2 release. Use the Markdown files in
 > `docs/release/`, the root `CHANGELOG.md`, and root `ARCHITECTURE.md` as the
 > current release sources until this PDF pack is regenerated.
 

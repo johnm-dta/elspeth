@@ -1,4 +1,4 @@
-# Roadmap — ELSPETH                     Updated: 2026-07-14 (PDR-0001)
+# Roadmap — ELSPETH                     Updated: 2026-07-24 (PDR-0001)
 
 > Sequencing, WSJF / cost-of-delay, and dated forecasts are produced by
 > /axiom-program-management. This file records bets as INTENT, not a delivery
@@ -14,11 +14,11 @@
   elspeth-0fd9dfcb7e, elspeth-16ddaa7d02, elspeth-248536c9e6 · metric: north-star
   (run assurance completeness) + Web-GA input metric.
 
-- **Ship the 0.7.1 line** *(in-flight delivery)* — Composer reliability and
+- **Ship the 0.7.2 line** *(in-flight delivery)* — Composer reliability and
   structural queue authoring on the release branch, followed by the AWS ECS
   runtime-readiness programme's PostgreSQL, S3, Bedrock, Cognito, telemetry,
   packaging, deployment, and live closeout gates. · branches:
-  `release/0.7.1` and `feat/aws-ecs-program` · tracker:
+  `release/0.7.2` · tracker:
   `elspeth-6343920a47` · metric: audit-integrity, operator explainability, and
   evidence-bound runtime readiness.
 

@@ -44,6 +44,20 @@ def test_changelog_describes_release_boundaries_precisely() -> None:
     assert "sink-effect-v1" not in release
 
 
+def test_changelog_keeps_071_historical_and_assigns_epoch_36_to_072() -> None:
+    changelog = _text(ROOT / "CHANGELOG.md")
+    release_072 = changelog.split("## 0.7.2", maxsplit=1)[1].split("## 0.7.1", maxsplit=1)[0]
+    release_071 = changelog.split("## 0.7.1", maxsplit=1)[1].split("## 0.7.0", maxsplit=1)[0]
+
+    assert "SESSION_SCHEMA_EPOCH` advances from 35\nto 36" in release_072
+    assert "retryable" in release_072 and "blob deletion" in release_072.lower()
+    assert "install\n0.7.2" in release_072
+
+    assert "SESSION_SCHEMA_EPOCH` advances from 26\nto 35" in release_071
+    assert "install\n0.7.1" in release_071
+    assert "Blob deletion cleanup remains retryable" not in release_071
+
+
 def test_every_page_has_description_favicon_and_current_navigation() -> None:
     favicon = WEBSITE / "favicon.svg"
     assert favicon.is_file()
@@ -60,12 +74,20 @@ def test_every_page_has_description_favicon_and_current_navigation() -> None:
         assert all(link.get("href") == current_href for link in current_links), name
 
 
-def test_home_surfaces_both_releases_without_invented_counts() -> None:
+def test_every_page_advertises_current_release() -> None:
+    for name in PAGES:
+        html = _text(WEBSITE / name)
+        assert "Changelog · v0.7.2" in html, name
+        assert "ELSPETH 0.7.2" in html, name
+
+
+def test_home_surfaces_current_and_predecessor_releases_without_invented_counts() -> None:
     html = _text(WEBSITE / "index.html")
 
-    assert "Current version: 0.7.1" in html
+    assert "Current version: 0.7.2" in html
     assert "0.7.0" in html and "LLM-primary" in html
     assert "0.7.1" in html and "recoverable publication" in html.lower()
+    assert "0.7.2" in html and "release hardening" in html.lower()
     assert "240 rows" not in html
     assert "pre-1.0" in html
 
@@ -123,8 +145,9 @@ def test_get_started_has_runnable_cli_and_complete_composer_paths() -> None:
     assert "npm install" in html and "npm run build" in html
     assert "ELSPETH_WEB__SECRET_KEY" in html
     assert "elspeth composer users add" in html and "--password" in html
-    assert "SESSION_SCHEMA_EPOCH" in html and "26 → 36" in html
-    assert "SQLITE_SCHEMA_EPOCH" in html and "22 → 29" in html
+    assert "SESSION_SCHEMA_EPOCH" in html and "35 → 36" in html
+    assert "guided schema remains at 10" in html
+    assert "SQLITE_SCHEMA_EPOCH" in html and "remains at 29" in html
     assert "aws-ecs-deployment.md" in html
 
 

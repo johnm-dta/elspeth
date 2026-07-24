@@ -67,13 +67,14 @@ accept this trade-off.
 
 ## First-deploy operator action
 
-For 0.7.1, shareable-review state is part of the broader web session database
-contract. The release expects `SESSION_SCHEMA_EPOCH=30` and
-`SQLITE_SCHEMA_EPOCH=28`. Epoch 29 introduced durable guided operations and
-epoch 30 adds the closed `quota_exceeded` terminal failure code used for stable
-HTTP 413 fork replay. When upgrading from an older pre-1.0 build, stop and
-uninstall the web service, archive/export evidence when required, recreate the
-configured session and Landscape databases, then reinstall and initialize this
+For 0.7.2, shareable-review state is part of the broader web session database
+contract. The release expects `SESSION_SCHEMA_EPOCH=36` and
+`SQLITE_SCHEMA_EPOCH=29`. Epoch 29 introduced durable guided operations, epoch
+30 added the closed `quota_exceeded` terminal failure code used for stable HTTP
+413 fork replay, and later session epochs completed proposal admission and
+retryable blob cleanup. When upgrading from an older pre-1.0 build, stop and
+uninstall the web service, archive/export evidence when required, recreate each
+configured database whose epoch is stale, then reinstall and initialize this
 ELSPETH version. No SQLite or PostgreSQL predecessor schema is transformed in
 place; PostgreSQL recreation remains a schema-owner operation. Deployments
 crossing from an older release must account for the historical 0.7.0 boundary

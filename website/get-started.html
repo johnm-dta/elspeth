@@ -65,7 +65,7 @@
         <span class="num">1</span>
         <div>
           <h3>Install from a current source checkout</h3>
-          <p>Python 3.12+. Clone the repository and use an editable install with <code>uv</code>. This tracks your current source checkout; it is not an immutable 0.7.1 artifact.</p>
+          <p>Python 3.12+. Clone the repository and use an editable install with <code>uv</code>. This tracks your current source checkout; it is not an immutable 0.7.2 artifact.</p>
           <pre class="copyable"><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
 <span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
 <span class="pr">$</span> uv pip install -e ".[dev]"</pre>
@@ -102,8 +102,8 @@
     <div class="section-head" style="max-width:70ch">
       <span class="eyebrow">Important upgrade posture</span>
       <h2>Pre-1.0 databases are recreated, not migrated.</h2>
-      <p>APIs, interfaces, and schemas are unstable before 1.0; ELSPETH makes no backward-compatibility promise. From 0.7.0 to 0.7.1, <code>SESSION_SCHEMA_EPOCH</code> changes 26 → 36, the guided schema changes 7 → 10, and Landscape <code>SQLITE_SCHEMA_EPOCH</code> changes 22 → 29.</p>
-      <p>Archive or export needed evidence, stop the old service, and recreate incompatible session and Landscape stores. Do not run older code over recreated databases: there is no in-place migration. The separate <code>auth.db</code> is not the session or Landscape store.</p>
+      <p>APIs, interfaces, and schemas are unstable before 1.0; ELSPETH makes no backward-compatibility promise. From 0.7.1 to 0.7.2, <code>SESSION_SCHEMA_EPOCH</code> changes 35 → 36. The guided schema remains at 10, and Landscape <code>SQLITE_SCHEMA_EPOCH</code> remains at 29.</p>
+      <p>Archive or export needed evidence, stop the old service, and recreate an incompatible session store. A Landscape store already at epoch 29 remains current. Do not run older code over the recreated session database: there is no in-place migration. The separate <code>auth.db</code> is not the session or Landscape store.</p>
     </div>
   </div>
 </section>
@@ -184,7 +184,7 @@
         <div class="foot-col">
           <span class="foot-h">Project</span>
           <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
-          <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Changelog · v0.7.1</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Changelog · v0.7.2</a>
           <a href="https://github.com/johnm-dta/elspeth/blob/main/CONTRIBUTING.md">Contributing</a>
           <a href="https://github.com/johnm-dta/elspeth/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
         </div>
@@ -196,7 +196,7 @@
       </div>
     </div>
     <div class="foot-bottom">
-      <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · ELSPETH 0.7.1 · Built for decisions that must be defensible.</span>
+      <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · ELSPETH 0.7.2 · Built for decisions that must be defensible.</span>
     </div>
   </div>
 </footer>

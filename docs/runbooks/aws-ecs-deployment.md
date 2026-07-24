@@ -822,7 +822,7 @@ remove_local_acceptance_images() {
   local ref
   for ref in \
     elspeth:ecs-rollback-baseline \
-    elspeth:ecs-0.7.1-closeout \
+    elspeth:ecs-0.7.2-closeout \
     "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG" \
     "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG" \
     "$ROLLBACK_BASELINE_IMAGE" \
@@ -903,7 +903,7 @@ BACKEND_STATE_BUCKET="elspeth-acc-${ACCEPTANCE_RUN_ID//-/}"
 export ECR_REGISTRY="${ECR_REGISTRY:?set approved account registry host}"
 export ECR_REPOSITORY="${ECR_REPOSITORY:?set run-scoped ECR repository name}"
 export ROLLBACK_BASELINE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-baseline-${ROLLBACK_BASELINE_SHA}"
-export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.1-${CANDIDATE_SHA}"
+export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.2-${CANDIDATE_SHA}"
 
 test ! -L "$BOOTSTRAP_TF_DIR" && test -d "$BOOTSTRAP_TF_DIR"
 test "$BOOTSTRAP_STATE" = "$BOOTSTRAP_TF_DIR/terraform.tfstate"
@@ -1051,7 +1051,7 @@ test "$(docker image inspect elspeth:ecs-rollback-baseline --format '{{.Os}}/{{.
 export ECR_REGISTRY="${ECR_REGISTRY:?set approved account registry host}"
 export ECR_REPOSITORY="${ECR_REPOSITORY:?set approved repository name}"
 export ROLLBACK_BASELINE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-baseline-${ROLLBACK_BASELINE_SHA}"
-export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.1-${CANDIDATE_SHA}"
+export CANDIDATE_TAG="acceptance-${ACCEPTANCE_RUN_ID}-0.7.2-${CANDIDATE_SHA}"
 
 test "$(aws_capture aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
 REPOSITORY_IDENTITY="$(aws_capture aws ecr describe-repositories \
@@ -1075,7 +1075,7 @@ arm_external_cleanup
   aws_ecr_login "$ECR_REGISTRY" "$AWS_REGION"
   docker tag elspeth:ecs-rollback-baseline \
     "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG"
-  docker tag elspeth:ecs-0.7.1-closeout \
+  docker tag elspeth:ecs-0.7.2-closeout \
     "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG"
   docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$ROLLBACK_BASELINE_TAG"
   docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$CANDIDATE_TAG"
@@ -1460,16 +1460,16 @@ countersigns it. Set `SCENARIO_A_COMPATIBILITY_RECORD_FILE` and
   "candidate_image_digest": "sha256:64-lowercase-hex",
   "candidate_task_definition": "exact-candidate-task-definition-arn",
   "candidate_doctor_task_definition": "exact-candidate-doctor-task-definition-arn",
-  "candidate_package_version": "0.7.1",
+  "candidate_package_version": "0.7.2",
   "previous_source_sha": "40-lowercase-hex",
   "previous_image_digest": "sha256:64-lowercase-hex",
   "previous_task_definition": "exact-previous-task-definition-arn",
   "rollback_doctor_task_definition": "exact-rollback-doctor-task-definition-arn",
-  "previous_package_version": "0.7.0",
+  "previous_package_version": "0.7.1",
   "schema_facts": {
     "candidate": {"session_epoch": 36, "landscape_epoch": 29, "run_web_plugin_policy_present": true},
-    "previous": {"session_epoch": 27, "landscape_epoch": 23, "run_web_plugin_policy_present": true},
-    "structural_changes": "session_epoch_35_to_36_blob_deletion_cleanup_state_and_landscape_epoch_23_to_29_token_ownership_artifact_idempotency_sink_effect_ledger_coalesce_receipts_per_member_failsink_provenance_output_contract_hash_run_scoped_validation_errors_and_token_ancestry_batch_expansion_claim_and_sidecar_journal_outbox",
+    "previous": {"session_epoch": 35, "landscape_epoch": 29, "run_web_plugin_policy_present": true},
+    "structural_changes": "session_epoch_35_to_36_blob_deletion_cleanup_state",
     "semantics_only_changes": "none",
     "archive_export_decision": "required_before_forward_migration",
     "destructive_reset_required": false
@@ -1898,7 +1898,7 @@ loop rather than readiness.
 
 ## Packaging and platform identity
 
-Task 4's inspected `elspeth:ecs-0.7.1-closeout` image is the only candidate.
+Task 4's inspected `elspeth:ecs-0.7.2-closeout` image is the only candidate.
 The earlier fresh-account publication step binds that exact local image to its
 registry digest before either scenario apply; do not rebuild or retag a second
 candidate here. Validate the approved platform mapping only:

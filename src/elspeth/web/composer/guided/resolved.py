@@ -232,6 +232,7 @@ class SourceResolved:
             "observed_columns",
             freeze_guided_str_sequence(self.observed_columns, "SourceResolved.observed_columns", budget=budget),
         )
+        freeze_fields(self, "options", "observed_columns", "sample_rows")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -292,6 +293,7 @@ class SinkOutputResolved:
             "required_fields",
             freeze_guided_str_sequence(self.required_fields, "SinkOutputResolved.required_fields", budget=budget),
         )
+        freeze_fields(self, "options", "required_fields")
 
     def to_dict(self) -> dict[str, Any]:
         return {

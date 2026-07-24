@@ -25,6 +25,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Final, TypedDict, cast
 
 from pydantic import BaseModel, JsonValue
@@ -1989,13 +1990,13 @@ class ReviewedSourceAuthority:
             raise TypeError("ReviewedSourceAuthority.session_id must be a non-empty exact str")
         if type(self.reviewed_anchor_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", self.reviewed_anchor_hash):
             raise TypeError("ReviewedSourceAuthority.reviewed_anchor_hash must be a SHA-256 hash")
-        if not isinstance(self.reviewed_sources, Mapping):
+        if type(self.reviewed_sources) not in (dict, MappingProxyType):
             raise TypeError("ReviewedSourceAuthority.reviewed_sources must be a mapping")
         if any(type(stable_id) is not str or not stable_id for stable_id in self.reviewed_sources):
             raise TypeError("ReviewedSourceAuthority.reviewed_sources keys must be non-empty exact strings")
         if any(not isinstance(source, Mapping) for source in self.reviewed_sources.values()):
             raise TypeError("ReviewedSourceAuthority.reviewed_sources values must be mappings")
-        if not isinstance(self.verified_blob_paths, Mapping):
+        if type(self.verified_blob_paths) not in (dict, MappingProxyType):
             raise TypeError("ReviewedSourceAuthority.verified_blob_paths must be a mapping")
         if any(
             type(locator) is not str or not locator.startswith("blob:") or type(storage_path) is not str or not storage_path

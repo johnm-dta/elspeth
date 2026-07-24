@@ -433,6 +433,7 @@ class SourceIntent:
                 "SourceIntent.inspection_facts",
             )
             object.__setattr__(self, "inspection_facts", facts_from_dict(cast(Mapping[str, Any], deep_thaw(frozen_facts))))
+        freeze_fields(self, "options", "observed_columns", "sample_rows")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""
@@ -526,6 +527,7 @@ class SinkIntent:
             raise ValueError("SinkIntent field_review phase requires plugin and options")
         if self.options is not None:
             object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SinkIntent.options"))
+        freeze_fields(self, "options")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain JSON-serialisable dict."""

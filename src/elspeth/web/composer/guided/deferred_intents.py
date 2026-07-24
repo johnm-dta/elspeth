@@ -20,7 +20,7 @@ from referencing import Registry, Resource
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
 
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.catalog.policy_view import PolicyCatalogView
 from elspeth.web.catalog.schemas import PluginKind
@@ -746,6 +746,9 @@ class _CandidateComponent:
     plugin: str | None = None
     options: Mapping[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        freeze_fields(self, "options")
+
 
 @dataclass(frozen=True, slots=True)
 class _SubjectResolution:
@@ -759,6 +762,9 @@ class _DeferredCoverageContext:
     components: tuple[_CandidateComponent, ...]
     exact_components: Mapping[tuple[_ComponentKind, str], _CandidateComponent]
     consumers: Mapping[str, tuple[ConsumerIdentity, ...]]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "exact_components", "consumers")
 
     def resolve(self, subject: StableSubject | PluginSubject) -> _SubjectResolution:
         if type(subject) is StableSubject:

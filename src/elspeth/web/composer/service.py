@@ -49,7 +49,7 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.contracts.trust_boundary import trust_boundary
@@ -831,6 +831,9 @@ class _ProofRepairOutcome:
 
     action: Literal["clear", "repair_injected", "blocked"]
     blocking_diagnostics: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "blocking_diagnostics")
 
 
 # The per-dispatch audit envelope (DispatchAudit, begin_dispatch, finish_*)

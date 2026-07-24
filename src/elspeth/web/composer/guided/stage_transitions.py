@@ -17,7 +17,7 @@ from uuid import UUID
 
 from pydantic import JsonValue
 
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.knob_schema import KnobSchema, validate_knob_schema
 from elspeth.web.composer.guided.errors import InvariantError
@@ -93,6 +93,7 @@ class PluginSelectionResponse:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "chosen", freeze_guided_str_sequence(self.chosen, "PluginSelectionResponse.chosen"))
+        freeze_fields(self, "chosen")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class SchemaFormResponse:
     def __post_init__(self) -> None:
         _require_nonempty_exact_str(self.plugin, "SchemaFormResponse.plugin")
         object.__setattr__(self, "options", freeze_guided_json_mapping(self.options, "SchemaFormResponse.options"))
+        freeze_fields(self, "options")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,7 @@ class SchemaFormAuthority:
             "server_options",
             freeze_guided_json_mapping(self.server_options, "SchemaFormAuthority.server_options"),
         )
+        freeze_fields(self, "knobs", "model_validated_options", "server_options")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +148,7 @@ class InspectionResponse:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "columns", freeze_guided_str_sequence(self.columns, "InspectionResponse.columns"))
+        freeze_fields(self, "columns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +168,7 @@ class FieldSelectionResponse:
         )
         if self.control_signal is not None and type(self.control_signal) is not ControlSignal:
             raise TypeError("FieldSelectionResponse.control_signal must be ControlSignal or None")
+        freeze_fields(self, "chosen", "custom_inputs")
 
 
 def _require_active_turn(

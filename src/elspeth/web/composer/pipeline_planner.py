@@ -32,7 +32,7 @@ from elspeth.contracts.blobs import BlobGuidedOperationWriteFence
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.web.async_workers import run_sync_in_worker
@@ -382,6 +382,9 @@ class _ParsedToolCall:
     name: str
     raw_arguments: str
     arguments: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "arguments")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1682,7 +1685,7 @@ async def _plan_pipeline_inner(
                 terminal_feedback = _canonical_schema_feedback()
             else:
                 try:
-                    payload = _PlannerTerminalPayload.model_validate(call.arguments)
+                    payload = _PlannerTerminalPayload.model_validate(deep_thaw(call.arguments))
                     SetPipelineArgumentsModel.model_validate(payload.pipeline)
                 except ValueError as exc:
                     claim_shape_error = isinstance(exc, PydanticValidationError) and any(
@@ -1927,12 +1930,13 @@ async def _plan_pipeline_inner(
             )
 
             async def execute_discovery(call_to_execute: _ParsedToolCall = call) -> _AuditedDiscoveryResult:
+                execution_arguments = cast(dict[str, Any], deep_thaw(call_to_execute.arguments))
                 result = cast(
                     ToolResult,
                     await run_planner_sync(
                         execute_discovery_tool_with_context,
                         call_to_execute.name,
-                        call_to_execute.arguments,
+                        execution_arguments,
                         current_state,
                         request_context,
                     ),

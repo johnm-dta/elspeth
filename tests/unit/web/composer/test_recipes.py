@@ -23,6 +23,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 import elspeth.web.composer.recipes as recipes_module
+from elspeth.core.expression_parser import ExpressionParser
 from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
 from elspeth.web.composer.recipes import (
     RecipeSpec,
@@ -473,6 +474,27 @@ class TestThresholdRecipe:
         gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
         assert gate["condition"] == "row['score'] >= 0.75"
         assert gate["routes"] == {"true": "above", "false": "below"}
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "x'] is not None or row['x",
+            "customer's score",
+            'quote"and\\slash',
+            "brackets[0]",
+            "line\nbreak",
+        ],
+    )
+    def test_gate_condition_treats_field_name_as_literal(self, field: str) -> None:
+        result = self._apply(field=field, threshold=1.0)
+        gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
+
+        condition = gate["condition"]
+        assert condition == f"row[{field!r}] >= 1.0"
+
+        parser = ExpressionParser(condition)
+        assert parser.evaluate({field: 2.0, "x": 2.0}) is True
+        assert parser.evaluate({field: 0.0, "x": 2.0}) is False
 
     def test_two_jsonl_outputs(self) -> None:
         result = self._apply(

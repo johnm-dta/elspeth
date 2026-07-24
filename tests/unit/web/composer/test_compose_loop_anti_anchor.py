@@ -298,7 +298,7 @@ async def test_identical_failure_hint_does_not_solicit_canary_into_assistant_pro
             return _make_text_only_response(f"The prior value was {canary}.")
         return _make_text_only_response("The validator named patch.name; the structural mismatch is its expected shape.")
 
-    mock_llm = AsyncMock(side_effect=respond)
+    mock_llm = AsyncMock(spec=service._call_llm, side_effect=respond)
     arg_error = ToolArgumentError(argument="patch", expected="non-anchored payload", actual_type="dict")
     with (
         patch.object(service, "_call_llm", mock_llm),

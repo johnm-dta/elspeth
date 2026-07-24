@@ -128,12 +128,15 @@ def _plan(base: AbsentBase | PresentBase | None = None) -> PipelinePlanResult:
     )
 
 
-def _runnable_pipeline(tmp_path) -> dict[str, object]:
+def _runnable_pipeline(tmp_path, session_id: UUID) -> dict[str, object]:
     return {
         "source": {
             "plugin": "csv",
             "on_success": "rows",
-            "options": {"path": str(tmp_path / "blobs" / "input.csv"), "schema": {"mode": "observed"}},
+            "options": {
+                "path": str(tmp_path / "blobs" / str(session_id) / "input.csv"),
+                "schema": {"mode": "observed"},
+            },
             "on_validation_failure": "discard",
         },
         "nodes": [],
@@ -143,7 +146,7 @@ def _runnable_pipeline(tmp_path) -> dict[str, object]:
                 "sink_name": "rows",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / "result.jsonl"),
+                    "path": str(tmp_path / "outputs" / str(session_id) / "result.jsonl"),
                     "schema": {"mode": "observed"},
                     "format": "jsonl",
                     "mode": "write",
@@ -155,10 +158,10 @@ def _runnable_pipeline(tmp_path) -> dict[str, object]:
     }
 
 
-def _runnable_plan(tmp_path) -> PipelinePlanResult:
+def _runnable_plan(tmp_path, session_id: UUID) -> PipelinePlanResult:
     return PipelinePlanResult(
         proposal=PipelineProposal.create(
-            pipeline=_runnable_pipeline(tmp_path),
+            pipeline=_runnable_pipeline(tmp_path, session_id),
             base=AbsentBase(),
             reviewed_facts={},
             surface=PlannerSurface.FREEFORM,
@@ -1112,14 +1115,14 @@ async def test_prepare_pipeline_commit_revalidates_and_audits_exact_arguments_wi
 ) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
-    plan = _runnable_plan(tmp_path)
+    plan = _runnable_plan(tmp_path, session_id)
     row = await service.create_pipeline_composition_proposal(
         session_id=session_id,
         plan=plan,
         summary="Replace the pipeline.",
         rationale="Requested by the operator.",
         affects=("graph", "validation"),
-        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path, session_id)),
         actor="composer-web:user:alice",
         composer_model_identifier="planner-model",
         composer_model_version="planner-model-v1",
@@ -1174,14 +1177,14 @@ async def test_prepare_pipeline_commit_runs_blocking_policy_validation_off_event
 ) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
-    plan = _runnable_plan(tmp_path)
+    plan = _runnable_plan(tmp_path, session_id)
     row = await service.create_pipeline_composition_proposal(
         session_id=session_id,
         plan=plan,
         summary="Replace the pipeline.",
         rationale="Requested by the operator.",
         affects=("graph",),
-        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path, session_id)),
         actor="composer-web:user:alice",
         composer_model_identifier="planner-model",
         composer_model_version="planner-model-v1",
@@ -1252,14 +1255,14 @@ async def test_prepare_pipeline_commit_uses_one_total_timeout_budget(
 ) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
-    plan = _runnable_plan(tmp_path)
+    plan = _runnable_plan(tmp_path, session_id)
     row = await service.create_pipeline_composition_proposal(
         session_id=session_id,
         plan=plan,
         summary="Replace the pipeline.",
         rationale="Requested by the operator.",
         affects=("graph",),
-        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path, session_id)),
         actor="composer-web:user:alice",
         composer_model_identifier="planner-model",
         composer_model_version="planner-model-v1",
@@ -1530,14 +1533,14 @@ async def test_prepare_pipeline_commit_detects_candidate_executor_mismatch_after
 ) -> None:
     session_id = uuid4()
     _insert_session(service, session_id)
-    plan = _runnable_plan(tmp_path)
+    plan = _runnable_plan(tmp_path, session_id)
     row = await service.create_pipeline_composition_proposal(
         session_id=session_id,
         plan=plan,
         summary="Replace the pipeline.",
         rationale="Requested by the operator.",
         affects=("graph",),
-        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path)),
+        arguments_redacted_json=_redacted_pipeline(_runnable_pipeline(tmp_path, session_id)),
         actor="composer-web:user:alice",
         composer_model_identifier="planner-model",
         composer_model_version="planner-model-v1",

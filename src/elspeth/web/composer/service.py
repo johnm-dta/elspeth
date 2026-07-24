@@ -4263,6 +4263,28 @@ class ComposerServiceImpl:
                     if dispatch.plugin_crash_cause is None:
                         raise persisted_plugin_crash
                     raise persisted_plugin_crash from dispatch.plugin_crash_cause
+                if persist.unwind_audit_failed:
+                    # P4 rolled back. Preserve only this unpersisted turn's
+                    # suffix: recorder.invocations is request-cumulative, so
+                    # carrying the full buffer after an earlier successful P4
+                    # would duplicate already committed rows when the route
+                    # drains the crash.
+                    current_invocation_count = len(dispatch.tool_outcomes)
+                    if current_invocation_count == 0 or current_invocation_count > len(dispatch.plugin_crash.tool_invocations):
+                        raise InvariantError("plugin crash dispatch must carry one invocation per current-turn tool outcome")
+                    unpersisted_plugin_crash = ComposerPluginCrashError.capture(
+                        dispatch.plugin_crash.original_exc,
+                        state=state,
+                        initial_version=initial_version,
+                        tool_invocations=dispatch.plugin_crash.tool_invocations[-current_invocation_count:],
+                        llm_calls=recorder.llm_calls,
+                        failed_turn=failed_turn,
+                    )
+                    if dispatch.plugin_crash_cause is None:
+                        raise unpersisted_plugin_crash
+                    raise unpersisted_plugin_crash from dispatch.plugin_crash_cause
+                # No session/audit target was configured, so nothing in the
+                # request-cumulative crash carrier has been persisted yet.
                 if dispatch.plugin_crash_cause is None:
                     raise dispatch.plugin_crash
                 raise dispatch.plugin_crash from dispatch.plugin_crash_cause

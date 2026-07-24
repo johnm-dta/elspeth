@@ -207,16 +207,17 @@ class _DispatchOutcome:
 class _PersistOutcome:
     """Result of redact-and-persist (Phase P4 → P5).
 
-    When the dispatch carried a plugin crash AND persistence succeeded,
-    the driver raises *after* constructing this carrier — so the carrier
-    never represents a "post-crash" state. If construction happens at all,
-    persist completed (or session_id was None so no persist was attempted)
-    and no plugin crash propagation is pending.
+    When the dispatch carried a plugin crash, the carrier distinguishes a
+    committed unwind audit from a rolled-back unwind attempt through
+    ``persisted_tool_call_turn``. The driver then propagates the crash with
+    either no invocation rows (committed) or exactly the current unpersisted
+    suffix (rolled back).
     """
 
     current_state_id: str | None
     persisted_assistant_message_id: str | None
     persisted_tool_call_turn: bool
+    unwind_audit_failed: bool
     failed_turn: FailedTurnMetadata | None
 
 

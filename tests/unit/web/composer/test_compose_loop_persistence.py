@@ -88,6 +88,17 @@ def _text_response(content: str) -> Any:
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))])
 
 
+def _metadata_tool_response(call_id: str, name: str) -> Any:
+    tool_call = SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(
+            name="set_metadata",
+            arguments=json.dumps({"patch": {"name": name}}),
+        ),
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))])
+
+
 def _advisor_model_response(content: str = "Try setting `provider: azure` with the deployment name.") -> Any:
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))],
@@ -679,3 +690,116 @@ async def test_step2_audit_integrity_error_carries_failed_turn_metadata(
     assert excinfo.value.failed_turn.assistant_message_id is None
     assert excinfo.value.failed_turn.tool_calls_attempted == 2
     assert excinfo.value.failed_turn.tool_responses_persisted == 0
+
+
+@pytest.mark.asyncio
+async def test_plugin_crash_unwind_commit_failure_remains_unpersisted_and_retains_current_invocations(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    fake_llm_runtime_error_on_second: Any,
+    result_session_id: str,
+    inject_commit_OperationalError: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rolled-back unwind write cannot suppress the crash audit evidence."""
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    _patch_auto_commit_preferences(monkeypatch, sessions_service)
+    composer_service_with_real_sessions._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
+
+    persisted_flags: list[bool] = []
+    original_persist = composer_service_with_real_sessions._persist_turn_audit  # type: ignore[attr-defined]
+
+    async def _capture_persist_outcome(**kwargs: Any) -> Any:
+        outcome = await original_persist(**kwargs)
+        persisted_flags.append(outcome.persisted_tool_call_turn)
+        return outcome
+
+    monkeypatch.setattr(composer_service_with_real_sessions, "_persist_turn_audit", _capture_persist_outcome)
+    inject_commit_OperationalError(sessions_service._engine)  # type: ignore[attr-defined]
+
+    with pytest.raises(ComposerPluginCrashError) as excinfo:
+        await _run_one_turn(
+            composer_service_with_real_sessions,
+            llm=fake_llm_runtime_error_on_second,
+            session_id=result_session_id,
+        )
+
+    assert persisted_flags == [False]
+    assert [invocation.tool_call_id for invocation in excinfo.value.tool_invocations] == ["call_ok", "call_crash"]
+    assert excinfo.value.failed_turn is not None
+    assert excinfo.value.failed_turn.assistant_message_id is None
+    assert excinfo.value.failed_turn.tool_calls_attempted == 3
+    assert excinfo.value.failed_turn.tool_responses_persisted == 0
+
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            text("SELECT role, tool_call_id FROM chat_messages WHERE session_id = :session_id AND role IN ('assistant', 'tool')"),
+            {"session_id": result_session_id},
+        ).fetchall()
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_unwind_failure_retains_only_current_turn_after_committed_prefix(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+    inject_commit_OperationalError: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Earlier committed invocations are not duplicated on unwind recovery."""
+
+    from elspeth.web.composer import tool_batch
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    _patch_auto_commit_preferences(monkeypatch, sessions_service)
+    composer_service_with_real_sessions._skill_markdown_history_upserted = True  # type: ignore[attr-defined]
+
+    original_execute = tool_batch.execute_tool
+    execute_calls = 0
+
+    def _execute(tool_name: str, *args: Any, **kwargs: Any) -> Any:
+        nonlocal execute_calls
+        execute_calls += 1
+        if execute_calls == 2:
+            raise RuntimeError("second-turn plugin crash")
+        return original_execute(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr(tool_batch, "execute_tool", _execute)
+
+    original_persist = sessions_service.persist_compose_turn_async
+    persist_calls = 0
+
+    async def _fail_second_persist(**kwargs: Any) -> Any:
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 2:
+            inject_commit_OperationalError(sessions_service._engine)  # type: ignore[attr-defined]
+        return await original_persist(**kwargs)
+
+    monkeypatch.setattr(sessions_service, "persist_compose_turn_async", _fail_second_persist)
+
+    responses = [
+        _metadata_tool_response("call_committed", "committed"),
+        _metadata_tool_response("call_unpersisted_crash", "crash"),
+    ]
+
+    async def _llm(_messages: Any, _tools: Any) -> Any:
+        return responses.pop(0)
+
+    with pytest.raises(ComposerPluginCrashError) as excinfo:
+        await _run_one_turn(
+            composer_service_with_real_sessions,
+            llm=_llm,
+            session_id=result_session_id,
+        )
+
+    assert persist_calls == 2
+    assert [invocation.tool_call_id for invocation in excinfo.value.tool_invocations] == ["call_unpersisted_crash"]
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            text(
+                "SELECT role, tool_call_id FROM chat_messages WHERE session_id = :session_id AND role IN ('assistant', 'tool') ORDER BY sequence_no"
+            ),
+            {"session_id": result_session_id},
+        ).fetchall()
+    assert rows == [("assistant", None), ("tool", "call_committed")]

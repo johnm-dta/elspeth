@@ -146,6 +146,7 @@ async def persist_turn_audit(
     service._phase3_last_redacted_assistant_tool_calls = redacted_assistant_tool_calls
     service._phase3_last_redacted_tool_rows = redacted_tool_rows
     failed_turn: FailedTurnMetadata | None = None
+    unwind_audit_failed = False
     if session_id is not None:
         sessions_service = service._require_sessions_service()
         try:
@@ -168,10 +169,12 @@ async def persist_turn_audit(
             )
             raise
         service._phase3_last_audit_outcome = audit_outcome
+        unwind_audit_failed = audit_outcome.unwind_audit_failed
         current_state_id = audit_outcome.current_state_id
         failed_turn = FailedTurnMetadata(
             assistant_message_id=audit_outcome.assistant_id,
             tool_calls_attempted=len(assistant_tool_calls),
+            tool_responses_persisted=0 if audit_outcome.assistant_id is None else len(redacted_tool_rows),
         )
         if audit_outcome.assistant_id is None and plugin_crash is None:
             raise AuditIntegrityError(
@@ -184,10 +187,14 @@ async def persist_turn_audit(
                 failed_turn=failed_turn,
             )
         persisted_assistant_message_id = audit_outcome.assistant_id
-        persisted_tool_call_turn = True
+        # The unwind-failure outcome means the transaction rolled back: no
+        # assistant or tool row survived, so the driver must retain the
+        # in-flight invocation evidence on the propagated plugin crash.
+        persisted_tool_call_turn = audit_outcome.assistant_id is not None
     return _PersistOutcome(
         current_state_id=current_state_id,
         persisted_assistant_message_id=persisted_assistant_message_id,
         persisted_tool_call_turn=persisted_tool_call_turn,
+        unwind_audit_failed=unwind_audit_failed,
         failed_turn=failed_turn,
     )

@@ -752,7 +752,8 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
     harness = _harness(tmp_path)
     state = _incremental_base_state(tmp_path)
     invalid = _inline_pipeline_args(tmp_path)
-    rejected_content = "bad\udc80private"
+    private_canary = "PRIVATE-SURROGATE-INLINE-CANARY"
+    rejected_content = f"bad\udc80{private_canary}"
     invalid["source"]["inline_blob"]["content"] = rejected_content
     repaired = _inline_pipeline_args(tmp_path)
     responses = [
@@ -801,13 +802,17 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
     assert len(arg_error_invocations) == 1
     arg_error_invocation = arg_error_invocations[0]
     assert arg_error_invocation.tool_call_id == "call_surrogate"
-    assert arg_error_invocation.error_class == "ToolArgumentError"
+    assert arg_error_invocation.error_class == "JsonBoundaryError"
     assert arg_error_invocation.version_before == state.version
     assert arg_error_invocation.version_after is None
-    assert rejected_content not in arg_error_invocation.arguments_canonical
-    assert rejected_content not in json.dumps(message_snapshots[1])
+    assert json.loads(arg_error_invocation.arguments_canonical) == {
+        "_redaction_status": "invalid_tool_arguments",
+        "error_class": "JsonBoundaryError",
+    }
+    assert private_canary not in arg_error_invocation.arguments_canonical
+    assert private_canary not in json.dumps(message_snapshots[1])
 
-    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "ToolArgumentError"]
+    arg_error_outcomes = [outcome for outcome in invalid_turn_outcomes if outcome.error_class == "JsonBoundaryError"]
     assert len(arg_error_outcomes) == 1
     assert arg_error_outcomes[0].pre_version == state.version
     assert arg_error_outcomes[0].post_version == state.version
@@ -815,12 +820,21 @@ async def test_surrogate_inline_content_fails_closed_at_canonicalization_and_is_
 
     feedback = next(message for message in message_snapshots[1] if message.get("tool_call_id") == "call_surrogate")
     feedback_payload = json.loads(feedback["content"])
-    assert "object conforming to SetPipelineArgumentsModel" in feedback_payload["error"]
-    assert rejected_content not in feedback["content"]
+    assert "not valid UTF-8" in feedback_payload["error"]
+    assert private_canary not in feedback["content"]
 
     persisted_feedback = _persisted_tool_content(harness, "call_surrogate")
-    assert json.loads(persisted_feedback)["error_class"] == "ToolArgumentError"
-    assert rejected_content not in persisted_feedback
+    assert json.loads(persisted_feedback)["error_class"] == "JsonBoundaryError"
+    assert private_canary not in persisted_feedback
+    with harness.engine.connect() as conn:
+        persisted_messages = tuple(
+            conn.execute(
+                select(chat_messages_table.c.content, chat_messages_table.c.raw_content, chat_messages_table.c.tool_calls).where(
+                    chat_messages_table.c.session_id == harness.session_id
+                )
+            )
+        )
+    assert private_canary not in json.dumps(tuple(tuple(row) for row in persisted_messages))
 
 
 @pytest.mark.asyncio

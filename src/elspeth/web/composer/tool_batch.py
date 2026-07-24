@@ -92,10 +92,11 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.state import CompositionState, ValidationSummary
 from elspeth.web.composer.tool_error_payloads import (
-    arg_error_payload as _arg_error_payload,
+    INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+    unknown_tool_arguments_redaction,
 )
 from elspeth.web.composer.tool_error_payloads import (
-    unknown_tool_arguments_redaction,
+    arg_error_payload as _arg_error_payload,
 )
 from elspeth.web.composer.tools import (
     RuntimePreflight,
@@ -412,10 +413,24 @@ async def run_tool_batch(
             # wasn't valid JSON. ``error_message`` is class-name only
             # because ``str(exc)`` for JSONDecodeError can echo column
             # offsets that reference the un-truncated raw bytes.
+            audit_arguments: Mapping[str, Any] | str = (
+                unknown_audit_arguments if unknown_audit_arguments is not None else tool_call.function.arguments
+            )
+            if isinstance(exc, JsonBoundaryError) and unknown_audit_arguments is None:
+                audit_arguments = {
+                    "_redaction_status": INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                    "error_class": type(exc).__name__,
+                }
+                decoded_args_by_call_id[tool_call.id] = dict(audit_arguments)
+                _replace_llm_tool_call_arguments(
+                    llm_messages,
+                    tool_call_id=tool_call.id,
+                    arguments=audit_arguments,
+                )
             audit = begin_dispatch(
                 tool_call.id,
                 tool_name,
-                unknown_audit_arguments if unknown_audit_arguments is not None else tool_call.function.arguments,
+                audit_arguments,
                 version_before=state.version,
                 actor=actor,
             )

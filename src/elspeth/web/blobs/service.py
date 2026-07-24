@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import re
+import threading
 from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -78,6 +80,9 @@ from elspeth.web.sessions.protocol import CompositionStateRecord
 _T = TypeVar("_T")
 
 _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter("blob_copy_fork.orphan_rows_left_behind")
+
+_FORK_COPY_LEASE_CHECKPOINT_INTERVAL_SECONDS = 30.0
+_FORK_COPY_WRITE_CHUNK_BYTES = 1024 * 1024
 
 _INLINE_CUSTODY_NAMESPACE = UUID("8ef5fd65-8a90-5fe4-9084-eab5b9d2d2db")
 _INLINE_CUSTODY_SCHEMA = "elspeth.inline-custody.v1"
@@ -447,18 +452,50 @@ def _require_failed_fork_cleanup_authorization(
         raise AuditIntegrityError("Fork blob cleanup requires exactly one matching retained blob plan")
 
 
-def _atomic_write_blob(storage: Path, content: bytes) -> None:
+def _atomic_write_blob(
+    storage: Path,
+    content: bytes,
+    *,
+    write_guard: Callable[[], None] | None = None,
+) -> None:
+    if write_guard is not None:
+        write_guard()
     storage.parent.mkdir(parents=True, exist_ok=True)
     _remove_blob_temp_artifacts(storage)
     temp_path = storage.with_name(f".{storage.name}.custody.tmp")
     fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
+            if write_guard is None:
+                handle.write(content)
+            else:
+                content_view = memoryview(content)
+                for offset in range(0, len(content_view), _FORK_COPY_WRITE_CHUNK_BYTES):
+                    write_guard()
+                    handle.write(content_view[offset : offset + _FORK_COPY_WRITE_CHUNK_BYTES])
+            if write_guard is not None:
+                write_guard()
             handle.flush()
+            if write_guard is not None:
+                write_guard()
             os.fsync(handle.fileno())
+        if write_guard is not None:
+            write_guard()
         os.replace(temp_path, storage)
         _fsync_parent_directory(storage.parent)
+        if write_guard is not None:
+            try:
+                write_guard()
+            except BaseException as guard_exc:
+                try:
+                    storage.unlink(missing_ok=True)
+                    _fsync_parent_directory(storage.parent)
+                except OSError as rollback_exc:
+                    guard_exc.add_note(
+                        f"Rollback failed: could not remove fork blob published after lease loss "
+                        f"({type(rollback_exc).__name__}: {rollback_exc})"
+                    )
+                raise
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -665,6 +702,7 @@ def _write_or_validate_reserved_blob(
     content: bytes,
     expected_hash: str,
     blob_id: str,
+    write_guard: Callable[[], None] | None = None,
 ) -> bool:
     if storage.exists():
         existing_content = storage.read_bytes()
@@ -674,7 +712,10 @@ def _write_or_validate_reserved_blob(
         return False
     if row.status == "ready":
         raise BlobContentMissingError(blob_id, storage_path=str(storage))
-    _atomic_write_blob(storage, content)
+    if write_guard is None:
+        _atomic_write_blob(storage, content)
+    else:
+        _atomic_write_blob(storage, content, write_guard=write_guard)
     return True
 
 
@@ -744,6 +785,7 @@ def _persist_blob_content(
     idempotent: bool,
     fork_write_fence: BlobForkWriteFence | None = None,
     guided_operation_write_fence: BlobGuidedOperationWriteFence | None = None,
+    write_guard: Callable[[], None] | None = None,
 ) -> Row[Any]:
     """Persist one blob through committed reservation, file, and ready phases."""
     if type(blob_id) is not UUID:
@@ -766,6 +808,8 @@ def _persist_blob_content(
         raise RuntimeError(f"Invalid created_by {untrusted_created_by!r} — must be one of {sorted(BLOB_CREATORS)}")
     if type(creation_modality) is not CreationModality:
         raise TypeError(f"creation_modality must be CreationModality, got {type(creation_modality).__name__}")
+    if write_guard is not None and not callable(write_guard):
+        raise TypeError("write_guard must be callable")
     source_description = _normalized_optional_text(source_description, field_name="source_description")
     created_from_message_id = _normalized_optional_text(created_from_message_id, field_name="created_from_message_id")
     creating_model_identifier = _normalized_optional_text(
@@ -839,6 +883,7 @@ def _persist_blob_content(
                     content=content,
                     expected_hash=expected["content_hash"],
                     blob_id=blob_id_str,
+                    write_guard=write_guard,
                 )
             except Exception:
                 created_storage = not storage_existed_before_write and storage.exists()
@@ -1073,6 +1118,84 @@ def _in_progress_session_fork_operation_id(conn: Connection, session_id: str) ->
         )
         .limit(1)
     ).scalar_one_or_none()
+
+
+class _ForkCopyWriteAuthority:
+    """Cross-thread lease state consulted at every fork file mutation seam."""
+
+    def __init__(self, fence: BlobForkWriteFence) -> None:
+        self._fence = fence
+        self._lease_lost = threading.Event()
+        self._checkpoint_complete = threading.Event()
+        self._checkpoint_complete.set()
+
+    def checkpoint_started(self) -> None:
+        self._checkpoint_complete.clear()
+
+    def checkpoint_succeeded(self) -> None:
+        self._checkpoint_complete.set()
+
+    def lose(self) -> None:
+        self._lease_lost.set()
+        self._checkpoint_complete.set()
+
+    def require(self) -> None:
+        self._checkpoint_complete.wait()
+        if self._lease_lost.is_set():
+            raise BlobForkFenceLostError(self._fence.operation_id, attempt=self._fence.attempt)
+
+
+async def _await_fork_copy_io_with_checkpoints[ResultT](
+    operation: Awaitable[ResultT],
+    *,
+    checkpoint: Callable[[], Awaitable[None]],
+    write_authority: _ForkCopyWriteAuthority | None = None,
+) -> ResultT:
+    """Await blocking fork I/O while renewing its parent operation lease.
+
+    A due checkpoint pauses the guarded writer at its next bounded mutation
+    seam.  Failure then publishes lease loss before this coroutine waits for
+    the worker to stop, so it can discard temporary bytes without releasing
+    target-session custody to a takeover worker first.
+    """
+    operation_task = asyncio.ensure_future(operation)
+    while True:
+        try:
+            done, _pending = await asyncio.wait(
+                {operation_task},
+                timeout=_FORK_COPY_LEASE_CHECKPOINT_INTERVAL_SECONDS,
+            )
+        except asyncio.CancelledError:
+            if write_authority is not None:
+                write_authority.lose()
+            operation_task.cancel()
+            with suppress(BaseException):
+                await operation_task
+            raise
+        if done:
+            return operation_task.result()
+        if write_authority is not None:
+            write_authority.checkpoint_started()
+        try:
+            await checkpoint()
+        except asyncio.CancelledError:
+            if write_authority is not None:
+                write_authority.lose()
+            operation_task.cancel()
+            with suppress(BaseException):
+                await operation_task
+            raise
+        except BaseException:
+            if write_authority is not None:
+                write_authority.lose()
+            else:
+                operation_task.cancel()
+            with suppress(BaseException):
+                await operation_task
+            raise
+        else:
+            if write_authority is not None:
+                write_authority.checkpoint_succeeded()
 
 
 class BlobServiceImpl:
@@ -1866,14 +1989,35 @@ class BlobServiceImpl:
         blob_map: dict[UUID, BlobRecord] = {}
         for entry, source_blob in zip(plan, source_records, strict=True):
             await checkpoint()
-            content = await self.read_blob_content(entry.source_blob_id)
-            if len(content) != entry.size_bytes or hashlib.sha256(content).hexdigest() != entry.content_hash:
-                raise AuditIntegrityError(f"frozen fork source blob {entry.source_blob_id} bytes changed during copy")
+
+            def _read_frozen_source(
+                storage_path: str = source_blob.storage_path,
+                source_blob_id: UUID = source_blob.id,
+            ) -> bytes:
+                storage = Path(storage_path)
+                if not storage.exists():
+                    raise BlobContentMissingError(str(source_blob_id), storage_path=storage_path)
+                return storage.read_bytes()
+
+            content = await _await_fork_copy_io_with_checkpoints(
+                self._run_sync(_read_frozen_source),
+                checkpoint=checkpoint,
+            )
+            actual_hash = hashlib.sha256(content).hexdigest()
+            if len(content) != entry.size_bytes or actual_hash != entry.content_hash:
+                raise BlobIntegrityError(
+                    str(entry.source_blob_id),
+                    expected=entry.content_hash,
+                    actual=actual_hash,
+                )
+
+            write_authority = _ForkCopyWriteAuthority(write_fence)
 
             def _persist_copy(
                 source_blob: BlobRecord = source_blob,
                 content: bytes = content,
                 child_blob_id: UUID = entry.target_blob_id,
+                authority: _ForkCopyWriteAuthority = write_authority,
             ) -> Row[Any]:
                 return _persist_blob_content(
                     engine=self._engine,
@@ -1895,9 +2039,14 @@ class BlobServiceImpl:
                     creating_arguments_hash=None,
                     idempotent=True,
                     fork_write_fence=write_fence,
+                    write_guard=authority.require,
                 )
 
-            row = await self._run_sync(_persist_copy)
+            row = await _await_fork_copy_io_with_checkpoints(
+                self._run_sync(_persist_copy),
+                checkpoint=checkpoint,
+                write_authority=write_authority,
+            )
             copied = self._row_to_record(row)
             if copied.id != entry.target_blob_id or copied.content_hash != entry.content_hash or copied.size_bytes != entry.size_bytes:
                 raise AuditIntegrityError(f"fork target blob {entry.target_blob_id} does not match its frozen plan")

@@ -2814,6 +2814,160 @@ class TestCopyBlobsForFork:
         assert source.id not in {blob.id for blob in await blob_service.list_blobs(target_session_id, limit=None)}
 
     @pytest.mark.asyncio
+    async def test_copy_checkpoints_while_source_read_is_blocked(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Slow source reads renew instead of consuming the whole fork lease."""
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        plan = await self._plan(blob_service, session_id, target_session_id)
+        fence = await self._authorize_copy(blob_service, session_id, target_session_id, plan)
+        source_path = Path(source.storage_path)
+        read_entered = threading.Event()
+        release_read = threading.Event()
+        checkpoint_seen = threading.Event()
+        original_read_bytes = Path.read_bytes
+
+        monkeypatch.setattr(blob_service_module, "_FORK_COPY_LEASE_CHECKPOINT_INTERVAL_SECONDS", 0.01)
+
+        def _blocked_source_read(path: Path) -> bytes:
+            if path == source_path and not read_entered.is_set():
+                read_entered.set()
+                if not release_read.wait(timeout=5):
+                    raise TimeoutError("test did not release blocked fork source read")
+            return original_read_bytes(path)
+
+        async def _checkpoint() -> None:
+            if read_entered.is_set():
+                checkpoint_seen.set()
+
+        monkeypatch.setattr(Path, "read_bytes", _blocked_source_read)
+        copy_task = asyncio.create_task(
+            blob_service.copy_blobs_for_fork(
+                session_id,
+                target_session_id,
+                plan,
+                fence,
+                checkpoint=_checkpoint,
+            )
+        )
+        assert await asyncio.to_thread(read_entered.wait, 5)
+        checkpoint_during_read = await asyncio.to_thread(checkpoint_seen.wait, 1)
+        release_read.set()
+        copied = await copy_task
+
+        assert checkpoint_during_read, "fork copy did not checkpoint while its source read was blocked"
+        assert copied[source.id].status == "ready"
+
+    @pytest.mark.asyncio
+    async def test_copy_aborts_blocked_fsync_when_periodic_checkpoint_loses_fence_and_takeover_retries(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A lease loss during blocked fsync leaves no stale canonical bytes."""
+        source = await blob_service.create_blob(session_id, "source.csv", b"source", "text/csv")
+        plan = await self._plan(blob_service, session_id, target_session_id)
+        stale_fence = await self._authorize_copy(blob_service, session_id, target_session_id, plan)
+        takeover_token = "takeover-lease"
+        fsync_entered = threading.Event()
+        release_fsync = threading.Event()
+        takeover_started = threading.Event()
+        checkpoint_calls = 0
+        original_fsync = blob_service_module.os.fsync
+
+        monkeypatch.setattr(
+            blob_service_module,
+            "_FORK_COPY_LEASE_CHECKPOINT_INTERVAL_SECONDS",
+            0.01,
+            raising=False,
+        )
+
+        def _blocked_first_fsync(descriptor: int) -> None:
+            if not fsync_entered.is_set():
+                fsync_entered.set()
+                if not release_fsync.wait(timeout=5):
+                    raise TimeoutError("test did not release blocked fork fsync")
+            original_fsync(descriptor)
+
+        async def _checkpoint_then_takeover() -> None:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if not fsync_entered.is_set() or takeover_started.is_set():
+                return
+            now = datetime.now(UTC)
+            with db_engine.begin() as conn:
+                changed = conn.execute(
+                    guided_operations_table.update()
+                    .where(guided_operations_table.c.session_id == str(session_id))
+                    .where(guided_operations_table.c.operation_id == stale_fence.operation_id)
+                    .where(guided_operations_table.c.status == "in_progress")
+                    .where(guided_operations_table.c.lease_token == stale_fence.lease_token)
+                    .where(guided_operations_table.c.attempt == stale_fence.attempt)
+                    .values(
+                        lease_token=takeover_token,
+                        lease_expires_at=now + timedelta(hours=1),
+                        attempt=stale_fence.attempt + 1,
+                        updated_at=now,
+                    )
+                ).rowcount
+            assert changed == 1
+            takeover_started.set()
+            raise BlobForkFenceLostError(stale_fence.operation_id, attempt=stale_fence.attempt)
+
+        monkeypatch.setattr(blob_service_module.os, "fsync", _blocked_first_fsync)
+        stale_copy = asyncio.create_task(
+            blob_service.copy_blobs_for_fork(
+                session_id,
+                target_session_id,
+                plan,
+                stale_fence,
+                checkpoint=_checkpoint_then_takeover,
+            )
+        )
+        assert await asyncio.to_thread(fsync_entered.wait, 5)
+        takeover_during_fsync = await asyncio.to_thread(takeover_started.wait, 1)
+        release_fsync.set()
+
+        with pytest.raises(BlobForkFenceLostError):
+            await stale_copy
+        assert takeover_during_fsync, "fork copy did not checkpoint while fsync was blocked"
+        assert checkpoint_calls >= 3
+
+        target_storage = tmp_path.resolve() / "blobs" / str(target_session_id) / f"{plan[0].target_blob_id}_{source.filename}"
+        assert not target_storage.exists()
+        with db_engine.connect() as conn:
+            pending = conn.execute(select(blobs_table).where(blobs_table.c.id == str(plan[0].target_blob_id))).one()
+        assert pending.status == "pending"
+
+        winner_fence = replace(
+            stale_fence,
+            lease_token=takeover_token,
+            attempt=stale_fence.attempt + 1,
+        )
+        copied = await blob_service.copy_blobs_for_fork(
+            session_id,
+            target_session_id,
+            plan,
+            winner_fence,
+            checkpoint=self._checkpoint,
+        )
+
+        assert copied[source.id].status == "ready"
+        assert target_storage.read_bytes() == b"source"
+        with db_engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == str(target_session_id))).all()
+        assert len(rows) == 1
+        assert rows[0].status == "ready"
+
+    @pytest.mark.asyncio
     async def test_copy_uses_frozen_plan_and_ignores_newly_finalized_parent_blob(
         self,
         blob_service: BlobServiceImpl,

@@ -349,7 +349,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         user_message_content = "Use this exact text file:\nhello"
         engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         catalog = _mock_catalog()
-        output_path = tmp_path / "outputs" / "out.csv"
+        output_path = tmp_path / "outputs" / session_id / "out.csv"
 
         args = {
             "source": {
@@ -526,7 +526,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         """CSV prevalidation accepts the field shape exposed by plugin JSON Schema."""
         user_message_content = "Use this exact CSV:\nurl\nhttps://example.test\n"
         engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
-        output_path = tmp_path / "outputs" / "out.csv"
+        output_path = tmp_path / "outputs" / session_id / "out.csv"
 
         args = {
             "source": {
@@ -1426,7 +1426,7 @@ class TestSetPipelineInlineBlobTsvDelimiter:
                     "sink_name": "rows",
                     "plugin": "csv",
                     "options": {
-                        "path": str(tmp_path / "outputs" / "out.csv"),
+                        "path": str(tmp_path / "outputs" / session_id / "out.csv"),
                         "schema": {"mode": "observed"},
                         "mode": "write",
                         "collision_policy": "auto_increment",

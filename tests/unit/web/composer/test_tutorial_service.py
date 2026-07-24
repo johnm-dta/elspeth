@@ -614,8 +614,8 @@ def test_rows_from_artifacts_skips_auxiliary_and_returns_row_artifact_rows(tmp_p
     Auxiliary artifacts (.txt, .log) must be skipped without crashing the
     projection — only row-format artifacts contribute to the row sequence.
     """
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     aux = outputs / "debug.txt"
     aux.write_text("composer chain trace", encoding="utf-8")
     rows_file = outputs / "rows.csv"
@@ -631,8 +631,8 @@ def test_rows_from_artifacts_skips_auxiliary_and_returns_row_artifact_rows(tmp_p
 
 
 def test_rows_from_artifacts_skips_auxiliary_before_reading_bytes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     aux = outputs / "debug.bin"
     aux.write_bytes(b"x" * 1024)
     rows_file = outputs / "rows.csv"
@@ -659,8 +659,8 @@ def test_rows_from_artifacts_skips_legacy_percent_encoded_suffix_auxiliary_befor
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     legacy_aux = outputs / "debug%2Ecsv"
     decoded_decoy = outputs / "debug.csv"
     legacy_aux.write_bytes(b"x" * 1024)
@@ -686,8 +686,8 @@ def test_rows_from_artifacts_skips_legacy_percent_encoded_suffix_auxiliary_befor
 
 
 def test_rows_from_artifacts_uses_legacy_raw_percent_candidate_when_it_matches_audit(tmp_path: Path) -> None:
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     legacy_raw_file = outputs / "results%3Ftoken=literal.csv"
     decoded_decoy = outputs / "results?token=literal.csv"
     audited_bytes = b"url,rating\nraw.example,5\n"
@@ -711,8 +711,8 @@ def test_rows_from_artifacts_parses_verified_bytes_when_file_changes_after_verif
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     rows_file = outputs / "rows.csv"
     audited_bytes = b"url,rating\nato.gov.au,5\n"
     rows_file.write_bytes(audited_bytes)
@@ -745,8 +745,8 @@ def test_rows_from_artifacts_distinguishes_no_row_format_from_all_empty(tmp_path
     read parquet' and 'pipeline emitted rows.csv but it was empty' — the
     prior implementation collapsed both into a single misleading message.
     """
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     only_aux = outputs / "summary.txt"
     only_aux.write_text("freeform", encoding="utf-8")
     artifacts = [_fake_artifact("aux-1", str(only_aux))]
@@ -756,8 +756,8 @@ def test_rows_from_artifacts_distinguishes_no_row_format_from_all_empty(tmp_path
 
 
 def test_rows_from_artifacts_raises_when_all_row_artifacts_yield_zero_rows(tmp_path: Path) -> None:
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
+    outputs = tmp_path / "outputs" / "sess-t"
+    outputs.mkdir(parents=True)
     empty = outputs / "empty.csv"
     empty.write_text("url,rating\n", encoding="utf-8")
     artifacts = [_fake_artifact("rows-1", str(empty))]

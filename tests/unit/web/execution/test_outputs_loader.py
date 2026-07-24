@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -19,9 +20,22 @@ from elspeth.contracts import NodeType
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.web.execution.outputs import load_run_outputs_for_settings, load_run_outputs_from_db, path_or_uri_to_filesystem_path
+from elspeth.web.execution.outputs import (
+    load_run_outputs_for_settings,
+    path_or_uri_to_filesystem_path,
+)
+from elspeth.web.execution.outputs import (
+    load_run_outputs_from_db as _load_run_outputs_from_db,
+)
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+_TEST_SESSION_ID = "test-session"
+
+
+def load_run_outputs_from_db(*args: Any, **kwargs: Any) -> Any:
+    if kwargs.get("data_dir") is not None:
+        kwargs.setdefault("session_id", _TEST_SESSION_ID)
+    return _load_run_outputs_from_db(*args, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -234,7 +248,7 @@ def test_load_run_outputs_returns_empty_artifacts_for_unknown_run(tmp_path: Path
 
 def test_downloadable_true_when_file_inside_allowlist_and_exists(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    outputs_dir = data_dir / "outputs"
+    outputs_dir = data_dir / "outputs" / _TEST_SESSION_ID
     outputs_dir.mkdir(parents=True)
     target = outputs_dir / "results.csv"
     target.write_bytes(b"col1\n1\n")
@@ -254,7 +268,7 @@ def test_downloadable_true_when_file_inside_allowlist_and_exists(tmp_path: Path)
 
 def test_downloadable_false_when_file_inside_allowlist_but_missing(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    outputs_dir = data_dir / "outputs"
+    outputs_dir = data_dir / "outputs" / _TEST_SESSION_ID
     outputs_dir.mkdir(parents=True)
     target = outputs_dir / "vanished.csv"
     target.write_bytes(b"col1\n1\n")
@@ -434,7 +448,7 @@ def test_storage_kind_payload_honours_payload_root_override(tmp_path: Path) -> N
 
 def test_storage_kind_sink_file_for_path_under_outputs_directory(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
-    outputs_dir = data_dir / "outputs"
+    outputs_dir = data_dir / "outputs" / _TEST_SESSION_ID
     outputs_dir.mkdir(parents=True)
     target = outputs_dir / "results.csv"
     target.write_bytes(b"col1\n1\n")

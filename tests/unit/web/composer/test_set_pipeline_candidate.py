@@ -101,6 +101,8 @@ def test_build_set_pipeline_candidate_constructs_without_publishing(tmp_path: Pa
 def _trained_context(*, data_dir: Path | None = None, **kwargs: Any) -> ToolContext:
     catalog = create_catalog_service()
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(catalog)
+    if data_dir is not None and "session_id" not in kwargs:
+        kwargs["session_id"] = "test-session"
     return ToolContext(
         catalog=PolicyCatalogView.for_trained_operator(catalog, snapshot),
         plugin_snapshot=snapshot,
@@ -126,6 +128,7 @@ def _blocked_context(plugin_id: PluginId, *, data_dir: Path) -> ToolContext:
         catalog=PolicyCatalogView(catalog, snapshot, MagicMock(spec=OperatorProfileRegistry)),
         plugin_snapshot=snapshot,
         data_dir=str(data_dir),
+        session_id="test-session",
     )
 
 
@@ -152,7 +155,7 @@ def _profile_rejecting_context(*, data_dir: Path) -> ToolContext:
     full = create_catalog_service()
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(full)
     catalog = _ProfileRejectingCatalog(full, snapshot, MagicMock(spec=OperatorProfileRegistry))
-    return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir))
+    return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir), session_id="test-session")
 
 
 class _FinalValidationRejectingCatalog(PolicyCatalogView):
@@ -194,7 +197,10 @@ def _final_validation_rejecting_context(*, data_dir: Path) -> tuple[ToolContext,
     snapshot = PluginAvailabilitySnapshot.for_trained_operator(full)
     catalog = _FinalValidationRejectingCatalog.for_trained_operator(full, snapshot)
     catalog.validated_states = []
-    return ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir)), catalog
+    return (
+        ToolContext(catalog=catalog, plugin_snapshot=snapshot, data_dir=str(data_dir), session_id="test-session"),
+        catalog,
+    )
 
 
 def _file_options(path: Path) -> dict[str, Any]:
@@ -212,7 +218,7 @@ def _linear_args(tmp_path: Path) -> dict[str, Any]:
             "plugin": "csv",
             "on_success": "rows",
             "options": {
-                "path": str(tmp_path / "blobs" / "input.csv"),
+                "path": str(tmp_path / "blobs" / "test-session" / "input.csv"),
                 "schema": {"mode": "observed"},
             },
             "on_validation_failure": "discard",
@@ -241,7 +247,7 @@ def _linear_args(tmp_path: Path) -> dict[str, Any]:
             {
                 "sink_name": "main",
                 "plugin": "json",
-                "options": _file_options(tmp_path / "outputs" / "result.jsonl") | {"format": "jsonl"},
+                "options": _file_options(Path("outputs/result.jsonl")) | {"format": "jsonl"},
                 "on_write_failure": "discard",
             }
         ],
@@ -456,7 +462,7 @@ def test_reviewed_source_authority_checks_owner_without_recognized_blob(tmp_path
 
 def test_exact_reviewed_non_blob_path_remains_subject_to_candidate_path_policy(tmp_path: Path) -> None:
     engine, session_id, _other_session, blobs = _reviewed_source_harness(tmp_path)
-    reviewed_path = str(tmp_path / "blobs" / "operator-reviewed.csv")
+    reviewed_path = str(tmp_path / "blobs" / session_id / "operator-reviewed.csv")
     facts = _reviewed_source_facts(blob_id=str(blobs[0].id), path=reviewed_path)
     options = next(iter(facts["reviewed_sources"].values()))["options"]
     options.pop("blob_ref")
@@ -1053,6 +1059,7 @@ def test_candidate_uses_final_request_scoped_profile_validation(tmp_path: Path) 
         catalog,
         plugin_snapshot=context.plugin_snapshot,
         data_dir=str(tmp_path),
+        session_id="test-session",
     )
 
     assert public_result.updated_state == candidate.result.updated_state
@@ -1085,6 +1092,7 @@ def test_public_set_pipeline_validates_current_and_candidate_exactly_once(
         catalog,
         plugin_snapshot=context.plugin_snapshot,
         data_dir=str(tmp_path),
+        session_id="test-session",
     )
 
     assert result.success is not rejected
@@ -1135,7 +1143,7 @@ def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:
                 "plugin": "csv",
                 "on_success": "inbound",
                 "options": {
-                    "path": str(tmp_path / "blobs" / "orders.csv"),
+                    "path": str(tmp_path / "blobs" / "test-session" / "orders.csv"),
                     "schema": {"mode": "observed"},
                 },
             },
@@ -1143,7 +1151,7 @@ def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:
                 "plugin": "csv",
                 "on_success": "inbound",
                 "options": {
-                    "path": str(tmp_path / "blobs" / "refunds.csv"),
+                    "path": str(tmp_path / "blobs" / "test-session" / "refunds.csv"),
                     "schema": {"mode": "observed"},
                 },
             },
@@ -1170,7 +1178,7 @@ def _named_multi_source_queue_args(tmp_path: Path) -> dict[str, Any]:
             {
                 "sink_name": "main",
                 "plugin": "json",
-                "options": _file_options(tmp_path / "outputs" / "queued.jsonl") | {"format": "jsonl"},
+                "options": _file_options(Path("outputs/queued.jsonl")) | {"format": "jsonl"},
                 "on_write_failure": "discard",
             }
         ],
@@ -1241,7 +1249,7 @@ def _gate_args(tmp_path: Path) -> dict[str, Any]:
         {
             "sink_name": name,
             "plugin": "json",
-            "options": _file_options(tmp_path / "outputs" / f"{name}.jsonl") | {"format": "jsonl"},
+            "options": _file_options(Path("outputs") / f"{name}.jsonl") | {"format": "jsonl"},
             "on_write_failure": "discard",
         }
         for name in ("high", "low")
@@ -1384,13 +1392,13 @@ def _multi_output_args(tmp_path: Path) -> dict[str, Any]:
         {
             "sink_name": "main",
             "plugin": "json",
-            "options": _file_options(tmp_path / "outputs" / "main.jsonl") | {"format": "jsonl"},
+            "options": _file_options(Path("outputs/main.jsonl")) | {"format": "jsonl"},
             "on_write_failure": "discard",
         },
         {
             "sink_name": "quarantine",
             "plugin": "csv",
-            "options": _file_options(tmp_path / "outputs" / "quarantine.csv"),
+            "options": _file_options(Path("outputs/quarantine.csv")),
             "on_write_failure": "discard",
         },
     ]
@@ -1400,13 +1408,13 @@ def _multi_output_args(tmp_path: Path) -> dict[str, Any]:
 
 
 _EXPECTED_STATE_HASHES = {
-    "linear": "7a9e54170c34e1e4672d7b2969860b35fedb35a73fc437d8e25f527712b322b9",
-    "named_multi_source_queue": "bebdc72124a73cd5ebb5ddd1c7660345004c4276b289b4651980131d133ff61b",
-    "fork_coalesce": "b1383d953ab65ab7339daf6223be072c8084ab7d59af4713bc9f8dfc85a52727",
-    "gate": "4c8954595ad404c45adcf43cdaf7ce1a5c6e1154afa7e5f64b21e44d7fc19cb5",
-    "aggregation": "ef2ecf5c7f1d7ff9f00709175102e4777563b43cc3d06edaac29b9d87d06073b",
-    "structured_llm": "3815378a23c396501b91809644b330c423367ea26d20ec63bb0d64caed39a1ee",
-    "multi_output": "50e5c9c2b421bdaa2db73585d569ae9b1f21d2f79c6a8d9adfb184420a8a0065",
+    "linear": "21dbf5afc36a0cc402394e1c59bfbb58304ea5564930998ab8b1b8851b78d1e9",
+    "named_multi_source_queue": "965e2b3991d2347b633baf4e54e71e37995c10bc386356b547b7a207f8b65f9c",
+    "fork_coalesce": "dedfc6a9066d6e5f6fa609bae7ed07c840f082224e63480a3a2b0788ebb2e850",
+    "gate": "c0380bca12a88112057ce36547ab39547eb691c03a8751e27f2371593b5abb9e",
+    "aggregation": "427cde0492596be8a65cf854e3183de0c868f31fb7a24884d4bd86963fbb22cd",
+    "structured_llm": "8cadfc3dd2b39c64cadb92e4af9994dfacb218afb6f70ad5c9f90cc190037ffc",
+    "multi_output": "a8e0698429a06efa22423ebc37033b585f1b6cdc225eb2501b4d69ee6b67ad8a",
 }
 
 _EXPECTED_WARNINGS = {
@@ -1610,7 +1618,7 @@ def _semantic_failure_cases(tmp_path: Path) -> list[tuple[str, dict[str, Any], T
             escaping_path,
             _trained_context(data_dir=tmp_path),
             "Output 'main': Path violation (S2): 'path' value '/etc/candidate-escape.json' is outside the allowed "
-            f"directories. Sink output paths must be under {tmp_path / 'outputs'}/ or this session's own "
+            f"directories. Sink output paths must be under this session's {tmp_path / 'outputs'}/<session>/ or "
             f"{tmp_path / 'blobs'}/<session>/ subtree.",
             None,
         ),
@@ -2046,7 +2054,7 @@ def _operator_profile_view(tmp_path: Path) -> ToolContext:
         generation_key=b"profile-test-key",
     )
     view = PolicyCatalogView(create_catalog_service(), snapshot, profiles)
-    return ToolContext(catalog=view, plugin_snapshot=snapshot, data_dir=str(tmp_path))
+    return ToolContext(catalog=view, plugin_snapshot=snapshot, data_dir=str(tmp_path), session_id="test-session")
 
 
 def _ab_multi_query_args(tmp_path: Path) -> dict[str, Any]:
@@ -2056,7 +2064,7 @@ def _ab_multi_query_args(tmp_path: Path) -> dict[str, Any]:
             "plugin": "csv",
             "on_success": "rows",
             "options": {
-                "path": str(tmp_path / "blobs" / "colours.csv"),
+                "path": str(tmp_path / "blobs" / "test-session" / "colours.csv"),
                 "schema": {"mode": "flexible", "fields": ["color_name: str", "hex: str"]},
             },
             "on_validation_failure": "discard",
@@ -2095,7 +2103,7 @@ def _ab_multi_query_args(tmp_path: Path) -> dict[str, Any]:
                 "sink_name": "assessed",
                 "plugin": "json",
                 "options": {
-                    "path": str(tmp_path / "outputs" / "colour_ab.json"),
+                    "path": "outputs/colour_ab.json",
                     "schema": {"mode": "observed"},
                     "format": "json",
                     "mode": "write",
@@ -2317,8 +2325,8 @@ def test_unknown_llm_provider_is_a_coded_rejection_not_an_escape(tmp_path: Path)
     # raised (e.g. unknown LLM provider) — surface it"). Tier-3 input must
     # never escape the candidate boundary: planner path degraded it to the
     # unrepairable CANDIDATE_CONSTRUCTION_ERROR; non-planner tool paths 500'd.
-    (tmp_path / "blobs").mkdir(exist_ok=True)
-    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path = tmp_path / "blobs" / "test-session" / "in.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.write_text("a\n1\n")
     args = _linear_args(tmp_path)
     args["source"]["options"]["path"] = str(csv_path)
@@ -2358,8 +2366,8 @@ def test_private_profile_option_rejection_names_the_real_cause(tmp_path: Path) -
     # included an option the operator layer owns. The finding must say so,
     # or no planner can repair it.
     context = _operator_profile_view(tmp_path)
-    (tmp_path / "blobs").mkdir(exist_ok=True)
-    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path = tmp_path / "blobs" / "test-session" / "in.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.write_text("a\n1\n")
     args = _linear_args(tmp_path)
     args["source"]["options"]["path"] = str(csv_path)
@@ -2402,8 +2410,8 @@ def test_query_template_interpretation_token_is_rejected_at_the_compose_gate(tmp
     # operator review resolution (the resolver rewrites only the node-level
     # template; no delivery mechanism exists for per-query slots).
     context = _operator_profile_view(tmp_path)
-    (tmp_path / "blobs").mkdir(exist_ok=True)
-    csv_path = tmp_path / "blobs" / "in.csv"
+    csv_path = tmp_path / "blobs" / "test-session" / "in.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.write_text("a\n1\n")
     args = _linear_args(tmp_path)
     args["source"]["options"]["path"] = str(csv_path)

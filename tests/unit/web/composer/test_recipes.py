@@ -1302,6 +1302,7 @@ class TestApplyRecipeEndToEnd:
             result.updated_state,
             SimpleNamespace(data_dir=data_dir),
             yaml_generator,
+            session_id=session_id,
         )
         assert runtime.is_valid is True, runtime.errors
 

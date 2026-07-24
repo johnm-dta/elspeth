@@ -15,7 +15,7 @@ from elspeth.web.sessions.routes.composer.state import _source_options_reference
 
 def test_source_options_reference_blob_storage_raises_on_nul_byte_path(tmp_path) -> None:
     with pytest.raises(ValueError):
-        _source_options_reference_blob_storage({"path": "blobs/x\x00y"}, data_dir=str(tmp_path))
+        _source_options_reference_blob_storage({"path": "blobs/test-session/x\x00y"}, data_dir=str(tmp_path))
 
 
 def test_source_options_reference_blob_storage_skips_non_string_values(tmp_path) -> None:
@@ -34,7 +34,7 @@ def test_reject_unbound_blob_storage_sources_raises_400_on_unbound_blob_path(tmp
             "source": SourceSpec(
                 plugin="csv",
                 on_success="main",
-                options={"path": str(tmp_path / "blobs" / "x.csv")},
+                options={"path": str(tmp_path / "blobs" / "test-session" / "x.csv")},
                 on_validation_failure="discard",
             )
         },
@@ -73,7 +73,7 @@ def test_reject_disallowed_source_paths_raises_400_outside_allowlist(tmp_path) -
         version=1,
     )
     with pytest.raises(HTTPException) as exc_info:
-        _reject_disallowed_source_paths(state, data_dir=str(data_dir))
+        _reject_disallowed_source_paths(state, data_dir=str(data_dir), session_id="test-session")
     assert exc_info.value.status_code == 400
     assert _reject_disallowed_source_paths.__trust_boundary__.test_ref == (  # type: ignore[attr-defined]
         "tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_outside_allowlist"

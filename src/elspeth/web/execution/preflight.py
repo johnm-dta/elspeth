@@ -30,6 +30,7 @@ from elspeth.web.paths import (
     SINK_LOCAL_PATH_OPTION_KEYS,
     SOURCE_LOCAL_PATH_OPTION_KEYS,
     resolve_data_path,
+    resolve_sink_data_path,
 )
 from elspeth.web.plugin_policy.models import PluginAvailabilitySnapshot, PluginId
 
@@ -77,7 +78,7 @@ class RuntimeGraphBundle:
     test_ref="tests/unit/web/execution/test_service.py::TestResolveYamlPaths::test_non_dict_yaml_raises_type_error",
     test_fingerprint="0b6962a40eb0f2ab584fb2c1de368235d046257d81da266750c8f8011e651c36",
 )
-def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
+def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str, *, session_id: str | None = None) -> str:
     """Rewrite relative source/sink paths in pipeline YAML to absolute paths.
 
     Plugins call PathConfig.resolved_path() with no base_dir, so relative
@@ -100,6 +101,7 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
         path_option_keys: tuple[str, ...],
         *,
         require_options: bool = False,
+        sink_paths: bool = False,
     ) -> None:
         if "options" not in component:
             if require_options:
@@ -111,7 +113,10 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
         path_options = cast(dict[str, Any], opts)
         for key in path_option_keys:
             if key in path_options and not Path(str(path_options[key])).is_absolute():
-                path_options[key] = str(resolve_data_path(str(path_options[key]), data_dir))
+                if sink_paths:
+                    path_options[key] = str(resolve_sink_data_path(str(path_options[key]), data_dir, session_id=session_id))
+                else:
+                    path_options[key] = str(resolve_data_path(str(path_options[key]), data_dir))
 
     if "source" in config:
         source = config["source"]
@@ -157,6 +162,7 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
                         cast(dict[str, Any], sink_cfg),
                         f"sinks.{sink_name}",
                         SINK_LOCAL_PATH_OPTION_KEYS,
+                        sink_paths=True,
                     )
 
     # Nested transform provider_config paths (RAG retrieval transforms carry a
@@ -178,7 +184,7 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
                 continue
             for key in NESTED_LOCAL_PATH_OPTION_KEYS:
                 if key in provider_config and not Path(str(provider_config[key])).is_absolute():
-                    provider_config[key] = str(resolve_data_path(str(provider_config[key]), data_dir))
+                    provider_config[key] = str(resolve_sink_data_path(str(provider_config[key]), data_dir, session_id=session_id))
 
     return yaml.dump(config, default_flow_style=False)
 

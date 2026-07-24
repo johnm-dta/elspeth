@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +56,10 @@ def _web_settings(tmp_path: Path) -> WebSettings:
 
 
 def _csv_worker_probe_state(tmp_path: Path) -> CompositionState:
-    blobs_dir = tmp_path / "blobs"
-    outputs_dir = tmp_path / "outputs"
-    blobs_dir.mkdir()
-    outputs_dir.mkdir()
+    blobs_dir = tmp_path / "blobs" / "test-session"
+    outputs_dir = tmp_path / "outputs" / "test-session"
+    blobs_dir.mkdir(parents=True)
+    outputs_dir.mkdir(parents=True)
     input_path = blobs_dir / "input.csv"
     input_path.write_text("name\nAda\n", encoding="utf-8")
     return CompositionState(
@@ -84,10 +85,10 @@ def _csv_worker_probe_state(tmp_path: Path) -> CompositionState:
 
 
 def _chroma_persist_outside_data_dir_state(tmp_path: Path) -> CompositionState:
-    blobs_dir = tmp_path / "blobs"
-    outputs_dir = tmp_path / "outputs"
-    blobs_dir.mkdir(exist_ok=True)
-    outputs_dir.mkdir(exist_ok=True)
+    blobs_dir = tmp_path / "blobs" / "test-session"
+    outputs_dir = tmp_path / "outputs" / "test-session"
+    blobs_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
     input_path = blobs_dir / "input.csv"
     input_path.write_text("id,text\n1,Ada\n", encoding="utf-8")
     return CompositionState(
@@ -326,7 +327,7 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
     monkeypatch.setattr(CSVSink, "__init__", sink_init)
 
     result = await run_sync_in_worker(
-        validate_pipeline_for_trained_operator,
+        partial(validate_pipeline_for_trained_operator, session_id="test-session"),
         _csv_worker_probe_state(tmp_path),
         _web_settings(tmp_path),
         yaml_generator,
@@ -338,7 +339,10 @@ async def test_run_sync_in_worker_preserves_preflight_mode_for_plugin_constructo
 
 def test_validate_pipeline_rejects_chroma_persist_directory_outside_data_dir(tmp_path: Path) -> None:
     result = validate_pipeline_for_trained_operator(
-        _chroma_persist_outside_data_dir_state(tmp_path), _web_settings(tmp_path), yaml_generator
+        _chroma_persist_outside_data_dir_state(tmp_path),
+        _web_settings(tmp_path),
+        yaml_generator,
+        session_id="test-session",
     )
 
     assert result.is_valid is False

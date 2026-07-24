@@ -30,11 +30,11 @@ VALID_HASH = "a" * 64
 BLOB_ID = UUID("5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b")
 
 
-def _state_with_inline_prompt(tmp_path: Path) -> CompositionState:
-    blobs_dir = tmp_path / "blobs"
-    outputs_dir = tmp_path / "outputs"
-    blobs_dir.mkdir()
-    outputs_dir.mkdir()
+def _state_with_inline_prompt(tmp_path: Path, *, session_id: UUID) -> CompositionState:
+    blobs_dir = tmp_path / "blobs" / str(session_id)
+    outputs_dir = tmp_path / "outputs" / str(session_id)
+    blobs_dir.mkdir(parents=True)
+    outputs_dir.mkdir(parents=True)
 
     return CompositionState(
         source=SourceSpec(
@@ -152,11 +152,13 @@ class _UnusedSessionService:
 
 
 def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path: Path) -> None:
+    session_id = uuid4()
     result = validate_pipeline_for_trained_operator(
-        _state_with_inline_prompt(tmp_path),
+        _state_with_inline_prompt(tmp_path, session_id=session_id),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
         blob_get_metadata=lambda _blob_id: None,
+        session_id=str(session_id),
     )
 
     assert result.is_valid is False
@@ -167,11 +169,13 @@ def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path:
 
 
 def test_validate_blob_inline_failure_has_no_duplicate_check_results(tmp_path: Path) -> None:
+    session_id = uuid4()
     result = validate_pipeline_for_trained_operator(
-        _state_with_inline_prompt(tmp_path),
+        _state_with_inline_prompt(tmp_path, session_id=session_id),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
         blob_get_metadata=lambda _blob_id: None,
+        session_id=str(session_id),
     )
 
     check_names = [check.name for check in result.checks]
@@ -216,10 +220,11 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
     mock_build_graph.return_value = mock_graph
 
     result = validate_pipeline_for_trained_operator(
-        _state_with_inline_prompt(tmp_path),
+        _state_with_inline_prompt(tmp_path, session_id=session_id),
         SimpleNamespace(data_dir=tmp_path),
         composer_yaml_generator,
         blob_get_metadata=lambda _blob_id: _ready_blob_record(session_id=session_id),
+        session_id=str(session_id),
     )
 
     assert result.is_valid is True
@@ -231,6 +236,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 
 @pytest.mark.asyncio
 async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_path: Path) -> None:
+    session_id = uuid4()
     blob_service = _BlobMetadataService(record=None)
     loop = asyncio.get_running_loop()
     service = ExecutionServiceImpl.for_trained_operator(
@@ -250,7 +256,11 @@ async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_
         blob_service=cast(Any, blob_service),
     )
     try:
-        result = await service.validate_state(_state_with_inline_prompt(tmp_path), user_id="user-1")
+        result = await service.validate_state(
+            _state_with_inline_prompt(tmp_path, session_id=session_id),
+            user_id="user-1",
+            session_id=session_id,
+        )
     finally:
         await service.shutdown()
 
@@ -283,7 +293,7 @@ async def test_execution_service_validate_state_treats_cross_session_inline_blob
     )
     try:
         result = await service.validate_state(
-            _state_with_inline_prompt(tmp_path),
+            _state_with_inline_prompt(tmp_path, session_id=requested_session_id),
             user_id="user-1",
             session_id=requested_session_id,
         )

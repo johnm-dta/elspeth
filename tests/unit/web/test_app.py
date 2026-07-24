@@ -342,14 +342,14 @@ class TestHealthEndpoint:
         app = create_app(_settings(tmp_path))
         entered = threading.Event()
         release = threading.Event()
-        real_resolver = readiness_module.allowed_source_directories
+        real_resolver = readiness_module.managed_blob_directory
 
         def blocked_resolver(data_dir: str):
             entered.set()
             release.wait()
             return real_resolver(data_dir)
 
-        monkeypatch.setattr("elspeth.web.readiness.allowed_source_directories", blocked_resolver)
+        monkeypatch.setattr("elspeth.web.readiness.managed_blob_directory", blocked_resolver)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             ready_task = asyncio.create_task(client.get("/api/ready"))

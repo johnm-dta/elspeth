@@ -22,7 +22,7 @@ from sqlalchemy.engine import make_url
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.web.config import WebSettings
 from elspeth.web.deployment_contract import ContractCheck, validate_aws_ecs_settings
-from elspeth.web.paths import allowed_source_directories
+from elspeth.web.paths import managed_blob_directory
 from elspeth.web.schema_probe import (
     DatabaseTargetConflictError,
     SchemaInitBusyError,
@@ -418,7 +418,7 @@ def collect_checks(settings: WebSettings, *, init_schema: bool = False) -> list[
         [
             probe_directory_writable("data_dir", settings.data_dir),
             _probe_payload_store(settings.payload_store_path),
-            probe_directory_writable("blob", allowed_source_directories(str(settings.data_dir))[0]),
+            probe_directory_writable("blob", managed_blob_directory(str(settings.data_dir))),
         ]
     )
     checks.extend(plugin_and_dependency_checks(settings=settings))

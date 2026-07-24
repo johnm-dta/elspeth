@@ -692,10 +692,10 @@ def fake_llm_two_tool_calls(fake_llm_emitting_n_tool_calls: Any) -> _FakeCompose
 
 
 @pytest.fixture
-def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
+def fake_llm_one_set_pipeline_tool_call(tmp_path: Path, result_session_id: str) -> _FakeComposeLLM:
     """Fake LLM that proposes one valid full-pipeline replacement."""
 
-    input_path = tmp_path / "blobs" / "input.csv"
+    input_path = tmp_path / "blobs" / result_session_id / "input.csv"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_text("value\n1\n", encoding="utf-8")
 
@@ -738,7 +738,7 @@ def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
                                     "sink_name": "main",
                                     "plugin": "csv",
                                     "options": {
-                                        "path": str(tmp_path / "outputs" / "output.csv"),
+                                        "path": str(tmp_path / "outputs" / result_session_id / "output.csv"),
                                         "schema": {"mode": "observed"},
                                         "mode": "write",
                                         "collision_policy": "auto_increment",
@@ -757,7 +757,7 @@ def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
 
 
 @pytest.fixture
-def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
+def fake_llm_create_blob_then_set_pipeline(tmp_path: Path, result_session_id: str) -> _FakeComposeLLM:
     """Fake LLM that emits a create_blob proposal followed by a set_pipeline.
 
     Reproduces the live-staging failure shape from session
@@ -774,13 +774,13 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
     valid set_pipeline becomes a pending proposal awaiting operator approval.
     """
 
-    input_path = tmp_path / "blobs" / "agency_urls.csv"
+    input_path = tmp_path / "blobs" / result_session_id / "agency_urls.csv"
     input_path.parent.mkdir(parents=True, exist_ok=True)
     input_path.write_text(
         "url\nhttps://www.example.gov\nhttps://www.example2.gov\n",
         encoding="utf-8",
     )
-    output_path = tmp_path / "outputs" / "review.csv"
+    output_path = tmp_path / "outputs" / result_session_id / "review.csv"
 
     return _FakeComposeLLM(
         (

@@ -1934,7 +1934,7 @@ def _schema8_require_runnable_sink_form(
     from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX
     from elspeth.web.composer.guided.stage_transitions import canonical_sink_local_paths
     from elspeth.web.composer.tools._common import validate_composer_file_sink_collision_policy
-    from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
+    from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_sink_data_path
 
     edited = body.edited_values
     if (
@@ -1953,7 +1953,7 @@ def _schema8_require_runnable_sink_form(
         value = options.get(key)
         if type(value) is not str or not value or value.startswith(BLOB_REF_PATH_PREFIX):
             continue
-        resolved = resolve_data_path(value, data_dir)
+        resolved = resolve_sink_data_path(value, data_dir, session_id=session_id)
         if not any(resolved.is_relative_to(directory) for directory in allowed):
             raise HTTPException(
                 status_code=400,

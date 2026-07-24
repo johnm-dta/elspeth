@@ -58,6 +58,8 @@ def execute_tool(
     catalog: CatalogService,
     **kwargs: Any,
 ) -> Any:
+    if kwargs.get("data_dir") is not None and "session_id" not in kwargs:
+        kwargs["session_id"] = "test-session"
     supplied_snapshot = kwargs.pop("plugin_snapshot", None)
     if isinstance(catalog, PolicyCatalogView):
         if not isinstance(supplied_snapshot, PluginAvailabilitySnapshot):
@@ -317,7 +319,10 @@ class TestFailureSchemaAugmentationSetPipeline:
             "source": {
                 "plugin": "csv",
                 "on_success": "rows",
-                "options": {"path": str(tmp_path / "blobs" / "in.csv"), "schema": {"mode": "observed"}},
+                "options": {
+                    "path": str(tmp_path / "blobs" / "test-session" / "in.csv"),
+                    "schema": {"mode": "observed"},
+                },
                 "on_validation_failure": "discard",
             },
             "nodes": [
@@ -345,7 +350,7 @@ class TestFailureSchemaAugmentationSetPipeline:
                     "sink_name": "main",
                     "plugin": "csv",
                     "options": {
-                        "path": str(tmp_path / "outputs" / "out.csv"),
+                        "path": str(tmp_path / "outputs" / "test-session" / "out.csv"),
                         "schema": {"mode": "observed"},
                         "mode": "write",
                         "collision_policy": "auto_increment",
@@ -579,7 +584,7 @@ class TestFailureSchemaAugmentationPerToolCoverage:
             {
                 "plugin": "csv",
                 "on_success": "rows",
-                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "options": {"path": "/data/blobs/test-session/in.csv", "schema": {"mode": "observed"}},
                 "on_validation_failure": "discard",
             },
             _empty_state(),

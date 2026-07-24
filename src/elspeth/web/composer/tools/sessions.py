@@ -534,7 +534,7 @@ def build_set_pipeline_candidate(
             )
             if credential_error is not None:
                 return _candidate(credential_error)
-            path_error = _validate_source_path(src_options, data_dir)
+            path_error = _validate_source_path(src_options, data_dir, session_id=session_id)
             if path_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {path_error}")
             src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
@@ -674,7 +674,7 @@ def build_set_pipeline_candidate(
         if endpoint_policy_error is not None:
             return _failure_result(state, endpoint_policy_error)
 
-        path_error = _validate_source_path(legacy_src_options, data_dir)
+        path_error = _validate_source_path(legacy_src_options, data_dir, session_id=session_id)
         if path_error is not None:
             return _failure_result(state, path_error)
 

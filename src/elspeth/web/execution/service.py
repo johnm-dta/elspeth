@@ -640,7 +640,7 @@ class ExecutionServiceImpl:
         if composition_state.sources:
             from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
-            allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
+            allowed_dirs = allowed_source_directories(str(self._settings.data_dir), session_id=str(session_id))
             for source_name, source in composition_state.sources.items():
                 for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
                     value = source.options.get(key)
@@ -655,14 +655,14 @@ class ExecutionServiceImpl:
         # Without this, a client can set sink options.path to any absolute or
         # ../ path and /execute will write there.
         if composition_state.outputs:
-            from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_data_path
+            from elspeth.web.paths import SINK_LOCAL_PATH_OPTION_KEYS, allowed_sink_directories, resolve_sink_data_path
 
             allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
             for output in composition_state.outputs:
                 for key in SINK_LOCAL_PATH_OPTION_KEYS:
                     value = output.options.get(key)
                     if value is not None:
-                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        resolved = resolve_sink_data_path(value, str(self._settings.data_dir), session_id=str(session_id))
                         if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
                             raise PathAllowlistViolationError(
                                 f"Sink '{output.name}' {key}='{value}' resolves outside allowed output directories"
@@ -676,7 +676,7 @@ class ExecutionServiceImpl:
             from elspeth.web.paths import (
                 NESTED_LOCAL_PATH_OPTION_KEYS,
                 allowed_sink_directories,
-                resolve_data_path,
+                resolve_sink_data_path,
             )
 
             allowed_sink_dirs = allowed_sink_directories(str(self._settings.data_dir), session_id=str(session_id))
@@ -691,7 +691,7 @@ class ExecutionServiceImpl:
                 for key in NESTED_LOCAL_PATH_OPTION_KEYS:
                     value = provider_config.get(key)
                     if value is not None:
-                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        resolved = resolve_sink_data_path(value, str(self._settings.data_dir), session_id=str(session_id))
                         if not any(resolved.is_relative_to(d) for d in allowed_sink_dirs):
                             raise PathAllowlistViolationError(
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
@@ -823,8 +823,12 @@ class ExecutionServiceImpl:
         # plugins see the same paths the allowlist approved.  Without this,
         # plugins call PathConfig.resolved_path() with no base_dir, which
         # resolves relative paths against CWD — not data_dir.
-        pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(self._settings.data_dir))
-        executable_pipeline_yaml = resolve_runtime_yaml_paths(executable_pipeline_yaml, str(self._settings.data_dir))
+        pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(self._settings.data_dir), session_id=str(session_id))
+        executable_pipeline_yaml = resolve_runtime_yaml_paths(
+            executable_pipeline_yaml,
+            str(self._settings.data_dir),
+            session_id=str(session_id),
+        )
 
         # Pre-validate blob_ref UUID before creating the run record.
         # UUID() can raise ValueError on malformed strings; if that happens

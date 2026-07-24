@@ -690,7 +690,7 @@ class TestExecutionFlow:
         assert submitted_args[4].executable_config is not submitted_args[4].audit_safe_config
 
     @pytest.mark.asyncio
-    async def test_execute_lowers_profile_only_into_frozen_executable_config(
+    async def test_execute_lowers_profile_into_fanout_guard_and_frozen_executable_config(
         self,
         service: ExecutionServiceImpl,
         mock_session_service: MagicMock,
@@ -700,8 +700,11 @@ class TestExecutionFlow:
         from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
         from elspeth.web.composer import yaml_generator
         from elspeth.web.config import WebSettings
+        from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired, evaluate_execution_fanout_guard
+        from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
         from elspeth.web.plugin_policy.compiler import compile_web_plugin_policy
         from elspeth.web.plugin_policy.profiles import OperatorProfileRegistry, RuntimeWebPluginConfig
+        from elspeth.web.plugin_policy.validation import validate_plugin_policy
 
         private_model = "bedrock/anthropic.claude-3-haiku-20240307-v1:0"
         private_region = "ap-southeast-2"
@@ -738,9 +741,9 @@ class TestExecutionFlow:
         (tmp_path / "blobs").mkdir()
         (tmp_path / "outputs").mkdir()
         source_path = tmp_path / "blobs" / "input.txt"
-        source_path.write_text("Ada\n", encoding="utf-8")
+        source_path.write_text("Ada\n" * 34, encoding="utf-8")
         mock_settings.data_dir = tmp_path
-        mock_session_service.get_current_state.return_value = _composition_state_record(
+        state_record = _composition_state_record(
             session_id=session_id,
             source_path=source_path,
             output_path=tmp_path / "outputs" / "output.jsonl",
@@ -757,6 +760,11 @@ class TestExecutionFlow:
                         "prompt_template": "Summarise {{ row }}",
                         "schema": {"mode": "observed", "fields": None},
                         "required_input_fields": [],
+                        "queries": [
+                            {"name": "summary", "input_fields": {"text": "body"}},
+                            {"name": "sentiment", "input_fields": {"text": "body"}},
+                            {"name": "topics", "input_fields": {"text": "body"}},
+                        ],
                         INTERPRETATION_REQUIREMENTS_KEY: [
                             {
                                 "id": "prompt_template_review:summarise",
@@ -774,6 +782,7 @@ class TestExecutionFlow:
                 }
             ],
         )
+        mock_session_service.get_current_state.return_value = state_record
         service._yaml_generator = yaml_generator
         service._plugin_snapshot_factory = lambda _user_id: snapshot
         service._operator_profile_registry = profiles
@@ -781,7 +790,33 @@ class TestExecutionFlow:
         completed.set_result(None)
 
         with patch.object(service._executor, "submit", return_value=completed) as submit:
-            await service.execute(session_id=session_id, user_id="alice")
+            with pytest.raises(ExecutionFanoutGuardRequired) as raised:
+                await service.execute(session_id=session_id, user_id="alice")
+
+            risk = raised.value.guard.risks[0]
+            assert risk.provider == "bedrock"
+            assert risk.model == private_model
+            assert risk.provider_calls_per_row == 3
+            assert risk.estimated_provider_calls == 102
+            materialized_state = materialize_state_for_execution(state_from_record(state_record))
+            assert not isinstance(materialized_state, InterpretationReviewPending)
+            executable_state = validate_plugin_policy(
+                materialized_state,
+                snapshot=snapshot,
+                profile_registry=profiles,
+                catalog=create_catalog_service(),
+            ).executable_state
+            expected_guard = evaluate_execution_fanout_guard(executable_state, data_dir=tmp_path)
+            assert expected_guard is not None
+            assert raised.value.guard.ack_token == expected_guard.ack_token
+            assert private_region in json.dumps(executable_state.to_dict(), default=dict)
+            assert private_region not in json.dumps(raised.value.guard.to_dict())
+
+            await service.execute(
+                session_id=session_id,
+                user_id="alice",
+                fanout_ack_token=raised.value.guard.ack_token,
+            )
 
         frozen = submit.call_args.args[4]
         executable = json.dumps(frozen.executable_config, default=dict)

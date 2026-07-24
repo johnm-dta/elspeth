@@ -13,7 +13,7 @@ the supported AWS ECS deployment profile. The notes below intentionally cover
 only release-level changes and critical correctness or security fixes.
 
 **Breaking pre-1.0 schema cutover:** `SESSION_SCHEMA_EPOCH` advances from 26
-to 35, guided checkpoints advance from schema 7 to 10, and Landscape
+to 36, guided checkpoints advance from schema 7 to 10, and Landscape
 `SQLITE_SCHEMA_EPOCH` advances from 22 to 29. ELSPETH does not migrate either
 predecessor database in place before 1.0. Archive or export required evidence,
 stop the old service, recreate stale session and Landscape stores, then install
@@ -85,6 +85,10 @@ service drained and repair this release forward.
   providers return closed rejection codes, remote OTLP endpoints require TLS,
   malformed ODBC brace syntax fails closed, and auth state compensates when its
   audit write cannot be persisted.
+- **Blob deletion cleanup remains retryable after metadata commit** — the
+  session store retains the exact staged tombstone until its unlink and parent
+  directory fsync both succeed, allowing direct and failed-fork cleanup to
+  resume safely after a process restart.
 
 ## 0.7.0 - 2026-07-09 (LLM-primary guided pipeline creation)
 

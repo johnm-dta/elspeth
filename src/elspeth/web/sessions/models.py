@@ -166,7 +166,10 @@ from elspeth.core.schema_identity import create_schema_identity_table
 #        from dispatching the same pending proposal under competing operations.
 #        Epoch 34 is rejected outright; no migration or compatibility decoder
 #        exists.
-SESSION_SCHEMA_EPOCH = 35
+#   36 -> ``blob_deletion_cleanups`` retains the exact staged filesystem delete
+#        across post-commit unlink/fsync failures. Epoch 35 cannot make those
+#        purges retryable after the ``blobs`` row is gone and is rejected.
+SESSION_SCHEMA_EPOCH = 36
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -2109,6 +2112,30 @@ blobs_table = Table(
         "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash ~ '^[a-f0-9]+$')",
         name="ck_blobs_ready_hash",
     ).ddl_if(dialect="postgresql"),
+)
+
+# A blob delete spans two durability domains: the metadata row is removed in a
+# database transaction, then its same-directory filesystem tombstone is unlinked
+# and the parent directory is fsynced. Keep the exact stage transactionally so a
+# post-commit purge failure remains discoverable and retryable after restart.
+# This row deliberately does not reference ``blobs.id`` because the blob row and
+# its dependent run links are removed in the same transaction that creates this
+# cleanup record. Session archival owns the whole blob directory, so its cascade
+# may retire cleanup rows after moving that directory into archive quarantine.
+blob_deletion_cleanups_table = Table(
+    "blob_deletion_cleanups",
+    metadata,
+    Column("blob_id", String, primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    Column("storage_path", String, nullable=False),
+    Column("tombstone_path", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
 # Index for the reverse-lookup path: "given a chat message, which inline

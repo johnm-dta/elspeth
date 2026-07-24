@@ -2,7 +2,7 @@
 
 Use this runbook when a pre-1.0 schema change requires deleting or archiving stale `sessions.db` and Landscape databases. Any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must coordinate both databases in one service-stop window. Before 1.0, the supported upgrade is uninstall, archive/export when required, recreate, and reinstall; ELSPETH does not migrate either database in place. Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
-## Current Cutover: Composer parity (session epoch 35 and Landscape epoch 29)
+## Current Cutover: Composer parity (session epoch 36 and Landscape epoch 29)
 
 0.7.1 advances `SESSION_SCHEMA_EPOCH` from 26 to 27 so
 `user_preferences.freeform_intro_dismissed_at` can persist the account-wide
@@ -14,8 +14,10 @@ guided operations, and to epoch 30 because the closed
 boundary makes a fork quota failure settle and replay as a stable HTTP 413.
 Later hard cuts add guided pipeline-proposal replay (31), exact failed-operation
 audit cohorts (32), guided-start negative admission (33), guided schema 10 (34),
-and exclusive guided-confirmation proposal admission (35). An epoch-34 database
-cannot enforce the current dispatch boundary and must be recreated. The universal web
+and exclusive guided-confirmation proposal admission (35). Durable blob-deletion
+cleanup state advances the session store again to epoch 36 so a committed delete
+whose tombstone unlink or directory fsync fails remains retryable after restart.
+An epoch-35 database cannot represent that recovery state and must be recreated. The universal web
 plugin-policy work also advances
 `SQLITE_SCHEMA_EPOCH` from 22 to 23 and adds `run_web_plugin_policy`. This
 table is optional per run but required in the schema: web runs receive one
@@ -32,7 +34,7 @@ transaction-owned sidecar-journal outbox.
 
 Archive and recreate the session database, its sidecars, and every stale
 Landscape database under the service-stop procedure below. Every predecessor
-session epoch is a recreate boundary, including epoch 34. Landscape epoch 29
+session epoch is a recreate boundary, including epoch 35. Landscape epoch 29
 is the current release boundary; recreate a Landscape database only when
 its own sentinel is stale. Any stale PostgreSQL session shape is recreated by
 the schema owner; the runtime role remains DML-only.
@@ -49,9 +51,9 @@ reset requirement and database-operator approval; previous release identity
 and epochs; forward and backward compatibility decisions; and an explicit
 `rollback_permitted` decision with evidence. Older code is not compatible with
 the freshly recreated current databases. Rollback across this boundary is
-unsupported: keep the service drained, repair the epoch-35 release forward,
+unsupported: keep the service drained, repair the epoch-36 release forward,
 recreate fresh state, and retry. Plans 10 and 12 must cite the
-session-epoch-35/Landscape-epoch-29 record when binding candidate and rollback
+session-epoch-36/Landscape-epoch-29 record when binding candidate and rollback
 decisions.
 
 Deployments crossing the 0.7.0 boundary from an older release must also account
@@ -517,10 +519,10 @@ After health checks pass, prove the recreated session store carries the current
 hard-cut sentinel before creating any session:
 
 ```bash
-sqlite3 "$DB_PATH" 'PRAGMA user_version;'  # expect 35 (== SESSION_SCHEMA_EPOCH)
+sqlite3 "$DB_PATH" 'PRAGMA user_version;'  # expect 36 (== SESSION_SCHEMA_EPOCH)
 ```
 
-An epoch-34 result is not repairable in place: keep the service drained,
+An epoch-35 result is not repairable in place: keep the service drained,
 recreate the session database with the current release, and rerun the probe.
 Then create a new session through the API or UI and confirm no
 `SessionSchemaError` appears in the service journal.

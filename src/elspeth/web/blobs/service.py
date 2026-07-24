@@ -66,6 +66,7 @@ from elspeth.web.sessions.locking import (
     sqlite_process_session_lock,
 )
 from elspeth.web.sessions.models import (
+    blob_deletion_cleanups_table,
     blob_run_links_table,
     blobs_table,
     chat_messages_table,
@@ -88,6 +89,7 @@ _INLINE_CUSTODY_NAMESPACE = UUID("8ef5fd65-8a90-5fe4-9084-eab5b9d2d2db")
 _INLINE_CUSTODY_SCHEMA = "elspeth.inline-custody.v1"
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _GUIDED_INLINE_CUSTODY_OPERATION_KINDS = ("guided_plan", "guided_respond")
+_LOWERCASE_UUID_HEX = re.compile(r"[0-9a-f]{32}\Z")
 
 
 class _NormalizedInlineCustodyFields(TypedDict):
@@ -561,6 +563,41 @@ def _finalize_staged_blob_deletion(stage: _StagedBlobDeletion) -> None:
         stage.tombstone.unlink(missing_ok=True)
         _fsync_parent_directory(stage.storage.parent)
     _remove_blob_temp_artifacts(stage.storage)
+
+
+def _registered_blob_deletion_stage(
+    row: Row[Any],
+    *,
+    data_dir: Path,
+    blob_id: str,
+    session_id: str,
+) -> _StagedBlobDeletion:
+    """Reconstruct and validate a durable post-commit deletion stage."""
+
+    if row.blob_id != blob_id or row.session_id != session_id:
+        raise AuditIntegrityError("Blob deletion cleanup identity does not match the requested blob custody")
+    if type(row.storage_path) is not str:
+        raise AuditIntegrityError("Blob deletion cleanup storage path is not a string")
+    storage = Path(row.storage_path)
+    expected_parent = data_dir / "blobs" / session_id
+    if storage.parent != expected_parent or not storage.name.startswith(f"{blob_id}_"):
+        raise AuditIntegrityError(f"Blob deletion cleanup storage path escapes blob custody: {storage}")
+
+    if row.tombstone_path is None:
+        tombstone = None
+    else:
+        if type(row.tombstone_path) is not str:
+            raise AuditIntegrityError("Blob deletion cleanup tombstone path is not a string")
+        tombstone = Path(row.tombstone_path)
+        tombstone_prefix = f".{storage.name}.delete-"
+        tombstone_suffix = tombstone.name.removeprefix(tombstone_prefix)
+        if (
+            tombstone.parent != expected_parent
+            or not tombstone.name.startswith(tombstone_prefix)
+            or _LOWERCASE_UUID_HEX.fullmatch(tombstone_suffix) is None
+        ):
+            raise AuditIntegrityError(f"Blob deletion cleanup tombstone path escapes blob custody: {tombstone}")
+    return _StagedBlobDeletion(storage=storage, tombstone=tombstone)
 
 
 def _validate_reusable_blob_row(
@@ -1572,6 +1609,15 @@ class BlobServiceImpl:
         stage = _stage_blob_deletion(storage)
 
         try:
+            conn.execute(
+                blob_deletion_cleanups_table.insert().values(
+                    blob_id=blob_id_str,
+                    session_id=row.session_id,
+                    storage_path=str(stage.storage),
+                    tombstone_path=str(stage.tombstone) if stage.tombstone is not None else None,
+                    created_at=self._now(),
+                )
+            )
             # Session qualification is required even though the UUID is
             # globally unique: callers with stronger custody knowledge must
             # never delete a row rebound outside that custody boundary.
@@ -1588,16 +1634,46 @@ class BlobServiceImpl:
             raise
         return stage
 
+    def _finalize_registered_blob_deletion(
+        self,
+        *,
+        held_connection: Connection | None,
+        blob_id_str: str,
+        session_id_str: str,
+        stage: _StagedBlobDeletion,
+    ) -> None:
+        """Purge staged bytes durably, then retire their retry record."""
+
+        _finalize_staged_blob_deletion(stage)
+        with _blob_phase_transaction(self._engine, held_connection) as conn:
+            _acquire_blob_phase_lock(conn, session_id_str)
+            deleted = conn.execute(
+                blob_deletion_cleanups_table.delete()
+                .where(blob_deletion_cleanups_table.c.blob_id == blob_id_str)
+                .where(blob_deletion_cleanups_table.c.session_id == session_id_str)
+            )
+            if deleted.rowcount != 1:
+                raise AuditIntegrityError(f"blob {blob_id_str} lost its durable deletion cleanup record before purge completion")
+
     async def delete_blob(self, blob_id: UUID) -> None:
         """Delete blob metadata and backing file."""
         blob_id_str = str(blob_id)
 
         def _sync() -> None:
             with self._engine.connect() as lookup_conn:
-                session_id = lookup_conn.execute(select(blobs_table.c.session_id).where(blobs_table.c.id == blob_id_str)).scalar()
+                blob_session_id = lookup_conn.execute(
+                    select(blobs_table.c.session_id).where(blobs_table.c.id == blob_id_str)
+                ).scalar_one_or_none()
+                cleanup_session_id = lookup_conn.execute(
+                    select(blob_deletion_cleanups_table.c.session_id).where(blob_deletion_cleanups_table.c.blob_id == blob_id_str)
+                ).scalar_one_or_none()
+            if blob_session_id is not None and cleanup_session_id is not None:
+                raise AuditIntegrityError(f"blob {blob_id_str} has both live metadata and committed deletion cleanup state")
+            session_id = blob_session_id if blob_session_id is not None else cleanup_session_id
             if session_id is None:
                 raise BlobNotFoundError(blob_id_str)
             stage: _StagedBlobDeletion | None = None
+            restore_uncommitted_stage = False
             # Keep the process/session lock across transaction commit and the
             # corresponding restore-or-purge filesystem phase.
             with _blob_custody_session_lock(self._engine, session_id) as held_connection:
@@ -1606,16 +1682,40 @@ class BlobServiceImpl:
                         _acquire_blob_phase_lock(conn, session_id)
                         # Re-read only after the shared lock: custody/proposal/
                         # delete decisions must observe one serial order.
-                        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
-                        if row is None:
+                        row = conn.execute(
+                            select(blobs_table).where(blobs_table.c.id == blob_id_str).where(blobs_table.c.session_id == session_id)
+                        ).one_or_none()
+                        cleanup_row = conn.execute(
+                            select(blob_deletion_cleanups_table)
+                            .where(blob_deletion_cleanups_table.c.blob_id == blob_id_str)
+                            .where(blob_deletion_cleanups_table.c.session_id == session_id)
+                            .with_for_update()
+                        ).one_or_none()
+                        if row is not None and cleanup_row is not None:
+                            raise AuditIntegrityError(f"blob {blob_id_str} has overlapping live and deletion cleanup state")
+                        if cleanup_row is not None:
+                            stage = _registered_blob_deletion_stage(
+                                cleanup_row,
+                                data_dir=self._data_dir,
+                                blob_id=blob_id_str,
+                                session_id=session_id,
+                            )
+                        elif row is None:
                             raise BlobNotFoundError(blob_id_str)
-                        stage = self._delete_blob_row_locked(conn, row=row, blob_id_str=blob_id_str)
+                        else:
+                            stage = self._delete_blob_row_locked(conn, row=row, blob_id_str=blob_id_str)
+                            restore_uncommitted_stage = True
                 except BaseException as primary_exc:
-                    if stage is not None:
+                    if restore_uncommitted_stage and stage is not None:
                         _restore_staged_blob_deletion(stage, primary_exc)
                     raise
                 if stage is not None:
-                    _finalize_staged_blob_deletion(stage)
+                    self._finalize_registered_blob_deletion(
+                        held_connection=held_connection,
+                        blob_id_str=blob_id_str,
+                        session_id_str=session_id,
+                        stage=stage,
+                    )
 
         await self._run_sync(_sync)
 
@@ -2104,12 +2204,30 @@ class BlobServiceImpl:
                         operation_id=operation_id,
                     )
                     snapshot_ids = tuple(
-                        UUID(row.id)
-                        for row in conn.execute(select(blobs_table.c.id).where(blobs_table.c.session_id == target_session_id_str)).all()
+                        sorted(
+                            {
+                                *(
+                                    UUID(row.id)
+                                    for row in conn.execute(
+                                        select(blobs_table.c.id).where(blobs_table.c.session_id == target_session_id_str)
+                                    ).all()
+                                ),
+                                *(
+                                    UUID(row.blob_id)
+                                    for row in conn.execute(
+                                        select(blob_deletion_cleanups_table.c.blob_id).where(
+                                            blob_deletion_cleanups_table.c.session_id == target_session_id_str
+                                        )
+                                    ).all()
+                                ),
+                            },
+                            key=str,
+                        )
                     )
 
                 for blob_id in snapshot_ids:
                     stage: _StagedBlobDeletion | None = None
+                    restore_uncommitted_stage = False
                     try:
                         try:
                             with _blob_phase_transaction(self._engine, held_connection) as conn:
@@ -2131,14 +2249,35 @@ class BlobServiceImpl:
                                     .where(blobs_table.c.session_id == target_session_id_str)
                                     .with_for_update()
                                 ).one_or_none()
-                                if row is not None:
+                                cleanup_row = conn.execute(
+                                    select(blob_deletion_cleanups_table)
+                                    .where(blob_deletion_cleanups_table.c.blob_id == str(blob_id))
+                                    .where(blob_deletion_cleanups_table.c.session_id == target_session_id_str)
+                                    .with_for_update()
+                                ).one_or_none()
+                                if row is not None and cleanup_row is not None:
+                                    raise AuditIntegrityError(f"blob {blob_id} has overlapping live and deletion cleanup state")
+                                if cleanup_row is not None:
+                                    stage = _registered_blob_deletion_stage(
+                                        cleanup_row,
+                                        data_dir=self._data_dir,
+                                        blob_id=str(blob_id),
+                                        session_id=target_session_id_str,
+                                    )
+                                elif row is not None:
                                     stage = self._delete_blob_row_locked(conn, row=row, blob_id_str=str(blob_id))
+                                    restore_uncommitted_stage = True
                         except BaseException as primary_exc:
-                            if stage is not None:
+                            if restore_uncommitted_stage and stage is not None:
                                 _restore_staged_blob_deletion(stage, primary_exc)
                             raise
                         if stage is not None:
-                            _finalize_staged_blob_deletion(stage)
+                            self._finalize_registered_blob_deletion(
+                                held_connection=held_connection,
+                                blob_id_str=str(blob_id),
+                                session_id_str=target_session_id_str,
+                                stage=stage,
+                            )
                     except (BlobError, SQLAlchemyError, OSError) as cleanup_exc:
                         errors.append(
                             BlobForkCleanupError(

@@ -93,6 +93,13 @@ def test_initialize_session_schema_creates_current_schema_without_alembic_table(
     assert "rows_routed_failure" in run_columns
     assert "content_hash" in {column["name"] for column in inspector.get_columns("blobs")}
     assert "ck_blobs_ready_hash" in {check["name"] for check in inspector.get_check_constraints("blobs")}
+    assert {column["name"] for column in inspector.get_columns("blob_deletion_cleanups")} == {
+        "blob_id",
+        "session_id",
+        "storage_path",
+        "tombstone_path",
+        "created_at",
+    }
 
 
 def test_postgres_schema_emits_native_audit_trigger_ddl() -> None:
@@ -268,8 +275,8 @@ def test_initialize_session_schema_rejects_partial_stale_schema() -> None:
         initialize_session_schema(eng)
 
 
-def test_initialize_session_schema_rejects_epoch_34_database() -> None:
-    """An epoch-34 DB without exclusive proposal admission fails at boot.
+def test_initialize_session_schema_rejects_epoch_35_database() -> None:
+    """An epoch-35 DB without durable blob deletion cleanup fails at boot.
 
     Seed a complete current-schema DB, then re-stamp only the SQLite epoch.
     Because the SQL shape and cross-dialect identity row remain current, the
@@ -278,12 +285,12 @@ def test_initialize_session_schema_rejects_epoch_34_database() -> None:
     eng = create_session_engine("sqlite:///:memory:")
     initialize_session_schema(eng)  # full schema + stamps the CURRENT epoch
     with eng.begin() as conn:
-        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 34 WHERE store_kind = 'session'"))
-        conn.execute(text("PRAGMA user_version = 34"))
+        conn.execute(text("UPDATE elspeth_schema_identity SET schema_epoch = 35 WHERE store_kind = 'session'"))
+        conn.execute(text("PRAGMA user_version = 35"))
     assert probe_current_schema(eng) is False
     with pytest.raises(
         SessionSchemaError,
-        match=r"Session DB schema version 34 does not match SESSION_SCHEMA_EPOCH=35.*Delete the session DB file and restart",
+        match=r"Session DB schema version 35 does not match SESSION_SCHEMA_EPOCH=36.*Delete the session DB file and restart",
     ):
         initialize_session_schema(eng)
 
@@ -323,7 +330,7 @@ def test_epoch_30_database_without_schema_9_operation_contract_fails_closed_with
 
     with pytest.raises(
         SessionSchemaError,
-        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=35.*"
+        match=r"Session DB schema version 30 does not match SESSION_SCHEMA_EPOCH=36.*"
         r"Delete the session DB file and restart",
     ):
         initialize_session_schema(stale_engine)

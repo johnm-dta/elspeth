@@ -183,7 +183,7 @@ changes.
   persisted with their controlling transitions.
 
 **Operational:** 0.7.1 is a pre-1.0 database cutover. The session store moves
-from epoch 26 to 35 (guided schema 7 to 10), and Landscape moves from epoch 22
+from epoch 26 to 36 (guided schema 7 to 10), and Landscape moves from epoch 22
 to 29. Archive or export evidence as required, stop the old service, recreate
 both stale stores, and install 0.7.1. Do not roll older code back over the
 recreated databases. `data/auth.db` remains separate; recreating the session

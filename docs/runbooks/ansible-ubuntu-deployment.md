@@ -2931,8 +2931,8 @@ and crashes the service with an actionable error if it diverges from the
 constant the running code expects:
 
 ```text
-SessionSchemaError: Session DB schema version 34 does not match
-SESSION_SCHEMA_EPOCH=35. Pre-release ELSPETH does not migrate session
+SessionSchemaError: Session DB schema version 35 does not match
+SESSION_SCHEMA_EPOCH=36. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.
 ```
 
@@ -2978,7 +2978,8 @@ exhausts and the unit goes into `failed` state.
 | 32 | Binds exact audit evidence to failed guided operations. |
 | 33 | Adds the durable guided-start negative admission barrier. |
 | 34 | Adds guided schema 10 and removes obsolete advisor counters. |
-| 35 | Current schema; adds exclusive guided-confirmation proposal admission. |
+| 35 | Adds exclusive guided-confirmation proposal admission. |
+| 36 | Current schema; adds durable retry state for post-commit blob tombstone cleanup. |
 
 The constant should be the authoritative reference; this table is a
 durability aid for operators reading the runbook in isolation.

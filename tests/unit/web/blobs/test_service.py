@@ -436,6 +436,92 @@ class TestDeleteBlob:
         assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
 
     @pytest.mark.asyncio
+    async def test_delete_blob_tombstone_unlink_failure_is_retryable_after_restart(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        db_engine,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A committed delete retains enough state to retry a failed unlink."""
+        content = b"retry-tombstone-unlink-content"
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="retry-tombstone-unlink.csv",
+            content=content,
+            mime_type="text/csv",
+            created_by="user",
+        )
+        storage = Path(record.storage_path)
+        original_unlink = Path.unlink
+        fail_tombstone_unlink = True
+
+        def fail_first_tombstone_unlink(path: Path, missing_ok: bool = False) -> None:
+            nonlocal fail_tombstone_unlink
+            if fail_tombstone_unlink and ".delete-" in path.name:
+                fail_tombstone_unlink = False
+                raise OSError("injected tombstone unlink failure")
+            original_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_first_tombstone_unlink)
+
+        with pytest.raises(OSError, match="injected tombstone unlink failure"):
+            await blob_service.delete_blob(record.id)
+
+        with pytest.raises(BlobNotFoundError):
+            await blob_service.get_blob(record.id)
+        tombstones = list(storage.parent.glob(f".{storage.name}.delete-*"))
+        assert len(tombstones) == 1
+        assert tombstones[0].read_bytes() == content
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        await restarted.delete_blob(record.id)
+
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_post_unlink_fsync_failure_is_retryable_after_restart(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        db_engine,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A retry repeats directory fsync after unlink succeeded but fsync failed."""
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="retry-post-unlink-fsync.csv",
+            content=b"retry-post-unlink-fsync-content",
+            mime_type="text/csv",
+            created_by="user",
+        )
+        storage = Path(record.storage_path)
+        fsync_calls = 0
+
+        def fail_first_purge_fsync(_directory: Path) -> None:
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 2:
+                raise OSError("injected post-unlink directory fsync failure")
+
+        monkeypatch.setattr(blob_service_module, "_fsync_parent_directory", fail_first_purge_fsync)
+
+        with pytest.raises(OSError, match="injected post-unlink directory fsync failure"):
+            await blob_service.delete_blob(record.id)
+
+        with pytest.raises(BlobNotFoundError):
+            await blob_service.get_blob(record.id)
+        assert not storage.exists()
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        await restarted.delete_blob(record.id)
+
+        assert fsync_calls == 3
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("tool_name", "arguments"),
         [
@@ -3232,6 +3318,49 @@ class TestCopyBlobsForFork:
         assert tuple(second.deleted_ids) == ()
         assert tuple(second.errors) == ()
         assert await blob_service.list_blobs(target_session_id, limit=None) == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_retries_committed_tombstone_after_unlink_failure(
+        self,
+        blob_service: BlobServiceImpl,
+        db_engine,
+        session_id: UUID,
+        target_session_id: UUID,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source = await blob_service.create_blob(session_id, "first.csv", b"first", "text/csv")
+        copied = await self._copy(blob_service, session_id, target_session_id)
+        target = copied[source.id]
+        storage = Path(target.storage_path)
+        operation_id = self._fail_fork(blob_service, session_id, target_session_id)
+        original_unlink = Path.unlink
+        fail_tombstone_unlink = True
+
+        def fail_first_tombstone_unlink(path: Path, missing_ok: bool = False) -> None:
+            nonlocal fail_tombstone_unlink
+            if fail_tombstone_unlink and ".delete-" in path.name:
+                fail_tombstone_unlink = False
+                raise OSError("injected fork tombstone unlink failure")
+            original_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_first_tombstone_unlink)
+
+        first = await blob_service.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
+
+        assert tuple(first.deleted_ids) == ()
+        assert len(first.errors) == 1
+        assert first.errors[0].blob_id == target.id
+        assert first.errors[0].exc_type == "OSError"
+        assert "injected fork tombstone unlink failure" in first.errors[0].detail
+        assert len(list(storage.parent.glob(f".{storage.name}.delete-*"))) == 1
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        second = await restarted.cleanup_blobs_for_fork(session_id, target_session_id, operation_id)
+
+        assert tuple(second.deleted_ids) == (target.id,)
+        assert tuple(second.errors) == ()
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
 
     @pytest.mark.asyncio
     async def test_cleanup_rejects_wrong_parent_and_preserves_child_blobs(

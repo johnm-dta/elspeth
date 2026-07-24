@@ -102,7 +102,7 @@
     <div class="section-head" style="max-width:70ch">
       <span class="eyebrow">Important upgrade posture</span>
       <h2>Pre-1.0 databases are recreated, not migrated.</h2>
-      <p>APIs, interfaces, and schemas are unstable before 1.0; ELSPETH makes no backward-compatibility promise. From 0.7.0 to 0.7.1, <code>SESSION_SCHEMA_EPOCH</code> changes 26 → 35, the guided schema changes 7 → 10, and Landscape <code>SQLITE_SCHEMA_EPOCH</code> changes 22 → 29.</p>
+      <p>APIs, interfaces, and schemas are unstable before 1.0; ELSPETH makes no backward-compatibility promise. From 0.7.0 to 0.7.1, <code>SESSION_SCHEMA_EPOCH</code> changes 26 → 36, the guided schema changes 7 → 10, and Landscape <code>SQLITE_SCHEMA_EPOCH</code> changes 22 → 29.</p>
       <p>Archive or export needed evidence, stop the old service, and recreate incompatible session and Landscape stores. Do not run older code over recreated databases: there is no in-place migration. The separate <code>auth.db</code> is not the session or Landscape store.</p>
     </div>
   </div>

@@ -123,7 +123,7 @@ def test_get_started_has_runnable_cli_and_complete_composer_paths() -> None:
     assert "npm install" in html and "npm run build" in html
     assert "ELSPETH_WEB__SECRET_KEY" in html
     assert "elspeth composer users add" in html and "--password" in html
-    assert "SESSION_SCHEMA_EPOCH" in html and "26 → 35" in html
+    assert "SESSION_SCHEMA_EPOCH" in html and "26 → 36" in html
     assert "SQLITE_SCHEMA_EPOCH" in html and "22 → 29" in html
     assert "aws-ecs-deployment.md" in html
 

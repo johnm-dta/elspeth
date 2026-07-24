@@ -149,7 +149,19 @@ def prepare_guided_audit_rows(
 
     rows: list[PreparedGuidedAuditRow] = []
     for invocation in invocations:
-        content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
+        content: str
+        envelope: dict[str, Any]
+        authentic_guided_synthetic = is_authentic_guided_synthetic_invocation(invocation)
+        if authentic_guided_synthetic:
+            # These are closed, server-authored event schemas whose exact
+            # hashes and bounded values were validated above. They are not
+            # model-dispatched Composer tools and intentionally do not live
+            # in MANIFEST, so the generic unknown-tool sentinel would destroy
+            # their payload custody (including payload-reference binding).
+            content = json.dumps({"error_class": None, "error_message": None})
+            envelope = {"_kind": "audit", "invocation": invocation.to_dict()}
+        else:
+            content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
         if invocation.status is not ComposerToolStatus.SUCCESS:
             omitted_arguments = canonical_json({"_redaction_status": "guided_failure_payload_omitted"})
             invocation_projection = deep_thaw(envelope["invocation"])
@@ -166,9 +178,8 @@ def prepare_guided_audit_rows(
                     "error_class": invocation.error_class,
                 }
             )
-        elif invocation.tool_name not in MANIFEST:
-            if not is_authentic_guided_synthetic_invocation(invocation):
-                content, envelope = _omitted_success_invocation(invocation)
+        elif invocation.tool_name not in MANIFEST and not authentic_guided_synthetic:
+            content, envelope = _omitted_success_invocation(invocation)
         rows.append(PreparedGuidedAuditRow(kind="tool", content=content, envelope=envelope))
     for call in llm_calls:
         content = json.dumps(

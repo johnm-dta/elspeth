@@ -174,10 +174,11 @@ def test_guided_route_handler_module_positions_remain_at_the_signed_layout() -> 
         "get_guided": 47,
         "get_guided_tutorial_sample": 48,
         "post_guided_reenter": 49,
-        "post_guided_start": 50,
-        "post_guided_respond": 64,
-        "post_guided_chat": 66,
-        "post_guided_convert": 67,
+        "reconcile_guided_start_operation": 50,
+        "post_guided_start": 51,
+        "post_guided_respond": 66,
+        "post_guided_chat": 68,
+        "post_guided_convert": 69,
     }
 
     actual_positions = {

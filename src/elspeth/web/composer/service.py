@@ -131,6 +131,7 @@ from elspeth.web.composer.protocol import (
     PipelineCommitIntent,
     ToolArgumentError,
 )
+from elspeth.web.composer.provider_config import infer_provider_from_model_name, infer_provider_from_unprefixed_model_name
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -1246,6 +1247,15 @@ class ComposerServiceImpl:
         self._operator_profile_registry = operator_profile_registry
         self._trained_operator_mode = trained_operator_mode
         self._settings = settings
+        advisor_provider = infer_provider_from_model_name(settings.composer_advisor_model) or infer_provider_from_unprefixed_model_name(
+            settings.composer_advisor_model
+        )
+        if advisor_provider is None:
+            raise ValueError(
+                "composer_advisor_model provider could not be inferred; use a provider-prefixed model name "
+                "or a recognized OpenAI/Anthropic model name"
+            )
+        self._advisor_provider = advisor_provider
         self._runtime_preflight_timeout_seconds = settings.composer_runtime_preflight_timeout_seconds
         self._runtime_preflight_coordinator = runtime_preflight_coordinator or RuntimePreflightCoordinator()
         self._availability = self._compute_availability()
@@ -2394,6 +2404,7 @@ class ComposerServiceImpl:
                 max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
                 escape_hatch_model=self._settings.composer_advisor_model,
+                escape_hatch_provider=self._advisor_provider,
             ),
             rendered_skill=self._composer_skill_text,
             repair_budget=self._settings.composer_planner_repair_budget,
@@ -2648,6 +2659,7 @@ class ComposerServiceImpl:
                 max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                 api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
                 escape_hatch_model=self._settings.composer_advisor_model,
+                escape_hatch_provider=self._advisor_provider,
             ),
             rendered_skill=load_step_planner_skill(guided.step),
             repair_budget=self._settings.composer_planner_repair_budget,
@@ -2932,6 +2944,7 @@ class ComposerServiceImpl:
                         max_api_attempts=_LLM_API_MAX_ATTEMPTS,
                         api_retry_base_seconds=_LLM_API_RETRY_BASE_DELAY_SECONDS,
                         escape_hatch_model=self._settings.composer_advisor_model,
+                        escape_hatch_provider=self._advisor_provider,
                     ),
                     rendered_skill=rendered_skill,
                     repair_budget=self._settings.composer_planner_repair_budget,

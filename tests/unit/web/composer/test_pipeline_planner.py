@@ -2401,6 +2401,18 @@ def test_escape_hatch_model_must_be_none_or_nonempty() -> None:
         _model(_ScriptedCompletion(), escape_hatch_model="   ")
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"escape_hatch_model": "openrouter/advisor-under-test"},
+        {"escape_hatch_provider": "openrouter"},
+    ],
+)
+def test_escape_hatch_model_and_provider_must_be_configured_together(overrides: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="escape_hatch_model and escape_hatch_provider"):
+        _model(_ScriptedCompletion(), **overrides)
+
+
 @pytest.mark.asyncio
 async def test_discovery_pressure_notice_injected_at_two_turns_remaining(
     tmp_path: Path,
@@ -2441,7 +2453,11 @@ async def test_escape_hatch_overtime_turn_runs_advisor_with_terminal_tool_only(
         tool_context=tool_context,
         completion=completion,
         recorder=recorder,
-        model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+        model_overrides={
+            "max_discovery_turns": 1,
+            "escape_hatch_model": "openrouter/advisor-under-test",
+            "escape_hatch_provider": "openrouter",
+        },
     )
 
     assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
@@ -2466,8 +2482,54 @@ async def test_escape_hatch_overtime_turn_runs_advisor_with_terminal_tool_only(
         "anthropic/claude-planner",
         "openrouter/advisor-under-test",
     ]
+    assert proposal.model_identifier == "openrouter/advisor-under-test"
+    assert proposal.provider == "openrouter"
     # The second discovery batch was never dispatched.
     assert [invocation.tool_name for invocation in recorder.invocations] == ["list_sources"]
+
+
+@pytest.mark.asyncio
+async def test_escape_hatch_provider_identity_reaches_inline_custody(
+    tmp_path: Path,
+    tool_context: ToolContext,
+) -> None:
+    engine, origin = await _session_context(content="Generate a fresh CSV after discovery.")
+    completion = _ScriptedCompletion(
+        _response(("list_sources", {})),
+        _response(("list_sinks", {})),
+        _response(("emit_pipeline_proposal", {"pipeline": _inline_pipeline(tmp_path)})),
+    )
+    recorder = BufferingRecorder()
+
+    proposal = await _plan(
+        tmp_path=tmp_path,
+        tool_context=tool_context,
+        completion=completion,
+        recorder=recorder,
+        originating_message=origin,
+        custody_config=PlannerCustodyConfig(
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            max_storage_per_session=1_000_000,
+            secret_service=None,
+            runtime_preflight=None,
+        ),
+        model_overrides={
+            "max_discovery_turns": 1,
+            "escape_hatch_model": "openrouter/advisor-under-test",
+            "escape_hatch_provider": "openrouter",
+        },
+    )
+
+    blob_id = proposal.proposal.to_dict()["pipeline"]["source"]["blob_id"]
+    with engine.begin() as conn:
+        row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id)).mappings().one()
+
+    assert recorder.llm_calls[-1].model_requested == "openrouter/advisor-under-test"
+    assert proposal.model_identifier == "openrouter/advisor-under-test"
+    assert proposal.provider == "openrouter"
+    assert row["creating_model_identifier"] == "openrouter/advisor-under-test"
+    assert row["creating_provider"] == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -2486,7 +2548,11 @@ async def test_escape_hatch_text_reply_is_honest_decline(
             tmp_path=tmp_path,
             tool_context=tool_context,
             completion=completion,
-            model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+            model_overrides={
+                "max_discovery_turns": 1,
+                "escape_hatch_model": "openrouter/advisor-under-test",
+                "escape_hatch_provider": "openrouter",
+            },
         )
 
     assert excinfo.value.code == "DECLINED"
@@ -2510,7 +2576,11 @@ async def test_escape_hatch_non_terminal_reply_reraises_original_exhaustion(
             tmp_path=tmp_path,
             tool_context=tool_context,
             completion=completion,
-            model_overrides={"max_discovery_turns": 1, "escape_hatch_model": "openrouter/advisor-under-test"},
+            model_overrides={
+                "max_discovery_turns": 1,
+                "escape_hatch_model": "openrouter/advisor-under-test",
+                "escape_hatch_provider": "openrouter",
+            },
         )
 
     assert excinfo.value.code == "DISCOVERY_EXHAUSTED"
@@ -2535,7 +2605,10 @@ async def test_escape_hatch_fires_on_repair_exhaustion(
         completion=completion,
         recorder=recorder,
         repair_budget=1,
-        model_overrides={"escape_hatch_model": "openrouter/advisor-under-test"},
+        model_overrides={
+            "escape_hatch_model": "openrouter/advisor-under-test",
+            "escape_hatch_provider": "openrouter",
+        },
     )
 
     assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)
@@ -2583,7 +2656,10 @@ async def test_escape_hatch_fires_on_discovery_cycle(
         tool_context=tool_context,
         completion=completion,
         recorder=recorder,
-        model_overrides={"escape_hatch_model": "openrouter/advisor-under-test"},
+        model_overrides={
+            "escape_hatch_model": "openrouter/advisor-under-test",
+            "escape_hatch_provider": "openrouter",
+        },
     )
 
     assert deep_thaw(proposal.proposal.pipeline) == _pipeline(tmp_path)

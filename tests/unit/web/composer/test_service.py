@@ -93,6 +93,13 @@ from tests.unit.web.composer._helpers import (
 )
 
 
+def test_service_rejects_uninferrable_advisor_provider() -> None:
+    settings = _make_settings(composer_advisor_model="custom-model-without-provider")
+
+    with pytest.raises(ValueError, match="composer_advisor_model provider could not be inferred"):
+        ComposerServiceImpl.for_trained_operator(catalog=_mock_catalog(), settings=settings)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("profile", "expected_surface", "expected_profile"),

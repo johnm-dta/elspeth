@@ -176,6 +176,7 @@ class PlannerModelConfig:
     # Senior advisor model for the one-shot escape-hatch overtime turn.
     # None disables the hatch: budget exhaustion raises exactly as before.
     escape_hatch_model: str | None = None
+    escape_hatch_provider: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("model_identifier", "provider"):
@@ -184,6 +185,12 @@ class PlannerModelConfig:
                 raise ValueError(f"{name} must be a non-empty exact string")
         if self.escape_hatch_model is not None and (type(self.escape_hatch_model) is not str or not self.escape_hatch_model.strip()):
             raise ValueError("escape_hatch_model must be a non-empty exact string or None")
+        if self.escape_hatch_provider is not None and (
+            type(self.escape_hatch_provider) is not str or not self.escape_hatch_provider.strip()
+        ):
+            raise ValueError("escape_hatch_provider must be a non-empty exact string or None")
+        if (self.escape_hatch_model is None) != (self.escape_hatch_provider is None):
+            raise ValueError("escape_hatch_model and escape_hatch_provider must be configured together")
         for name in ("max_composition_turns", "max_discovery_turns", "max_tool_calls_per_turn", "max_api_attempts"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -1716,12 +1723,18 @@ async def _plan_pipeline_inner(
                 )
                 continue
             assert pipeline is not None
+            effective_provider = model_config.provider
+            if is_hatch_turn:
+                assert model_config.escape_hatch_provider is not None
+                effective_provider = model_config.escape_hatch_provider
             finalized_pipeline = candidate_finalizer(pipeline)
             if type(finalized_pipeline) is not dict:
                 raise AuditIntegrityError("pipeline candidate finalizer must return an exact dict")
             terminal_context = replace(
                 request_context,
+                composer_model_identifier=audited_call.model_requested,
                 composer_model_version=audited_call.model_returned or audited_call.model_requested,
+                composer_provider=effective_provider,
             )
             try:
                 if (
@@ -1763,7 +1776,7 @@ async def _plan_pipeline_inner(
                     run_sync=run_planner_sync,
                     model_identifier=audited_call.model_requested,
                     model_version=audited_call.model_returned or audited_call.model_requested,
-                    provider=model_config.provider,
+                    provider=effective_provider,
                 )
             except DeferredIntentClaimError:
                 last_rejection_codes = ("deferred_intent_claim",)

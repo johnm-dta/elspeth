@@ -146,7 +146,7 @@ class SeedCompositionStateRequest(BaseModel):
         "raises ValueError from path resolution rather than being coerced"
     ),
     test_ref="tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_source_options_reference_blob_storage_raises_on_nul_byte_path",
-    test_fingerprint="18ac99a70b815badb2f8ef53eb3061e7cb3d8b13299965bc591e559d2d961bf9",
+    test_fingerprint="b8fe8c2cfa05ee4a2ab7637e8c981a22226fee2b38657b770c649d13e96310ac",
 )
 def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
     blob_root = managed_blob_directory(data_dir)
@@ -170,7 +170,7 @@ def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_d
         "without a blob_ref binding; blob_ref-bound and non-blob sources pass"
     ),
     test_ref="tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_unbound_blob_storage_sources_raises_400_on_unbound_blob_path",
-    test_fingerprint="bdb265d5ce47ac3963b67735a2d485acdf4bc93c9d091f9b6c2da9c0571ca9a9",
+    test_fingerprint="36cb5dc337b093240d7028a644ba3088509f3b4760f6f694a78a59024afc995f",
 )
 def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: str) -> None:
     for source_name, source in state.sources.items():
@@ -197,7 +197,7 @@ def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: s
     test_ref=(
         "tests/unit/web/sessions/routes/composer/test_state_boundaries.py::test_reject_disallowed_source_paths_raises_400_outside_allowlist"
     ),
-    test_fingerprint="ee81505482c502b3bed9e0ce1ccb6fa1e94983ce0e147ebf6e6461bf61038ca1",
+    test_fingerprint="c28cbd4b88b4649f5617dffed78e013d0b0317904975c8114607dd63ff9324f0",
 )
 def _reject_disallowed_source_paths(state: CompositionState, *, data_dir: str, session_id: str) -> None:
     allowed_dirs = allowed_source_directories(data_dir, session_id=session_id)

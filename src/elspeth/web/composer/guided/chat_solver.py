@@ -1558,7 +1558,7 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
     test_ref=(
         "tests/unit/web/composer/guided/test_chat_solver.py::test_parse_step_2_sink_translates_strict_snapshot_failures_to_malformed"
     ),
-    test_fingerprint="283f5a4c664af76b2cc2aa111d84d276e17bbbf25e61a1cbec2ce10a39ff7237",
+    test_fingerprint="f780f40674b16cd1dbd4b826824c3e35ca8b4e2767589fae5125c456c64d6a6d",
 )
 def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
     """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""

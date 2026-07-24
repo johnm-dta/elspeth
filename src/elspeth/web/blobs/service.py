@@ -526,8 +526,13 @@ def _stage_blob_deletion(storage: Path) -> _StagedBlobDeletion:
         return _StagedBlobDeletion(storage=storage, tombstone=None)
     tombstone = storage.with_name(f".{storage.name}.delete-{uuid4().hex}")
     os.replace(storage, tombstone)
-    _fsync_parent_directory(storage.parent)
-    return _StagedBlobDeletion(storage=storage, tombstone=tombstone)
+    stage = _StagedBlobDeletion(storage=storage, tombstone=tombstone)
+    try:
+        _fsync_parent_directory(storage.parent)
+    except BaseException as primary_exc:
+        _restore_staged_blob_deletion(stage, primary_exc)
+        raise
+    return stage
 
 
 def _restore_staged_blob_deletion(stage: _StagedBlobDeletion, primary_exc: BaseException) -> None:

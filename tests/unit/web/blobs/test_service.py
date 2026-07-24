@@ -398,6 +398,44 @@ class TestDeleteBlob:
         assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
 
     @pytest.mark.asyncio
+    async def test_delete_blob_staging_fsync_failure_restores_file_before_stage_escapes(
+        self,
+        blob_service: BlobServiceImpl,
+        session_id: UUID,
+        db_engine,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A staging fsync failure must not strand live metadata without bytes."""
+        content = b"staging-fsync-boundary-content"
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="staging-fsync-boundary.csv",
+            content=content,
+            mime_type="text/csv",
+            created_by="user",
+        )
+        storage = Path(record.storage_path)
+        fsync_calls = 0
+
+        def fail_staging_fsync(_directory: Path) -> None:
+            nonlocal fsync_calls
+            fsync_calls += 1
+            if fsync_calls == 1:
+                raise OSError("injected staging directory fsync failure")
+
+        monkeypatch.setattr(blob_service_module, "_fsync_parent_directory", fail_staging_fsync)
+
+        with pytest.raises(OSError, match="injected staging directory fsync failure"):
+            await blob_service.delete_blob(record.id)
+
+        restarted = BlobServiceImpl(db_engine, tmp_path)
+        assert (await restarted.get_blob(record.id)).id == record.id
+        assert storage.read_bytes() == content
+        assert await restarted.read_blob_content(record.id) == content
+        assert list(storage.parent.glob(f".{storage.name}.delete-*")) == []
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("tool_name", "arguments"),
         [

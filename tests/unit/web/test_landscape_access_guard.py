@@ -194,6 +194,7 @@ def test_real_web_tree_has_only_the_reviewed_direct_call_map() -> None:
         ("src/elspeth/web/aws_ecs_acceptance.py", "from_url"),
         ("src/elspeth/web/aws_ecs_acceptance.py", "from_url"),
         ("src/elspeth/web/aws_ecs_acceptance.py", "from_url"),
+        ("src/elspeth/web/aws_ecs_acceptance.py", "from_url"),
         ("src/elspeth/web/execution/accounting.py", "from_url"),
         ("src/elspeth/web/execution/diagnostics.py", "from_url"),
         ("src/elspeth/web/execution/discard_summary.py", "from_url"),

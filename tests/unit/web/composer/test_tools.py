@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -9003,6 +9004,248 @@ class TestSetPipeline:
                 session_id=session_id,
                 **_verbatim_blob_context(engine, session_id, "name,email\n"),
             )
+
+    def test_set_pipeline_oversized_inline_csv_field_returns_bounded_failure(self, tmp_path: Path) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        oversized_content = f"{'x' * ((64 * 1024) + 1)}\n"
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "oversized.csv",
+                "mime_type": "text/csv",
+                "content": oversized_content,
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, oversized_content),
+        )
+
+        assert result.success is False
+        assert result.data["error"] == "Refusing inline CSV because it exceeds bounded CSV inspection limits."
+        assert "x" * 32 not in result.data["error"]
+
+    @pytest.mark.parametrize(
+        "unsafe_content",
+        [f"{'x' * ((64 * 1024) + 1)}\n", '"unterminated\n', "url\x00\n"],
+        ids=["oversized_field", "malformed_quoting", "nul"],
+    )
+    def test_source_blob_review_classification_contains_unsafe_csv(self, unsafe_content: str) -> None:
+        from elspeth.web.composer.tools.sources import _source_blob_review_user_term
+
+        assert _source_blob_review_user_term(mime_type="text/csv", content=unsafe_content) == "inline_source_data"
+
+    @pytest.mark.parametrize(
+        "malformed_content",
+        ['"unterminated\n', "name,em\x00ail\n"],
+        ids=["malformed_quoting", "nul"],
+    )
+    def test_set_pipeline_malformed_inline_csv_returns_bounded_failure(
+        self,
+        tmp_path: Path,
+        malformed_content: str,
+    ) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "malformed.csv",
+                "mime_type": "text/csv",
+                "content": malformed_content,
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"].update(
+            {
+                "path": str(tmp_path / "outputs" / "out.csv"),
+                "mode": "write",
+                "collision_policy": "auto_increment",
+            }
+        )
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, malformed_content),
+        )
+
+        assert result.success is False
+        assert result.data["error"] == "Refusing inline CSV because it exceeds bounded CSV inspection limits."
+        assert malformed_content not in result.data["error"]
+
+    def test_set_pipeline_candidate_csv_parser_error_escalates_as_integrity_failure(self, tmp_path: Path) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = f"{'x' * 64}\nrow\n"
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_oversized.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="oversized.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content.encode("utf-8")),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description="uploaded rows",
+                    status="ready",
+                )
+            )
+        inline_content = "name,email\n"
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": inline_content,
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+        previous_limit = csv.field_size_limit()
+        csv.field_size_limit(32)
+        try:
+            with pytest.raises(AuditIntegrityError, match="bounded CSV inspection"):
+                execute_tool(
+                    "set_pipeline",
+                    args,
+                    state,
+                    catalog,
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                    **_verbatim_blob_context(engine, session_id, inline_content),
+                )
+        finally:
+            csv.field_size_limit(previous_limit)
+
+    @pytest.mark.parametrize(
+        ("candidate_count", "match_on_read", "expected_reads", "expected_error"),
+        [
+            (50, 50, 50, "header-only inline CSV"),
+            (51, None, 0, "candidate scan limit"),
+        ],
+        ids=["match_at_budget", "over_budget"],
+    )
+    def test_set_pipeline_header_only_candidate_scan_has_fixed_file_read_budget(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        candidate_count: int,
+        match_on_read: int | None,
+        expected_reads: int,
+        expected_error: str,
+    ) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.web.composer.tools import sources as sources_module
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert(),
+                [
+                    {
+                        "id": str(uuid4()),
+                        "session_id": session_id,
+                        "filename": f"candidate-{index}.csv",
+                        "mime_type": "text/csv",
+                        "size_bytes": 1024,
+                        "content_hash": _STUB_SHA256,
+                        "storage_path": str(tmp_path / f"missing-{index}.csv"),
+                        "created_at": now,
+                        "created_by": "user",
+                        "source_description": "uploaded rows",
+                        "status": "ready",
+                    }
+                    for index in range(candidate_count)
+                ],
+            )
+
+        reads = 0
+
+        def _record_read(_path: Path) -> tuple[str, ...] | None:
+            nonlocal reads
+            reads += 1
+            return ("name", "email") if reads == match_on_read else None
+
+        monkeypatch.setattr(sources_module, "_first_nonempty_csv_row_from_path", _record_read)
+        inline_content = "name,email\n"
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": inline_content,
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, inline_content),
+        )
+
+        assert result.success is False
+        assert expected_error in result.data["error"]
+        assert reads == expected_reads
 
     def test_set_pipeline_unknown_source_plugin_fails(self) -> None:
         state = _empty_state()

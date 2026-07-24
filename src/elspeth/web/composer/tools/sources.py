@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TypedDict
@@ -76,6 +76,25 @@ from elspeth.web.sessions.models import blobs_table
 _INSPECT_SOURCE_MAX_BYTES = 8 * 1024
 _BLOB_HASH_CHUNK_BYTES = 1024 * 1024
 _INLINE_CSV_HEADER_READ_BYTES = 64 * 1024
+_CSV_FIELD_MAX_CHARS = 64 * 1024
+_CSV_MAX_COLUMNS = 4096
+_INLINE_CSV_CANDIDATE_SCAN_LIMIT = 50
+
+
+class _CsvContentBoundaryError(ValueError):
+    """One redacted domain error for unsafe or malformed CSV content."""
+
+
+def _bounded_csv_rows(content: str) -> Iterator[list[str]]:
+    """Yield CSV rows while containing parser and structural limit failures."""
+
+    try:
+        for row in csv.reader(io.StringIO(content), strict=True):
+            if len(row) > _CSV_MAX_COLUMNS or any(len(cell) > _CSV_FIELD_MAX_CHARS or "\x00" in cell for cell in row):
+                raise _CsvContentBoundaryError("CSV content exceeds bounded inspection limits")
+            yield row
+    except csv.Error as exc:
+        raise _CsvContentBoundaryError("CSV content exceeds bounded inspection limits") from exc
 
 
 class InspectSourceArgumentsModel(BaseModel):
@@ -255,8 +274,10 @@ def _source_blob_review_user_term(*, mime_type: str, content: str) -> str:
     """Choose the stable Class 2 review term for an LLM-authored source blob."""
     if mime_type != "text/csv":
         return "inline_source_data"
-    rows = csv.reader(io.StringIO(content))
-    header = next(rows, ())
+    try:
+        header = next(_bounded_csv_rows(content), ())
+    except _CsvContentBoundaryError:
+        return "inline_source_data"
     if len(header) == 1 and header[0].strip().lower() == "url":
         return "inline_source_url_list"
     return "inline_source_data"
@@ -664,7 +685,7 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
 
 def _first_nonempty_csv_row(content: str) -> tuple[str, ...] | None:
     """Return the first non-empty CSV row, if any."""
-    for row in csv.reader(io.StringIO(content)):
+    for row in _bounded_csv_rows(content):
         if any(cell.strip() for cell in row):
             return tuple(row)
     return None
@@ -679,10 +700,14 @@ def _first_nonempty_csv_row_from_path(path: Path) -> tuple[str, ...] | None:
 
 def _is_header_only_csv(content: str) -> tuple[str, ...] | None:
     """Return the sole CSV row when content is header-only, otherwise None."""
-    nonempty_rows = [tuple(row) for row in csv.reader(io.StringIO(content)) if any(cell.strip() for cell in row)]
-    if len(nonempty_rows) != 1:
-        return None
-    return nonempty_rows[0]
+    header: tuple[str, ...] | None = None
+    for row in _bounded_csv_rows(content):
+        if not any(cell.strip() for cell in row):
+            continue
+        if header is not None:
+            return None
+        header = tuple(row)
+    return header
 
 
 def _read_inspection_prefix_and_hash(path: Path) -> tuple[bytes, str]:
@@ -710,20 +735,31 @@ def _header_only_inline_csv_conflict(
     """Reject schema-only CSV blobs when a matching uploaded CSV is ready."""
     if prepared.mime_type != "text/csv":
         return None
-    header = _is_header_only_csv(prepared.content_bytes.decode("utf-8"))
+    try:
+        header = _is_header_only_csv(prepared.content_bytes.decode("utf-8"))
+    except _CsvContentBoundaryError:
+        return "Refusing inline CSV because it exceeds bounded CSV inspection limits."
     if header is None:
         return None
 
     with session_engine.connect() as conn:
         rows = conn.execute(
-            select(blobs_table).where(
+            select(blobs_table)
+            .where(
                 blobs_table.c.session_id == session_id,
                 blobs_table.c.mime_type == "text/csv",
                 blobs_table.c.status == "ready",
                 blobs_table.c.created_by == "user",
                 blobs_table.c.size_bytes > len(prepared.content_bytes),
             )
+            .limit(_INLINE_CSV_CANDIDATE_SCAN_LIMIT + 1)
         ).fetchall()
+
+    if len(rows) > _INLINE_CSV_CANDIDATE_SCAN_LIMIT:
+        return (
+            "Refusing header-only inline CSV because the ready uploaded CSV candidate scan limit was exceeded. "
+            "Bind the intended uploaded file with source.blob_id or call list_blobs then set_source_from_blob."
+        )
 
     matches: list[BlobToolRecord] = []
     for row in rows:
@@ -737,6 +773,10 @@ def _header_only_inline_csv_conflict(
         except OSError as exc:
             raise AuditIntegrityError(
                 f"Ready uploaded blob '{blob['id']}' storage_path could not be read during set_pipeline inline CSV custody check"
+            ) from exc
+        except _CsvContentBoundaryError as exc:
+            raise AuditIntegrityError(
+                f"Ready uploaded blob '{blob['id']}' could not be parsed within bounded CSV inspection limits"
             ) from exc
         if candidate_header == header:
             matches.append(blob)

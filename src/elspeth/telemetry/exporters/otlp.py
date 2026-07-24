@@ -9,7 +9,7 @@ Converts ELSPETH TelemetryEvents to OpenTelemetry Spans and ships them via gRPC.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC
+from datetime import UTC, datetime
 from ipaddress import ip_address
 from time import time_ns
 from typing import TYPE_CHECKING, Any, TypedDict
@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import structlog
 from opentelemetry.sdk.trace.export import SpanExportResult
 
+from elspeth.contracts.events import RunFinished, RunStarted
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 from elspeth.telemetry.resource_identity import is_aws_ecs_name, is_aws_resource_label, is_aws_task_revision, is_release_identity
 from elspeth.telemetry.serialization import (
@@ -36,6 +37,7 @@ logger = structlog.get_logger(__name__)
 
 _MAX_RESOURCE_IDENTITY_CHARS = 128
 _MAX_BATCH_SIZE = 10_000
+_MAX_TRACKED_TRACE_RUNS = 10_000
 
 
 class OTLPDeliveryMetrics(TypedDict):
@@ -149,6 +151,7 @@ class OTLPExporter:
         self._consecutive_failures = 0
         self._last_success_unix_nano: int | None = None
         self._lifecycle_failures = 0
+        self._trace_started_at: dict[str, datetime] = {}
 
     @property
     def name(self) -> str:
@@ -412,8 +415,24 @@ class OTLPExporter:
         """
         from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
-        # Derive IDs
-        trace_id = derive_trace_id(event.run_id)
+        # X-Ray interprets the high trace-ID word as the trace-start epoch.
+        # Remember the first durable lifecycle timestamp so every later span
+        # for the run preserves the same identity.
+        started_at = self._trace_started_at.get(event.run_id)
+        if isinstance(event, RunStarted):
+            if started_at is not None and int(started_at.timestamp()) != int(event.timestamp.timestamp()):
+                raise TelemetryExporterError(self._name, "run trace start changed after binding")
+            started_at = event.timestamp
+        elif started_at is None:
+            # Standalone/custom telemetry may not include RunStarted. Its first
+            # observed event still needs a structurally valid trace identity.
+            started_at = event.timestamp
+        if event.run_id not in self._trace_started_at and len(self._trace_started_at) >= _MAX_TRACKED_TRACE_RUNS:
+            raise TelemetryExporterError(self._name, "active trace identity capacity exceeded")
+        self._trace_started_at[event.run_id] = started_at
+        trace_id = derive_trace_id(event.run_id, started_at=started_at)
+        if isinstance(event, RunFinished):
+            self._trace_started_at.pop(event.run_id, None)
         span_id = generate_span_id()
 
         # Convert timestamp to nanoseconds since epoch

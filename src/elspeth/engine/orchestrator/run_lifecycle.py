@@ -229,7 +229,9 @@ class RunLifecycleCoordinator:
             # Emit telemetry AFTER Landscape succeeds - Landscape is the legal record
             self._ceremony.emit_telemetry(
                 RunStarted(
-                    timestamp=datetime.now(UTC),
+                    # Bind telemetry identity to the timestamp committed with
+                    # the Landscape run, not a later process-local clock read.
+                    timestamp=run.started_at,
                     run_id=run.run_id,
                     config_hash=run.config_hash,
                     source_plugin=first_source.name,

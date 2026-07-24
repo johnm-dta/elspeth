@@ -2966,6 +2966,8 @@ class AuditSentinel(Protocol):
 
     def terminal_status(self, run_id: str) -> str: ...
 
+    def started_at(self, run_id: str) -> datetime: ...
+
 
 class TelemetrySentinelEmitter(Protocol):
     def emit_web_metric(self, sentinel_value: int, *, acceptance_namespace: str) -> bool: ...
@@ -2976,7 +2978,7 @@ class TelemetrySentinelEmitter(Protocol):
 class TelemetryQueries(Protocol):
     def metric_observed(self, *, metric_name: str, sentinel_value: int, acceptance_namespace: str) -> bool: ...
 
-    def trace_observed(self, *, trace_name: str, run_id: str) -> bool: ...
+    def trace_observed(self, *, trace_name: str, run_id: str, started_at: datetime) -> bool: ...
 
     def trace_terminal_status(self, *, run_id: str) -> str | None: ...
 
@@ -2997,12 +2999,15 @@ def operator_metric_dimensions(settings: Any) -> tuple[tuple[str, str], ...]:
     return tuple(dimensions)
 
 
-def xray_trace_id(run_id: str) -> str:
-    """Return the AWS X-Ray spelling of ELSPETH's deterministic OTel trace ID."""
+def xray_trace_id(run_id: str, *, started_at: datetime) -> str:
+    """Return an X-Ray trace ID bound to the durable run-start epoch."""
 
     if type(run_id) is not str or not run_id or len(run_id) > 256:
         raise OperatorTelemetryAcceptanceError("X-Ray run identity is invalid")
-    hexadecimal = f"{derive_trace_id(run_id):032x}"
+    try:
+        hexadecimal = f"{derive_trace_id(run_id, started_at=started_at):032x}"
+    except (TypeError, ValueError, OverflowError):
+        raise OperatorTelemetryAcceptanceError("X-Ray run start is invalid") from None
     return f"1-{hexadecimal[:8]}-{hexadecimal[8:]}"
 
 
@@ -3168,10 +3173,10 @@ class AWSOperatorTelemetryQueries:
             documents.append(parsed)
         return documents
 
-    def trace_observed(self, *, trace_name: str, run_id: str) -> bool:
+    def trace_observed(self, *, trace_name: str, run_id: str, started_at: datetime) -> bool:
         if trace_name not in _TRACE_NAMES:
             raise OperatorTelemetryAcceptanceError("X-Ray trace name is invalid")
-        expected_trace_id = xray_trace_id(run_id)
+        expected_trace_id = xray_trace_id(run_id, started_at=started_at)
         try:
             raw = self._xray.batch_get_traces(TraceIds=[expected_trace_id])
         except Exception:
@@ -3285,14 +3290,17 @@ class PublicApiLifecycleAudit:
         *,
         capture_runner: Callable[..., AcceptanceState] = capture,
         status_reader: Callable[[Any, str], str | None] | None = None,
+        started_at_reader: Callable[[Any, str], datetime | None] | None = None,
     ) -> None:
         self._settings = settings
         self._env = dict(env)
         self._env.pop("ELSPETH_ACCEPTANCE_REGISTER", None)
         self._capture_runner = capture_runner
         self._status_reader = status_reader or _read_landscape_terminal_status
+        self._started_at_reader = started_at_reader or _read_landscape_started_at
         self._state: AcceptanceState | None = None
         self._verified_status: str | None = None
+        self._started_at: datetime | None = None
 
     def execute_lifecycle_run(self) -> str:
         try:
@@ -3318,6 +3326,15 @@ class PublicApiLifecycleAudit:
             self._verified_status = self._status_reader(self._settings, run_id)
         return self._verified_status or ""
 
+    def started_at(self, run_id: str) -> datetime:
+        if self._state is None or run_id != self._state.landscape_run_id:
+            raise OperatorTelemetryAcceptanceError("Landscape run start is unavailable")
+        if self._started_at is None:
+            self._started_at = self._started_at_reader(self._settings, run_id)
+        if self._started_at is None:
+            raise OperatorTelemetryAcceptanceError("Landscape run start is unavailable")
+        return self._started_at
+
 
 class ExistingLandscapeLifecycleAudit:
     """Verify a browser-authenticated lifecycle run without handling its bearer token."""
@@ -3328,13 +3345,16 @@ class ExistingLandscapeLifecycleAudit:
         run_id: str,
         *,
         status_reader: Callable[[Any, str], str | None] | None = None,
+        started_at_reader: Callable[[Any, str], datetime | None] | None = None,
     ) -> None:
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", run_id) is None:
             raise OperatorTelemetryAcceptanceError("existing Landscape run identity is invalid")
         self._settings = settings
         self._run_id = run_id
         self._status_reader = status_reader or _read_landscape_terminal_status
+        self._started_at_reader = started_at_reader or _read_landscape_started_at
         self._verified_status: str | None = None
+        self._started_at: datetime | None = None
 
     def execute_lifecycle_run(self) -> str:
         return self._run_id
@@ -3352,6 +3372,15 @@ class ExistingLandscapeLifecycleAudit:
             self._verified_status = self._status_reader(self._settings, run_id)
         return self._verified_status or ""
 
+    def started_at(self, run_id: str) -> datetime:
+        if run_id != self._run_id:
+            raise OperatorTelemetryAcceptanceError("Landscape run start is unavailable")
+        if self._started_at is None:
+            self._started_at = self._started_at_reader(self._settings, run_id)
+        if self._started_at is None:
+            raise OperatorTelemetryAcceptanceError("Landscape run start is unavailable")
+        return self._started_at
+
 
 def _read_landscape_terminal_status(settings: Any, run_id: str) -> str | None:
     try:
@@ -3367,6 +3396,22 @@ def _read_landscape_terminal_status(settings: Any, run_id: str) -> str | None:
     if run is None or run.completed_at is None:
         return None
     return run.status.value
+
+
+def _read_landscape_started_at(settings: Any, run_id: str) -> datetime | None:
+    try:
+        with LandscapeDB.from_url(
+            settings.get_landscape_url(),
+            passphrase=settings.landscape_passphrase,
+            create_tables=False,
+            read_only=True,
+        ) as database:
+            run = RecorderFactory.read_only(database).run_lifecycle.get_run(run_id)
+    except Exception:
+        raise OperatorTelemetryAcceptanceError("Landscape lifecycle query failed") from None
+    if run is None:
+        return None
+    return run.started_at.replace(tzinfo=UTC) if run.started_at.tzinfo is None else run.started_at.astimezone(UTC)
 
 
 class AWSOperatorMetricEmitter:
@@ -3537,6 +3582,7 @@ def verify_operator_telemetry(
     landscape_status = audit.terminal_status(run_id)
     if landscape_status != "completed":
         raise OperatorTelemetryAcceptanceError("Landscape terminal status was not completed")
+    started_at = audit.started_at(run_id)
 
     metric_delivery = emitter.emit_web_metric(sentinel_value, acceptance_namespace=acceptance_namespace)
     if not metric_delivery:
@@ -3551,7 +3597,11 @@ def verify_operator_telemetry(
             acceptance_namespace=acceptance_namespace,
         )
         for trace_name in _TRACE_NAMES:
-            trace_seen[trace_name] = trace_seen[trace_name] or queries.trace_observed(trace_name=trace_name, run_id=run_id)
+            trace_seen[trace_name] = trace_seen[trace_name] or queries.trace_observed(
+                trace_name=trace_name,
+                run_id=run_id,
+                started_at=started_at,
+            )
         if metric_seen and all(trace_seen.values()):
             break
         if attempt + 1 < policy.attempts:
@@ -3577,7 +3627,7 @@ def verify_operator_telemetry(
                 {"name": "elspeth.acceptance.sentinel", "value": str(sentinel_value)},
             ],
         },
-        retained_trace_id=xray_trace_id(run_id),
+        retained_trace_id=xray_trace_id(run_id, started_at=started_at),
     )
 
 
@@ -3598,6 +3648,7 @@ def verify_operator_telemetry_outage(
     run_id = audit.execute_lifecycle_run()
     if not run_id:
         raise OperatorTelemetryAcceptanceError("Landscape lifecycle run returned no identity")
+    started_at = audit.started_at(run_id)
 
     metric_delivery = emitter.emit_web_metric(sentinel_value, acceptance_namespace=acceptance_namespace)
     landscape_correct = audit.verify_run(run_id)
@@ -3610,7 +3661,11 @@ def verify_operator_telemetry_outage(
             acceptance_namespace=acceptance_namespace,
         )
         for trace_name in _TRACE_NAMES:
-            cloud_receipt = cloud_receipt or queries.trace_observed(trace_name=trace_name, run_id=run_id)
+            cloud_receipt = cloud_receipt or queries.trace_observed(
+                trace_name=trace_name,
+                run_id=run_id,
+                started_at=started_at,
+            )
         if cloud_receipt:
             break
         if attempt + 1 < policy.attempts:

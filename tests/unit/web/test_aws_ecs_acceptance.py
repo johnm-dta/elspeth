@@ -2051,6 +2051,9 @@ def test_guardrail_live_owner_persists_four_calls_before_forwarding_telemetry_an
     assert persisted_policy == policy_evidence
 
 
+_TELEMETRY_STARTED_AT = datetime(2026, 7, 14, 1, 1, tzinfo=UTC)
+
+
 class _TelemetryAudit:
     def __init__(self, events: list[str]) -> None:
         self.events = events
@@ -2068,6 +2071,10 @@ class _TelemetryAudit:
         assert run_id == "landscape-run-internal"
         self.events.append("audit.status")
         return "completed"
+
+    def started_at(self, run_id: str) -> datetime:
+        assert run_id == "landscape-run-internal"
+        return _TELEMETRY_STARTED_AT
 
 
 class _TelemetryEmitter:
@@ -2099,9 +2106,10 @@ class _TelemetryQueries:
         self.metric_calls += 1
         return self.metric_calls >= self.available_on
 
-    def trace_observed(self, *, trace_name: str, run_id: str) -> bool:
+    def trace_observed(self, *, trace_name: str, run_id: str, started_at: datetime) -> bool:
         assert trace_name in self.trace_calls
         assert run_id == "landscape-run-internal"
+        assert started_at == _TELEMETRY_STARTED_AT
         self.trace_calls[trace_name] += 1
         return self.trace_calls[trace_name] >= self.available_on
 
@@ -2198,7 +2206,8 @@ def test_aws_operator_telemetry_queries_use_exact_metric_dimensions_and_trace_co
     trace_calls: list[dict[str, object]] = []
     sentinel_value = 123456789
     run_id = "landscape-run-internal"
-    trace_id = acceptance.xray_trace_id(run_id)
+    trace_id = acceptance.xray_trace_id(run_id, started_at=_TELEMETRY_STARTED_AT)
+    assert trace_id.split("-")[1] == f"{int(_TELEMETRY_STARTED_AT.timestamp()):08x}"
 
     class CloudWatch:
         def get_metric_data(self, **kwargs: object) -> object:
@@ -2257,8 +2266,8 @@ def test_aws_operator_telemetry_queries_use_exact_metric_dimensions_and_trace_co
         )
         is True
     )
-    assert queries.trace_observed(trace_name="RunStarted", run_id=run_id) is True
-    assert queries.trace_observed(trace_name="RunFinished", run_id=run_id) is True
+    assert queries.trace_observed(trace_name="RunStarted", run_id=run_id, started_at=_TELEMETRY_STARTED_AT) is True
+    assert queries.trace_observed(trace_name="RunFinished", run_id=run_id, started_at=_TELEMETRY_STARTED_AT) is True
     assert queries.trace_terminal_status(run_id=run_id) == "completed"
     metric = metric_calls[0]["MetricDataQueries"][0]["MetricStat"]["Metric"]  # type: ignore[index]
     assert metric == {
@@ -2322,7 +2331,7 @@ def test_aws_operator_telemetry_queries_accept_matching_point_among_repeated_win
         is True
     )
     with pytest.raises(acceptance.OperatorTelemetryAcceptanceError, match="forbidden content"):
-        queries.trace_observed(trace_name="RunStarted", run_id="run-a")
+        queries.trace_observed(trace_name="RunStarted", run_id="run-a", started_at=_TELEMETRY_STARTED_AT)
 
 
 def test_aws_operator_telemetry_queries_treat_absence_as_retryable_and_malformed_or_provider_failures_as_static() -> None:
@@ -2349,7 +2358,7 @@ def test_aws_operator_telemetry_queries_treat_absence_as_retryable_and_malformed
         )
         is False
     )
-    assert queries.trace_observed(trace_name="RunStarted", run_id="run-a") is False
+    assert queries.trace_observed(trace_name="RunStarted", run_id="run-a", started_at=_TELEMETRY_STARTED_AT) is False
 
     class MalformedCloudWatch:
         def get_metric_data(self, **_kwargs: object) -> object:
@@ -2381,14 +2390,14 @@ def test_aws_operator_telemetry_queries_treat_absence_as_retryable_and_malformed
         end_time=datetime(2026, 7, 14, 1, 5, tzinfo=UTC),
     )
     with pytest.raises(acceptance.OperatorTelemetryAcceptanceError, match="X-Ray query") as raised:
-        queries.trace_observed(trace_name="RunStarted", run_id="run-a")
+        queries.trace_observed(trace_name="RunStarted", run_id="run-a", started_at=_TELEMETRY_STARTED_AT)
     assert "raw trace" not in str(raised.value)
 
 
 def test_verify_operator_telemetry_live_positive_uses_default_chain_clients_and_closed_receipt() -> None:
     sentinel = "fixed-non-content-sentinel"
     sentinel_value = int(hashlib.sha256(sentinel.encode()).hexdigest()[:12], 16)
-    trace_id = acceptance.xray_trace_id("landscape-run-internal")
+    trace_id = acceptance.xray_trace_id("landscape-run-internal", started_at=_TELEMETRY_STARTED_AT)
     client_calls: list[tuple[str, str]] = []
 
     class CloudWatch:
@@ -4514,7 +4523,7 @@ def test_positive_operator_receipt_creates_and_binds_exact_retained_checkpoint(t
     _init_control_manifest(manifest_path, bind_retained=False)
     sentinel = "checkpoint-positive-sentinel"
     sentinel_value = int(hashlib.sha256(sentinel.encode()).hexdigest()[:12], 16)
-    trace_id = acceptance.xray_trace_id("landscape-run-internal")
+    trace_id = acceptance.xray_trace_id("landscape-run-internal", started_at=_TELEMETRY_STARTED_AT)
 
     class CloudWatch:
         def get_metric_data(self, **_kwargs: object) -> object:

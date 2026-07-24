@@ -86,6 +86,15 @@ class TestTraceIdDerivation:
         assert trace_id > 0
         assert trace_id < 2**128
 
+    def test_xray_compatible_trace_id_uses_durable_run_start_epoch(self) -> None:
+        """The high 32 bits carry X-Ray's trace-start Unix epoch."""
+        started_at = datetime(2026, 7, 24, 1, 2, 3, tzinfo=UTC)
+
+        trace_id = derive_trace_id("run-12345", started_at=started_at)
+
+        assert trace_id >> 96 == int(started_at.timestamp())
+        assert trace_id & (2**96 - 1) == derive_trace_id("run-12345") & (2**96 - 1)
+
 
 class TestSpanIdGeneration:
     """Tests for random span_id generation."""
@@ -637,8 +646,9 @@ class TestOTLPExporterSpanConversion:
         """Span trace_id is derived from run_id."""
         exporter, mock_sdk = self._create_configured_exporter()
 
+        started_at = datetime(2026, 7, 24, 1, 2, 3, tzinfo=UTC)
         event = RunStarted(
-            timestamp=datetime.now(UTC),
+            timestamp=started_at,
             run_id="run-123",
             config_hash="abc",
             source_plugin="csv",
@@ -646,8 +656,28 @@ class TestOTLPExporterSpanConversion:
         exporter.export(event)
 
         exported_spans = mock_sdk.export.call_args[0][0]
-        expected_trace_id = derive_trace_id("run-123")
+        expected_trace_id = derive_trace_id("run-123", started_at=started_at)
         assert exported_spans[0].context.trace_id == expected_trace_id
+
+    def test_run_finish_reuses_run_start_trace_id(self) -> None:
+        """Later lifecycle events retain the durable start epoch and run hash."""
+        exporter, mock_sdk = self._create_configured_exporter()
+        started_at = datetime(2026, 7, 24, 1, 2, 3, tzinfo=UTC)
+        exporter.export(RunStarted(timestamp=started_at, run_id="run-123", config_hash="abc", source_plugin="csv"))
+        exporter.export(
+            RunFinished(
+                timestamp=started_at.replace(minute=5),
+                run_id="run-123",
+                status=RunStatus.COMPLETED,
+                row_count=1,
+                duration_ms=177_000,
+            )
+        )
+
+        start_span = mock_sdk.export.call_args_list[0][0][0][0]
+        finish_span = mock_sdk.export.call_args_list[1][0][0][0]
+        assert start_span.context.trace_id == finish_span.context.trace_id
+        assert finish_span.context.trace_id >> 96 == int(started_at.timestamp())
 
     def test_span_attributes_contain_event_fields(self) -> None:
         """Span attributes contain all event fields."""

@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -27,20 +27,31 @@ if TYPE_CHECKING:
     from elspeth.contracts.events import TelemetryEvent
 
 
-def derive_trace_id(run_id: str) -> int:
-    """Derive a consistent 128-bit trace ID from run_id.
+def derive_trace_id(run_id: str, *, started_at: datetime | None = None) -> int:
+    """Derive a consistent 128-bit trace ID from run identity.
 
     All events from the same run share the same trace ID, enabling
-    distributed tracing correlation within a pipeline run.
+    distributed tracing correlation within a pipeline run.  When the durable
+    run start is supplied, the high 32 bits carry its Unix epoch as required
+    by AWS X-Ray while the remaining 96 bits retain the run hash.
 
     Args:
-        run_id: Pipeline run identifier
+        run_id: Pipeline run identifier.
+        started_at: Durable pipeline start time for X-Ray-compatible IDs.
 
     Returns:
         128-bit integer suitable for OpenTelemetry trace_id
     """
     hash_bytes = hashlib.sha256(run_id.encode()).digest()[:16]
-    return int.from_bytes(hash_bytes, byteorder="big")
+    if started_at is None:
+        return int.from_bytes(hash_bytes, byteorder="big")
+    if not isinstance(started_at, datetime):
+        raise TypeError("started_at must be a datetime")
+    normalized = started_at.replace(tzinfo=UTC) if started_at.tzinfo is None else started_at.astimezone(UTC)
+    epoch = int(normalized.timestamp())
+    if epoch <= 0 or epoch >= 2**32:
+        raise ValueError("started_at is outside the X-Ray epoch range")
+    return (epoch << 96) | int.from_bytes(hash_bytes[4:], byteorder="big")
 
 
 def generate_span_id() -> int:

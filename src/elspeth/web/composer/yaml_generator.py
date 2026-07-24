@@ -34,7 +34,9 @@ import yaml
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.composer.guided_blob_refs import (
+    GUIDED_REVIEWED_BLOB_PATH_KEYS,
     validate_guided_reviewed_blob_binding,
+    validate_guided_reviewed_blob_ref,
     validate_guided_reviewed_blob_source_mapping,
 )
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState, queue_node_contract_error
@@ -274,22 +276,39 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
     Guided mode can commit sources with only their storage ``path`` while each
     authoritative ``blob_ref`` survives in schema-8 ``reviewed_sources``.
     Public YAML stripping keys off ``blob_ref``, so reattach each binding to a
-    working copy when both the persisted source name and storage path match.
+    working copy. Private reviewed paths must exactly match the live source;
+    public ``blob:<uuid>`` sentinels must match the retained ref and source name,
+    after which the HTTP export boundary verifies live blob custody and the exact
+    private storage path before returning the sidecar.
     """
     guided = state.guided_session
     if guided is None or not guided.reviewed_sources:
         return state
 
     reviewed_bindings: list[tuple[str, frozenset[str], str]] = []
+    sentinel_bindings: list[tuple[str, str]] = []
+    reviewed_names: set[str] = set()
     for snapshot in guided.reviewed_sources.values():
         source_name = snapshot.name
+        if source_name in reviewed_names:
+            raise AuditIntegrityError("guided reviewed source names must be unique")
+        reviewed_names.add(source_name)
         snapshot_options = snapshot.options
         if "blob_ref" not in snapshot_options:
             continue
         blob_ref, blob_backed_paths = validate_guided_reviewed_blob_binding(snapshot_options)
-        reviewed_bindings.append((source_name, blob_backed_paths, blob_ref))
+        sentinel_paths = frozenset(path for path in blob_backed_paths if path.startswith("blob:"))
+        if sentinel_paths:
+            if sentinel_paths != blob_backed_paths:
+                raise AuditIntegrityError("guided reviewed blob source mixes public sentinels and private paths")
+            sentinel_ids = {validate_guided_reviewed_blob_ref(sentinel.removeprefix("blob:")) for sentinel in sentinel_paths}
+            if sentinel_ids != {blob_ref}:
+                raise AuditIntegrityError("guided reviewed blob sentinel and blob_ref differ")
+            sentinel_bindings.append((source_name, blob_ref))
+        else:
+            reviewed_bindings.append((source_name, blob_backed_paths, blob_ref))
 
-    if not reviewed_bindings:
+    if not reviewed_bindings and not sentinel_bindings:
         return state
     validate_guided_reviewed_blob_source_mapping(
         [(name, paths) for name, paths, _blob_ref in reviewed_bindings],
@@ -320,6 +339,23 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
         merged = dict(options)
         merged["blob_ref"] = blob_ref
         reattached[source_name] = replace(source, options=merged)
+        changed = True
+
+    for source_name, blob_ref in sentinel_bindings:
+        sentinel_source = state.sources.get(source_name)
+        if sentinel_source is None:
+            raise AuditIntegrityError("guided blob source mapping is inconsistent")
+        live_carriers = [sentinel_source.options[key] for key in GUIDED_REVIEWED_BLOB_PATH_KEYS if key in sentinel_source.options]
+        if not live_carriers or any(type(value) is not str or not value or "\x00" in value for value in live_carriers):
+            raise AuditIntegrityError("guided blob source mapping is inconsistent")
+        options = sentinel_source.options
+        if "blob_ref" in options:
+            if options["blob_ref"] != blob_ref:
+                raise AuditIntegrityError("guided blob source mapping is inconsistent")
+            continue
+        merged = dict(options)
+        merged["blob_ref"] = blob_ref
+        reattached[source_name] = replace(sentinel_source, options=merged)
         changed = True
 
     return replace(state, sources=reattached) if changed else state

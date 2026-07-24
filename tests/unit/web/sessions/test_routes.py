@@ -7090,6 +7090,75 @@ sinks:
         assert exported_source_options["schema"] == {"mode": "observed"}
 
     @pytest.mark.asyncio
+    async def test_yaml_round_trip_restores_guided_blob_from_reviewed_public_sentinel(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        blob_id = uuid.UUID("98b1357d-5aab-4fb3-85b4-5ad643912e84")
+        session = await service.create_session("alice", "Guided blob pipeline", "local")
+        storage_path = str(tmp_path / "blobs" / str(session.id) / f"{blob_id}_input.csv")
+        get_blob = AsyncMock(
+            spec=BlobServiceProtocol.get_blob,
+            return_value=SimpleNamespace(
+                id=blob_id,
+                session_id=session.id,
+                storage_path=storage_path,
+                status="ready",
+            ),
+        )
+        app.state.blob_service = SimpleNamespace(get_blob=get_blob)
+        stable_id = "11111111-1111-4111-8111-111111111111"
+        guided = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={
+                        "path": f"blob:{blob_id}",
+                        "blob_ref": str(blob_id),
+                        "schema": {"mode": "observed"},
+                    },
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": {"path": storage_path, "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                outputs=[{"name": "out", "plugin": "csv", "options": {}, "on_write_failure": "discard"}],
+                metadata_={"name": "Guided blob pipeline", "description": ""},
+                is_valid=True,
+                composer_meta={"guided_session": guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            exported = client.get(f"/api/sessions/{session.id}/state/yaml")
+            imported = client.post(f"/api/sessions/{session.id}/state/yaml", json=exported.json())
+
+        assert exported.status_code == 200, exported.text
+        assert exported.json()["source_blob_ids"] == {"source": str(blob_id)}
+        assert storage_path not in exported.json()["yaml"]
+        assert imported.status_code == 200, imported.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.sources["source"]["options"]["blob_ref"] == str(blob_id)
+        assert record.sources["source"]["options"]["path"] == storage_path
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "custody_failure",
         [

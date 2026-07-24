@@ -75,6 +75,35 @@ def test_reattaches_blob_ref_from_guided_snapshot() -> None:
     assert "blob_ref" not in state.sources["source"].options
 
 
+def test_reattaches_blob_ref_when_reviewed_snapshot_uses_public_blob_sentinel() -> None:
+    state = _state(
+        source_options={"path": BLOB_PATH, "schema": {"mode": "observed"}},
+        guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=f"blob:{BLOB_REF}"),
+    )
+
+    out = _reattach_guided_blob_refs(state)
+
+    assert out.sources["source"].options == {
+        "path": BLOB_PATH,
+        "schema": {"mode": "observed"},
+        "blob_ref": BLOB_REF,
+    }
+    assert "blob_ref" not in state.sources["source"].options
+
+
+def test_rejects_public_blob_sentinel_that_differs_from_retained_blob_ref() -> None:
+    state = _state(
+        source_options={"path": BLOB_PATH},
+        guided_session=_guided_with_snapshot(
+            blob_ref=BLOB_REF,
+            path="blob:def45600-0000-4000-8000-000000000000",
+        ),
+    )
+
+    with pytest.raises(AuditIntegrityError, match="sentinel and blob_ref differ"):
+        _reattach_guided_blob_refs(state)
+
+
 def test_reattached_state_omits_path_and_yields_sidecar() -> None:
     state = _state(
         source_options={"path": BLOB_PATH, "schema": {"mode": "observed"}},

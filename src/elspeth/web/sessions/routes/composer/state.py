@@ -810,9 +810,10 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     freeform blob-bound ones. Mirrors the snapshot cross-reference in
     ``redact_guided_snapshot_storage_paths``; never mutates ``state``.
 
-    Sources are matched to their reviewed snapshot by stable persisted source name
-    and storage-path-string equality, so plural sources cannot borrow one another's
-    binding even when they reference the same underlying file.
+    Private-path snapshots use stable source name plus exact path equality. Public
+    ``blob:<uuid>`` snapshots use the stable source name plus canonical blob identity;
+    ``_verified_yaml_export_blob_ids`` then proves the live session, status, ID, and
+    private storage path before either export artifact is returned.
     """
     return reattach_guided_blob_refs_for_public_export(state)
 

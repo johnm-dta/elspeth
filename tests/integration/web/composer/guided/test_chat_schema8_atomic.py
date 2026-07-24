@@ -18,8 +18,9 @@ import structlog
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select, text
 
-from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
@@ -216,6 +217,49 @@ async def _advisory_provider(**_kwargs: object) -> GuidedChatProviderOutcome:
             error_class=None,
         ),
     )
+
+
+def _record_test_llm_call(
+    recorder: object,
+    *,
+    marker: str,
+    status: ComposerLLMCallStatus = ComposerLLMCallStatus.SUCCESS,
+) -> None:
+    now = datetime.now(UTC)
+    call = ComposerLLMCall(
+        model_requested="test/guided-chat",
+        model_returned="test/guided-chat" if status is ComposerLLMCallStatus.SUCCESS else None,
+        status=status,
+        prompt_tokens=1 if status is ComposerLLMCallStatus.SUCCESS else None,
+        completion_tokens=1 if status is ComposerLLMCallStatus.SUCCESS else None,
+        total_tokens=2 if status is ComposerLLMCallStatus.SUCCESS else None,
+        latency_ms=1,
+        provider_request_id=None,
+        messages_hash=stable_hash({"marker": marker}),
+        tools_spec_hash=None,
+        declared_tool_names=(),
+        started_at=now,
+        finished_at=now,
+        error_class=None if status is ComposerLLMCallStatus.SUCCESS else "ProviderFailure",
+        error_message=None if status is ComposerLLMCallStatus.SUCCESS else f"secret-{marker}",
+        temperature=0.0,
+        seed=42,
+    )
+    recorder.record_llm_call(call)  # type: ignore[attr-defined]
+
+
+def _llm_audit_calls(client: TestClient, session_id: str) -> list[dict[str, object]]:
+    messages = asyncio.run(client.app.state.session_service.get_messages(UUID(session_id), limit=None))
+    return [
+        envelope["call"] for message in messages for envelope in (message.tool_calls or ()) if envelope.get("_kind") == "llm_call_audit"
+    ]
+
+
+def _assert_one_llm_failure_audit(client: TestClient, session_id: str, *, marker: str) -> None:
+    calls = _llm_audit_calls(client, session_id)
+    assert len(calls) == 1, calls
+    assert calls[0]["messages_hash"] == stable_hash({"marker": marker})
+    assert calls[0]["error_message"] is None
 
 
 def test_advisory_chat_settles_once_and_exact_replay_ignores_mutable_provider_and_policy(
@@ -615,7 +659,62 @@ def test_same_operation_concurrent_callers_join_one_provider_result_outside_comp
     assert len(asyncio.run(client.app.state.session_service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
 
 
-def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed_failure(
+def test_provider_failure_persists_one_redacted_llm_audit_with_terminal_failure(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    body = _chat_body(turn)
+    marker = "chat-provider-failure"
+
+    async def failed_provider(**kwargs: object) -> GuidedChatProviderOutcome:
+        _record_test_llm_call(
+            kwargs["recorder"],
+            marker=marker,
+            status=ComposerLLMCallStatus.API_ERROR,
+        )
+        raise RuntimeError(f"secret-{marker}")
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", failed_provider, raising=False)
+    first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
+    replay = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
+
+    assert first.status_code == replay.status_code == 500
+    assert first.json() == replay.json()
+    assert first.json()["detail"]["failure_code"] == "operation_failed"
+    assert f"secret-{marker}" not in first.text
+    _assert_one_llm_failure_audit(composer_test_client, session_id, marker=marker)
+
+
+def test_post_provider_transition_rejection_persists_one_llm_audit(
+    composer_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = _create_session(composer_test_client)
+    turn = composer_test_client.get(f"/api/sessions/{session_id}/guided").json()["next_turn"]
+    marker = "chat-transition-rejection"
+
+    async def audited_provider(**kwargs: object) -> GuidedChatProviderOutcome:
+        _record_test_llm_call(kwargs["recorder"], marker=marker)
+        return await _resolved_source_provider()
+
+    def reject_transition(*_args: object, **_kwargs: object) -> None:
+        raise AuditIntegrityError("injected transition rejection")
+
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", audited_provider, raising=False)
+    monkeypatch.setattr(guided_route, "_schema8_answer_and_project_next", reject_transition)
+    response = composer_test_client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json=_chat_body(turn),
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["failure_code"] == "integrity_error"
+    _assert_one_llm_failure_audit(composer_test_client, session_id, marker=marker)
+
+
+def test_settlement_failure_rolls_back_chat_state_but_persists_failure_evidence_and_replays_typed_failure(
     composer_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -626,11 +725,16 @@ def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed
     initial_versions = asyncio.run(service.get_state_versions(UUID(session_id)))
     initial_messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
     secret_canary = "/private/operator/chat-settlement-secret.csv"
+    marker = "chat-settlement-failure"
+
+    async def audited_provider(**kwargs: object) -> GuidedChatProviderOutcome:
+        _record_test_llm_call(kwargs["recorder"], marker=marker)
+        return await _advisory_provider()
 
     async def fail_settlement(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError(secret_canary)
 
-    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", _advisory_provider, raising=False)
+    monkeypatch.setattr(guided_route, "_run_guided_chat_provider_attempt", audited_provider, raising=False)
     monkeypatch.setattr(service, "settle_guided_state_operation", fail_settlement)
     first = composer_test_client.post(f"/api/sessions/{session_id}/guided/chat", json=body)
     monkeypatch.setattr(
@@ -646,7 +750,10 @@ def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed
     assert first.json()["detail"]["failure_code"] == "operation_failed"
     assert secret_canary not in first.text
     assert asyncio.run(service.get_state_versions(UUID(session_id))) == initial_versions
-    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == initial_messages
+    # The failed success-settlement had already buffered both the provider
+    # call and the completed chat-turn projection. Both belong to the closed
+    # failure cohort; neither state nor the user/assistant message pair does.
+    assert len(asyncio.run(service.get_messages(UUID(session_id), limit=None))) == len(initial_messages) + 2
     with composer_test_client.app.state.session_engine.connect() as connection:
         operation = (
             connection.execute(
@@ -662,6 +769,7 @@ def test_settlement_failure_rolls_back_chat_state_and_evidence_and_replays_typed
     assert operation["result_state_id"] is None
     assert operation["response_hash"] is None
     assert secret_canary not in str(dict(operation))
+    _assert_one_llm_failure_audit(composer_test_client, session_id, marker=marker)
 
 
 def test_provider_head_drift_fails_closed_without_settling_chat(
@@ -674,8 +782,10 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
     service = composer_test_client.app.state.session_service
     initial_versions = asyncio.run(service.get_state_versions(UUID(session_id)))
     initial_messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+    marker = "chat-stale-head"
 
     async def drifting_provider(**kwargs: object) -> GuidedChatProviderOutcome:
+        _record_test_llm_call(kwargs["recorder"], marker=marker)
         state = kwargs["state"]
         state_dict = state.to_dict()  # type: ignore[union-attr]
         await service.save_composition_state(
@@ -701,7 +811,8 @@ def test_provider_head_drift_fails_closed_without_settling_chat(
     assert response.json() == replay.json()
     assert response.json()["detail"]["failure_code"] == "stale_conflict"
     assert len(asyncio.run(service.get_state_versions(UUID(session_id)))) == len(initial_versions) + 1
-    assert asyncio.run(service.get_messages(UUID(session_id), limit=None)) == initial_messages
+    assert len(asyncio.run(service.get_messages(UUID(session_id), limit=None))) == len(initial_messages) + 1
+    _assert_one_llm_failure_audit(composer_test_client, session_id, marker=marker)
 
 
 def test_exact_replay_fails_closed_when_current_turn_payload_is_tampered(

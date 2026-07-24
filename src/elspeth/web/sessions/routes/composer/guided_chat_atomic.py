@@ -49,6 +49,7 @@ from elspeth.web.sessions.protocol import (
     GuidedAuditEvidence,
     GuidedCompositionStateResult,
     GuidedOperationFailureCode,
+    GuidedOperationFailureCommand,
     GuidedOperationFenceLostError,
     GuidedOperationSettlementConflictError,
     GuidedOriginatingUserMessageDraft,
@@ -1091,10 +1092,17 @@ async def post_guided_chat_schema8(
             except asyncio.CancelledError as exc:
                 with contextlib.suppress(Exception):
                     await asyncio.shield(
-                        service.fail_guided_operation(
-                            reserved.fence,
-                            failure_code="operation_failed",
-                            actor="composer_route",
+                        service.fail_guided_operation_with_audit(
+                            GuidedOperationFailureCommand(
+                                fence=reserved.fence,
+                                failure_code="operation_failed",
+                                actor="composer_route",
+                                audit_evidence=GuidedAuditEvidence(
+                                    invocations=recorder.invocations,
+                                    llm_calls=recorder.llm_calls,
+                                    chat_turns=recorder.chat_turns,
+                                ),
+                            )
                         )
                     )
                 if progress_started:
@@ -1129,10 +1137,17 @@ async def post_guided_chat_schema8(
                         frames=_safe_frame_strings(exc),
                     )
                 try:
-                    failed = await service.fail_guided_operation(
-                        reserved.fence,
-                        failure_code=failure_code,
-                        actor="composer_route",
+                    failed = await service.fail_guided_operation_with_audit(
+                        GuidedOperationFailureCommand(
+                            fence=reserved.fence,
+                            failure_code=failure_code,
+                            actor="composer_route",
+                            audit_evidence=GuidedAuditEvidence(
+                                invocations=recorder.invocations,
+                                llm_calls=recorder.llm_calls,
+                                chat_turns=recorder.chat_turns,
+                            ),
+                        )
                     )
                 except GuidedOperationFenceLostError:
                     rejoin_after_lock = True

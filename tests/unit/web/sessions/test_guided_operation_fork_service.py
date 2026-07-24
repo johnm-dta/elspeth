@@ -156,7 +156,7 @@ async def _blob_delete_first_contention(
 
     from elspeth.web.blobs import service as blob_service_module
 
-    original_blob_lock = blob_service_module.locked_session_transaction
+    original_blob_lock = blob_service_module._blob_custody_session_lock
     original_service_begin = reserve_service._session_process_locked_begin
     original_service_lock = reserve_service._session_write_lock
     held = threading.Barrier(2)
@@ -187,7 +187,7 @@ async def _blob_delete_first_contention(
             yield
 
     with (
-        patch.object(blob_service_module, "locked_session_transaction", new=controlled_blob_lock),
+        patch.object(blob_service_module, "_blob_custody_session_lock", new=controlled_blob_lock),
         patch.object(reserve_service, "_session_process_locked_begin", new=observed_service_begin),
         patch.object(reserve_service, "_session_write_lock", new=observed_service_lock),
     ):
@@ -212,7 +212,7 @@ async def _fork_first_blob_contention(
 
     from elspeth.web.blobs import service as blob_service_module
 
-    original_blob_lock = blob_service_module.locked_session_transaction
+    original_blob_lock = blob_service_module._blob_custody_session_lock
     original_service_lock = fork_service._session_write_lock
     held = threading.Barrier(2)
     release = threading.Barrier(2)
@@ -241,7 +241,7 @@ async def _fork_first_blob_contention(
 
     with (
         patch.object(fork_service, "_session_write_lock", new=controlled_service_lock),
-        patch.object(blob_service_module, "locked_session_transaction", new=observed_blob_lock),
+        patch.object(blob_service_module, "_blob_custody_session_lock", new=observed_blob_lock),
     ):
         fork_task = asyncio.create_task(fork_first())
         await asyncio.to_thread(held.wait, 5)

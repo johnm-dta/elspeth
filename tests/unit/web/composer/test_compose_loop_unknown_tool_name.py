@@ -14,22 +14,26 @@ rev-3 M2 (Phase 3 call-order precondition).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from elspeth.contracts.composer_audit import ComposerToolStatus
+from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.core.canonical import canonical_json
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     PluginSchemaInfo,
     PluginSummary,
 )
+from elspeth.web.composer.audit_storage import redacted_tool_invocation_content_and_envelope
 from elspeth.web.composer.redaction import redact_tool_call_arguments
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
@@ -307,6 +311,48 @@ class TestUnknownToolNameComposeLoopAuditShape:
 # ---------------------------------------------------------------------------
 # Test 2: Phase 3 call-order pin (rev-3 M2 closure)
 # ---------------------------------------------------------------------------
+
+
+def test_unknown_tool_audit_projection_uses_value_free_sentinels() -> None:
+    canary = "UNKNOWN_TOOL_AUDIT_CANARY_7f4d43"
+    arguments_canonical = canonical_json({"password": canary})
+    result_canonical = canonical_json(
+        {
+            "success": False,
+            "data": {"error": "Unknown tool: hallucinated_tool", "echo": canary},
+        }
+    )
+    now = datetime.now(UTC)
+    invocation = ComposerToolInvocation(
+        tool_call_id="call_unknown_projection",
+        tool_name="hallucinated_tool",
+        arguments_canonical=arguments_canonical,
+        arguments_hash=hashlib.sha256(arguments_canonical.encode()).hexdigest(),
+        result_canonical=result_canonical,
+        result_hash=hashlib.sha256(result_canonical.encode()).hexdigest(),
+        status=ComposerToolStatus.SUCCESS,
+        error_class=None,
+        error_message=None,
+        version_before=0,
+        version_after=0,
+        started_at=now,
+        finished_at=now,
+        latency_ms=0,
+        actor="composer-web:test",
+    )
+
+    content, envelope = redacted_tool_invocation_content_and_envelope(invocation)
+    persisted = json.dumps({"content": content, "envelope": envelope}, sort_keys=True)
+
+    assert canary not in persisted
+    assert "password" not in persisted
+    persisted_invocation = envelope["invocation"]
+    assert json.loads(persisted_invocation["arguments_canonical"]) == {"_redaction_status": "unknown_tool"}
+    assert json.loads(content) == {
+        "_redaction_status": "unknown_tool",
+        "success": False,
+        "data": {"error": "Unknown tool"},
+    }
 
 
 def test_redact_tool_call_arguments_raises_for_unknown_tool() -> None:

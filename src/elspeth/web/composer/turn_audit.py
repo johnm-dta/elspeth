@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any, cast
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.composer._compose_loop_carriers import _PersistOutcome, _ToolOutcome
 from elspeth.web.composer.protocol import ComposerPluginCrashError
-from elspeth.web.composer.tool_error_payloads import INVALID_TOOL_ARGUMENTS_REDACTION_STATUS
+from elspeth.web.composer.tool_error_payloads import (
+    INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+    unknown_tool_arguments_redaction,
+)
 from elspeth.web.sessions._persist_payload import RedactedToolRow
 
 if TYPE_CHECKING:
@@ -77,6 +80,7 @@ async def persist_turn_audit(
     for tool_outcome in tool_outcomes:
         tc = tool_outcome.call
         decoded_args: dict[str, Any]
+        persisted_arguments: Mapping[str, Any]
         if tc.id in decoded_args_by_call_id:
             # deep_thaw restores plain dict/list types from any
             # MappingProxyType / tuple introduced by the carrier's
@@ -115,11 +119,7 @@ async def persist_turn_audit(
                     "error_class": tool_outcome.error_class,
                 }
         else:
-            # Unknown tool names are Tier-3 LLM hallucinations handled
-            # by execute_tool as a semantic failure ToolResult. The
-            # manifest is intentionally closed, so do not call the
-            # walker for names it cannot know about.
-            persisted_arguments = decoded_args
+            persisted_arguments = unknown_tool_arguments_redaction(telemetry=redaction_telemetry)
         redacted_assistant_tool_calls = (
             *redacted_assistant_tool_calls,
             {

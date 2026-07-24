@@ -17,8 +17,11 @@ from elspeth.web.composer.redaction import (
     redact_tool_call_response,
 )
 from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
-
-_INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
+from elspeth.web.composer.tool_error_payloads import (
+    INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+    unknown_tool_arguments_redaction,
+    unknown_tool_response_redaction,
+)
 
 
 def _hash_canonical_payload(canonical_payload: str) -> str:
@@ -50,7 +53,9 @@ def _redacted_argument_canonical(
     telemetry: OtelRedactionTelemetry,
 ) -> str:
     arguments = _load_canonical_mapping(invocation.arguments_canonical)
-    if invocation.tool_name not in MANIFEST or arguments is None:
+    if invocation.tool_name not in MANIFEST:
+        return canonical_json(unknown_tool_arguments_redaction(telemetry=telemetry))
+    if arguments is None:
         return invocation.arguments_canonical
     try:
         redacted = redact_tool_call_arguments(
@@ -62,7 +67,7 @@ def _redacted_argument_canonical(
         if invocation.status != ComposerToolStatus.ARG_ERROR:
             raise
         redacted = {
-            "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+            "_redaction_status": INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
             "error_class": invocation.error_class,
         }
     return canonical_json(redacted)
@@ -74,7 +79,9 @@ def _redacted_result_canonical(
     telemetry: OtelRedactionTelemetry,
 ) -> str | None:
     result = _load_canonical_mapping(invocation.result_canonical)
-    if invocation.tool_name not in MANIFEST or result is None:
+    if invocation.tool_name not in MANIFEST:
+        return canonical_json(unknown_tool_response_redaction()) if result is not None else None
+    if result is None:
         return invocation.result_canonical
     if invocation.status == ComposerToolStatus.ARG_ERROR:
         return invocation.result_canonical

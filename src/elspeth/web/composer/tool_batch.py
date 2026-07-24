@@ -91,7 +91,12 @@ from elspeth.web.composer.protocol import (
     ToolArgumentError,
 )
 from elspeth.web.composer.state import CompositionState, ValidationSummary
-from elspeth.web.composer.tool_error_payloads import arg_error_payload as _arg_error_payload
+from elspeth.web.composer.tool_error_payloads import (
+    arg_error_payload as _arg_error_payload,
+)
+from elspeth.web.composer.tool_error_payloads import (
+    unknown_tool_arguments_redaction,
+)
 from elspeth.web.composer.tools import (
     RuntimePreflight,
     ToolContext,
@@ -342,6 +347,7 @@ async def run_tool_batch(
     decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
     proposals_this_turn = 0
     mutation_success_observed = False
+    from elspeth.web.composer.redaction import MANIFEST
 
     for tool_call in assistant_message.tool_calls:
         if ctx.cancellation_requested.is_set():
@@ -356,6 +362,20 @@ async def run_tool_batch(
             break
         tool_name = tool_call.function.name
         pre_version = state.version
+        unknown_audit_arguments: dict[str, Any] | None = None
+        if tool_name not in MANIFEST:
+            if is_discovery_tool(tool_name) or is_mutation_tool(tool_name) or is_session_aware_tool(tool_name):
+                raise AuditIntegrityError(f"Registered composer tool {tool_name!r} is missing from the redaction manifest")
+            unknown_audit_arguments = cast(
+                dict[str, Any],
+                unknown_tool_arguments_redaction(telemetry=ctx.service._redaction_telemetry),
+            )
+            decoded_args_by_call_id[tool_call.id] = unknown_audit_arguments
+            _replace_llm_tool_call_arguments(
+                llm_messages,
+                tool_call_id=tool_call.id,
+                arguments=unknown_audit_arguments,
+            )
 
         def _append_tool_outcome(
             *,
@@ -395,7 +415,7 @@ async def run_tool_batch(
             audit = begin_dispatch(
                 tool_call.id,
                 tool_name,
-                tool_call.function.arguments,
+                unknown_audit_arguments if unknown_audit_arguments is not None else tool_call.function.arguments,
                 version_before=state.version,
                 actor=actor,
             )
@@ -438,7 +458,7 @@ async def run_tool_batch(
             audit, canonicalization_failed = begin_dispatch_or_arg_error(
                 tool_call.id,
                 tool_name,
-                {"_decoded_non_object": decoded_arguments},
+                unknown_audit_arguments if unknown_audit_arguments is not None else {"_decoded_non_object": decoded_arguments},
                 version_before=state.version,
                 actor=actor,
             )
@@ -477,7 +497,12 @@ async def run_tool_batch(
             continue
 
         arguments = cast(dict[str, Any], decoded_arguments)
-        audit_arguments = cast(dict[str, Any], inline_custody_audit_projection(arguments)) if tool_name == "set_pipeline" else arguments
+        if unknown_audit_arguments is not None:
+            audit_arguments = unknown_audit_arguments
+        elif tool_name == "set_pipeline":
+            audit_arguments = cast(dict[str, Any], inline_custody_audit_projection(arguments))
+        else:
+            audit_arguments = arguments
         decoded_args_by_call_id[tool_call.id] = audit_arguments
 
         # Open the audit envelope ONCE per dispatch — the cache,
@@ -652,7 +677,7 @@ async def run_tool_batch(
 
             from pydantic import ValidationError as PydanticValidationError
 
-            from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
+            from elspeth.web.composer.redaction import redact_tool_call_arguments
 
             # The LLM may produce arguments that fail the redaction
             # MANIFEST's argument_model — most commonly a misplaced
@@ -671,17 +696,14 @@ async def run_tool_batch(
             # frontend rendered a generic ApiError as a bare
             # "retry" button with no diagnostic).
             redacted_arguments: Mapping[str, Any] | None
-            if tool_name in MANIFEST:
-                try:
-                    redacted_arguments = redact_tool_call_arguments(
-                        tool_name,
-                        arguments,
-                        telemetry=ctx.service._redaction_telemetry,
-                    )
-                except PydanticValidationError:
-                    redacted_arguments = None
-            else:
-                redacted_arguments = arguments
+            try:
+                redacted_arguments = redact_tool_call_arguments(
+                    tool_name,
+                    arguments,
+                    telemetry=ctx.service._redaction_telemetry,
+                )
+            except PydanticValidationError:
+                redacted_arguments = None
 
             candidate_prior_validation: ValidationSummary | None = None
             if redacted_arguments is not None and tool_name == "set_pipeline":

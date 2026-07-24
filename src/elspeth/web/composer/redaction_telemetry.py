@@ -18,6 +18,11 @@ _UNKNOWN_RESPONSE_KEY_COUNTER = _meter.create_counter(
     description="Count of unknown response keys substituted with the fixed sentinel.",
 )
 
+_UNKNOWN_TOOL_COUNTER = _meter.create_counter(
+    "composer.redaction.unknown_tool_redacted",
+    description="Count of unknown-tool payloads replaced with a fixed value-free sentinel.",
+)
+
 _MANIFEST_DISPATCH_COUNTER = _meter.create_counter(
     "composer.redaction.manifest_dispatch",
     description="Count of tool calls dispatched through the redaction manifest.",
@@ -30,6 +35,7 @@ _SUMMARIZER_ERROR_COUNTER = _meter.create_counter(
 
 
 class RedactionTelemetry(Protocol):
+    def unknown_tool_redacted(self) -> None: ...
     def unknown_response_key_redacted(self, *, tool_name: str) -> None: ...
     def manifest_dispatch(self, *, tool_name: str, shape: str) -> None: ...
     def summarizer_error(self, *, tool_name: str) -> None:
@@ -43,9 +49,13 @@ class NoopRedactionTelemetry:
     """In-memory test impl. Records every call; assertable."""
 
     def __init__(self) -> None:
+        self.unknown_tool_redacted_count = 0
         self.unknown_response_key_calls: list[dict[str, str]] = []
         self.manifest_dispatch_calls: list[dict[str, str]] = []
         self.summarizer_error_calls: list[dict[str, str]] = []
+
+    def unknown_tool_redacted(self) -> None:
+        self.unknown_tool_redacted_count += 1
 
     def unknown_response_key_redacted(self, *, tool_name: str) -> None:
         self.unknown_response_key_calls.append({"tool_name": tool_name})
@@ -59,6 +69,9 @@ class NoopRedactionTelemetry:
 
 class OtelRedactionTelemetry:
     """Production impl. Emits via module-level OTel counter objects."""
+
+    def unknown_tool_redacted(self) -> None:
+        _UNKNOWN_TOOL_COUNTER.add(1, {})
 
     def unknown_response_key_redacted(self, *, tool_name: str) -> None:
         _UNKNOWN_RESPONSE_KEY_COUNTER.add(1, {"tool_name": tool_name})

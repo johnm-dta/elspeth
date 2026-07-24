@@ -1426,6 +1426,7 @@ class ComposerServiceImpl:
         from elspeth.contracts.freeze import deep_thaw
         from elspeth.core.canonical import canonical_json
         from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
+        from elspeth.web.composer.tool_error_payloads import unknown_tool_response_redaction
 
         if outcome.error_class is None:
             response = outcome.response
@@ -1445,7 +1446,7 @@ class ComposerServiceImpl:
                 result = cast(ToolResult, response)
                 response_payload = result.to_dict()
             if outcome.call.function.name not in MANIFEST:
-                return canonical_json(response_payload)
+                return canonical_json(unknown_tool_response_redaction())
             redacted = redact_tool_call_response(
                 tool_name=outcome.call.function.name,
                 response=response_payload,

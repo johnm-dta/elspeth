@@ -29,6 +29,7 @@ class _RecordingCounter:
 
 def test_noop_implements_protocol() -> None:
     noop: RedactionTelemetry = NoopRedactionTelemetry()
+    noop.unknown_tool_redacted()
     noop.unknown_response_key_redacted(tool_name="t")
     noop.manifest_dispatch(tool_name="t", shape="declarative")
     noop.summarizer_error(tool_name="t")
@@ -36,9 +37,11 @@ def test_noop_implements_protocol() -> None:
 
 def test_noop_records_for_assertion_in_tests() -> None:
     noop = NoopRedactionTelemetry()
+    noop.unknown_tool_redacted()
     noop.unknown_response_key_redacted(tool_name="set_source")
     noop.manifest_dispatch(tool_name="set_source", shape="type_driven")
     noop.summarizer_error(tool_name="set_source")
+    assert noop.unknown_tool_redacted_count == 1
     assert noop.unknown_response_key_calls == [{"tool_name": "set_source"}]
     assert noop.manifest_dispatch_calls == [{"tool_name": "set_source", "shape": "type_driven"}]
     assert noop.summarizer_error_calls == [{"tool_name": "set_source"}]
@@ -57,14 +60,17 @@ def test_otel_telemetry_emits_via_module_level_counters(monkeypatch) -> None:
     from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
 
     unknown_counter = _RecordingCounter()
+    unknown_tool_counter = _RecordingCounter()
     dispatch_counter = _RecordingCounter()
     summarizer_counter = _RecordingCounter()
 
     monkeypatch.setattr(rt_mod, "_UNKNOWN_RESPONSE_KEY_COUNTER", unknown_counter)
+    monkeypatch.setattr(rt_mod, "_UNKNOWN_TOOL_COUNTER", unknown_tool_counter)
     monkeypatch.setattr(rt_mod, "_MANIFEST_DISPATCH_COUNTER", dispatch_counter)
     monkeypatch.setattr(rt_mod, "_SUMMARIZER_ERROR_COUNTER", summarizer_counter)
 
     tel = OtelRedactionTelemetry()
+    tel.unknown_tool_redacted()
     tel.unknown_response_key_redacted(tool_name="set_source")
     tel.manifest_dispatch(tool_name="set_source", shape="type_driven")
     tel.summarizer_error(tool_name="set_source")
@@ -72,3 +78,4 @@ def test_otel_telemetry_emits_via_module_level_counters(monkeypatch) -> None:
     assert unknown_counter.add_calls == [(1, {"tool_name": "set_source"})]
     assert dispatch_counter.add_calls == [(1, {"tool_name": "set_source", "shape": "type_driven"})]
     assert summarizer_counter.add_calls == [(1, {"tool_name": "set_source"})]
+    assert unknown_tool_counter.add_calls == [(1, {})]

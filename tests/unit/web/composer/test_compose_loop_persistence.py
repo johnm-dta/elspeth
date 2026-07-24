@@ -7,7 +7,7 @@ import json
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -94,6 +94,17 @@ def _metadata_tool_response(call_id: str, name: str) -> Any:
         function=SimpleNamespace(
             name="set_metadata",
             arguments=json.dumps({"patch": {"name": name}}),
+        ),
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))])
+
+
+def _unknown_tool_response(call_id: str, *, arguments: dict[str, Any]) -> Any:
+    tool_call = SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(
+            name="hallucinated_tool",
+            arguments=json.dumps(arguments),
         ),
     )
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[tool_call]))])
@@ -361,6 +372,95 @@ async def test_step2_redacts_intercepted_advisor_unknown_arguments_before_persis
     )
     assert "full_context" not in persisted_blob
     assert raw_extra_context not in persisted_blob
+
+
+@pytest.mark.asyncio
+async def test_step2_unknown_tool_canary_is_absent_from_actual_persistence(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    canary_key = "private_unknown_argument"
+    canary_value = "UNKNOWN_TOOL_PERSISTENCE_CANARY_91c36b"
+    responses = [
+        _unknown_tool_response("call_unknown_canary", arguments={canary_key: canary_value}),
+        _text_response("Recovered after the unknown tool failure."),
+    ]
+
+    async def _fake_llm(_messages: Any, _tools: Any) -> Any:
+        return responses.pop(0)
+
+    result = await _run_one_turn(
+        composer_service_with_real_sessions,
+        llm=_fake_llm,
+        session_id=result_session_id,
+    )
+
+    assert len(result.persisted_assistant_tool_calls) == 1
+    persisted_call = result.persisted_assistant_tool_calls[0]
+    assert json.loads(persisted_call["function"]["arguments"]) == {"_redaction_status": "unknown_tool"}
+    persisted_content = json.loads(result.persisted_tool_row_content[0])
+    assert persisted_content == {
+        "_redaction_status": "unknown_tool",
+        "success": False,
+        "data": {"error": "Unknown tool"},
+    }
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = list(
+            conn.execute(
+                select(
+                    chat_messages_table.c.role,
+                    chat_messages_table.c.content,
+                    chat_messages_table.c.tool_calls,
+                )
+                .where(chat_messages_table.c.session_id == result_session_id)
+                .where(chat_messages_table.c.role.in_(("assistant", "tool")))
+                .order_by(chat_messages_table.c.sequence_no)
+            ).mappings()
+        )
+
+    durable_blob = json.dumps([dict(row) for row in rows], sort_keys=True)
+    result_blob = json.dumps([invocation.to_dict() for invocation in result.tool_invocations], sort_keys=True)
+    assert canary_key not in durable_blob
+    assert canary_value not in durable_blob
+    assert canary_key not in result_blob
+    assert canary_value not in result_blob
+    assert "Unknown tool" in durable_blob
+
+
+@pytest.mark.asyncio
+async def test_step2_registered_tool_missing_manifest_fails_before_persistence(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import elspeth.web.composer.redaction as redaction_module
+
+    manifest_without_set_metadata = MappingProxyType(
+        {name: entry for name, entry in redaction_module.MANIFEST.items() if name != "set_metadata"}
+    )
+    monkeypatch.setattr(redaction_module, "MANIFEST", manifest_without_set_metadata)
+    response = _metadata_tool_response("call_manifest_drift", "must-not-persist")
+
+    async def _fake_llm(_messages: Any, _tools: Any) -> Any:
+        return response
+
+    with pytest.raises(AuditIntegrityError, match="missing from the redaction manifest"):
+        await _run_one_turn(
+            composer_service_with_real_sessions,
+            llm=_fake_llm,
+            session_id=result_session_id,
+        )
+
+    sessions_service = composer_service_with_real_sessions._sessions_service  # type: ignore[attr-defined]
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            select(chat_messages_table.c.id)
+            .where(chat_messages_table.c.session_id == result_session_id)
+            .where(chat_messages_table.c.role.in_(("assistant", "tool")))
+        ).fetchall()
+    assert rows == []
 
 
 @pytest.mark.asyncio

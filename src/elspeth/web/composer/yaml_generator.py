@@ -33,6 +33,7 @@ import yaml
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.guided_blob_refs import (
     GUIDED_REVIEWED_BLOB_PATH_KEYS,
     validate_guided_reviewed_blob_binding,
@@ -280,9 +281,16 @@ def reattach_guided_blob_refs_for_public_export(state: CompositionState) -> Comp
     public ``blob:<uuid>`` sentinels must match the retained ref and source name,
     after which the HTTP export boundary verifies live blob custody and the exact
     private storage path before returning the sidecar.
+
+    An ``exited_to_freeform`` terminal retains guided history for audit and
+    possible re-entry, but it is no longer current source authority. Completed
+    guided sessions remain authoritative until an explicit exit records that
+    lifecycle boundary.
     """
     guided = state.guided_session
     if guided is None or not guided.reviewed_sources:
+        return state
+    if guided.terminal is not None and guided.terminal.kind is TerminalKind.EXITED_TO_FREEFORM:
         return state
 
     reviewed_bindings: list[tuple[str, frozenset[str], str]] = []

@@ -7159,6 +7159,80 @@ sinks:
         assert record.sources["source"]["options"]["path"] == storage_path
 
     @pytest.mark.asyncio
+    async def test_yaml_export_after_guided_exit_uses_current_freeform_blob_binding(self, tmp_path: Path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        current_blob_id = uuid.UUID("98b1357d-5aab-4fb3-85b4-5ad643912e84")
+        stale_blob_id = "11111111-1111-4111-8111-111111111111"
+        session = await service.create_session("alice", "Freeform replacement", "local")
+        current_storage_path = str(tmp_path / "blobs" / str(session.id) / f"{current_blob_id}_current.csv")
+        app.state.blob_service = SimpleNamespace(
+            get_blob=AsyncMock(
+                spec=BlobServiceProtocol.get_blob,
+                return_value=SimpleNamespace(
+                    id=current_blob_id,
+                    session_id=session.id,
+                    storage_path=current_storage_path,
+                    status="ready",
+                ),
+            )
+        )
+        stable_id = "22222222-2222-4222-8222-222222222222"
+        exited_guided = replace(
+            GuidedSession.initial(),
+            source_order=(stable_id,),
+            reviewed_sources={
+                stable_id: SourceResolved(
+                    name="source",
+                    plugin="csv",
+                    options={
+                        "path": "/data/blobs/stale-session/stale.csv",
+                        "blob_ref": stale_blob_id,
+                    },
+                    observed_columns=("id",),
+                    sample_rows=(),
+                    on_validation_failure="discard",
+                )
+            },
+            terminal=TerminalState(
+                kind=TerminalKind.EXITED_TO_FREEFORM,
+                reason=TerminalReason.USER_PRESSED_EXIT,
+                pipeline_yaml=None,
+            ),
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "on_success": "out",
+                    "options": {
+                        "path": current_storage_path,
+                        "blob_ref": str(current_blob_id),
+                        "schema": {"mode": "observed"},
+                    },
+                    "on_validation_failure": "discard",
+                },
+                outputs=[{"name": "out", "plugin": "csv", "options": {}, "on_write_failure": "discard"}],
+                metadata_={"name": "Freeform replacement", "description": ""},
+                is_valid=True,
+                composer_meta={"guided_session": exited_guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id, session_id, **_policy_context):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            response = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["source_blob_ids"] == {"source": str(current_blob_id)}
+        assert stale_blob_id not in response.text
+        assert current_storage_path not in response.json()["yaml"]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "custody_failure",
         [

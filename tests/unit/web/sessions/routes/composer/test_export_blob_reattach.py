@@ -18,7 +18,12 @@ import pytest
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.guided.resolved import SourceResolved
-from elspeth.web.composer.guided.state_machine import GuidedSession
+from elspeth.web.composer.guided.state_machine import (
+    GuidedSession,
+    TerminalKind,
+    TerminalReason,
+    TerminalState,
+)
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, SourceSpec
 from elspeth.web.composer.yaml_generator import generate_public_pipeline_dict
 from elspeth.web.sessions.routes.composer.state import _reattach_guided_blob_refs
@@ -142,6 +147,48 @@ def test_rejects_operator_typed_source_reusing_reviewed_name() -> None:
 
     with pytest.raises(AuditIntegrityError, match="guided blob source mapping"):
         _reattach_guided_blob_refs(state)
+
+
+def test_exited_guided_session_does_not_shadow_freeform_source_replacement() -> None:
+    freeform_path = "/tmp/operator/replacement.csv"
+    guided = replace(
+        _guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
+        terminal=TerminalState(
+            kind=TerminalKind.EXITED_TO_FREEFORM,
+            reason=TerminalReason.USER_PRESSED_EXIT,
+            pipeline_yaml=None,
+        ),
+    )
+    state = _state(
+        source_options={"path": freeform_path, "schema": {"mode": "observed"}},
+        guided_session=guided,
+    )
+
+    assert _reattach_guided_blob_refs(state) is state
+    assert generate_public_pipeline_dict(state)["sources"]["source"]["options"] == {
+        "path": freeform_path,
+        "schema": {"mode": "observed"},
+        "on_validation_failure": "discard",
+    }
+
+
+def test_completed_guided_session_retains_reviewed_source_authority() -> None:
+    guided = replace(
+        _guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
+        terminal=TerminalState(
+            kind=TerminalKind.COMPLETED,
+            reason=None,
+            pipeline_yaml="sources: {}\n",
+        ),
+    )
+    state = _state(
+        source_options={"path": BLOB_PATH, "schema": {"mode": "observed"}},
+        guided_session=guided,
+    )
+
+    out = _reattach_guided_blob_refs(state)
+
+    assert out.sources["source"].options["blob_ref"] == BLOB_REF
 
 
 def test_allows_retired_reviewed_binding_when_name_and_path_are_absent() -> None:

@@ -56,6 +56,7 @@ ValidationCheckName = Literal[
     "identity_node_advisory",
     "state_exists",
     "advisor_signoff",
+    "proof_diagnostics",
 ]
 VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
 
@@ -84,6 +85,7 @@ RUNTIME_CHECK_SCHEMA_COMPATIBILITY: Final[ValidationCheckName] = "schema_compati
 CHECK_IDENTITY_NODE_ADVISORY: Final[ValidationCheckName] = "identity_node_advisory"
 CHECK_STATE_EXISTS: Final[ValidationCheckName] = "state_exists"
 CHECK_ADVISOR_SIGNOFF: Final[ValidationCheckName] = "advisor_signoff"
+CHECK_PROOF_DIAGNOSTICS: Final[ValidationCheckName] = "proof_diagnostics"
 
 VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_PLUGIN_ENABLEMENT,
@@ -110,6 +112,7 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
     CHECK_STATE_EXISTS,
     CHECK_ADVISOR_SIGNOFF,
+    CHECK_PROOF_DIAGNOSTICS,
 )
 VALIDATION_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     *VALIDATION_BLOCKING_CHECK_NAMES,

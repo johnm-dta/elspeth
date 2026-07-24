@@ -98,6 +98,7 @@ _AugmentationBranch = Literal[
     "orphaned_interpretation_review_augmentation",
     "advisor_signoff_blocked_augmentation",
     "interpretation_review_handoff_augmentation",
+    "proof_repair_exhausted_augmentation",
 ]
 
 

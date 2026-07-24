@@ -6273,8 +6273,9 @@ class TestEmptyStateFinalizePassthrough:
 # Forced-repair loop coverage. When the assistant emits no tool_calls but
 # preview_pipeline's proof_diagnostics still reports blocking entries, the
 # compose loop synthesises a repair message and continues. Hard cap of
-# _MAX_REPAIR_TURNS=2 forced repair turns. The repair NEVER catches plugin
-# exceptions — it only feeds the model proof diagnostics on configurations.
+# _MAX_REPAIR_TURNS=2 forced repair turns; blockers that survive the cap return
+# a non-runnable result. The repair NEVER catches plugin exceptions — it only
+# feeds the model proof diagnostics on configurations.
 # ---------------------------------------------------------------------------
 
 
@@ -6397,42 +6398,45 @@ class TestAttemptProofRepair:
         assert result.success, result.data
         return result.updated_state
 
-    def test_returns_false_when_no_blocking_diagnostics(self) -> None:
+    def test_returns_clear_when_no_blocking_diagnostics(self) -> None:
         state = self._state_without_blob()
         messages: list[dict[str, Any]] = []
-        attempted = self.service._attempt_proof_repair(
+        outcome = self.service._attempt_proof_repair(
             state=state,
             llm_messages=messages,
             session_id=self.session_id,
             repair_turns_used=0,
         )
-        assert attempted is False
+        assert outcome.action == "clear"
+        assert outcome.blocking_diagnostics == ()
         assert messages == []
 
-    def test_returns_false_when_budget_exhausted(self) -> None:
+    def test_returns_blocked_when_budget_exhausted(self) -> None:
         from elspeth.web.composer.service import _MAX_REPAIR_TURNS
 
         state = self._state_with_blocking_csv()
         messages: list[dict[str, Any]] = []
-        attempted = self.service._attempt_proof_repair(
+        outcome = self.service._attempt_proof_repair(
             state=state,
             llm_messages=messages,
             session_id=self.session_id,
             repair_turns_used=_MAX_REPAIR_TURNS,
         )
-        assert attempted is False
+        assert outcome.action == "blocked"
+        assert {diagnostic["code"] for diagnostic in outcome.blocking_diagnostics} == {"csv_fixed_schema_omits_observed_columns"}
         assert messages == []
 
     def test_appends_repair_message_when_blocking(self) -> None:
         state = self._state_with_blocking_csv()
         messages: list[dict[str, Any]] = []
-        attempted = self.service._attempt_proof_repair(
+        outcome = self.service._attempt_proof_repair(
             state=state,
             llm_messages=messages,
             session_id=self.session_id,
             repair_turns_used=0,
         )
-        assert attempted is True
+        assert outcome.action == "repair_injected"
+        assert outcome.blocking_diagnostics
         assert len(messages) == 1
         msg = messages[0]
         assert msg["role"] == "user"
@@ -6446,13 +6450,13 @@ class TestAttemptProofRepair:
         state = self._state_with_blocking_csv()
         messages: list[dict[str, Any]] = []
         # Simulate one already-used repair turn
-        attempted = self.service._attempt_proof_repair(
+        outcome = self.service._attempt_proof_repair(
             state=state,
             llm_messages=messages,
             session_id=self.session_id,
             repair_turns_used=1,
         )
-        assert attempted is True
+        assert outcome.action == "repair_injected"
         assert "forced repair turn 2 of 2" in messages[0]["content"]
 
     def test_repair_does_not_catch_plugin_exceptions(self) -> None:
@@ -6498,13 +6502,13 @@ class TestAttemptProofRepair:
         ]
         messages: list[dict[str, Any]] = []
         with patch.object(svc_module, "compute_proof_diagnostics", return_value=fake_blockers):
-            attempted = self.service._attempt_proof_repair(
+            outcome = self.service._attempt_proof_repair(
                 state=self._state_without_blob(),
                 llm_messages=messages,
                 session_id=self.session_id,
                 repair_turns_used=0,
             )
-        assert attempted is True
+        assert outcome.action == "repair_injected"
         assert len(messages) == 1
         body = messages[0]["content"]
         # First three blockers rendered.
@@ -6979,8 +6983,7 @@ class TestComposeLoopForcedRepair:
           - Turn 4: claim complete → repair fires, repair_turns_used=2
           - Turn 5: tool_calls = [set_metadata(name='attempt-2')]
           - Turn 6: claim complete → repair_turns_used==_MAX_REPAIR_TURNS,
-            repair gate returns False, finalize with blocker still in
-            ``proof_diagnostics``.
+            repair gate returns an explicit non-runnable blocker.
         """
         from elspeth.web.composer.service import _MAX_REPAIR_TURNS
 
@@ -7012,7 +7015,7 @@ class TestComposeLoopForcedRepair:
                 user_id="test-user",
             )
 
-        # Six LLM turns total; the third claim-complete is final because
+        # Six LLM turns total; the third claim-complete is blocked because
         # the repair budget is exhausted.
         assert mock_llm.call_count == 6, f"expected 6 LLM calls, got {mock_llm.call_count}"
         assert result.repair_turns_used == _MAX_REPAIR_TURNS
@@ -7022,17 +7025,24 @@ class TestComposeLoopForcedRepair:
         assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
         # Metadata reflects the most recent (futile) repair attempt.
         assert result.state.metadata.name == "attempt-2"
-        # Final message is the third claim-complete; finalisation
-        # proceeded once the repair budget hit the cap.
-        assert result.message == "final"
+        # The model's final claim is preserved for audit, but a backend-owned
+        # blocker prevents ordinary successful finalisation.
+        assert result.raw_assistant_content == "final"
+        assert result.message.startswith("final")
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert result.runtime_preflight.readiness.authoring_valid is False
+        assert result.runtime_preflight.readiness.completion_ready is False
+        assert result.runtime_preflight.readiness.execution_ready is False
+        assert {error.error_code for error in result.runtime_preflight.errors} == {"proof_repair_exhausted"}
 
     @pytest.mark.asyncio
     async def test_cap_respected_when_model_never_repairs(self) -> None:
-        """Model claims completion but never tool-calls repairs — the cap stops the loop.
+        """Model claims completion but never repairs — the cap blocks finalization.
 
         The blocker remains every time the proof step fires. The repair
-        budget is exhausted; finalization proceeds with the blocker
-        still visible. ``is_valid`` must reflect the blocking proof
+        budget is exhausted; finalization returns a non-runnable blocker.
+        ``is_valid`` must reflect the blocking proof
         diagnostic (forced False by the proof gate even when authoring/
         runtime preflight pass).
         """
@@ -7078,6 +7088,9 @@ class TestComposeLoopForcedRepair:
         # is not the proof gate. Verify the source state is unchanged.
         assert result.state.sources["source"] is not None
         assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
+        assert result.runtime_preflight is not None
+        assert result.runtime_preflight.is_valid is False
+        assert {blocker.code for blocker in result.runtime_preflight.readiness.blockers} == {"proof_repair_exhausted"}
 
     @pytest.mark.asyncio
     async def test_repair_gate_fires_on_first_turn_of_resumed_session(self) -> None:

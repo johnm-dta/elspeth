@@ -164,6 +164,7 @@ from elspeth.web.execution.runtime_preflight import (
 from elspeth.web.execution.schemas import (
     CHECK_ADVISOR_SIGNOFF,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_PROOF_DIAGNOSTICS,
     ValidationCheck,
     ValidationCheckName,
     ValidationError,
@@ -594,6 +595,61 @@ _INTERPRETATION_REVIEW_HANDOFF_KINDS: Final[frozenset[str]] = frozenset(
 # fail-closed result names the same check as the runtime preflight; kept as a
 # local literal rather than importing a private validation symbol.
 _INTERPRETATION_REVIEW_CHECK_NAME: Final[ValidationCheckName] = CHECK_INTERPRETATION_REVIEW
+_PROOF_REPAIR_EXHAUSTED_CODE: Final[str] = "proof_repair_exhausted"
+_PROOF_DIAGNOSTICS_CHECK_NAME: Final[ValidationCheckName] = CHECK_PROOF_DIAGNOSTICS
+
+
+def _proof_repair_exhausted_validation(
+    blocking_diagnostics: tuple[Mapping[str, Any], ...],
+) -> ValidationResult:
+    """Build a non-runnable result when proof blockers outlive repair."""
+
+    if not blocking_diagnostics:
+        raise AuditIntegrityError("proof repair exhaustion requires blocking diagnostics")
+    # Diagnostic codes are internal builder-owned discriminants. Direct access
+    # deliberately crashes on contract drift instead of fabricating a fallback.
+    codes = tuple(cast(str, diagnostic["code"]) for diagnostic in blocking_diagnostics)
+    detail = (
+        "The pre-finalisation proof still has blocking diagnostics after the automatic repair budget was exhausted: "
+        + ", ".join(codes[:3])
+        + (f" (+{len(codes) - 3} more)" if len(codes) > 3 else "")
+        + "."
+    )
+    suggestion = "Apply the previously supplied proof repair, preview the pipeline again, and retry finalisation."
+    return ValidationResult(
+        is_valid=False,
+        checks=[
+            ValidationCheck(
+                name=_PROOF_DIAGNOSTICS_CHECK_NAME,
+                passed=False,
+                detail=detail,
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        ],
+        errors=[
+            ValidationError(
+                component_id="pipeline",
+                component_type="pipeline",
+                message=detail,
+                suggestion=suggestion,
+                error_code=_PROOF_REPAIR_EXHAUSTED_CODE,
+            )
+        ],
+        readiness=ValidationReadiness(
+            authoring_valid=False,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[
+                ValidationReadinessBlocker(
+                    code=_PROOF_REPAIR_EXHAUSTED_CODE,
+                    component_id="pipeline",
+                    component_type="pipeline",
+                    detail=detail,
+                )
+            ],
+        ),
+    )
 
 
 def _orphaned_interpretation_review_validation(
@@ -768,6 +824,14 @@ class _TerminalNoToolAdvisorGateOutcome:
     advisor_passes_delta: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _ProofRepairOutcome:
+    """Explicit proof-gate state; budget exhaustion is not proof clearance."""
+
+    action: Literal["clear", "repair_injected", "blocked"]
+    blocking_diagnostics: tuple[Mapping[str, Any], ...] = ()
+
+
 # The per-dispatch audit envelope (DispatchAudit, begin_dispatch, finish_*)
 # and the structural enforcement helper (dispatch_with_audit) live in
 # web/composer/audit.py next to the BufferingRecorder. Hoisting them out of
@@ -780,9 +844,9 @@ class _TerminalNoToolAdvisorGateOutcome:
 # Hard cap on proof-step-driven repair turns. When the assistant claims
 # completion but preview_pipeline's proof_diagnostics still has blocking
 # entries, the loop may inject a synthetic repair message and continue for
-# at most this many additional iterations. After the cap, the original
-# termination path runs — preventing indefinite spin against a model that
-# refuses to apply the suggested repair.
+# at most this many additional iterations. After the cap, persistent blockers
+# return a non-runnable result — preventing both indefinite spin and fail-open
+# finalization when a model refuses to apply the suggested repair.
 _MAX_REPAIR_TURNS: Final[int] = 2
 _TRAINED_OPERATOR_COMPOSITION_ROOT = object()
 
@@ -1820,7 +1884,7 @@ class ComposerServiceImpl:
         llm_messages: list[dict[str, Any]],
         session_id: str | None,
         repair_turns_used: int,
-    ) -> bool:
+    ) -> _ProofRepairOutcome:
         """Pre-finalize proof gate.
 
         When the assistant emits no tool_calls (claiming completion), check
@@ -1831,9 +1895,9 @@ class ComposerServiceImpl:
         outer compose loop then continues for one more iteration so the
         model can apply the suggested fix.
 
-        Returns True when a repair message was injected (the loop should
-        ``continue`` and skip finalization). Returns False when there are
-        no blocking diagnostics OR the repair budget is exhausted.
+        Returns an explicit outcome: ``clear`` when no blockers remain,
+        ``repair_injected`` when the loop should continue, or ``blocked``
+        when blockers remain after the repair budget is exhausted.
 
         Boundary contract: this helper NEVER catches plugin exceptions.
         It only repairs *configurations* via composer-tool calls. Plugin
@@ -1847,9 +1911,6 @@ class ComposerServiceImpl:
         path that retains decoded content; only inspect_blob_content's
         bounded-summary facts are surfaced.
         """
-        if repair_turns_used >= _MAX_REPAIR_TURNS:
-            return False
-
         diagnostics = compute_proof_diagnostics(
             state,
             session_engine=self._session_engine,
@@ -1868,7 +1929,10 @@ class ComposerServiceImpl:
         # into the audit trail and the LLM's repair-message context.
         blocking = [d for d in diagnostics if d["severity"] == "blocking"]
         if not blocking:
-            return False
+            return _ProofRepairOutcome(action="clear")
+        blocking_diagnostics = tuple(blocking)
+        if repair_turns_used >= _MAX_REPAIR_TURNS:
+            return _ProofRepairOutcome(action="blocked", blocking_diagnostics=blocking_diagnostics)
 
         # Cap at 3 blocking entries in the synthesised message to keep the
         # context window manageable. The model can call preview_pipeline to
@@ -1891,7 +1955,42 @@ class ComposerServiceImpl:
         )
 
         llm_messages.append({"role": "user", "content": message})
-        return True
+        return _ProofRepairOutcome(action="repair_injected", blocking_diagnostics=blocking_diagnostics)
+
+    def _proof_repair_blocked_result(
+        self,
+        *,
+        state: CompositionState,
+        assistant_message: Any,
+        recorder: BufferingRecorder,
+        blocking_diagnostics: tuple[Mapping[str, Any], ...],
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+    ) -> ComposerResult:
+        """Return a backend-owned blocker instead of finalizing after the cap."""
+
+        raw_content = assistant_message.content or ""
+        runtime_result = _proof_repair_exhausted_validation(blocking_diagnostics)
+        augmented = _compose_preflight_failure_message(raw_content, runtime_result=runtime_result)
+        _enforce_augmentation_prefix_invariant(
+            branch="proof_repair_exhausted_augmentation",
+            content=raw_content,
+            augmented=augmented,
+        )
+        return replace(
+            ComposerResult(
+                message=augmented,
+                state=state,
+                runtime_preflight=runtime_result,
+                raw_assistant_content=raw_content,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+            ),
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
 
     async def _attempt_preflight_repair(
         self,
@@ -3429,11 +3528,11 @@ class ComposerServiceImpl:
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
-        # Forced-repair gate: when the model claims completion but
-        # the proof step still has blocking diagnostics, inject a
-        # repair message and continue. Capped at _MAX_REPAIR_TURNS so
-        # the loop can never spin indefinitely. NEVER catches plugin
-        # exceptions — only repairs configurations.
+        # Forced-repair gate: when the model claims completion but the proof
+        # step still has blocking diagnostics, inject a repair message and
+        # continue. At _MAX_REPAIR_TURNS, preserve the blocker as an explicit
+        # non-runnable result rather than falling through to finalization.
+        # NEVER catches plugin exceptions — only repairs configurations.
         #
         # The gate fires whenever the proof step is applicable —
         # i.e. there is a blob-backed source to inspect. The earlier
@@ -3447,13 +3546,28 @@ class ComposerServiceImpl:
         # source is absent or not blob-backed, ``_attempt_proof_repair``
         # short-circuits cheaply via ``compute_proof_diagnostics``'s
         # own early return.
-        if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
-            state=state,
-            llm_messages=llm_messages,
-            session_id=session_id,
-            repair_turns_used=repair_turns_used,
-        ):
-            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+        if _proof_repair_is_applicable(state):
+            proof_repair = self._attempt_proof_repair(
+                state=state,
+                llm_messages=llm_messages,
+                session_id=session_id,
+                repair_turns_used=repair_turns_used,
+            )
+            if proof_repair.action == "repair_injected":
+                return _TerminateOutcome(action="continue", repair_turns_delta=1)
+            if proof_repair.action == "blocked":
+                return _TerminateOutcome(
+                    action="return",
+                    result=self._proof_repair_blocked_result(
+                        state=state,
+                        assistant_message=assistant_message,
+                        recorder=recorder,
+                        blocking_diagnostics=proof_repair.blocking_diagnostics,
+                        repair_turns_used=repair_turns_used,
+                        persisted_assistant_message_id=persisted_assistant_message_id,
+                        persisted_tool_call_turn=persisted_tool_call_turn,
+                    ),
+                )
 
         # Runtime-preflight repair gate (Fix 2). When the model claims completion
         # but the deterministic runtime preflight is invalid — a real contract

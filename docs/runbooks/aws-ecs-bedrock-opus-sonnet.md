@@ -17,22 +17,22 @@ ELSPETH has two distinct uses of an LLM:
 1. **Pipeline LLM profiles** back `transform:llm` nodes and the tutorial
    pipeline. Bedrock is supported here through the ECS task role.
 2. **The composer LLM** interprets chat and builds pipelines. Its boot-time
-   provider contract currently supports Anthropic, Azure, OpenAI, and
-   OpenRouter credentials, but not the Bedrock credential chain.
+   provider contract supports `bedrock/...` primary and advisor models through
+   LiteLLM and the same ECS task-role/default AWS credential chain.
 
-This runbook therefore makes both Bedrock models available to pipelines,
-selects Sonnet for the tutorial, and leaves the composer on its existing
-supported provider. Do not set `ELSPETH_WEB__COMPOSER_MODEL` or
-`ELSPETH_WEB__COMPOSER_ADVISOR_MODEL` to `bedrock/...`: the service will report
-the composer unavailable at startup. Making the composer itself use Bedrock is
-an application change, not an ECS configuration change.
+This runbook makes both models available to pipelines, selects Sonnet for the
+tutorial and Composer primary, and selects Opus as the independent Composer
+advisor. Do not add static AWS keys, credential/profile variables, endpoint
+overrides, a Bedrock gateway ARN, or AgentCore configuration. LiteLLM uses the
+ordinary boto3 credential chain and Region environment; the runtime task role
+is the production authority.
 
 ## Target configuration
 
 | ELSPETH alias | Bedrock inference profile | Use |
 |---|---|---|
-| `bedrock-opus` | `global.anthropic.claude-opus-4-6-v1` | Higher-capability pipeline LLM |
-| `bedrock-sonnet` | `global.anthropic.claude-sonnet-4-6` | General pipeline LLM and tutorial default |
+| `bedrock-opus` | `global.anthropic.claude-opus-4-6-v1` | Higher-capability pipeline LLM and Composer advisor |
+| `bedrock-sonnet` | `global.anthropic.claude-sonnet-4-6` | General pipeline LLM, tutorial default, and Composer primary |
 
 The corresponding ELSPETH model strings are:
 
@@ -66,8 +66,9 @@ selectable. `transform:llm` is a required core web plugin, so do not add it to
   first-time-use details.
 - A valid AWS Marketplace payment method. Model access and invocation are
   separate: enabling a model does not invoke it, but live verification does.
-- Existing composer configuration on a supported provider. Preserve its model,
-  advisor model, and credential secret unchanged.
+- Task-role permission to invoke both Composer models as well as the pipeline
+  profiles. `OPENROUTER_API_KEY` is required only if either selected Composer
+  model is `openrouter/...`; an all-Bedrock definition does not carry it.
 
 Run the commands below in one shell. Replace the deployment-specific values.
 
@@ -327,6 +328,8 @@ jq -e --arg container "$WEB_CONTAINER_NAME" '
   | ((.secrets // []) | map(.name) | all(
       . != "ELSPETH_WEB__LLM_PROFILES"
       and . != "ELSPETH_WEB__TUTORIAL_LLM_PROFILE"
+      and . != "ELSPETH_WEB__COMPOSER_MODEL"
+      and . != "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL"
       and . != "ELSPETH_BEDROCK_LIVE_TEST_MODEL"
       and . != "AWS_REGION"
     ))
@@ -335,8 +338,11 @@ jq -e --arg container "$WEB_CONTAINER_NAME" '
 
 Create a registrable task-definition document. Set only `AWS_REGION` for AWS
 SDK Region selection; do not add `AWS_DEFAULT_REGION`, which the AWS acceptance
-contract rejects. Preserve the composer settings and credentials exactly as
-they are.
+contract rejects. Composer model identifiers are non-secret protected
+environment values. The acceptance validator compares them byte-for-byte with
+the scenario inventory and conditionally requires the OpenRouter secret only
+when one of them uses that provider. This all-Bedrock transform also removes an
+existing `OPENROUTER_API_KEY` binding from the web container.
 
 ```bash
 jq \
@@ -344,6 +350,8 @@ jq \
   --arg profiles "$LLM_PROFILES" \
   --arg tutorial_profile "bedrock-sonnet" \
   --arg live_model "bedrock/$SONNET_INFERENCE_PROFILE" \
+  --arg composer_model "bedrock/$SONNET_INFERENCE_PROFILE" \
+  --arg composer_advisor_model "bedrock/$OPUS_INFERENCE_PROFILE" \
   --arg region "$AWS_REGION" '
   def setenv($name; $value):
     .environment = (
@@ -363,8 +371,11 @@ jq \
   )
   | .containerDefinitions |= map(
       if .name == $container then
-        setenv("ELSPETH_WEB__LLM_PROFILES"; $profiles)
+        .secrets = ((.secrets // []) | map(select(.name != "OPENROUTER_API_KEY")))
+        | setenv("ELSPETH_WEB__LLM_PROFILES"; $profiles)
         | setenv("ELSPETH_WEB__TUTORIAL_LLM_PROFILE"; $tutorial_profile)
+        | setenv("ELSPETH_WEB__COMPOSER_MODEL"; $composer_model)
+        | setenv("ELSPETH_WEB__COMPOSER_ADVISOR_MODEL"; $composer_advisor_model)
         | setenv("ELSPETH_BEDROCK_LIVE_TEST_MODEL"; $live_model)
         | setenv("AWS_REGION"; $region)
       else . end
@@ -378,9 +389,10 @@ jq -e --arg container "$WEB_CONTAINER_NAME" '
 ```
 
 Before registration, prove that the only task-definition differences for this
-configuration-only rollout are the four environment values above. Do not print
-the full task definition into chat, tickets, or logs; it contains private
-deployment configuration and secret ARNs.
+configuration-only rollout are the six environment values above and removal of
+the obsolete OpenRouter secret binding. Do not print the full task definition
+into chat, tickets, or logs; it contains private deployment configuration and
+secret ARNs.
 
 ```bash
 normalize_bedrock_candidate() {
@@ -400,9 +412,12 @@ normalize_bedrock_candidate() {
           .environment = ((.environment // []) | map(
             select(.name != "ELSPETH_WEB__LLM_PROFILES"
               and .name != "ELSPETH_WEB__TUTORIAL_LLM_PROFILE"
+              and .name != "ELSPETH_WEB__COMPOSER_MODEL"
+              and .name != "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL"
               and .name != "ELSPETH_BEDROCK_LIVE_TEST_MODEL"
               and .name != "AWS_REGION")
           ))
+          | .secrets = ((.secrets // []) | map(select(.name != "OPENROUTER_API_KEY")))
         else . end
       )
   ' "$1"
@@ -420,14 +435,18 @@ jq -e \
   --arg container "$WEB_CONTAINER_NAME" \
   --arg profiles "$LLM_PROFILES" \
   --arg live_model "bedrock/$SONNET_INFERENCE_PROFILE" \
+  --arg composer_model "bedrock/$SONNET_INFERENCE_PROFILE" \
+  --arg composer_advisor_model "bedrock/$OPUS_INFERENCE_PROFILE" \
   --arg region "$AWS_REGION" '
-  .containerDefinitions[]
-  | select(.name == $container)
-  | reduce (.environment // [])[] as $item ({}; .[$item.name] = $item.value)
-  | .ELSPETH_WEB__LLM_PROFILES == $profiles
-    and .ELSPETH_WEB__TUTORIAL_LLM_PROFILE == "bedrock-sonnet"
-    and .ELSPETH_BEDROCK_LIVE_TEST_MODEL == $live_model
-    and .AWS_REGION == $region
+  (.containerDefinitions[] | select(.name == $container)) as $web
+  | (reduce ($web.environment // [])[] as $item ({}; .[$item.name] = $item.value)) as $env
+  | $env.ELSPETH_WEB__LLM_PROFILES == $profiles
+    and $env.ELSPETH_WEB__TUTORIAL_LLM_PROFILE == "bedrock-sonnet"
+    and $env.ELSPETH_WEB__COMPOSER_MODEL == $composer_model
+    and $env.ELSPETH_WEB__COMPOSER_ADVISOR_MODEL == $composer_advisor_model
+    and $env.ELSPETH_BEDROCK_LIVE_TEST_MODEL == $live_model
+    and $env.AWS_REGION == $region
+    and (($web.secrets // []) | all(.name != "OPENROUTER_API_KEY"))
 ' "$WORK_DIR/candidate-task-definition.json" >/dev/null
 ```
 
@@ -544,7 +563,7 @@ curl --fail --silent --show-error "$BASE_URL/api/system/status" \
   | jq -e '
       .tutorial_ready == true
       and .composer_available == true
-      and (.composer_provider | IN("anthropic", "azure", "azure_ai", "openai", "openrouter"))
+      and .composer_provider == "bedrock"
     '
 ```
 
@@ -580,13 +599,13 @@ aws ecs execute-command \
   --command 'python -m elspeth.web.aws_ecs_acceptance verify-bedrock'
 ```
 
-This proves Sonnet invocation, response metadata handling, Region selection,
-and task-role credentials. It does not prove Opus, pipeline lowering, or the
-end-user workflow.
+This raw transport probe proves Sonnet invocation, response metadata handling,
+Region selection, and task-role credentials. It does not by itself prove the
+Composer service path, Opus, pipeline lowering, or the end-user workflow.
 
 ### Meaningful application proof
 
-Complete these two short runs through the deployed web application:
+Complete these three short runs through the deployed web application:
 
 1. Run the tutorial to completion. Inspect the committed pipeline and confirm
    its LLM node stores `profile: bedrock-sonnet`; confirm the run reaches a
@@ -594,11 +613,17 @@ Complete these two short runs through the deployed web application:
 2. Create or copy a minimal text-source → LLM → text-sink pipeline. Select
    `bedrock-opus`, use a bounded prompt such as `Summarise {{ row.text }} in one
    sentence`, run one row, and confirm the terminal run and LLM call record.
+3. In Composer chat, request a minimal auditable pipeline and let the normal
+   primary/advisor flow settle it. Confirm the persisted Composer LLM records
+   name the exact `bedrock/...` primary/advisor models and `bedrock` provider,
+   and that no API key, endpoint, gateway, or provider error text appears in
+   the audit projection.
 
 The first run proves the configured tutorial selection. The second proves that
 the non-default Opus alias is exposed, lowered to its private operator binding,
-invoked through the ECS task role, and recorded by ELSPETH. Merely seeing two
-aliases in the UI is not sufficient.
+invoked through the ECS task role, and recorded by ELSPETH. The third proves
+the real Composer service path rather than only raw Bedrock transport. Merely
+seeing two aliases in the UI is not sufficient.
 
 ## Rollback
 
@@ -630,7 +655,7 @@ not required to restore the previous application task definition.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Composer reports unavailable after rollout | Composer model was changed to `bedrock/...` | Restore the previous supported composer model and credential; leave Bedrock only in `LLM_PROFILES` |
+| Composer reports unavailable after rollout | Model is not provider-prefixed, task still runs an older image, or configuration drifted | Confirm the active digest supports Bedrock Composer, both model values start with `bedrock/`, and sanitized status names provider `bedrock` |
 | `transform:llm` says an operator profile is unavailable | Alias missing from the process-frozen profile map, invalid JSON, or old task still serving | Inspect sanitized status, confirm the active task-definition ARN, correct the profile map, and register/redeploy a new revision |
 | Bedrock returns `AccessDeniedException` | Agreement not active, FTU missing, task-role policy incomplete, or an SCP denies a routed Region/model | Recheck all four availability fields, profile model ARNs, task role, and SCPs |
 | Sonnet works but Opus does not | Opus agreement or one Opus ARN is missing from IAM | Compare the Opus availability and `get-inference-profile` output with the policy resources |
@@ -654,11 +679,12 @@ not required to restore the previous application task definition.
       or endpoint overrides are present in the task definition.
 - [ ] `ELSPETH_WEB__LLM_PROFILES` contains both opaque aliases.
 - [ ] `ELSPETH_WEB__TUTORIAL_LLM_PROFILE=bedrock-sonnet`.
-- [ ] Existing composer provider/model/credential settings are unchanged.
+- [ ] Composer primary/advisor are the protected Bedrock model values; no
+      OpenRouter secret is present unless one selected model uses OpenRouter.
 - [ ] Candidate doctor passed before service update.
 - [ ] Service is stable on the exact candidate task-definition ARN.
-- [ ] Health, readiness, sanitized status, Sonnet tutorial, and Opus pipeline
-      checks passed.
+- [ ] Health, readiness, sanitized status, Composer service-path, Sonnet
+      tutorial, and Opus pipeline checks passed.
 - [ ] Previous task-definition ARN is recorded and rollback was not needed.
 
 ## References

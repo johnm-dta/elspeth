@@ -6,6 +6,10 @@ PROVIDER_REQUIRED_ENV_KEYS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
     "azure": ("AZURE_API_KEY",),
     "azure_ai": ("AZURE_API_KEY",),
+    # LiteLLM's Bedrock provider uses boto3's default AWS credential chain
+    # (task role, environment, profile, etc.); Composer must not inject or
+    # require a parallel static API-key contract.
+    "bedrock": (),
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
 }

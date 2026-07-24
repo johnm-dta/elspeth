@@ -575,7 +575,7 @@ and destroy use, and again when an approved apply is recorded; verification
 performed before expiry cannot authorize later use after expiry.
 
 Each protected scenario inventory uses
-`elspeth.aws-ecs-scenario-inventory.v5` and binds the run ID, candidate SHA,
+`elspeth.aws-ecs-scenario-inventory.v6` and binds the run ID, candidate SHA,
 account, region, scenario ID, Terraform binding, and the closed `values`
 assignment set, including the protected binding-receipt path. The initial
 immutable `preapply` document leaves provider-generated identities empty; a
@@ -680,6 +680,7 @@ load_scenario() {
   unset ACTIVE_SCENARIO_ID ACCEPTANCE_RUN_ID DEPLOYMENT_MODE TARGET_PLATFORM \
     AWS_REGION ECS_CLUSTER ECS_SERVICE WEB_CONTAINER_NAME TARGET_GROUP_ARN \
     ELSPETH_WEB__DATA_DIR ELSPETH_WEB__PAYLOAD_STORE_PATH \
+    ELSPETH_WEB__COMPOSER_MODEL ELSPETH_WEB__COMPOSER_ADVISOR_MODEL \
     ELSPETH_WEB__PLUGIN_ALLOWLIST ELSPETH_WEB__PLUGIN_PREFERENCES \
     ELSPETH_WEB__PLUGIN_CONTROL_MODES ELSPETH_WEB__LLM_PROFILES \
     ELSPETH_WEB__TUTORIAL_LLM_PROFILE \
@@ -1175,7 +1176,7 @@ render_resolved_inventory() (
   jq -e --arg run "$ACCEPTANCE_RUN_ID" --arg candidate "$CANDIDATE_SHA" \
     --arg account "$AWS_ACCOUNT_ID" --arg region "$AWS_REGION" --arg scenario "$scenario_id" '
       type == "object"
-      and .schema == "elspeth.aws-ecs-scenario-inventory.v5"
+      and .schema == "elspeth.aws-ecs-scenario-inventory.v6"
       and .phase == "resolved"
       and .acceptance_run_id == $run
       and .candidate_sha == $candidate
@@ -1969,6 +1970,17 @@ The runbook records the documented Bedrock/Azure category gap. Shared
 pre-existing Guardrails are not accepted because their ownership and
 configuration can drift.
 
+Composer primary and advisor may also be `bedrock/...` identifiers. They are
+protected non-secret task environment values and LiteLLM uses the task role's
+default AWS credential chain; never inject access keys, profiles, endpoint
+overrides, Bedrock/AgentCore gateway ARNs, or parallel provider configuration.
+The task-definition acceptance gate requires `OPENROUTER_API_KEY` from the
+approved Secrets Manager selector when either Composer model is
+`openrouter/...`, and requires no OpenRouter secret when both are Bedrock.
+`/api/ready` remains the storage/auth/deployment readiness surface and is not
+made dependent on a live provider call; sanitized system status reports
+Composer availability separately.
+
 For S3, grant only `s3:GetObject` for approved source prefixes and
 `s3:PutObject` for approved sink prefixes. Never grant wildcard buckets. The
 disposable acceptance role additionally gets `s3:DeleteObject` only for
@@ -2311,7 +2323,9 @@ first deploy left desired count zero and traffic fixed at 503. Validate these
 inputs from the approved inventory:
 
 - `TARGET_PLATFORM`, `AWS_REGION`, `ECS_CLUSTER`, `ECS_SERVICE`,
-  `WEB_CONTAINER_NAME`, `TARGET_GROUP_ARN`, and `ALB_BASE_URL`;
+  `WEB_CONTAINER_NAME`, `TARGET_GROUP_ARN`, `ALB_BASE_URL`,
+  `ELSPETH_WEB__COMPOSER_MODEL`, and
+  `ELSPETH_WEB__COMPOSER_ADVISOR_MODEL`;
 - `CANDIDATE_TASK_DEFINITION`, `DOCTOR_TASK_DEFINITION`,
   `DOCTOR_CONTAINER_NAME`, and the complete JSON
   `DOCTOR_NETWORK_CONFIGURATION`;
@@ -2330,7 +2344,8 @@ definition and replace it with the returned exact taskDefinitionArn. Require
 `ACTIVE`, the approved image digest, matching Linux CPU architecture, named
 container, network configuration, log group, and stream prefix. The
 manifest-backed validator below also compares the returned named container's
-seven policy settings, binding hash, live Bedrock model, and AWS region byte
+seven policy settings, Composer primary/advisor models, binding hash, live
+Bedrock model, and AWS region byte
 for byte with the loaded protected scenario inventory; recomputing a matching
 hash over a substituted bundle is not sufficient.
 

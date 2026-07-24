@@ -3182,6 +3182,8 @@ def _scenario_inventory(
             "WEB_CONTAINER_NAME": "elspeth-web",
             "ELSPETH_WEB__DATA_DIR": "/var/lib/elspeth",
             "ELSPETH_WEB__PAYLOAD_STORE_PATH": "/var/lib/elspeth/payloads",
+            "ELSPETH_WEB__COMPOSER_MODEL": "openrouter/openai/gpt-5.4",
+            "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL": "openrouter/anthropic/claude-opus-4.6",
             "ELSPETH_BEDROCK_LIVE_TEST_MODEL": "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
             "TARGET_GROUP_ARN": f"arn:aws:elasticloadbalancing:{region}:{account}:targetgroup/{namespace}-target/0123456789abcdef",
             "ALB_BASE_URL": f"https://{namespace}.example.invalid",
@@ -3281,7 +3283,7 @@ def _scenario_inventory(
         for profile in guardrail_profiles
     ]
     return {
-        "schema": "elspeth.aws-ecs-scenario-inventory.v5",
+        "schema": "elspeth.aws-ecs-scenario-inventory.v6",
         "acceptance_run_id": run_id,
         "candidate_sha": "c" * 40,
         "aws_account_id": account,
@@ -3792,9 +3794,22 @@ def _task_definition_policy_payload(
     tmp_path: Path,
     *,
     record_ecr: bool = True,
+    composer_model: str = "openrouter/openai/gpt-5.4",
+    composer_advisor_model: str = "openrouter/anthropic/claude-opus-4.6",
 ) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
     manifest_path = tmp_path / "control.json"
-    _init_control_manifest(manifest_path)
+
+    def bind_composer_models(inventory: dict[str, object], _scenario_id: str) -> None:
+        values = inventory["values"]
+        assert isinstance(values, dict)
+        values["ELSPETH_WEB__COMPOSER_MODEL"] = composer_model
+        values["ELSPETH_WEB__COMPOSER_ADVISOR_MODEL"] = composer_advisor_model
+
+    _init_control_manifest(
+        manifest_path,
+        inventory_mutator=bind_composer_models,
+        preapply_inventory_mutator=bind_composer_models,
+    )
     if record_ecr:
         acceptance.control_manifest_update(
             manifest_path,
@@ -3819,6 +3834,8 @@ def _task_definition_policy_payload(
         for name in (
             "ELSPETH_WEB__DATA_DIR",
             "ELSPETH_WEB__PAYLOAD_STORE_PATH",
+            "ELSPETH_WEB__COMPOSER_MODEL",
+            "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL",
             *acceptance.PLUGIN_POLICY_ASSIGNMENT_NAMES,
             "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
             "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
@@ -3842,12 +3859,11 @@ def _task_definition_policy_payload(
     required_secret_bindings = (
         ("ELSPETH_WEB__SECRET_KEY", f"{namespace}-database-runtime", "secret_key"),
         ("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", f"{namespace}-database-runtime", "shareable_link_signing_key"),
-        ("OPENROUTER_API_KEY", f"{namespace}-openrouter-composer", "openrouter_api_key"),
-        ("ELSPETH_WEB__COMPOSER_MODEL", f"{namespace}-openrouter-composer", "composer_model"),
-        ("ELSPETH_WEB__COMPOSER_ADVISOR_MODEL", f"{namespace}-openrouter-composer", "composer_advisor_model"),
         ("ELSPETH_WEB__SESSION_DB_URL", f"{namespace}-database-runtime", "session_url"),
         ("ELSPETH_WEB__LANDSCAPE_URL", f"{namespace}-database-runtime", "landscape_url"),
     )
+    if composer_model.startswith("openrouter/") or composer_advisor_model.startswith("openrouter/"):
+        required_secret_bindings += (("OPENROUTER_API_KEY", f"{namespace}-openrouter-composer", "openrouter_api_key"),)
     secrets = [
         {
             "name": name,
@@ -3893,6 +3909,52 @@ def _task_definition_policy_payload(
         }
     }
     return manifest_path, container_name, inventory, payload
+
+
+def test_task_definition_policy_binding_allows_bedrock_models_without_openrouter_secret(tmp_path: Path) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(
+        tmp_path,
+        composer_model="bedrock/global.anthropic.claude-sonnet-4-6",
+        composer_advisor_model="bedrock/global.anthropic.claude-opus-4-6-v1",
+    )
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+
+    assert "OPENROUTER_API_KEY" not in {entry["name"] for entry in container["secrets"]}
+    acceptance.validate_task_definition_policy_binding(
+        payload,
+        manifest_path=manifest_path,
+        scenario_id="A",
+        container_name=container_name,
+    )
+
+
+@pytest.mark.parametrize(
+    ("composer_model", "composer_advisor_model"),
+    [
+        ("openrouter/openai/gpt-5.4", "bedrock/global.anthropic.claude-opus-4-6-v1"),
+        ("bedrock/global.anthropic.claude-sonnet-4-6", "openrouter/anthropic/claude-opus-4.6"),
+    ],
+)
+def test_task_definition_policy_binding_requires_openrouter_secret_for_mixed_models(
+    tmp_path: Path,
+    composer_model: str,
+    composer_advisor_model: str,
+) -> None:
+    manifest_path, container_name, _inventory, payload = _task_definition_policy_payload(
+        tmp_path,
+        composer_model=composer_model,
+        composer_advisor_model=composer_advisor_model,
+    )
+    container = payload["taskDefinition"]["containerDefinitions"][0]
+    container["secrets"] = [entry for entry in container["secrets"] if entry["name"] != "OPENROUTER_API_KEY"]
+
+    with pytest.raises(acceptance.AcceptanceCheckError, match="task_definition_policy_binding"):
+        acceptance.validate_task_definition_policy_binding(
+            payload,
+            manifest_path=manifest_path,
+            scenario_id="A",
+            container_name=container_name,
+        )
 
 
 @pytest.mark.parametrize("reference_kind", ["missing", "unapproved"])

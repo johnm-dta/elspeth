@@ -53,6 +53,27 @@ async def test_probe_passes_through_on_success(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
+async def test_bedrock_probe_uses_default_aws_chain_without_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_acompletion(**kwargs: object) -> object:
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(bp, "_litellm_acompletion", fake_acompletion)
+    model = "bedrock/global.anthropic.claude-sonnet-4-6"
+
+    assert await bp.probe_composer_config(model=model, temperature=None, seed=None) is True
+    assert captured == [
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "This is a composer boot-time configuration smoke test. Please reply with ok."}],
+            "max_tokens": 16,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_probe_is_graceful_on_transient(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_acompletion(**_kwargs: object) -> object:
         raise httpx.ConnectError("boom")

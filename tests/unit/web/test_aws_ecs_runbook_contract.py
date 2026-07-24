@@ -14,6 +14,7 @@ from elspeth.web.aws_ecs_acceptance import SCENARIO_ASSIGNMENT_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "aws-ecs-deployment.md"
+BEDROCK_RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "aws-ecs-bedrock-opus-sonnet.md"
 RUNBOOK_INDEX = REPO_ROOT / "docs" / "runbooks" / "index.md"
 DOCKER_GUIDE = REPO_ROOT / "docs" / "guides" / "docker.md"
 OIDC_PLAYWRIGHT_CONFIG = REPO_ROOT / "src" / "elspeth" / "web" / "frontend" / "playwright.oidc.config.ts"
@@ -21,6 +22,10 @@ OIDC_PLAYWRIGHT_CONFIG = REPO_ROOT / "src" / "elspeth" / "web" / "frontend" / "p
 
 def _text() -> str:
     return RUNBOOK.read_text(encoding="utf-8")
+
+
+def _bedrock_text() -> str:
+    return BEDROCK_RUNBOOK.read_text(encoding="utf-8")
 
 
 def _fences(language: str) -> list[str]:
@@ -907,3 +912,24 @@ def test_runbook_is_linked_from_operator_indexes() -> None:
     assert (
         "[AWS ECS Deployment Runbook](../runbooks/aws-ecs-deployment.md) - Production ECS/Fargate deployment contract"
     ) in DOCKER_GUIDE.read_text(encoding="utf-8")
+
+
+def test_bedrock_runbook_removes_openrouter_secret_for_all_bedrock_composer() -> None:
+    text = _bedrock_text()
+    candidate = text[text.index("Create a registrable task-definition document") : text.index("Before registration")]
+    assert '.secrets = ((.secrets // []) | map(select(.name != "OPENROUTER_API_KEY")))' in candidate
+
+    assertion = text[text.index("normalize_bedrock_candidate()") : text.index("Register the revision")]
+    assert 'map(select(.name != "OPENROUTER_API_KEY"))' in assertion
+
+
+def test_bedrock_runbook_normalizes_and_asserts_composer_model_switch() -> None:
+    text = _bedrock_text()
+    verification = text[text.index("normalize_bedrock_candidate()") : text.index("Register the revision")]
+    for name in (
+        "ELSPETH_WEB__COMPOSER_MODEL",
+        "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL",
+    ):
+        assert f'.name != "{name}"' in verification
+    assert ".ELSPETH_WEB__COMPOSER_MODEL == $composer_model" in verification
+    assert ".ELSPETH_WEB__COMPOSER_ADVISOR_MODEL == $composer_advisor_model" in verification

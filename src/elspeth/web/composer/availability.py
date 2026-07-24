@@ -53,7 +53,7 @@ class ComposerAvailability:
 
 
 def compute_availability(service: ComposerServiceImpl) -> ComposerAvailability:
-    """Infer whether the configured model has the required env at boot.
+    """Infer whether the configured primary and advisor have required env.
 
     This is a configuration/readiness signal, not a network health check.
     Keep it side-effect-free: LiteLLM provider probing has observable
@@ -82,20 +82,45 @@ def compute_availability(service: ComposerServiceImpl) -> ComposerAvailability:
     required_keys = PROVIDER_REQUIRED_ENV_KEYS[provider]
 
     missing_keys = tuple(key for key in required_keys if key not in os.environ or not os.environ[key])
-    if not missing_keys:
+    if missing_keys:
+        missing = ", ".join(missing_keys)
+        reason = f"Composer model {service._model} is unavailable: missing {missing}."
         return ComposerAvailability(
-            available=True,
+            available=False,
             model=service._model,
             provider=provider,
+            reason=reason,
+            missing_keys=missing_keys,
         )
 
-    missing = ", ".join(missing_keys)
-    reason = f"Composer model {service._model} is unavailable: missing {missing}."
+    advisor_model = service._settings.composer_advisor_model
+    advisor_provider = service._advisor_provider
+    if advisor_provider not in PROVIDER_REQUIRED_ENV_KEYS:
+        return ComposerAvailability(
+            available=False,
+            model=service._model,
+            provider=provider,
+            reason=(
+                f"Composer advisor model {advisor_model} is unavailable: provider "
+                f"{advisor_provider!r} has no configured environment contract."
+            ),
+        )
+
+    advisor_missing_keys = tuple(
+        key for key in PROVIDER_REQUIRED_ENV_KEYS[advisor_provider] if key not in os.environ or not os.environ[key]
+    )
+    if advisor_missing_keys:
+        missing = ", ".join(advisor_missing_keys)
+        return ComposerAvailability(
+            available=False,
+            model=service._model,
+            provider=provider,
+            reason=f"Composer advisor model {advisor_model} is unavailable: missing {missing}.",
+            missing_keys=advisor_missing_keys,
+        )
 
     return ComposerAvailability(
-        available=False,
+        available=True,
         model=service._model,
         provider=provider,
-        reason=reason,
-        missing_keys=missing_keys,
     )

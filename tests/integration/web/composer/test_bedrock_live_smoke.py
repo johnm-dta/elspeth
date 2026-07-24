@@ -1,16 +1,16 @@
-"""Explicit operator-selected smoke test for composer calls through Bedrock."""
+"""Explicit operator-selected smoke test for Composer calls through Bedrock."""
 
 from __future__ import annotations
 
 import os
-import time
-from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
-from elspeth.web.composer.llm_response_parsing import build_llm_call_record
-from elspeth.web.composer.service import _litellm_acompletion
+from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.config import WebSettings
+from elspeth.web.dependencies import create_catalog_service
 
 pytestmark = [
     pytest.mark.integration,
@@ -20,7 +20,7 @@ pytestmark = [
 ]
 
 
-async def test_bedrock_live_smoke_uses_aws_default_credential_chain() -> None:
+async def test_bedrock_live_smoke_uses_real_composer_service_and_default_credential_chain(tmp_path: Path) -> None:
     if os.environ.get("ELSPETH_RUN_BEDROCK_LIVE") != "1":
         pytest.skip("set ELSPETH_RUN_BEDROCK_LIVE=1 to select the live Bedrock smoke test")
 
@@ -30,33 +30,35 @@ async def test_bedrock_live_smoke_uses_aws_default_credential_chain() -> None:
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     if not region:
         pytest.fail("AWS_REGION or AWS_DEFAULT_REGION is required for the live Bedrock smoke test")
+    advisor_model = os.environ.get("ELSPETH_BEDROCK_LIVE_ADVISOR_MODEL", "bedrock/global.anthropic.claude-opus-4-6-v1")
+    if advisor_model == model:
+        pytest.fail("ELSPETH_BEDROCK_LIVE_ADVISOR_MODEL must differ from the primary live model")
+
+    settings = WebSettings(
+        data_dir=tmp_path,
+        composer_model=model,
+        composer_advisor_model=advisor_model,
+        composer_temperature=None,
+        composer_seed=None,
+        shareable_link_signing_key=b"\x00" * 32,
+    )
+    service = ComposerServiceImpl.for_trained_operator(catalog=create_catalog_service(), settings=settings)
+    assert service.get_availability().available is True
 
     messages = [{"role": "user", "content": "Reply with exactly: Bedrock smoke passed."}]
-    started_at = datetime.now(UTC)
-    started_ns = time.monotonic_ns()
-    response = await _litellm_acompletion(
-        model=model,
-        messages=messages,
-        max_tokens=16,
-        aws_region_name=region,
+    tools = service._get_litellm_tools()
+    recorder = BufferingRecorder()
+    response = await service._call_llm_with_audit(
+        messages,
+        tools,
+        timeout=55.0,
+        recorder=recorder,
     )
 
     assert response.choices
-    content = response.choices[0].message.content
-    assert isinstance(content, str)
-    assert content.strip()
-
-    record = build_llm_call_record(
-        model_requested=model,
-        messages=messages,
-        tools=None,
-        status=ComposerLLMCallStatus.SUCCESS,
-        started_at=started_at,
-        started_ns=started_ns,
-        temperature=None,
-        seed=None,
-        response=response,
-    )
+    record = recorder.llm_calls[-1]
+    assert record.model_requested == model
+    assert record.tools_sha256 is not None
     assert record.prompt_tokens is not None
     assert record.completion_tokens is not None
     assert record.model_returned is not None

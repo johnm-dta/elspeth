@@ -83,6 +83,7 @@ from elspeth.telemetry import create_telemetry_manager
 from elspeth.telemetry.serialization import derive_trace_id
 from elspeth.web.audit_readiness.service import build_plugin_policy_readiness
 from elspeth.web.composer.llm_response_parsing import build_llm_call_record
+from elspeth.web.composer.provider_config import infer_provider_from_model_name, infer_provider_from_unprefixed_model_name
 from elspeth.web.composer.recipes import apply_recipe
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
@@ -255,11 +256,17 @@ _TASK_DEFINITION_PLAINTEXT_SECRET_ENV = frozenset(
 _TASK_DEFINITION_REQUIRED_SECRET_BINDINGS = (
     ("ELSPETH_WEB__SECRET_KEY", "database-runtime", "secret_key"),
     ("ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY", "database-runtime", "shareable_link_signing_key"),
-    ("OPENROUTER_API_KEY", "openrouter-composer", "openrouter_api_key"),
-    ("ELSPETH_WEB__COMPOSER_MODEL", "openrouter-composer", "composer_model"),
-    ("ELSPETH_WEB__COMPOSER_ADVISOR_MODEL", "openrouter-composer", "composer_advisor_model"),
     ("ELSPETH_WEB__SESSION_DB_URL", "database-runtime", "session_url"),
     ("ELSPETH_WEB__LANDSCAPE_URL", "database-runtime", "landscape_url"),
+)
+_TASK_DEFINITION_OPENROUTER_SECRET_BINDING = (
+    "OPENROUTER_API_KEY",
+    "openrouter-composer",
+    "openrouter_api_key",
+)
+_TASK_DEFINITION_COMPOSER_MODEL_ENV = (
+    "ELSPETH_WEB__COMPOSER_MODEL",
+    "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL",
 )
 _TASK_DEFINITION_AWS_OVERRIDE_ENV = FORBIDDEN_AWS_OVERRIDE_ENV | {"AWS_DEFAULT_REGION"}
 _SECRET_VALUE_FROM_PATTERN = re.compile(
@@ -426,6 +433,8 @@ SCENARIO_ASSIGNMENT_NAMES = (
     "WEB_CONTAINER_NAME",
     "ELSPETH_WEB__DATA_DIR",
     "ELSPETH_WEB__PAYLOAD_STORE_PATH",
+    "ELSPETH_WEB__COMPOSER_MODEL",
+    "ELSPETH_WEB__COMPOSER_ADVISOR_MODEL",
     "ELSPETH_WEB__PLUGIN_ALLOWLIST",
     "ELSPETH_WEB__PLUGIN_PREFERENCES",
     "ELSPETH_WEB__PLUGIN_CONTROL_MODES",
@@ -5034,7 +5043,7 @@ def _validate_scenario_inventory(
     }:
         raise AcceptanceCheckError("scenario_inventory_schema")
     if (
-        payload["schema"] != "elspeth.aws-ecs-scenario-inventory.v5"
+        payload["schema"] != "elspeth.aws-ecs-scenario-inventory.v6"
         or payload["scenario_id"] != scenario_id
         or payload["phase"] != expected_phase
         or payload["acceptance_run_id"] != acceptance_run_id
@@ -5066,6 +5075,14 @@ def _validate_scenario_inventory(
     live_model = values["ELSPETH_BEDROCK_LIVE_TEST_MODEL"]
     if not live_model.startswith("bedrock/") or any(character.isspace() for character in live_model):
         raise AcceptanceCheckError("scenario_inventory_schema")
+    for name in _TASK_DEFINITION_COMPOSER_MODEL_ENV:
+        model = values[name]
+        if (
+            not model
+            or any(character.isspace() for character in model)
+            or (infer_provider_from_model_name(model) or infer_provider_from_unprefixed_model_name(model)) is None
+        ):
+            raise AcceptanceCheckError("scenario_inventory_schema")
     for name in PLUGIN_POLICY_ASSIGNMENT_NAMES:
         if name == "ELSPETH_WEB__TUTORIAL_LLM_PROFILE":
             continue
@@ -6748,12 +6765,24 @@ def validate_task_definition_policy_binding(
         observed[name] = value
     if any(name in _TASK_DEFINITION_AWS_OVERRIDE_ENV or _plaintext_task_definition_secret(name) for name in observed):
         raise AcceptanceCheckError("task_definition_policy_binding")
+    if any(observed.get(name) != values.get(name) for name in _TASK_DEFINITION_COMPOSER_MODEL_ENV):
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    composer_providers = {
+        infer_provider_from_model_name(observed[name]) or infer_provider_from_unprefixed_model_name(observed[name])
+        for name in _TASK_DEFINITION_COMPOSER_MODEL_ENV
+    }
+    if None in composer_providers:
+        raise AcceptanceCheckError("task_definition_policy_binding")
+    requires_openrouter = "openrouter" in composer_providers
     secret_names: set[str] = set()
     approved_secret_ids = set(cast(list[str], orphan["secret_ids"]))
     required_secret_bindings = {
         name: (f"{namespace}-{secret_suffix}", json_key, "", "")
         for name, secret_suffix, json_key in _TASK_DEFINITION_REQUIRED_SECRET_BINDINGS
     }
+    if requires_openrouter:
+        name, secret_suffix, json_key = _TASK_DEFINITION_OPENROUTER_SECRET_BINDING
+        required_secret_bindings[name] = (f"{namespace}-{secret_suffix}", json_key, "", "")
     aws_region = aws.get("region")
     assert task_definition_match is not None
     partition = task_definition_match.group(1)
@@ -6780,8 +6809,11 @@ def validate_task_definition_policy_binding(
         secret_names.add(name)
     if not required_secret_bindings.keys() <= secret_names:
         raise AcceptanceCheckError("task_definition_policy_binding")
+    if not requires_openrouter and "OPENROUTER_API_KEY" in secret_names:
+        raise AcceptanceCheckError("task_definition_policy_binding")
 
     protected_names = (
+        *_TASK_DEFINITION_COMPOSER_MODEL_ENV,
         *PLUGIN_POLICY_ASSIGNMENT_NAMES,
         "ELSPETH_ACCEPTANCE_PLUGIN_POLICY_BINDING_SHA256",
         "ELSPETH_BEDROCK_LIVE_TEST_MODEL",
